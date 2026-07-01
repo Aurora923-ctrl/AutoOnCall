@@ -1,0 +1,12 @@
+{
+  "ticket_id": "INC-REDIS-001",
+  "service_name": "order-service",
+  "severity": "P1",
+  "root_cause": "Redis connected_clients reached maxclients",
+  "resolution": "Increased maxclients after approval, reduced client retry storm, and added connection pool guardrails.",
+  "evidence": [
+    "Application logs showed Redis connection timeout",
+    "Redis connected_clients equaled maxclients",
+    "P95 latency and 5xx rate increased at the same time"
+  ]
+}

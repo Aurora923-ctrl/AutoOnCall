@@ -1,0 +1,29 @@
+"""文档相关数据模型"""
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DocumentChunk(BaseModel):
+    """Legacy 文档分片模型；当前索引链路使用 LangChain Document。"""
+
+    content: str = Field(..., description="分片内容")
+
+    start_index: int = Field(..., description="分片在原文档中的起始位置")
+    end_index: int = Field(..., description="分片在原文档中的结束位置")
+
+    chunk_index: int = Field(..., description="分片索引（从0开始）")
+
+    title: str | None = Field(None, description="分片所属章节标题")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "deprecated": True,
+            "example": {
+                "content": "这是一段文档内容...",
+                "start_index": 0,
+                "end_index": 100,
+                "chunk_index": 0,
+                "title": "第一章",
+            },
+        }
+    )

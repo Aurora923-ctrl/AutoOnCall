@@ -1,0 +1,9 @@
+{
+  "service": "mock-cmdb",
+  "description": "Static CMDB fixture service for AutoOnCall sandbox",
+  "endpoints": [
+    "/services.json",
+    "/services/order-service.json",
+    "/alertmanager-webhook-placeholder.json"
+  ]
+}

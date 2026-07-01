@@ -1,0 +1,110 @@
+cases:
+  - id: cpu_high_usage_alert
+    query: billing-service CPU 使用率持续 95%，负载快速飙升，应该参考哪个处理方案？
+    expected_source: cpu_high_usage.md
+    expected_keywords:
+      - CPU
+      - HighCPUUsage
+
+  - id: cpu_dead_loop
+    query: 单个进程 CPU 接近 100%，怀疑代码死循环或无限递归
+    expected_source: cpu_high_usage.md
+    expected_keywords:
+      - 死循环
+      - CPU
+
+  - id: cpu_slow_sql_relation
+    query: 应用 CPU 高，同时日志里出现慢 SQL，如何排查？
+    expected_source: cpu_high_usage.md
+    expected_keywords:
+      - 慢SQL
+      - CPU
+
+  - id: memory_oom
+    query: recommendation-service 内存使用率 96%，Pod 出现 OOMKilled
+    expected_source: memory_high_usage.md
+    expected_keywords:
+      - OOM
+      - 内存
+
+  - id: memory_jvm_gc
+    query: Java 服务频繁 Full GC，怀疑 JVM 参数或堆内存配置不合理
+    expected_source: memory_high_usage.md
+    expected_keywords:
+      - JVM
+      - GC
+
+  - id: disk_no_space
+    query: report-service 写文件失败，日志提示 no space left on device，磁盘空间满
+    expected_source: disk_high_usage.md
+    expected_keywords:
+      - 磁盘
+      - 清理
+
+  - id: disk_docker_images
+    query: 节点磁盘占用过高，Docker 镜像和容器日志占用了大量空间
+    expected_source: disk_high_usage.md
+    expected_keywords:
+      - Docker
+      - 磁盘
+
+  - id: disk_inode_and_large_files
+    query: 服务器 inode 使用率异常，需要查找大文件和目录占用
+    expected_source: disk_high_usage.md
+    expected_keywords:
+      - inode
+      - 大文件
+
+  - id: service_503_unavailable
+    query: checkout-service 大量 503 和 5xx，用户无法下单，服务不可用
+    expected_source: service_unavailable.md
+    expected_keywords:
+      - 服务不可用
+      - 用户无法访问
+
+  - id: service_dependency_redis_down
+    query: order-service 依赖 Redis 或 MQ 不可用，导致接口失败
+    expected_source: service_unavailable.md
+    expected_keywords:
+      - Redis
+      - 依赖服务
+
+  - id: service_config_error
+    query: 服务启动失败，怀疑配置文件错误或环境变量缺失
+    expected_source: service_unavailable.md
+    expected_keywords:
+      - 配置错误
+      - 服务
+
+  - id: slow_response_sql
+    query: payment-service 接口响应慢，数据库慢查询数量增加，连接池等待
+    expected_source: slow_response.md
+    expected_keywords:
+      - 慢查询
+      - 数据库
+
+  - id: slow_response_external_api
+    query: profile-service P95 超过 4 秒，下游外部 API 调用 timeout
+    expected_source: slow_response.md
+    expected_keywords:
+      - 外部API
+      - 超时
+
+  - id: slow_response_cache_penetration
+    query: 查询接口突然变慢，怀疑缓存失效或缓存穿透
+    expected_source: slow_response.md
+    expected_keywords:
+      - 缓存穿透
+      - 缓存
+
+  - id: reject_resume_question
+    query: 秋招简历里的项目经历应该怎么包装更好？
+    should_reject: true
+
+  - id: reject_reimbursement_policy
+    query: 公司差旅报销和年假申请流程是什么？
+    should_reject: true
+
+  - id: reject_frontend_color
+    query: 前端按钮颜色和页面圆角应该怎么设计？
+    should_reject: true

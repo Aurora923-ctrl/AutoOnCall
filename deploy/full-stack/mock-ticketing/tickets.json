@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "ticket_id": "INC-REDIS-001",
+      "service_name": "order-service",
+      "title": "Redis maxclients exhausted",
+      "root_cause": "Redis connected_clients reached maxclients",
+      "status": "resolved"
+    },
+    {
+      "ticket_id": "INC-MYSQL-001",
+      "service_name": "payment-service",
+      "title": "MySQL slow query latency",
+      "root_cause": "Slow query increased pool wait time",
+      "status": "resolved"
+    },
+    {
+      "ticket_id": "INC-K8S-001",
+      "service_name": "inventory-service",
+      "title": "Pod CrashLoopBackOff after ConfigMap refresh",
+      "root_cause": "ConfigMap value caused process startup failure and repeated restarts",
+      "status": "resolved"
+    },
+    {
+      "ticket_id": "INC-KAFKA-001",
+      "service_name": "checkout-service",
+      "title": "Kafka consumer lag delayed checkout state updates",
+      "root_cause": "Consumer group rebalance and slow downstream payment callback",
+      "status": "resolved"
+    }
+  ]
+}

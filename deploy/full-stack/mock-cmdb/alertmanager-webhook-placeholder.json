@@ -1,0 +1,4 @@
+{
+  "status": "ok",
+  "message": "Alertmanager webhook placeholder. Replace this mock endpoint with AutoOnCall incident ingestion when the adapter is implemented."
+}

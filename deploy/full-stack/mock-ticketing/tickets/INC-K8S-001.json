@@ -1,0 +1,12 @@
+{
+  "ticket_id": "INC-K8S-001",
+  "service_name": "inventory-service",
+  "severity": "P1",
+  "root_cause": "ConfigMap refresh caused process startup failure and CrashLoopBackOff",
+  "resolution": "Rolled back ConfigMap through change process and added config validation in CI.",
+  "evidence": [
+    "Kubernetes status showed CrashLoopBackOff",
+    "Logs showed startup validation failure",
+    "Change CHG-10088 updated the ConfigMap shortly before the alert"
+  ]
+}

@@ -1,0 +1,108 @@
+"""AIOps API request and compatibility response models."""
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.incident import Incident
+
+
+class AIOpsRequest(BaseModel):
+    """Request body for the streaming `/api/aiops` diagnosis endpoint."""
+
+    session_id: str | None = Field(
+        default="default",
+        description="会话ID，用于追踪诊断历史",
+    )
+
+    incident: Incident | None = Field(
+        default=None,
+        description="结构化故障事件；不传时后端会根据当前任务自动构造默认 Incident",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "session_id": "session-123",
+                "incident": {
+                    "title": "order-service Redis timeout",
+                    "service_name": "order-service",
+                    "severity": "P1",
+                    "symptom": "5xx 错误率升高，P95 延迟超过 3 秒，并出现 Redis connection timeout",
+                    "environment": "prod",
+                },
+            }
+        }
+    )
+
+
+class AIOpsResumeRequest(BaseModel):
+    """Request body for resuming a paused AIOps diagnosis after approval."""
+
+    session_id: str | None = Field(
+        default=None,
+        description="原诊断会话 ID；新审批会从 metadata 自动推断，旧审批可显式传入。",
+    )
+    approval_id: str | None = Field(
+        default=None,
+        description="要恢复的审批 ID；不传时使用该事件最新 approved 审批。",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "session_id": "session-123",
+                "approval_id": "apr_xxx",
+            }
+        }
+    )
+
+
+class AlertInfo(BaseModel):
+    """Legacy alert shape kept for older non-streaming callers."""
+
+    alertname: str
+    severity: str
+    instance: str
+    duration: str
+    description: str | None = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "deprecated": True,
+            "description": "Legacy alert shape kept only for older non-streaming callers.",
+        }
+    )
+
+
+class DiagnosisResponse(BaseModel):
+    """Legacy non-streaming response wrapper.
+
+    The current public AIOps path is SSE-first. This model remains for import
+    compatibility and generated API examples.
+    """
+
+    code: int = 200
+    message: str = "success"
+    data: dict[str, Any]
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "deprecated": True,
+            "example": {
+                "code": 200,
+                "message": "success",
+                "data": {
+                    "status": "completed",
+                    "target_alert": {
+                        "alertname": "HighCPUUsage",
+                        "severity": "critical",
+                    },
+                    "diagnosis": {
+                        "root_cause": "数据库连接池耗尽",
+                        "recommendations": ["扩容数据库连接池", "优化SQL查询"],
+                    },
+                },
+            },
+        }
+    )

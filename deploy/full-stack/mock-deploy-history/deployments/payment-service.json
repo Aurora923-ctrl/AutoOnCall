@@ -1,0 +1,13 @@
+{
+  "service_name": "payment-service",
+  "current_version": "2026.06.27-0910",
+  "recent_deployments": [
+    {
+      "version": "2026.06.27-0910",
+      "deployed_at": "2026-06-27T04:10:00Z",
+      "operator": "release-bot",
+      "status": "succeeded",
+      "change_id": "CHG-10087"
+    }
+  ]
+}

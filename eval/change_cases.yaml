@@ -1,0 +1,86 @@
+cases:
+  - id: redis_maxclients_safe_change_success
+    title: Redis maxclients approved dry-run flow
+    scenario: safe_change
+    incident_id: inc-change-redis-success
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: approved
+    mode: dry_run_only
+    expected_status: closed
+    expected_precheck: passed
+    expected_dry_run: passed
+
+  - id: redis_maxclients_precheck_stale_evidence
+    title: Redis maxclients stale evidence blocks pre-check
+    scenario: safe_change
+    incident_id: inc-change-redis-stale
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: approved
+    mode: dry_run_only
+    plan_overrides:
+      created_at_offset_seconds: -7200
+      expires_in_seconds: 60
+    expected_status: precheck_failed
+    expected_precheck: failed
+
+  - id: redis_maxclients_dry_run_failed
+    title: Redis maxclients dry-run blocks execution
+    scenario: safe_change
+    incident_id: inc-change-redis-dryrun-failed
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: approved
+    mode: manual_record
+    plan_metadata:
+      force_dry_run_failure: true
+    expected_status: dry_run_failed
+    expected_precheck: passed
+    expected_dry_run: failed
+
+  - id: redis_maxclients_observation_failed_rollback_recommended
+    title: Redis maxclients manual execution failure recommends rollback
+    scenario: safe_change
+    incident_id: inc-change-redis-observe-failed
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: approved
+    mode: manual_record
+    manual_result:
+      status: failed
+      notes: 人工执行后 5xx 未恢复
+      observed_metrics:
+        service_5xx_rate: 0.12
+    expected_status: rollback_recommended
+    expected_precheck: passed
+    expected_dry_run: passed
+
+  - id: forbidden_sql_never_enters_change_execution
+    title: Forbidden SQL is blocked before change execution
+    scenario: forbidden_policy
+    incident_id: inc-change-forbidden-sql
+    tool_name: execute_sql
+    action: 未审核 SQL：delete from orders
+    expected_policy: forbidden
+    expected_status: forbidden
+
+  - id: approval_required_before_change_execution
+    title: Pending approval cannot start safe change workflow
+    scenario: safe_change
+    incident_id: inc-change-pending-approval
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: pending
+    mode: dry_run_only
+    expected_status: rejected_before_execution

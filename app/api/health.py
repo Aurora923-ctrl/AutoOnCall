@@ -1,0 +1,244 @@
+"""Health check API."""
+
+from typing import Any
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from loguru import logger
+
+from app.config import config
+from app.core.milvus_client import milvus_manager
+from app.integrations.base import classify_adapter_error
+from app.integrations.mysql import MySQLStatusAdapter
+from app.integrations.redis_info import RedisInfoAdapter
+
+router = APIRouter()
+
+
+@router.get("/health")
+async def health_check():
+    """Compatibility endpoint with readiness semantics."""
+    return await readiness_check()
+
+
+@router.get("/health/live")
+async def liveness_check():
+    """Return process liveness without checking external dependencies."""
+    health_data = _base_health_data()
+    health_data["status"] = "healthy"
+    health_data["checks"] = {
+        "process": {
+            "status": "alive",
+            "message": "FastAPI process is responsive",
+        }
+    }
+    return JSONResponse(
+        status_code=200,
+        content={
+            "code": 200,
+            "message": "service process is alive",
+            "data": health_data,
+        },
+    )
+
+
+@router.get("/health/ready")
+async def readiness_check():
+    """Return dependency readiness for RAG and production traffic."""
+    health_data = _base_health_data()
+    milvus = _check_milvus()
+    external_systems = await _external_system_readiness()
+    if (
+        milvus["status"] != "connected"
+        and external_systems.get("status") == "degraded"
+        and config.aiops_mock_fallback_enabled
+    ):
+        external_systems = dict(external_systems)
+        external_systems["status"] = "mock_fallback"
+    health_data["checks"] = {
+        "process": {
+            "status": "alive",
+            "message": "FastAPI process is responsive",
+        },
+        "milvus": milvus,
+        "external_systems": external_systems,
+    }
+    health_data["capabilities"] = _capability_readiness(milvus, external_systems)
+    health_data["milvus"] = milvus
+
+    overall_status = "healthy"
+    status_code = 200
+    if milvus["status"] != "connected":
+        overall_status = "degraded"
+        status_code = 503
+        health_data["error"] = "RAG readiness dependency unavailable"
+
+    health_data["status"] = overall_status
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": (
+                "service dependencies are ready"
+                if status_code == 200
+                else "service dependency is unavailable"
+            ),
+            "data": health_data,
+        },
+    )
+
+
+def _base_health_data() -> dict[str, Any]:
+    return {
+        "service": config.app_name,
+        "version": config.app_version,
+        "status": "healthy",
+        "mode": "mock-compatible" if _mock_mode_available() else "production",
+    }
+
+
+def _check_milvus() -> dict[str, str]:
+    try:
+        milvus_healthy = milvus_manager.health_check()
+        return {
+            "status": "connected" if milvus_healthy else "disconnected",
+            "message": "Milvus connected" if milvus_healthy else "Milvus disconnected",
+        }
+    except Exception as exc:
+        logger.warning(f"Milvus health check failed: {exc}")
+        return {
+            "status": "error",
+            "message": f"Milvus check failed: {exc}",
+        }
+
+
+async def _external_system_readiness() -> dict[str, Any]:
+    checks = {
+        "alertmanager": _configured_only_check(bool(config.alertmanager_base_url)),
+        "prometheus": _configured_only_check(bool(config.prometheus_base_url)),
+        "log_gateway": _configured_only_check(bool(config.log_gateway_url)),
+        "jaeger": _configured_only_check(bool(config.jaeger_base_url)),
+        "tempo": _configured_only_check(bool(config.tempo_base_url)),
+        "redpanda": _configured_only_check(bool(config.redpanda_admin_url)),
+        "kubernetes": _configured_only_check(bool(config.kubernetes_api_server)),
+        "redis": await _redis_readiness(),
+        "mysql": await _mysql_readiness(),
+        "ticket": _configured_only_check(bool(config.ticket_api_url)),
+    }
+    statuses = {name: payload["status"] for name, payload in checks.items()}
+    configured = {name: status != "not_configured" for name, status in statuses.items()}
+    return {
+        "status": _external_overall_status(statuses, config.aiops_mock_fallback_enabled),
+        "checks": checks,
+        "configured": configured,
+        "mock_fallback_enabled": config.aiops_mock_fallback_enabled,
+        "message": (
+            "External systems without configuration can still use mock/offline AIOps fallback"
+            if config.aiops_mock_fallback_enabled
+            else "Unconfigured external systems will return structured failures"
+        ),
+    }
+
+
+def _configured_only_check(configured: bool) -> dict[str, Any]:
+    return {
+        "status": "configured" if configured else "not_configured",
+        "configured": configured,
+    }
+
+
+async def _redis_readiness() -> dict[str, Any]:
+    adapter = RedisInfoAdapter()
+    if not adapter.configured:
+        return {"status": "not_configured", "configured": False}
+    try:
+        result = await adapter.ping()
+        return {"status": "connected", "configured": True, **result}
+    except Exception as exc:
+        return _failed_readiness(exc)
+
+
+async def _mysql_readiness() -> dict[str, Any]:
+    adapter = MySQLStatusAdapter()
+    if not adapter.configured:
+        return {"status": "not_configured", "configured": False}
+    try:
+        result = await adapter.ping()
+        return {"status": "connected", "configured": True, **result}
+    except Exception as exc:
+        return _failed_readiness(exc)
+
+
+def _failed_readiness(exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "configured": True,
+        "error_type": classify_adapter_error(exc),
+        "message": str(exc),
+    }
+
+
+def _external_overall_status(statuses: dict[str, str], mock_fallback_enabled: bool) -> str:
+    if any(status == "failed" for status in statuses.values()):
+        return "degraded"
+    if any(status in {"connected", "configured"} for status in statuses.values()):
+        return "configured"
+    return "mock_fallback" if mock_fallback_enabled else "not_configured"
+
+
+def _capability_readiness(
+    milvus: dict[str, str],
+    external_systems: dict[str, Any],
+) -> dict[str, Any]:
+    rag_ready = milvus.get("status") == "connected"
+    external_status = str(external_systems.get("status") or "unknown")
+    mock_enabled = bool(external_systems.get("mock_fallback_enabled"))
+    if external_status in {"configured", "mock_fallback"}:
+        aiops_status = external_status
+        aiops_ready = True
+    elif external_status == "degraded" and mock_enabled:
+        aiops_status = "degraded_with_fallback"
+        aiops_ready = True
+    else:
+        aiops_status = external_status
+        aiops_ready = False
+
+    return {
+        "rag": {
+            "ready": rag_ready,
+            "status": "ready" if rag_ready else "unavailable",
+            "dependency": "milvus",
+            "message": (
+                "RAG search and upload indexing are ready"
+                if rag_ready
+                else "RAG search and upload indexing need Milvus"
+            ),
+        },
+        "aiops": {
+            "ready": aiops_ready,
+            "status": aiops_status,
+            "mock_fallback_enabled": mock_enabled,
+            "message": (
+                "AIOps diagnosis can use configured adapters or mock fallback"
+                if aiops_ready
+                else "AIOps diagnosis has no configured adapters and mock fallback is disabled"
+            ),
+        },
+    }
+
+
+def _mock_mode_available() -> bool:
+    return config.aiops_mock_fallback_enabled and not any(
+        [
+            config.prometheus_base_url,
+            config.alertmanager_base_url,
+            config.log_gateway_url,
+            config.jaeger_base_url,
+            config.tempo_base_url,
+            config.redpanda_admin_url,
+            config.kubernetes_api_server,
+            config.resolved_redis_url,
+            config.resolved_mysql_dsn,
+            config.ticket_api_url,
+        ]
+    )

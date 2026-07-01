@@ -1,0 +1,22 @@
+services:
+  order-service:
+    redis:
+      - redis-cluster-prod
+    mysql:
+      - order-mysql
+    downstream_services:
+      - payment-service
+      - inventory-service
+  payment-service:
+    mysql:
+      - payment-mysql
+    downstream_services:
+      - risk-service
+  checkout-service:
+    redis:
+      - redis-cluster-prod
+    mysql:
+      - order-mysql
+    downstream_services:
+      - order-service
+      - payment-service

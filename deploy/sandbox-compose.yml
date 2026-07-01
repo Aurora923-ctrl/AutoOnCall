@@ -1,0 +1,83 @@
+services:
+  sandbox-redis:
+    image: redis:7-alpine
+    container_name: autooncall-sandbox-redis
+    command:
+      - redis-server
+      - --maxclients
+      - "10000"
+      - --slowlog-log-slower-than
+      - "1000"
+      - --slowlog-max-len
+      - "128"
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  sandbox-mysql:
+    image: mysql:8.0
+    container_name: autooncall-sandbox-mysql
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --slow-query-log=ON
+      - --long-query-time=10
+      - --performance-schema=ON
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: autooncall
+      MYSQL_USER: autooncall
+      MYSQL_PASSWORD: autooncall123
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uautooncall", "-pautooncall123"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  sandbox-metrics-exporter:
+    image: python:3.11-alpine
+    container_name: autooncall-sandbox-metrics-exporter
+    command: ["python", "/app/metrics_exporter.py"]
+    ports:
+      - "9109:9108"
+    volumes:
+      - ./sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=2).read()\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  sandbox-prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: autooncall-sandbox-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2h
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./sandbox/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      sandbox-metrics-exporter:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20

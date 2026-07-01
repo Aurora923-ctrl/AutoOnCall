@@ -1,0 +1,87 @@
+"""Tests for liveness and readiness health checks."""
+
+import json
+
+import pytest
+
+from app.api import health as health_api
+
+
+@pytest.mark.asyncio
+async def test_liveness_does_not_check_milvus(monkeypatch) -> None:
+    def fail_health_check() -> bool:
+        raise RuntimeError("milvus should not be checked")
+
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", fail_health_check)
+
+    response = await health_api.liveness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert payload["data"]["checks"]["process"]["status"] == "alive"
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+
+    response = await health_api.readiness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 503
+    assert payload["data"]["status"] == "degraded"
+    assert payload["data"]["checks"]["milvus"]["status"] == "disconnected"
+    assert payload["data"]["capabilities"]["rag"]["ready"] is False
+    assert "aiops" in payload["data"]["capabilities"]
+    assert payload["data"]["checks"]["external_systems"]["status"] in {
+        "configured",
+        "mock_fallback",
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
+
+    response = await health_api.health_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert payload["data"]["checks"]["milvus"]["status"] == "connected"
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
+
+    class ConnectedRedis:
+        configured = True
+
+        async def ping(self):
+            return {"status": "connected", "message": "PONG"}
+
+    class FailedMySQL:
+        configured = True
+
+        async def ping(self):
+            raise ConnectionError("mysql down")
+
+    monkeypatch.setattr(health_api, "RedisInfoAdapter", lambda: ConnectedRedis())
+    monkeypatch.setattr(health_api, "MySQLStatusAdapter", lambda: FailedMySQL())
+
+    response = await health_api.readiness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+    external = payload["data"]["checks"]["external_systems"]
+
+    assert response.status_code == 200
+    assert external["status"] == "degraded"
+    assert external["checks"]["redis"]["status"] == "connected"
+    assert external["checks"]["mysql"]["status"] == "failed"
+    assert payload["data"]["capabilities"]["aiops"]["status"] == "degraded_with_fallback"
+
+
+def test_external_overall_status_respects_mock_fallback_flag() -> None:
+    statuses = {"alertmanager": "not_configured", "prometheus": "not_configured"}
+
+    assert health_api._external_overall_status(statuses, True) == "mock_fallback"
+    assert health_api._external_overall_status(statuses, False) == "not_configured"

@@ -1,0 +1,25 @@
+{
+  "service_name": "order-service",
+  "owner": "payments-oncall",
+  "tier": "critical",
+  "environment": "prod",
+  "namespace": "orders",
+  "runtime": "kubernetes",
+  "dependencies": [
+    {
+      "name": "redis-order-cache",
+      "type": "redis",
+      "endpoint": "redis:6379"
+    },
+    {
+      "name": "mysql-orders",
+      "type": "mysql",
+      "endpoint": "mysql:3306"
+    },
+    {
+      "name": "redpanda-orders",
+      "type": "kafka",
+      "endpoint": "redpanda:9092"
+    }
+  ]
+}

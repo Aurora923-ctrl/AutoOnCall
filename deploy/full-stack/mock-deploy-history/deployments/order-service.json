@@ -1,0 +1,20 @@
+{
+  "service_name": "order-service",
+  "current_version": "2026.06.27-1024",
+  "recent_deployments": [
+    {
+      "version": "2026.06.27-1024",
+      "deployed_at": "2026-06-27T06:30:00Z",
+      "operator": "release-bot",
+      "status": "succeeded",
+      "change_id": "CHG-10086"
+    },
+    {
+      "version": "2026.06.26-1810",
+      "deployed_at": "2026-06-26T10:10:00Z",
+      "operator": "release-bot",
+      "status": "succeeded",
+      "change_id": "CHG-10021"
+    }
+  ]
+}
