@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
@@ -47,7 +48,7 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
         "rank": item.get("rank"),
         "doc_id": item.get("doc_id", ""),
         "source_file": item.get("source_file", "未知来源"),
-        "source_path": item.get("source_path", ""),
+        "source_path": public_source_path(item.get("source_path") or item.get("source_file")),
         "heading_path": item.get("heading_path", ""),
         "chunk_id": item.get("chunk_id", ""),
         "score": item.get("score"),
@@ -71,6 +72,14 @@ def build_runbook_summary(payload: dict[str, Any]) -> str:
     if payload.get("status") == "no_answer":
         return "未找到可信 Runbook 来源"
     return str(payload.get("summary") or "Runbook 检索失败")
+
+
+def public_source_path(value: Any) -> str:
+    """Return a frontend-safe source identifier without leaking server directories."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return Path(text).name
 
 
 def format_score(score: Any) -> str:

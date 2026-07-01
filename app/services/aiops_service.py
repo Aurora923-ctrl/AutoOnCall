@@ -6,6 +6,7 @@
 import json
 from collections.abc import AsyncGenerator
 from typing import Any, cast
+from uuid import uuid4
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -104,7 +105,7 @@ class AIOpsService:
     async def execute(
         self,
         user_input: str,
-        session_id: str = "default",
+        session_id: str | None = None,
         incident: Incident | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -117,6 +118,7 @@ class AIOpsService:
         Yields:
             Dict[str, Any]: 流式事件
         """
+        session_id = session_id or f"session-{uuid4().hex}"
         logger.info(f"[会话 {session_id}] 开始执行任务: {user_input}")
 
         try:
@@ -244,7 +246,7 @@ class AIOpsService:
                 node_name="workflow",
                 event_type="workflow_completed",
                 output_summary="AIOps workflow completed",
-                status="success",
+                status=terminal_status,
                 metadata={"session_id": session_id},
             )
             yield {
@@ -294,7 +296,7 @@ class AIOpsService:
 
     async def diagnose(
         self,
-        session_id: str = "default",
+        session_id: str | None = None,
         incident: Incident | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -308,6 +310,7 @@ class AIOpsService:
         """
         from textwrap import dedent
 
+        session_id = session_id or f"session-{uuid4().hex}"
         aiops_task = dedent(
             """诊断当前系统是否存在告警，如果存在告警请详细分析告警原因并生成诊断报告，诊断报告输出格式要求：
                 ```
@@ -871,7 +874,10 @@ def _build_persisted_resume_report(
         for item in persisted_report.uncertainties
         if "等待人工审批" not in item and "需要人工审批" not in item
     ]
-    uncertainties.append("审批已通过；本次恢复使用持久化报告兜底，Agent 仍不会自动执行生产变更。")
+    uncertainties.append(
+        "审批已通过；本次恢复使用持久化报告补齐 Trace 和报告闭环，"
+        "后续风险操作需进入安全变更流程。"
+    )
     summary = persisted_report.summary
     if "审批已通过" not in summary:
         summary = f"{summary} 审批已通过，已基于持久化报告补齐恢复闭环。"
@@ -912,7 +918,8 @@ def _append_resume_markdown(
             f"- 审批人：{approval.decided_by or '未记录'}",
             f"- 审批原因：{approval.decision_reason or approval.reason or '未填写'}",
             f"- 恢复 session：{session_id}",
-            "- 恢复边界：使用持久化报告补齐 Trace 和报告闭环，Agent 不自动执行生产变更。",
+            "- 恢复边界：使用持久化报告补齐 Trace 和报告闭环；"
+            "Agent 不直接执行生产写操作，后续风险操作需进入安全变更流程。",
         ]
     )
     if "## 审批恢复记录" in base:

@@ -30,6 +30,7 @@ def _state_with_redis_evidence() -> dict:
             step_id="s1",
             summary="connected_clients=9940/10000，Redis 连接数接近上限",
             evidence_type="redis",
+            data_source="redis_info",
             stance="supporting",
             confidence_reason="Redis 连接数或慢日志阈值命中",
             raw_data={
@@ -47,6 +48,7 @@ def _state_with_redis_evidence() -> dict:
             tool_name="query_redis_status",
             input_args={"service_name": "order-service"},
             output={"summary": "connected_clients=9940/10000"},
+            data_source="redis_info",
             latency_ms=18.5,
             status="success",
         ).model_dump(mode="json")
@@ -338,7 +340,8 @@ def test_report_generator_marks_approval_decision_on_latest_report(tmp_path) -> 
     assert "审批动作：调整 Redis maxclients 配置" in updated.markdown
     assert "审批人：pytest" in updated.markdown
     assert "审批原因：approved for manual mitigation" in updated.markdown
-    assert "Agent 仍不会自动执行生产变更" in updated.markdown
+    assert "Agent 不直接执行生产写操作" in updated.markdown
+    assert "安全变更流程" in updated.markdown
 
 
 def test_report_generator_renders_conflicts_and_confidence_reasons(tmp_path) -> None:
@@ -476,7 +479,73 @@ def test_report_generator_keeps_graceful_degradation_confidence_floor(tmp_path) 
         status="completed",
     )
 
-    assert report.confidence == 0.55
+    assert report.confidence == 0.5
+
+
+def test_report_generator_caps_mock_only_analysis_confidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    for item in state["gathered_evidence"]:
+        if item.get("evidence_type") not in {"runbook", "risk"}:
+            item["data_source"] = "mock"
+            item["raw_data"] = {
+                "status": "success",
+                "output": {"source": "mock", "summary": item.get("summary", "")},
+            }
+            item["confidence"] = 0.5
+    state["evidence_analysis"] = {
+        "confidence": 0.9,
+        "evidence_profile": {
+            "source_quality": "fallback_only",
+            "diagnostic_success_count": 3,
+            "trusted_source_count": 0,
+            "fallback_source_count": 3,
+        },
+        "hypothesis_ranking": [
+            {
+                "title": "Redis maxclients 或连接池耗尽导致 timeout 和 5xx。",
+                "confidence": 0.92,
+                "confidence_reason": "mock 证据命中，但缺少真实数据源",
+            }
+        ],
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.confidence == 0.5
+
+
+def test_report_generator_caps_unknown_successful_evidence_confidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    for item in state["gathered_evidence"]:
+        if item.get("evidence_type") not in {"runbook", "risk"}:
+            item["data_source"] = "unknown"
+            item["raw_data"] = {
+                "status": "success",
+                "output": {"summary": item.get("summary", "")},
+            }
+            item["confidence"] = 0.9
+    state["evidence_analysis"] = {
+        "confidence": 0.88,
+        "hypothesis_ranking": [
+            {
+                "title": "Redis maxclients 或连接池耗尽导致 timeout 和 5xx。",
+                "confidence": 0.9,
+                "confidence_reason": "未知来源证据命中，需要复核",
+            }
+        ],
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.confidence == 0.5
 
 
 @pytest.mark.asyncio

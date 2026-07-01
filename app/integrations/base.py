@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+_KUBERNETES_LABEL_VALUE_RE = re.compile(r"^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$")
+
 
 class ExternalAdapterError(RuntimeError):
     """Raised when a configured external adapter cannot return usable data."""
@@ -31,6 +33,25 @@ def first_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def escape_prometheus_label_value(value: Any) -> str:
+    """Escape a value before interpolating it into a quoted PromQL label matcher."""
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace('"', '\\"')
+    )
+
+
+def require_kubernetes_label_value(value: Any, *, field_name: str = "label value") -> str:
+    """Return a Kubernetes label value or raise before issuing a broad selector query."""
+    text = str(value or "").strip()
+    if not text or len(text) > 63 or not _KUBERNETES_LABEL_VALUE_RE.fullmatch(text):
+        raise ExternalAdapterError(f"{field_name} must be a valid Kubernetes label value")
+    return text
 
 
 def parse_duration_seconds(value: str, *, default_seconds: int = 600) -> int:

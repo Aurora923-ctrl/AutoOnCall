@@ -1,9 +1,12 @@
 """Regression tests for the first industrial AIOps model upgrade."""
 
+import pytest
+from pydantic import ValidationError
+
 from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.planner import _build_planner_retrieval_query
 from app.agent.aiops.state import normalize_plan_state_update, remaining_plan_state_update
-from app.models.aiops import AIOpsRequest
+from app.models.aiops import AIOpsRequest, AIOpsResumeRequest
 from app.models.approval import ApprovalRequest, RiskAssessment
 from app.models.evidence import Evidence
 from app.models.incident import Incident
@@ -11,6 +14,7 @@ from app.models.plan import PlanStep
 from app.models.report import DiagnosisReport
 from app.models.trace import ToolCallRecord, TraceEvent
 from app.services.aiops_service import _build_incident_diagnosis_input
+from app.services.incident_state_builder import build_incident_state_from_state
 
 
 def test_aiops_request_keeps_legacy_session_only_payload() -> None:
@@ -18,6 +22,42 @@ def test_aiops_request_keeps_legacy_session_only_payload() -> None:
 
     assert request.session_id == "session-123"
     assert request.incident is None
+
+
+def test_aiops_request_defaults_to_no_shared_session() -> None:
+    request = AIOpsRequest()
+
+    assert request.session_id is None
+    assert request.incident is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session_id": ""},
+        {"session_id": "s" * 129},
+    ],
+)
+def test_aiops_request_rejects_invalid_session_id_boundaries(payload: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        AIOpsRequest(**payload)
+
+
+def test_aiops_resume_request_rejects_invalid_ids() -> None:
+    with pytest.raises(ValidationError):
+        AIOpsResumeRequest(session_id="s" * 129)
+    with pytest.raises(ValidationError):
+        AIOpsResumeRequest(approval_id="")
+
+
+def test_initial_aiops_state_generates_unique_session_when_missing() -> None:
+    first = create_initial_aiops_state("diagnose current alerts")
+    second = create_initial_aiops_state("diagnose current alerts")
+
+    assert first["session_id"].startswith("session-")
+    assert second["session_id"].startswith("session-")
+    assert first["session_id"] != second["session_id"]
+    assert first["session_id"] != "default"
 
 
 def test_aiops_request_accepts_optional_structured_incident() -> None:
@@ -155,6 +195,35 @@ def test_initial_aiops_state_is_backward_compatible() -> None:
     assert state["gathered_evidence"] == []
     assert state["evidence_analysis"] is None
     assert state["errors"] == []
+
+
+def test_incident_state_from_state_uses_report_approval_id_when_pending_is_cleared() -> None:
+    state = {
+        "incident": {
+            "incident_id": "inc-approval-resumed",
+            "title": "order-service Redis timeout",
+            "service_name": "order-service",
+            "severity": "P1",
+            "environment": "prod",
+        },
+        "trace_id": "trace-approval-resumed",
+        "pending_approval": None,
+        "report": {
+            "report_id": "rpt-1",
+            "approval_status": "approved",
+            "approval_decision": {"approval_id": "apr-resumed"},
+            "manual_action_required": True,
+        },
+    }
+
+    incident_state = build_incident_state_from_state(
+        state=state,
+        status="approval_resumed",
+        session_id="session-resumed",
+    )
+
+    assert incident_state.latest_approval_id == "apr-resumed"
+    assert incident_state.approval_status == "approved"
 
 
 def test_plan_state_helpers_keep_canonical_and_legacy_plan_in_sync() -> None:

@@ -7,7 +7,13 @@ from typing import Any
 from app.config import config
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.prometheus import PrometheusMetricsAdapter
-from app.tools.base import AIOpsTool, invoke_langchain_tool, is_failed_tool_output, tool_map
+from app.tools.base import (
+    AIOpsTool,
+    clamp_duration,
+    invoke_langchain_tool,
+    is_failed_tool_output,
+    tool_map,
+)
 
 
 class QueryMetricsTool(AIOpsTool):
@@ -44,8 +50,13 @@ class QueryMetricsTool(AIOpsTool):
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
-        interval = input_args.get("interval") or "1m"
-        time_range = input_args.get("time_range", "10m")
+        interval = clamp_duration(input_args.get("interval"), default="1m", maximum_seconds=300)
+        time_range = clamp_duration(
+            input_args.get("time_range"),
+            default="10m",
+            maximum_seconds=3600,
+        )
+        input_args.update({"interval": interval, "time_range": time_range})
 
         cpu_result = await self._call_optional_mcp(
             "query_cpu_metrics",
@@ -57,7 +68,7 @@ class QueryMetricsTool(AIOpsTool):
         )
         cpu_output = None if is_failed_tool_output(cpu_result) else cpu_result
         memory_output = None if is_failed_tool_output(memory_result) else memory_result
-        partial_errors = []
+        partial_errors: list[dict[str, Any]] = []
         if is_failed_tool_output(cpu_result):
             partial_errors.append(
                 {
@@ -74,14 +85,45 @@ class QueryMetricsTool(AIOpsTool):
             )
 
         if cpu_output or memory_output:
+            source = "mcp_monitor" if cpu_output and memory_output else "mcp_monitor_mixed"
+            if not config.aiops_mock_fallback_enabled and source == "mcp_monitor_mixed":
+                if cpu_output is None and not is_failed_tool_output(cpu_result):
+                    partial_errors.append(
+                        {
+                            "tool_name": "query_cpu_metrics",
+                            "error_message": self._mcp_metric_error(cpu_result),
+                        }
+                    )
+                if memory_output is None and not is_failed_tool_output(memory_result):
+                    partial_errors.append(
+                        {
+                            "tool_name": "query_memory_metrics",
+                            "error_message": self._mcp_metric_error(memory_result),
+                        }
+                    )
+                return self._build_partial_mcp_failure_output(
+                    service_name=service_name,
+                    time_range=time_range,
+                    interval=interval,
+                    cpu=cpu_output,
+                    memory=memory_output,
+                    partial_errors=partial_errors,
+                )
             output = self._build_monitor_output(
                 service_name=service_name,
                 time_range=time_range,
                 interval=interval,
-                source="mcp_monitor",
+                source=source,
                 cpu=cpu_output or self._mock_cpu(service_name),
                 memory=memory_output or self._mock_memory(service_name),
                 partial_errors=partial_errors,
+                source_detail={
+                    "cpu": "mcp_monitor" if cpu_output else "mock_fallback",
+                    "memory": "mcp_monitor" if memory_output else "mock_fallback",
+                    "qps": "synthetic_demo_baseline",
+                    "p95_latency_ms": "synthetic_demo_baseline",
+                    "error_rate": "synthetic_demo_baseline",
+                },
             )
             return output
 
@@ -122,6 +164,13 @@ class QueryMetricsTool(AIOpsTool):
             cpu=self._mock_cpu(service_name),
             memory=self._mock_memory(service_name),
             partial_errors=partial_errors,
+            source_detail={
+                "cpu": "mock",
+                "memory": "mock",
+                "qps": "synthetic_demo_baseline",
+                "p95_latency_ms": "synthetic_demo_baseline",
+                "error_rate": "synthetic_demo_baseline",
+            },
         )
 
     def _build_monitor_output(
@@ -134,6 +183,7 @@ class QueryMetricsTool(AIOpsTool):
         cpu: Any,
         memory: Any,
         partial_errors: list[dict[str, Any]],
+        source_detail: dict[str, str],
     ) -> dict[str, Any]:
         """Build the stable metrics payload shared by MCP and mock paths."""
         output = {
@@ -146,6 +196,10 @@ class QueryMetricsTool(AIOpsTool):
             "error_rate": {"current": 0.082, "threshold": 0.01, "status": "high"},
             "cpu": cpu,
             "memory": memory,
+            "source_detail": source_detail,
+            "synthetic_fields": [
+                key for key, value in source_detail.items() if value == "synthetic_demo_baseline"
+            ],
         }
         if partial_errors:
             output["partial_errors"] = partial_errors
@@ -155,6 +209,43 @@ class QueryMetricsTool(AIOpsTool):
             f"metrics_source={output['source']}"
         )
         return output
+
+    def _build_partial_mcp_failure_output(
+        self,
+        *,
+        service_name: str,
+        time_range: str,
+        interval: str,
+        cpu: Any,
+        memory: Any,
+        partial_errors: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return a failed payload when strict mode forbids synthetic metric backfill."""
+        available_metrics = {}
+        if cpu is not None:
+            available_metrics["cpu"] = cpu
+        if memory is not None:
+            available_metrics["memory"] = memory
+        return {
+            "status": "failed",
+            "service_name": service_name,
+            "time_range": time_range,
+            "interval": interval,
+            "source": "mcp_monitor_mixed",
+            "summary": (
+                f"{service_name} 监控指标查询部分可用，但 mock fallback 已关闭，"
+                "不能用合成指标补齐。"
+            ),
+            "available_metrics": available_metrics,
+            "partial_errors": partial_errors,
+            "source_detail": {
+                "cpu": "mcp_monitor" if cpu is not None else "unavailable",
+                "memory": "mcp_monitor" if memory is not None else "unavailable",
+                "qps": "unavailable",
+                "p95_latency_ms": "unavailable",
+                "error_rate": "unavailable",
+            },
+        }
 
     async def _call_prometheus(
         self,
@@ -184,6 +275,20 @@ class QueryMetricsTool(AIOpsTool):
             return await invoke_langchain_tool(tool, input_args)
         except Exception as exc:
             return {"status": "failed", "error_message": str(exc)}
+
+    @staticmethod
+    def _mcp_metric_error(result: Any) -> str:
+        if result is None:
+            return "MCP metric tool is not configured"
+        if isinstance(result, dict):
+            return str(
+                result.get("error_message")
+                or result.get("error")
+                or result.get("summary")
+                or result.get("message")
+                or "no usable MCP metric output"
+            )
+        return "no usable MCP metric output"
 
     @staticmethod
     def _mock_cpu(service_name: str) -> dict[str, Any]:

@@ -11,6 +11,7 @@ from app.integrations.base import (
     ExternalAdapterError,
     adapter_success,
     bearer_headers,
+    escape_prometheus_label_value,
     first_float,
     require_config,
 )
@@ -119,7 +120,10 @@ class PrometheusMetricsAdapter:
         query_template: str,
         service_name: str,
     ) -> tuple[float, bool]:
-        query = query_template.replace("{service_name}", service_name)
+        query = query_template.replace(
+            "{service_name}",
+            escape_prometheus_label_value(service_name),
+        )
         response = await client.get(f"{base_url}/api/v1/query", params={"query": query})
         response.raise_for_status()
         payload = response.json()

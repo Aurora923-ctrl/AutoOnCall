@@ -7,6 +7,9 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+SESSION_ID_MAX_LENGTH = 128
+CHAT_QUESTION_MAX_LENGTH = 8000
+
 
 class ChatRequest(BaseModel):
     """对话请求"""
@@ -21,9 +24,21 @@ class ChatRequest(BaseModel):
         },
     )
 
-    id: str = Field(..., description="会话 ID", alias="Id")
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        description="会话 ID",
+        alias="Id",
+    )
 
-    question: str = Field(..., description="用户问题", alias="Question")
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=CHAT_QUESTION_MAX_LENGTH,
+        description="用户问题",
+        alias="Question",
+    )
 
     metadata_filter: dict[str, Any] | None = Field(
         default=None,
@@ -37,4 +52,10 @@ class ClearRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    session_id: str = Field(..., description="会话 ID", alias="sessionId")
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        description="会话 ID",
+        alias="sessionId",
+    )

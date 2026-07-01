@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.api import aiops, approvals, incidents
+from app.config import config
 from app.services.aiops_service import AIOpsService
 from app.services.approval_service import ApprovalService
 from app.services.report_generator import ReportGenerator
@@ -77,6 +78,7 @@ def _build_test_app(monkeypatch: pytest.MonkeyPatch, tmp_path) -> FastAPI:
     approval_service_module = importlib.import_module("app.services.approval_service")
     report_generator_module = importlib.import_module("app.services.report_generator")
 
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(planner_module, "ChatQwen", FailingPlannerLLM)
     monkeypatch.setattr(
         planner_module, "retrieve_structured_knowledge", lambda _: {"status": "empty"}

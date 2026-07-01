@@ -69,11 +69,17 @@ def execution_stage_status(execution: Mapping[str, Any]) -> str:
         return "sandbox_executing"
     if status == "manual_execution_recorded":
         return "manual_execution_recorded"
-    if status in {"closed", "rollback_recommended", "escalated"}:
+    if status in {
+        "dry_run_completed",
+        "sandbox_validated",
+        "closed",
+        "rollback_recommended",
+        "escalated",
+    }:
         if manual_result:
             return status
         if mode == "sandbox" or observation:
-            return "passed" if status == "closed" else status
+            return "passed" if status in {"closed", "sandbox_validated"} else status
         return "skipped"
     return "pending"
 
@@ -94,6 +100,10 @@ def execution_stage_reason(execution: Mapping[str, Any]) -> str:
         return str(manual_result.get("notes") or f"人工执行结果：{manual_result.get('status') or 'recorded'}")
     if mode == "sandbox" and observation:
         return str(observation.get("recommendation") or "沙箱执行和观察通过，未调用生产写接口。")
+    if status == "sandbox_validated":
+        return "沙箱执行和观察通过，未调用生产写接口。"
+    if status == "dry_run_completed":
+        return "dry-run 已完成，未执行生产变更。"
     if status == "closed":
         return "流程已关闭，未自动执行生产变更。"
     if status == "rollback_recommended":
@@ -116,6 +126,10 @@ def change_execution_next_steps(existing: list[str], status: str) -> list[str]:
         steps.append("安全变更流程已升级，需人工复核沙箱或生产变更边界。")
     elif status in {"precheck_failed", "dry_run_failed"}:
         steps.append("修正前置检查或 dry-run 阻断项后，重新生成审批和安全变更计划。")
+    elif status == "dry_run_completed":
+        steps.append("dry-run 已完成且未执行生产变更；如需恢复生产，请走人工执行记录或变更平台。")
+    elif status == "sandbox_validated":
+        steps.append("sandbox 验证已完成且未执行生产变更；如需恢复生产，请走人工执行记录或变更平台。")
     elif status == "closed":
         steps.append("安全变更流程已关闭，继续按观察窗口复核关键指标是否稳定。")
     return _dedupe_strings(steps)[:8]
@@ -134,6 +148,10 @@ def change_execution_uncertainties(existing: list[str], status: str) -> list[str
         uncertainties.append("当前环境不满足安全沙箱执行边界，已转人工复核。")
     elif status in {"precheck_failed", "dry_run_failed"}:
         uncertainties.append("安全变更校验未通过，当前计划不能进入执行阶段。")
+    elif status == "dry_run_completed":
+        uncertainties.append("dry-run 只验证计划可行性，尚不能证明生产故障已经恢复。")
+    elif status == "sandbox_validated":
+        uncertainties.append("sandbox 只验证非生产或本地沙箱流程，尚不能证明生产故障已经恢复。")
     elif status == "closed":
         uncertainties = [
             item for item in uncertainties if "等待人工执行" not in item and "人工执行" not in item

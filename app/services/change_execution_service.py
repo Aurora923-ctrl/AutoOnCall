@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from datetime import UTC
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from app.models.approval import ApprovalRequest
 from app.models.change_execution import (
@@ -22,6 +25,7 @@ from app.models.incident import utc_now
 from app.services.aiops_store import create_aiops_store
 from app.services.approval_service import ApprovalNotFoundError, ApprovalService, approval_service
 from app.services.change_execution_read_models import build_change_execution_read_model
+from app.services.incident_lifecycle import is_production_environment
 from app.services.incident_state_builder import build_incident_state_from_change_execution
 from app.services.report_generator import ReportGenerator, report_generator
 from app.services.sqlite_store import resolve_sqlite_path
@@ -85,6 +89,80 @@ class ChangeExecutionService:
             approval_id=approval_id,
         )
         if existing is not None:
+            if existing.status == "dry_run_completed" and mode in {"manual_record", "sandbox"}:
+                failed_resume = self._revalidate_existing_dry_run_resume(
+                    execution=existing,
+                    approval=approval,
+                    plan=plan,
+                    requested_mode=mode,
+                    operator=operator,
+                )
+                if failed_resume is not None:
+                    execution, trace_event = failed_resume
+                    yield self._event_payload(
+                        event_type="change_precheck",
+                        stage="precheck_completed",
+                        status=(
+                            execution.pre_check.status if execution.pre_check else execution.status
+                        ),
+                        message=(
+                            execution.pre_check.reason
+                            if execution.pre_check
+                            else "pre-check 未通过"
+                        ),
+                        execution=execution,
+                        trace_event=trace_event,
+                    )
+                    yield self._complete_payload(
+                        execution,
+                        "pre-check 未通过，安全变更流程已停止",
+                    )
+                    return
+            if existing.status == "dry_run_completed" and mode == "sandbox":
+                execution = self._resume_existing_dry_run_to_sandbox(
+                    execution=existing,
+                    plan=plan,
+                    operator=operator,
+                    observe_window_seconds=observe_window_seconds,
+                )
+                sandbox_stage, sandbox_message = _sandbox_event_status_text(execution.status)
+                yield self._event_payload(
+                    event_type="change_observation",
+                    stage=sandbox_stage,
+                    status=(
+                        execution.observation.status if execution.observation else execution.status
+                    ),
+                    message=sandbox_message,
+                    execution=execution,
+                )
+                yield self._complete_payload(
+                    execution,
+                    _sandbox_complete_message(execution.status),
+                )
+                return
+            resumed_existing = self._resume_existing_execution_for_mode(
+                execution=existing,
+                requested_mode=mode,
+                operator=operator,
+            )
+            if resumed_existing is not None:
+                execution, trace_event = resumed_existing
+                yield self._event_payload(
+                    event_type="change_execution",
+                    stage="waiting_manual_execution",
+                    status=execution.status,
+                    message=(
+                        "dry-run 已完成，现进入人工执行结果记录等待态；"
+                        "Agent 不直接执行生产写操作"
+                    ),
+                    execution=execution,
+                    trace_event=trace_event,
+                )
+                yield self._complete_payload(
+                    execution,
+                    "安全变更流程已进入人工执行记录等待态",
+                )
+                return
             yield self._event_payload(
                 event_type="change_report",
                 stage="change_execution_existing",
@@ -102,6 +180,10 @@ class ChangeExecutionService:
             return
 
         execution = ChangeExecution(
+            change_execution_id=_stable_change_execution_id(
+                approval_id=approval_id,
+                change_plan_id=change_plan_id,
+            ),
             change_plan_id=change_plan_id,
             approval_id=approval_id,
             incident_id=incident_id,
@@ -110,7 +192,23 @@ class ChangeExecutionService:
             execution_steps=list(plan.steps),
             created_by=operator,
         )
-        execution = self._save_execution(execution)
+        execution, created = self._store.create_change_execution_once(execution)
+        if not created:
+            yield self._event_payload(
+                event_type="change_report",
+                stage="change_execution_existing",
+                status=execution.status,
+                message="已存在相同审批和变更计划的安全变更执行记录，返回现有状态",
+                execution=execution,
+            )
+            yield self._event_payload(
+                event_type="complete",
+                stage="change_resume_complete",
+                status=execution.status,
+                message="安全变更流程幂等完成",
+                execution=execution,
+            )
+            return
 
         execution = self._transition(execution, "precheck_running")
         trace_event = self._record_change_event(
@@ -215,7 +313,7 @@ class ChangeExecutionService:
                 event_type="change_execution",
                 stage="waiting_manual_execution",
                 status=execution.status,
-                message="dry-run 通过，等待人工提交执行结果；Agent 不自动执行生产变更",
+                message="dry-run 通过，等待人工提交执行结果；Agent 不直接执行生产写操作",
                 execution=execution,
                 trace_event=trace_event,
             )
@@ -481,15 +579,116 @@ class ChangeExecutionService:
                 return execution
         return None
 
+    def _revalidate_existing_dry_run_resume(
+        self,
+        *,
+        execution: ChangeExecution,
+        approval: ApprovalRequest,
+        plan: ChangePlan,
+        requested_mode: ChangeExecutionMode,
+        operator: str,
+    ) -> tuple[ChangeExecution, Any] | None:
+        """Re-run pre-check before a completed dry-run can continue."""
+        pre_check = self.run_pre_checks(approval=approval, plan=plan)
+        metadata = {
+            "pre_check": pre_check.model_dump(mode="json"),
+            "operator": operator,
+            "requested_mode": requested_mode,
+            "resumed_from_status": execution.status,
+        }
+        if pre_check.status != "failed":
+            self._record_change_event(
+                execution=execution,
+                event_type="change_precheck",
+                status="success",
+                summary="Pre-check revalidated before resuming completed dry-run",
+                metadata=metadata,
+            )
+            return None
+
+        updated = execution.model_copy(
+            update={
+                "status": "precheck_failed",
+                "pre_check": pre_check,
+                "updated_at": utc_now(),
+            }
+        )
+        updated = self._save_execution(updated)
+        trace_event = self._record_change_event(
+            execution=updated,
+            event_type="change_precheck",
+            status="failed",
+            summary=pre_check.reason,
+            metadata=metadata,
+        )
+        return updated, trace_event
+
+    def _resume_existing_execution_for_mode(
+        self,
+        *,
+        execution: ChangeExecution,
+        requested_mode: ChangeExecutionMode,
+        operator: str,
+    ) -> tuple[ChangeExecution, Any] | None:
+        """Allow a validated dry-run to continue into manual result recording."""
+        if requested_mode != "manual_record" or execution.status != "dry_run_completed":
+            return None
+        updated = execution.model_copy(
+            update={
+                "mode": "manual_record",
+                "status": "waiting_manual_execution",
+                "updated_at": utc_now(),
+            }
+        )
+        updated = self._save_execution(updated)
+        trace_event = self._record_change_event(
+            execution=updated,
+            event_type="change_execution",
+            status="waiting",
+            summary="Dry-run already completed; waiting for operator to record manual result",
+            metadata={"operator": operator, "resumed_from_status": execution.status},
+        )
+        return updated, trace_event
+
+    def _resume_existing_dry_run_to_sandbox(
+        self,
+        *,
+        execution: ChangeExecution,
+        plan: ChangePlan,
+        operator: str,
+        observe_window_seconds: int,
+    ) -> ChangeExecution:
+        next_status = self._status_after_dry_run("sandbox", plan)
+        updated = execution.model_copy(
+            update={
+                "mode": "sandbox",
+                "status": next_status,
+                "updated_at": utc_now(),
+            }
+        )
+        updated = self._save_execution(updated)
+        self._record_change_event(
+            execution=updated,
+            event_type="change_execution",
+            status="blocked" if next_status == "escalated" else "running",
+            summary="Dry-run already completed; sandbox execution requested",
+            metadata={"operator": operator, "resumed_from_status": execution.status},
+        )
+        return self._run_sandbox_execution(
+            execution=updated,
+            plan=plan,
+            observe_window_seconds=observe_window_seconds,
+        )
+
     def _status_after_dry_run(self, mode: ChangeExecutionMode, plan: ChangePlan) -> str:
         if mode == "manual_record":
             return "waiting_manual_execution"
         if mode == "sandbox":
             environment = str(plan.metadata.get("environment") or "").lower()
-            if environment == "prod" and not plan.metadata.get("sandbox_enabled"):
+            if is_production_environment(environment) and not plan.metadata.get("sandbox_enabled"):
                 return "escalated"
             return "sandbox_executing"
-        return "closed"
+        return "dry_run_completed"
 
     def _run_sandbox_execution(
         self,
@@ -538,7 +737,7 @@ class ChangeExecutionService:
         )
         execution = execution.model_copy(
             update={
-                "status": "closed",
+                "status": "sandbox_validated",
                 "observation": observation,
                 "updated_at": utc_now(),
             }
@@ -560,9 +759,7 @@ class ChangeExecutionService:
 
     def _save_execution(self, execution: ChangeExecution) -> ChangeExecution:
         self._store.save_change_execution(execution)
-        self._store.save_incident_state(
-            build_incident_state_from_change_execution(execution)
-        )
+        self._store.save_incident_state(build_incident_state_from_change_execution(execution))
         self._sync_report(execution)
         return execution
 
@@ -572,7 +769,14 @@ class ChangeExecutionService:
                 incident_id=execution.incident_id,
                 execution=build_change_execution_read_model(execution),
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Change execution report synchronization failed: incident_id={}, "
+                "change_execution_id={}, error={}",
+                execution.incident_id,
+                execution.change_execution_id,
+                exc,
+            )
             return
 
     def _record_change_event(
@@ -706,6 +910,12 @@ def _manual_observation(
         failed_criteria=failed_criteria,
         recommendation=recommendation,
     )
+
+
+def _stable_change_execution_id(*, approval_id: str, change_plan_id: str) -> str:
+    """Return the same execution id for retries of one approved change plan."""
+    digest = sha256(f"{approval_id}:{change_plan_id}".encode()).hexdigest()[:24]
+    return f"chgexec-{digest}"
 
 
 change_execution_service = ChangeExecutionService()

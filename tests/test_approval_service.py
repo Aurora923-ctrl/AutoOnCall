@@ -5,10 +5,12 @@ import json
 import sqlite3
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.approval import ApprovalRequest
 from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService, ApprovalStateError
+from app.services.approval_workflow import create_approval_request_from_risk_decision
 from app.services.report_generator import ReportGenerator
 
 
@@ -64,6 +66,52 @@ def test_approval_service_approves_latest_pending_request(tmp_path) -> None:
     assert approved.decided_by == "oncall"
     assert approved.decision_reason == "已确认变更窗口"
     assert service.get_request(first.approval_id).status == "pending"
+
+
+def test_approval_workflow_reuses_same_pending_request_by_idempotency_key(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    state = {
+        "session_id": "session-dup",
+        "trace_id": "trace-dup",
+        "incident": {
+            "incident_id": "inc-dup",
+            "service_name": "checkout-service",
+            "environment": "prod",
+        },
+    }
+    decision = {
+        "action": "重启 checkout-service",
+        "risk_level": "high",
+        "policy": "approval_required",
+        "step_id": "s-risk",
+        "tool_name": "restart_service",
+        "reason": "生产写操作需要审批",
+    }
+
+    first = create_approval_request_from_risk_decision(
+        state,
+        decision,
+        approval_repository=service,
+    )
+    second = create_approval_request_from_risk_decision(
+        state,
+        decision,
+        approval_repository=service,
+    )
+
+    assert second.approval_id == first.approval_id
+    assert len(service.list_pending("inc-dup")) == 1
+    assert first.metadata["idempotency_key"]
+
+    service.decide_request(first.approval_id, decision="reject", decided_by="sre")
+    third = create_approval_request_from_risk_decision(
+        state,
+        decision,
+        approval_repository=service,
+    )
+
+    assert third.approval_id != first.approval_id
+    assert len(service.list_requests(incident_id="inc-dup")) == 2
 
 
 def test_approval_service_rejects_and_blocks_second_decision(tmp_path) -> None:
@@ -133,3 +181,32 @@ def test_approval_service_syncs_report_lifecycle_on_decision(monkeypatch, tmp_pa
     assert updated.approval_decision["decision_reason"] == "缺少回滚方案"
     assert "审批已拒绝" in updated.markdown
     assert "审批原因：缺少回滚方案" in updated.markdown
+
+
+def test_resume_approval_without_id_blocks_when_newer_pending_exists(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    aiops_api = importlib.import_module("app.api.aiops")
+    service = ApprovalService(tmp_path / "approvals.db")
+    old_request = service.create_request(
+        ApprovalRequest(incident_id="inc-resume", action="旧变更", risk_level="medium")
+    )
+    approved = service.decide_request(
+        old_request.approval_id,
+        decision="approve",
+        decided_by="sre",
+    )
+    pending = service.create_request(
+        ApprovalRequest(incident_id="inc-resume", action="新变更", risk_level="high")
+    )
+    monkeypatch.setattr(aiops_api, "get_approval_service", lambda: service)
+
+    with pytest.raises(HTTPException) as exc_info:
+        aiops_api._resolve_resume_approval("inc-resume", None)
+
+    assert exc_info.value.status_code == 409
+    assert "still pending" in exc_info.value.detail
+    explicit_resume = aiops_api._resolve_resume_approval("inc-resume", approved.approval_id)
+    assert explicit_resume.approval_id == approved.approval_id
+    assert service.get_request(pending.approval_id).status == "pending"

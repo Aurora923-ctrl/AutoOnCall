@@ -16,6 +16,33 @@ from app.api import aiops, alerts, approvals, chat, evaluations, file, health, i
 from app.config import config
 from app.core.milvus_client import milvus_manager
 
+EXTERNALLY_BOUND_HOSTS = {"0.0.0.0", "::", "[::]"}
+
+
+def production_exposure_warnings() -> list[str]:
+    """Return warnings for demo defaults that are risky on externally bound hosts."""
+
+    host = str(config.host).strip()
+    externally_bound = host in EXTERNALLY_BOUND_HOSTS
+    if not externally_bound:
+        return []
+
+    warnings: list[str] = []
+    if not config.api_auth_enabled:
+        warnings.append("API auth is disabled while binding to a non-local host")
+    if "*" in config.cors_origins:
+        warnings.append("CORS allows all origins while binding to a non-local host")
+    if config.aiops_mock_fallback_enabled:
+        warnings.append("AIOps mock fallback is enabled while binding to a non-local host")
+    return warnings
+
+
+def log_production_exposure_warnings() -> None:
+    """Log startup warnings for unsafe production-facing demo defaults."""
+
+    for warning in production_exposure_warnings():
+        logger.warning(f"⚠️ 生产暴露配置提示: {warning}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,6 +52,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"📝 环境: {'开发' if config.debug else '生产'}")
     logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
     logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
+
+    log_production_exposure_warnings()
 
     logger.info("🔌 Milvus 将在 RAG 检索或文档索引首次使用时按需连接")
 

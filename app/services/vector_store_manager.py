@@ -128,6 +128,32 @@ class VectorStoreManager:
             logger.warning(f"删除旧数据失败 (可能是首次索引): {e}")
             return 0
 
+    def delete_by_source_except_version(self, file_path: str, document_version: str) -> int:
+        """Delete older chunks for one source while preserving the newly indexed version."""
+        if not document_version:
+            return self.delete_by_source(file_path)
+        try:
+            _ = milvus_manager.connect()
+            collection = milvus_manager.get_collection()
+
+            expr = (
+                f'metadata["_source"] == {_quote_expr_value(file_path)} '
+                f'and metadata["_document_version"] != {_quote_expr_value(document_version)}'
+            )
+
+            result = collection.delete(expr)
+            deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
+
+            logger.info(
+                f"删除文件旧版本数据: {file_path}, version={document_version}, "
+                f"删除数量: {deleted_count}"
+            )
+            return deleted_count
+
+        except Exception as e:
+            logger.warning(f"删除旧版本数据失败，可能短期存在重复 chunk: {e}")
+            return 0
+
     def get_vector_store(self) -> Milvus:
         """
         获取 VectorStore 实例

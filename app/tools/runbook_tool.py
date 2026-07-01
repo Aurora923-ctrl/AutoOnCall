@@ -6,7 +6,7 @@ from typing import Any
 
 from app.services.rag_read_models import build_runbook_summary
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_int
 
 
 class SearchRunbookTool(AIOpsTool):
@@ -32,9 +32,14 @@ class SearchRunbookTool(AIOpsTool):
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         query = input_args.get("query") or input_args.get("symptom") or ""
         top_k = input_args.get("top_k")
+        bounded_top_k = (
+            clamp_int(top_k, default=5, minimum=1, maximum=10) if top_k is not None else None
+        )
+        if bounded_top_k is not None:
+            input_args["top_k"] = bounded_top_k
         payload = retrieve_structured_knowledge(
             str(query),
-            top_k=int(top_k) if isinstance(top_k, int) and top_k > 0 else None,
+            top_k=bounded_top_k,
         )
         payload["summary"] = build_runbook_summary(payload)
         return payload

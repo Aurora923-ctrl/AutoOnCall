@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     app_name: str = "AutoOnCall"
     app_version: str = "1.2.1"
     debug: bool = False
-    host: str = "0.0.0.0"
+    host: str = LOCAL_DEMO_HOST
     port: int = 9900
     api_base_url: str = LOCAL_DEMO_API_URL
 
@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     rag_hybrid_search_enabled: bool = True
     rag_hybrid_candidate_multiplier: int = 4
     rag_rerank_enabled: bool = True
+    rag_min_lexical_trust_score: float = 0.20
 
     chunk_max_size: int = 800
     chunk_overlap: int = 100
@@ -105,11 +106,13 @@ class Settings(BaseSettings):
     # 时使用 MYSQL_DSN / MYSQL_HOST 等配置。
     aiops_storage_backend: str = "sqlite"
     aiops_sqlite_path: str = "data/aiops_state.db"
-    aiops_mock_fallback_enabled: bool = True
+    aiops_mock_fallback_enabled: bool = False
     service_topology_path: str = "config/service_topology.yaml"
 
     # ---- 生产部署与日志配置 ---------------------------------------------------
-    cors_allowed_origins: str = "*"
+    cors_allowed_origins: str = (
+        f"http://{LOCAL_DEMO_HOST}:{LOCAL_DEMO_PORT},http://localhost:{LOCAL_DEMO_PORT}"
+    )
     log_retention_days: int = 14
 
     # ---- 内部 API Token / RBAC 配置 ------------------------------------------

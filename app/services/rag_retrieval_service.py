@@ -35,6 +35,7 @@ def retrieve_structured_knowledge(
     safe_query = str(query or "").strip()
     k = top_k or config.rag_top_k
     threshold = config.rag_max_l2_distance if max_distance is None else max_distance
+    lexical_threshold = config.rag_min_lexical_trust_score
     hybrid_enabled = (
         config.rag_hybrid_search_enabled if hybrid_search_enabled is None else hybrid_search_enabled
     )
@@ -57,6 +58,7 @@ def retrieve_structured_knowledge(
             document_to_retrieval_chunk(document, score=score, rank=rank)
             for rank, (document, score) in enumerate(raw_results, 1)
         ]
+        candidates = [chunk for chunk in candidates if not is_stale_retrieval_source(chunk)]
         if metadata_filter:
             candidates = [
                 chunk
@@ -73,18 +75,32 @@ def retrieve_structured_knowledge(
         trusted = []
         rejected = []
         for chunk in candidates:
-            if is_trusted_l2_distance(chunk.get("score"), threshold):
+            if is_trusted_retrieval_chunk(
+                chunk,
+                max_distance=threshold,
+                min_lexical_score=lexical_threshold,
+            ):
                 trusted.append(
                     chunk
                     | {
-                        "retrieval_reason": build_retrieval_reason(chunk, threshold, trusted=True),
+                        "retrieval_reason": build_retrieval_reason(
+                            chunk,
+                            threshold,
+                            min_lexical_score=lexical_threshold,
+                            trusted=True,
+                        ),
                     }
                 )
             else:
                 rejected.append(
                     chunk
                     | {
-                        "retrieval_reason": build_retrieval_reason(chunk, threshold, trusted=False),
+                        "retrieval_reason": build_retrieval_reason(
+                            chunk,
+                            threshold,
+                            min_lexical_score=lexical_threshold,
+                            trusted=False,
+                        ),
                     }
                 )
 
@@ -96,6 +112,7 @@ def retrieve_structured_knowledge(
                 "top_k": k,
                 "candidate_k": candidate_k,
                 "max_l2_distance": threshold,
+                "min_lexical_trust_score": lexical_threshold,
                 "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
                 "vector_candidate_count": len(vector_results),
                 "lexical_candidate_count": len(lexical_results),
@@ -116,6 +133,7 @@ def retrieve_structured_knowledge(
             "top_k": k,
             "candidate_k": candidate_k,
             "max_l2_distance": threshold,
+            "min_lexical_trust_score": lexical_threshold,
             "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
             "vector_candidate_count": len(vector_results),
             "lexical_candidate_count": len(lexical_results),
@@ -137,6 +155,7 @@ def retrieve_structured_knowledge(
             "top_k": k,
             "candidate_k": candidate_k,
             "max_l2_distance": threshold,
+            "min_lexical_trust_score": lexical_threshold,
             "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
             "vector_candidate_count": 0,
             "lexical_candidate_count": 0,
@@ -188,6 +207,18 @@ def document_to_retrieval_chunk(
     }
 
 
+def is_stale_retrieval_source(chunk: dict[str, Any]) -> bool:
+    """Return True when an indexed source was superseded but failed to re-index."""
+    source_path = str(chunk.get("source_path") or "")
+    if not source_path:
+        return False
+    try:
+        return lexical_index_service.is_source_stale(source_path)
+    except Exception as exc:
+        logger.warning(f"检查陈旧 RAG source 失败: source={source_path}, error={exc}")
+        return False
+
+
 def merge_raw_retrieval_results(
     vector_results: list[tuple[Document, float | None]],
     lexical_results: list[tuple[Document, float]],
@@ -209,7 +240,6 @@ def merge_raw_retrieval_results(
     base_position = len(vector_results)
     for offset, (document, lexical_score) in enumerate(lexical_results, 1):
         key = _document_identity(document)
-        lexical_distance = lexical_score_to_distance(lexical_score)
         if key in merged:
             existing_document, existing_score, position = merged[key]
             metadata = dict(existing_document.metadata or {})
@@ -228,7 +258,7 @@ def merge_raw_retrieval_results(
         metadata["_retrieval_source"] = "lexical"
         merged[key] = (
             Document(page_content=document.page_content, metadata=metadata),
-            lexical_distance,
+            None,
             base_position + offset,
         )
 
@@ -256,24 +286,63 @@ def build_heading_path(metadata: dict[str, Any]) -> str:
 def is_trusted_l2_distance(score: Any, max_distance: float) -> bool:
     """Return True when a result score is within the accepted L2 distance threshold."""
     if score is None:
-        return True
+        return False
     try:
         return float(score) <= max_distance
     except (TypeError, ValueError):
+        return False
+
+
+def is_trusted_retrieval_chunk(
+    chunk: dict[str, Any],
+    *,
+    max_distance: float,
+    min_lexical_score: float,
+) -> bool:
+    """Return True when either vector distance or lexical score crosses its own trust gate."""
+    metadata = dict(chunk.get("metadata") or {})
+    retrieval_source = str(metadata.get("_retrieval_source") or "")
+    has_vector_signal = (
+        retrieval_source in {"vector", "hybrid"} or metadata.get("_vector_score") is not None
+    )
+    if has_vector_signal and is_trusted_l2_distance(chunk.get("score"), max_distance):
         return True
+    if retrieval_source in {"lexical", "hybrid"}:
+        return _trusted_lexical_score(chunk, min_lexical_score)
+    return False
 
 
-def build_retrieval_reason(chunk: dict[str, Any], max_distance: float, *, trusted: bool) -> str:
+def build_retrieval_reason(
+    chunk: dict[str, Any],
+    max_distance: float,
+    *,
+    min_lexical_score: float,
+    trusted: bool,
+) -> str:
     """Explain why a retrieval chunk was accepted or rejected."""
+    metadata = dict(chunk.get("metadata") or {})
+    retrieval_source = str(metadata.get("_retrieval_source") or "")
     score = chunk.get("score")
-    if score is None:
-        return "检索后端未返回距离分数，按兼容策略保留" if trusted else "检索后端未返回距离分数"
-    try:
-        score_value = float(score)
-    except (TypeError, ValueError):
-        return f"距离分数不可解析: {score}"
-    relation = "小于等于" if trusted else "大于"
-    return f"L2 distance {score_value:.4f} {relation} 阈值 {max_distance:.4f}"
+    if retrieval_source in {"vector", "hybrid"} or metadata.get("_vector_score") is not None:
+        if score is None:
+            vector_reason = "检索后端未返回距离分数"
+        else:
+            try:
+                score_value = float(score)
+                relation = "小于等于" if score_value <= max_distance else "大于"
+                vector_reason = f"L2 distance {score_value:.4f} {relation} 阈值 {max_distance:.4f}"
+            except (TypeError, ValueError):
+                vector_reason = f"距离分数不可解析: {score}"
+        if trusted and is_trusted_l2_distance(score, max_distance):
+            return vector_reason
+        if retrieval_source != "hybrid":
+            return vector_reason
+
+    lexical_score = _coerce_score(chunk.get("lexical_score"))
+    if lexical_score is None:
+        return "词法召回缺少可信分数" if not trusted else "词法召回通过可信阈值"
+    relation = "大于等于" if lexical_score >= min_lexical_score else "小于"
+    return f"lexical score {lexical_score:.4f} {relation} " f"阈值 {min_lexical_score:.4f}"
 
 
 def format_retrieval_results(results: list[dict[str, Any]]) -> str:
@@ -327,8 +396,13 @@ def rerank_retrieval_candidates(
     query_terms = extract_retrieval_terms(query)
     deduped = deduplicate_candidates(candidates)
     for index, chunk in enumerate(deduped, 1):
+        metadata = dict(chunk.get("metadata") or {})
+        has_vector_signal = (
+            str(metadata.get("_retrieval_source") or "") in {"vector", "hybrid"}
+            or metadata.get("_vector_score") is not None
+        )
         lexical_score = compute_lexical_score(query_terms, chunk) if hybrid_search_enabled else 0.0
-        vector_score = normalize_vector_distance(chunk.get("score"))
+        vector_score = normalize_vector_distance(chunk.get("score")) if has_vector_signal else 0.0
         base_rank_score = 1 / max(index, 1)
         rerank_score = (
             (0.55 * vector_score) + (0.35 * lexical_score) + (0.10 * base_rank_score)
@@ -378,7 +452,7 @@ def compute_lexical_score(query_terms: set[str], chunk: dict[str, Any]) -> float
     indexed_score = metadata.get("_lexical_score")
     if indexed_score is not None:
         try:
-            return min(float(indexed_score) / 6, 1.0)
+            return min(float(indexed_score) / 5, 1.0)
         except (TypeError, ValueError):
             pass
     if not query_terms:
@@ -395,6 +469,13 @@ def compute_lexical_score(query_terms: set[str], chunk: dict[str, Any]) -> float
     if not overlap:
         return 0.0
     return min(1.0, len(overlap) / math.sqrt(len(query_terms) * max(len(chunk_terms), 1)) * 4)
+
+
+def _trusted_lexical_score(chunk: dict[str, Any], min_lexical_score: float) -> bool:
+    lexical_score = _coerce_score(chunk.get("lexical_score"))
+    if lexical_score is None:
+        return False
+    return lexical_score >= min_lexical_score
 
 
 def extract_retrieval_terms(text: str) -> set[str]:

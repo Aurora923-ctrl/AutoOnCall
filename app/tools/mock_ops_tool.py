@@ -10,7 +10,7 @@ from app.integrations.kubernetes import KubernetesStatusAdapter
 from app.integrations.mysql import MySQLStatusAdapter
 from app.integrations.ticketing import TicketingAdapter
 from app.services.service_topology import get_primary_dependency_instance
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_duration, clamp_int
 
 
 class QueryK8sStatusTool(AIOpsTool):
@@ -29,7 +29,12 @@ class QueryK8sStatusTool(AIOpsTool):
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
-        time_range = input_args.get("time_range") or "10m"
+        time_range = clamp_duration(
+            input_args.get("time_range"),
+            default="10m",
+            maximum_seconds=3600,
+        )
+        input_args["time_range"] = time_range
         if self._k8s_adapter.configured:
             try:
                 return await self._k8s_adapter.query_service_status(service_name, time_range)
@@ -216,7 +221,8 @@ class SearchHistoryTicketTool(AIOpsTool):
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
         query = input_args.get("query") or input_args.get("symptom") or ""
-        limit = int(input_args.get("limit") or 5)
+        limit = clamp_int(input_args.get("limit"), default=5, minimum=1, maximum=20)
+        input_args["limit"] = limit
         if self._ticketing_adapter.configured:
             try:
                 return await self._ticketing_adapter.search_history(service_name, query, limit)

@@ -9,7 +9,7 @@ cases:
     environment: prod
     approval_status: approved
     mode: dry_run_only
-    expected_status: closed
+    expected_status: dry_run_completed
     expected_precheck: passed
     expected_dry_run: passed
 

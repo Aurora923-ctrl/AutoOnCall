@@ -63,7 +63,7 @@ def test_change_execution_read_model_exposes_lifecycle_and_stages() -> None:
         approval_id="apr-1",
         incident_id="inc-1",
         trace_id="trace-1",
-        status="closed",
+        status="dry_run_completed",
         pre_check=PreCheckResult(
             change_plan_id="chg-1",
             status="passed",
@@ -80,7 +80,7 @@ def test_change_execution_read_model_exposes_lifecycle_and_stages() -> None:
 
     payload = build_change_execution_read_model(execution)
 
-    assert payload["lifecycle_status"] == "resolved"
+    assert payload["lifecycle_status"] == "change_validated"
     assert payload["status_metadata"]["tone"] == "success"
     assert [stage["key"] for stage in payload["stages"]] == [
         "pre_check",
@@ -89,4 +89,4 @@ def test_change_execution_read_model_exposes_lifecycle_and_stages() -> None:
         "observe",
     ]
     assert payload["stages"][2]["status"] == "skipped"
-    assert "安全变更流程已关闭" in payload["next_steps"][0]
+    assert "dry-run 已完成" in payload["next_steps"][0]

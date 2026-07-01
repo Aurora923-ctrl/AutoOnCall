@@ -8,7 +8,7 @@ from app.config import config
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.log_gateway import HTTPLogGatewayAdapter
 from app.integrations.loki import LokiLogAdapter
-from app.tools.base import AIOpsTool, invoke_langchain_tool, tool_map
+from app.tools.base import AIOpsTool, clamp_duration, clamp_int, invoke_langchain_tool, tool_map
 
 
 class QueryLogsTool(AIOpsTool):
@@ -49,8 +49,13 @@ class QueryLogsTool(AIOpsTool):
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
         query = input_args.get("query") or "ERROR OR timeout"
-        limit = int(input_args.get("limit") or 100)
-        time_range = input_args.get("time_range", "10m")
+        limit = clamp_int(input_args.get("limit"), default=100, minimum=1, maximum=200)
+        time_range = clamp_duration(
+            input_args.get("time_range"),
+            default="10m",
+            maximum_seconds=3600,
+        )
+        input_args.update({"limit": limit, "time_range": time_range})
 
         loki_result = await self._call_loki(service_name, query, time_range, limit)
         if loki_result and str(loki_result.get("status") or "").lower() != "failed":

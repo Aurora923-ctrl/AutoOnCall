@@ -5,6 +5,7 @@
 """
 
 from collections.abc import AsyncGenerator, Sequence
+from datetime import datetime
 from typing import Annotated, Any, cast
 
 from langchain.agents import create_agent
@@ -97,6 +98,7 @@ class RagAgentService:
         self.mcp_tools: list = []
 
         self.checkpointer = MemorySaver()
+        self._grounded_history: dict[str, list[dict[str, str]]] = {}
 
         self.agent: Any | None = None
         self._agent_initialized = False
@@ -238,6 +240,7 @@ class RagAgentService:
 
         if retrieval_payload.get("status") != "success":
             answer = build_no_answer_message(retrieval_payload)
+            self._append_grounded_history(session_id, question, answer)
             return {
                 "success": True,
                 "answer": answer,
@@ -250,9 +253,10 @@ class RagAgentService:
             }
 
         grounded_question = build_grounded_question(question, retrieval_payload)
-        answer = await self.query(grounded_question, session_id, history_question=question)
+        answer = await self.query_grounded(grounded_question, session_id, history_question=question)
         citations = build_citations(retrieval_payload)
         answer = ensure_citation_block(answer, citations)
+        self._append_grounded_history(session_id, question, answer)
 
         return {
             "success": True,
@@ -262,6 +266,27 @@ class RagAgentService:
             "no_answer": False,
             "answer_policy": retrieval_payload.get("answer_policy", "answer_with_citations"),
         }
+
+    async def query_grounded(
+        self,
+        grounded_question: str,
+        session_id: str,
+        *,
+        history_question: str | None = None,
+    ) -> str:
+        """Generate a grounded answer without exposing any Agent tools to the model."""
+        model = self._ensure_model()
+        logger.info(f"[会话 {session_id}] RAG grounded 生成（禁用工具）")
+        messages = [
+            SystemMessage(content=build_grounded_system_prompt()),
+            HumanMessage(content=grounded_question),
+        ]
+        result = await model.ainvoke(messages)
+        content = result.content if hasattr(result, "content") else result
+        answer = message_content_to_text(content)
+        if history_question:
+            logger.debug(f"[会话 {session_id}] grounded 问答原始问题: {history_question}")
+        return answer
 
     async def query_stream(
         self,
@@ -363,6 +388,7 @@ class RagAgentService:
 
         if retrieval_payload.get("status") != "success":
             answer = build_no_answer_message(retrieval_payload)
+            self._append_grounded_history(session_id, question, answer)
             yield {
                 "type": "content",
                 "data": answer,
@@ -384,7 +410,7 @@ class RagAgentService:
 
         grounded_question = build_grounded_question(question, retrieval_payload)
         full_answer = ""
-        async for chunk in self.query_stream(
+        async for chunk in self.query_grounded_stream(
             grounded_question,
             session_id,
             history_question=question,
@@ -406,6 +432,7 @@ class RagAgentService:
                 "data": appended_content,
                 "node": "citation_guard",
             }
+        self._append_grounded_history(session_id, question, final_answer)
 
         yield {
             "type": "complete",
@@ -417,6 +444,40 @@ class RagAgentService:
                 "answer_policy": retrieval_payload.get("answer_policy", "answer_with_citations"),
             },
         }
+
+    async def query_grounded_stream(
+        self,
+        grounded_question: str,
+        session_id: str,
+        *,
+        history_question: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream a grounded answer from the base model without Agent tools."""
+        model = self._ensure_model()
+        logger.info(f"[会话 {session_id}] RAG grounded 流式生成（禁用工具）")
+        messages = [
+            SystemMessage(content=build_grounded_system_prompt()),
+            HumanMessage(content=grounded_question),
+        ]
+        if not hasattr(model, "astream"):
+            answer = await self.query_grounded(
+                grounded_question,
+                session_id,
+                history_question=history_question,
+            )
+            if answer:
+                yield {"type": "content", "data": answer, "node": "grounded_model"}
+            yield {"type": "complete"}
+            return
+
+        async for chunk in model.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else chunk
+            text = message_content_to_text(content)
+            if text:
+                yield {"type": "content", "data": text, "node": "grounded_model"}
+        if history_question:
+            logger.debug(f"[会话 {session_id}] grounded 流式问答原始问题: {history_question}")
+        yield {"type": "complete"}
 
     def get_session_history(self, session_id: str) -> list:
         """
@@ -431,8 +492,9 @@ class RagAgentService:
         try:
             checkpoint_data = self._get_checkpoint_data(session_id)
             if not checkpoint_data:
-                logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
-                return []
+                grounded_history = list(self._grounded_history.get(session_id, []))
+                logger.info(f"获取会话历史: {session_id}, 消息数量: {len(grounded_history)}")
+                return grounded_history
 
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
 
@@ -455,6 +517,8 @@ class RagAgentService:
                         {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
                     )
 
+            history.extend(self._grounded_history.get(session_id, []))
+            history.sort(key=lambda item: item.get("timestamp", ""))
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
 
@@ -474,6 +538,7 @@ class RagAgentService:
         """
         try:
             self.checkpointer.delete_thread(session_id)
+            self._grounded_history.pop(session_id, None)
 
             logger.info(f"已清除会话历史: {session_id}")
             return True
@@ -511,6 +576,16 @@ class RagAgentService:
             checkpoint_candidate = cast(Any, checkpoint_tuple)
             checkpoint_data = checkpoint_candidate[0] if checkpoint_candidate else {}
         return cast(dict[str, Any], checkpoint_data) if isinstance(checkpoint_data, dict) else {}
+
+    def _append_grounded_history(self, session_id: str, question: str, answer: str) -> None:
+        """Persist tool-free grounded RAG turns for the session-history API."""
+        timestamp = datetime.now().isoformat()
+        self._grounded_history.setdefault(session_id, []).extend(
+            [
+                {"role": "user", "content": question, "timestamp": timestamp},
+                {"role": "assistant", "content": answer, "timestamp": timestamp},
+            ]
+        )
 
     def _replace_latest_human_message(
         self,
@@ -573,6 +648,14 @@ def build_grounded_question(question: str, retrieval_payload: dict[str, Any]) ->
         f"用户问题: {question}\n\n"
         "回答要求: 将答案和依据说清楚，末尾必须列出引用来源，格式为 "
         "source_file + chunk_id。"
+    )
+
+
+def build_grounded_system_prompt() -> str:
+    """Return the strict system prompt used for tool-free grounded generation."""
+    return (
+        "你是知识库问答助手。你不能调用工具，也不能补充知识库之外的事实。"
+        "如果检索片段不足以回答，请明确说明无法从当前知识库确认。"
     )
 
 

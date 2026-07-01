@@ -15,6 +15,7 @@ from app.config import config
 
 READ_SCOPE = "read"
 DIAGNOSE_SCOPE = "diagnose"
+CHAT_WRITE_SCOPE = "chat_write"
 KNOWLEDGE_WRITE_SCOPE = "knowledge_write"
 APPROVE_SCOPE = "approve"
 CHANGE_SCOPE = "change"
@@ -24,6 +25,7 @@ ADMIN_SCOPE = "admin"
 ALL_SCOPES = {
     READ_SCOPE,
     DIAGNOSE_SCOPE,
+    CHAT_WRITE_SCOPE,
     KNOWLEDGE_WRITE_SCOPE,
     APPROVE_SCOPE,
     CHANGE_SCOPE,
@@ -33,7 +35,7 @@ ALL_SCOPES = {
 ROLE_SCOPES = {
     "viewer": {READ_SCOPE},
     "reader": {READ_SCOPE},
-    "operator": {READ_SCOPE, DIAGNOSE_SCOPE, KNOWLEDGE_WRITE_SCOPE, EVAL_SCOPE},
+    "operator": {READ_SCOPE, DIAGNOSE_SCOPE, CHAT_WRITE_SCOPE, KNOWLEDGE_WRITE_SCOPE, EVAL_SCOPE},
     "approver": {READ_SCOPE, APPROVE_SCOPE, CHANGE_SCOPE},
     "admin": {ADMIN_SCOPE, *ALL_SCOPES},
 }
@@ -51,6 +53,13 @@ class AuthPrincipal:
 
     def has_scope(self, scope: str) -> bool:
         return ADMIN_SCOPE in self.scopes or scope in self.scopes
+
+
+def audit_actor(principal: AuthPrincipal, fallback: str = "operator") -> str:
+    """Return the authenticated actor name for audit fields when auth is enabled."""
+    if principal.enabled and principal.token_name:
+        return principal.token_name
+    return fallback or principal.token_name
 
 
 def require_scope(scope: str):

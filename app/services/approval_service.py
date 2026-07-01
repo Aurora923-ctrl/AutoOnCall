@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Literal
 
+from loguru import logger
+
 from app.models.approval import ApprovalRequest
 from app.models.incident import utc_now
 from app.services.aiops_store import create_aiops_store
@@ -109,7 +111,9 @@ class ApprovalService:
                 "metadata": metadata,
             }
         )
-        self._store.save_approval_request(updated)
+        if not self._store.save_approval_decision_if_pending(updated):
+            latest = self.get_request(approval_id)
+            raise ApprovalStateError(f"Approval {approval_id} is already {latest.status}")
         self._store.save_incident_state(
             build_incident_state_from_approval(
                 approval=updated,
@@ -196,9 +200,15 @@ class ApprovalService:
                 reason=request.decision_reason,
                 approval_request=request.model_dump(mode="json"),
             )
-        except Exception:
+        except Exception as exc:
             # Approval persistence is the source of truth; report synchronization must not
             # make an operator decision fail.
+            logger.warning(
+                "Approval report synchronization failed: incident_id={}, approval_id={}, error={}",
+                request.incident_id,
+                request.approval_id,
+                exc,
+            )
             return
 
 

@@ -9,6 +9,8 @@ from app.models.incident_state import IncidentState
 CHANGE_LIFECYCLE_STATUSES = {
     "change_prechecking",
     "change_dry_run",
+    "change_validated",
+    "sandbox_validated",
     "waiting_manual_execution",
     "change_executing_sandbox",
     "observing",
@@ -37,6 +39,7 @@ AI_OBJECT_STATUSES = {
     "dry_run_failed",
     "manual_result_required",
     "manual_result_recorded",
+    "dry_run_completed",
     "closed",
 }
 
@@ -46,7 +49,14 @@ AIOPS_RUN_FILTER_STATUSES = [
     "waiting_approval",
     "approval_approved",
     "approval_rejected",
+    "approval_cancelled",
     "approval_resumed",
+    "change_validated",
+    "waiting_manual_execution",
+    "resolved",
+    "rollback_recommended",
+    "precheck_failed",
+    "dry_run_failed",
     "failed",
     "blocked",
     "escalated",
@@ -54,6 +64,7 @@ AIOPS_RUN_FILTER_STATUSES = [
 
 ALERT_FIRING_STATUSES = {"firing", "active", "triggered"}
 ALERT_RESOLVED_STATUSES = {"resolved", "inactive", "ok", "closed"}
+PRODUCTION_ENVIRONMENT_NAMES = {"prod", "production", "prd", "线上", "生产"}
 ALERT_MUTABLE_INCIDENT_STATUSES = {
     "created",
     "investigating",
@@ -158,6 +169,12 @@ STATUS_METADATA: dict[str, dict[str, Any]] = {
         "tone": "warning",
         "phase": "change",
         "terminal": False,
+    },
+    "change_validated": {
+        "label": "变更已校验",
+        "tone": "success",
+        "phase": "change",
+        "terminal": True,
     },
     "waiting_manual_execution": {
         "label": "等待人工执行",
@@ -331,6 +348,10 @@ def status_from_change_execution(status: str) -> str:
         return "change_prechecking"
     if status == "dry_run_running":
         return "change_dry_run"
+    if status == "dry_run_completed":
+        return "change_validated"
+    if status == "sandbox_validated":
+        return "change_validated"
     if status == "waiting_manual_execution":
         return "waiting_manual_execution"
     if status == "sandbox_executing":
@@ -350,7 +371,18 @@ def manual_action_required_from_change_execution(status: str, *, fallback: bool)
     """Return whether a change execution still needs human action."""
     if not status:
         return fallback
-    return status not in {"closed", "dry_run_failed", "precheck_failed"}
+    return status not in {
+        "closed",
+        "dry_run_completed",
+        "sandbox_validated",
+        "dry_run_failed",
+        "precheck_failed",
+    }
+
+
+def is_production_environment(value: Any) -> bool:
+    """Return True for canonical production environment names used across AIOps."""
+    return str(value or "").strip().lower() in PRODUCTION_ENVIRONMENT_NAMES
 
 
 def normalize_alert_status(value: Any) -> str:

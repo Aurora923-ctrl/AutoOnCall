@@ -36,10 +36,76 @@ def test_trace_service_records_lists_and_reloads_events(tmp_path) -> None:
     assert node_event.event_id.startswith("traceevt-")
     assert tool_event.event_type == "tool_call"
     assert len(service.list_events(incident_id="inc-1")) == 2
-    assert service.list_events(incident_id="inc-1", event_type="tool_call")[0].tool_name == "query_metrics"
+    assert (
+        service.list_events(incident_id="inc-1", event_type="tool_call")[0].tool_name
+        == "query_metrics"
+    )
 
     reloaded = TraceService(path)
     assert len(reloaded.list_events(trace_id="trace-1")) == 2
+
+
+def test_trace_service_redacts_sensitive_tool_args(tmp_path) -> None:
+    path = tmp_path / "traces.db"
+    service = TraceService(path)
+
+    event = service.record_tool_call(
+        ToolCallRecord(
+            trace_id="trace-redact",
+            incident_id="inc-redact",
+            step_id="s1",
+            tool_name="query_logs",
+            input_args={
+                "service_name": "order-service",
+                "authorization": "Bearer secret",
+                "nested": {"password": "redis-password"},
+            },
+            status="success",
+        )
+    )
+
+    assert event.tool_args["service_name"] == "order-service"
+    assert event.tool_args["authorization"] == "[REDACTED]"
+    assert event.tool_args["nested"]["password"] == "[REDACTED]"
+
+    reloaded = TraceService(path).list_events(trace_id="trace-redact")[0]
+    assert reloaded.tool_args["authorization"] == "[REDACTED]"
+    assert reloaded.tool_args["nested"]["password"] == "[REDACTED]"
+
+
+def test_trace_service_redacts_sensitive_tool_output(tmp_path) -> None:
+    path = tmp_path / "traces.db"
+    service = TraceService(path)
+
+    event = service.record_tool_call(
+        ToolCallRecord(
+            trace_id="trace-output-redact",
+            incident_id="inc-output-redact",
+            step_id="s1",
+            tool_name="query_logs",
+            input_args={"service_name": "order-service"},
+            output={
+                "summary": "token=summary-secret",
+                "lines": [
+                    "Authorization: Bearer log-secret",
+                    {"message": "cookie=session-secret", "api_key": "raw-key"},
+                ],
+            },
+            output_summary="Bearer summary-secret",
+            error_message="password=error-secret",
+            status="success",
+        )
+    )
+
+    assert event.tool_result["summary"] == "token=[REDACTED]"
+    assert event.tool_result["lines"][0] == "Authorization: Bearer [REDACTED]"
+    assert event.tool_result["lines"][1]["message"] == "cookie=[REDACTED]"
+    assert event.tool_result["lines"][1]["api_key"] == "[REDACTED]"
+    assert event.output_summary == "Bearer [REDACTED]"
+
+    reloaded = TraceService(path).list_events(trace_id="trace-output-redact")[0]
+    assert reloaded.tool_result["lines"][1]["api_key"] == "[REDACTED]"
+    assert "summary-secret" not in reloaded.output_summary
 
 
 @pytest.mark.asyncio

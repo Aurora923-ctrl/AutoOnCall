@@ -41,6 +41,9 @@ def test_static_workbench_renders_in_browser(tmp_path) -> None:
             page = browser.new_page(viewport={"width": 1366, "height": 900})
             page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
             page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+            page.locator("#apiTokenInput").fill("demo-token")
+            page.locator("#apiTokenSaveBtn").click()
+            assert page.locator("#authStatusBadge").inner_text() == "已设置"
             page.locator("#aiOpsPresetSelect").wait_for(state="visible", timeout=5000)
             page.locator("#aiOpsPresetSelect").select_option("redis_maxclients")
             assert page.locator("#aiOpsServiceName").input_value() == "order-service"

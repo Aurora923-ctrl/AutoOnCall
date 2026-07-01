@@ -3,14 +3,14 @@
 提供基于 RAG Agent 的普通对话和流式对话接口
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.sse import sse_message
-from app.core.auth import READ_SCOPE, require_scope
-from app.models.request import ChatRequest, ClearRequest
+from app.core.auth import CHAT_WRITE_SCOPE, READ_SCOPE, require_scope
+from app.models.request import SESSION_ID_MAX_LENGTH, ChatRequest, ClearRequest
 from app.models.response import ApiResponse, SessionInfoResponse
 from app.services.rag_agent_service import rag_agent_service
 
@@ -138,7 +138,11 @@ async def chat_stream(request: ChatRequest):
     return EventSourceResponse(event_generator())
 
 
-@router.post("/chat/clear", response_model=ApiResponse, dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.post(
+    "/chat/clear",
+    response_model=ApiResponse,
+    dependencies=[Depends(require_scope(CHAT_WRITE_SCOPE))],
+)
 async def clear_session(request: ClearRequest):
     """清空会话历史
 
@@ -168,7 +172,9 @@ async def clear_session(request: ClearRequest):
     response_model=SessionInfoResponse,
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_session_info(session_id: str) -> SessionInfoResponse:
+async def get_session_info(
+    session_id: str = Path(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH),
+) -> SessionInfoResponse:
     """查询会话历史
 
     Args:

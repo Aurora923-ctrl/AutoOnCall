@@ -210,6 +210,37 @@ class AIOpsMySQLStore:
                     ),
                 )
 
+    def save_approval_decision_if_pending(self, request: ApprovalRequest) -> bool:
+        """Persist an approval decision only while the request is still pending."""
+        payload = _dump_model(request)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE approval_requests
+                    SET
+                        incident_id = %s,
+                        status = %s,
+                        risk_level = %s,
+                        action = %s,
+                        created_at = %s,
+                        decided_at = %s,
+                        payload = %s
+                    WHERE approval_id = %s AND status = 'pending'
+                    """,
+                    (
+                        request.incident_id,
+                        request.status,
+                        request.risk_level,
+                        request.action,
+                        request.created_at.isoformat(),
+                        request.decided_at.isoformat() if request.decided_at else None,
+                        payload,
+                        request.approval_id,
+                    ),
+                )
+                return cursor.rowcount == 1
+
     def get_approval_request(self, approval_id: str) -> ApprovalRequest | None:
         """Return one approval request by id."""
         with self._connect() as connection:
@@ -284,6 +315,59 @@ class AIOpsMySQLStore:
                         payload,
                     ),
                 )
+
+    def create_change_execution_once(
+        self,
+        execution: ChangeExecution,
+    ) -> tuple[ChangeExecution, bool]:
+        """Create a safe change workflow once and return an existing row on conflict."""
+        payload = _dump_model(execution)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT IGNORE INTO change_executions (
+                        change_execution_id, change_plan_id, approval_id, incident_id,
+                        status, mode, created_at, updated_at, payload
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        execution.change_execution_id,
+                        execution.change_plan_id,
+                        execution.approval_id,
+                        execution.incident_id,
+                        execution.status,
+                        execution.mode,
+                        execution.created_at.isoformat(),
+                        execution.updated_at.isoformat(),
+                        payload,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    return execution, True
+
+                cursor.execute(
+                    "SELECT payload FROM change_executions WHERE change_execution_id = %s",
+                    (execution.change_execution_id,),
+                )
+                existing = cursor.fetchone()
+                if existing is None:
+                    cursor.execute(
+                        """
+                        SELECT payload FROM change_executions
+                        WHERE incident_id = %s AND change_plan_id = %s AND approval_id = %s
+                        ORDER BY created_at ASC, id ASC
+                        LIMIT 1
+                        """,
+                        (execution.incident_id, execution.change_plan_id, execution.approval_id),
+                    )
+                    existing = cursor.fetchone()
+                if existing is None:
+                    raise RuntimeError(
+                        "change execution creation conflicted but existing record was not found"
+                    )
+                return ChangeExecution.model_validate(_load_payload(existing)), False
 
     def get_change_execution(self, change_execution_id: str) -> ChangeExecution | None:
         """Return one safe change workflow by id."""

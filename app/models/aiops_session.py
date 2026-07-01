@@ -25,7 +25,7 @@ class AIOpsSessionSnapshot(BaseModel):
     past_steps: list[dict[str, Any]] = Field(default_factory=list)
     tool_call_records: list[dict[str, Any]] = Field(default_factory=list)
     gathered_evidence: list[dict[str, Any]] = Field(default_factory=list)
-    hypotheses: list[dict[str, Any]] = Field(default_factory=list)
+    hypotheses: list[str] = Field(default_factory=list)
     evidence_analysis: dict[str, Any] = Field(default_factory=dict)
     risk_assessment: dict[str, Any] = Field(default_factory=dict)
     pending_approval: dict[str, Any] | None = None
@@ -75,7 +75,7 @@ class AIOpsSessionSnapshot(BaseModel):
             past_steps=_normalize_past_steps(state.get("past_steps")),
             tool_call_records=_to_dict_list(state.get("tool_call_records")),
             gathered_evidence=_to_dict_list(state.get("gathered_evidence")),
-            hypotheses=_to_dict_list(state.get("hypotheses")),
+            hypotheses=_to_string_list(state.get("hypotheses")),
             evidence_analysis=_to_dict(state.get("evidence_analysis")),
             risk_assessment=risk_assessment,
             pending_approval=pending_approval,
@@ -141,6 +141,19 @@ def _to_dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(safe, list):
         return []
     return [item if isinstance(item, dict) else {"value": item} for item in safe]
+
+
+def _to_string_list(value: Any) -> list[str]:
+    safe = _json_safe(value)
+    if not isinstance(safe, list):
+        return []
+    result: list[str] = []
+    for item in safe:
+        if isinstance(item, dict) and set(item.keys()) == {"value"}:
+            item = item.get("value")
+        if item is not None:
+            result.append(str(item))
+    return result
 
 
 def _normalize_past_steps(value: Any) -> list[dict[str, Any]]:

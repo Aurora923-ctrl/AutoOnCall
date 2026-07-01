@@ -8,7 +8,7 @@ import pytest
 from app.agent.aiops import create_initial_aiops_state
 from app.config import config
 from app.models.plan import PlanStep
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, ToolExecutionResult
 from app.tools.registry import ToolRegistry
 
 executor_module = importlib.import_module("app.agent.aiops.executor")
@@ -23,6 +23,53 @@ async def fake_get_mcp_client_with_retry() -> EmptyMCPClient:
     return EmptyMCPClient()
 
 
+class FakeNamedTool:
+    def __init__(self, name: str):
+        self.name = name
+
+
+def test_executor_llm_fallback_filters_unsafe_mcp_tools() -> None:
+    safe_time_tool = FakeNamedTool("get_current_time")
+    safe_knowledge_tool = FakeNamedTool("retrieve_knowledge")
+    unsafe_mcp_tool = FakeNamedTool("delete_pod")
+
+    filtered = executor_module._safe_fallback_tools(
+        [safe_time_tool, safe_knowledge_tool, unsafe_mcp_tool]
+    )
+
+    assert [tool.name for tool in filtered] == ["get_current_time", "retrieve_knowledge"]
+
+
+def test_executor_persistence_redacts_sensitive_tool_input_args() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_logs",
+        status="success",
+        input_args={
+            "service_name": "order-service",
+            "api_token": "secret-token",
+            "nested": {"password": "redis-password", "query": "ERROR"},
+        },
+        output={
+            "summary": "ok token=summary-secret",
+            "logs": [
+                "Authorization: Bearer log-secret",
+                {"message": "cookie=session-secret", "password": "raw-password"},
+            ],
+        },
+    )
+
+    persisted = executor_module._result_for_persistence(result)
+
+    assert persisted.input_args["service_name"] == "order-service"
+    assert persisted.input_args["api_token"] == "[REDACTED]"
+    assert persisted.input_args["nested"]["password"] == "[REDACTED]"
+    assert persisted.input_args["nested"]["query"] == "ERROR"
+    assert persisted.output["summary"] == "ok token=[REDACTED]"
+    assert persisted.output["logs"][0] == "Authorization: Bearer [REDACTED]"
+    assert persisted.output["logs"][1]["message"] == "cookie=[REDACTED]"
+    assert persisted.output["logs"][1]["password"] == "[REDACTED]"
+
+
 def state_with_step(step: PlanStep) -> dict[str, Any]:
     state = create_initial_aiops_state(
         "diagnose order-service Redis timeout",
@@ -35,6 +82,7 @@ def state_with_step(step: PlanStep) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_executor_registry_step_creates_evidence_and_tool_call_record(monkeypatch) -> None:
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(config, "redis_url", "")
     monkeypatch.setattr(config, "redis_host", "")
     monkeypatch.setattr(config, "redis_instances", "")
@@ -67,7 +115,7 @@ async def test_executor_registry_step_creates_evidence_and_tool_call_record(monk
     assert evidence["data_source"] == "mock"
     assert evidence["stance"] == "supporting"
     assert "Redis" in evidence["confidence_reason"]
-    assert 0.65 <= evidence["confidence"] < 0.82
+    assert 0.45 <= evidence["confidence"] <= 0.55
     assert "connected_clients" in evidence["summary"]
     assert "来源=mock" in evidence["fact"]
     assert "支持当前根因假设" in evidence["inference"]
@@ -290,6 +338,4 @@ async def test_executor_unregistered_tool_fallback_is_failed_evidence(monkeypatc
     assert record["status"] == "failed"
     assert record["error_message"]
     assert record["output"]["structured_tool_registered"] is False
-    assert record["output"]["fallback_reason"] == (
-        "structured_tool_not_registered"
-    )
+    assert record["output"]["fallback_reason"] == ("structured_tool_not_registered")

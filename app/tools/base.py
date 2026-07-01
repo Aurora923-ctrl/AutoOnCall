@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import time
 from typing import Any, Literal
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel, Field
 
 ToolStatus = Literal["success", "failed"]
 RiskLevel = Literal["low", "medium", "high"]
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhd])\s*$", re.IGNORECASE)
+_DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 class ToolRetryPolicy(BaseModel):
@@ -158,6 +161,48 @@ def tool_map(tools: list[Any] | None) -> dict[str, Any]:
 def elapsed_ms(started_at: float) -> float:
     """Return elapsed milliseconds from a perf_counter start."""
     return round((time.perf_counter() - started_at) * 1000, 2)
+
+
+def clamp_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 100) -> int:
+    """Coerce an integer-like tool input into a bounded range."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def clamp_duration(
+    value: Any,
+    *,
+    default: str,
+    minimum_seconds: int = 1,
+    maximum_seconds: int = 3600,
+) -> str:
+    """Normalize simple duration strings such as 10m, 1h, or 30s."""
+    text = str(value or default).strip().lower()
+    match = _DURATION_RE.match(text)
+    if not match:
+        text = default.strip().lower()
+        match = _DURATION_RE.match(text)
+    if not match:
+        return "1m"
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    seconds = amount * _DURATION_MULTIPLIERS[unit]
+    if seconds < minimum_seconds:
+        return _format_duration(minimum_seconds)
+    if seconds > maximum_seconds:
+        return _format_duration(maximum_seconds)
+    return f"{amount}{unit}"
+
+
+def _format_duration(seconds: int) -> str:
+    for unit, multiplier in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= multiplier and seconds % multiplier == 0:
+            return f"{seconds // multiplier}{unit}"
+    return f"{max(seconds, 1)}s"
 
 
 def is_failed_tool_output(output: Any) -> bool:

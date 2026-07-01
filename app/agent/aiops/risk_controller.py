@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.models.approval import RiskAssessment
 from app.models.plan import PlanStep
+from app.services.incident_lifecycle import is_production_environment
 from app.tools.base import RiskLevel
 
 RiskPolicy = Literal["allow", "approval_required", "forbidden"]
@@ -320,7 +321,7 @@ def _is_prod_incident(incident: Any | None) -> bool:
         if isinstance(incident, dict)
         else getattr(incident, "environment", "")
     )
-    return str(environment).lower() in {"prod", "production", "prd", "线上", "生产"}
+    return is_production_environment(environment)
 
 
 def _action_text(step: PlanStep) -> str:

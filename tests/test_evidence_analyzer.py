@@ -10,6 +10,15 @@ from app.models.evidence import (
 )
 from app.tools.base import ToolExecutionResult
 
+DEFAULT_DATA_SOURCE_BY_TOOL = {
+    "query_metrics": "prometheus",
+    "query_logs": "loki",
+    "query_redis_status": "redis_info",
+    "query_mysql_status": "mysql",
+    "query_k8s_status": "kubernetes",
+    "query_message_queue_status": "redpanda",
+}
+
 
 def evidence_from_tool(
     tool_name: str,
@@ -17,6 +26,7 @@ def evidence_from_tool(
     step_id: str = "s1",
     *,
     status: str = "success",
+    data_source: str | None = None,
 ) -> dict:
     result = ToolExecutionResult(
         tool_name=tool_name,
@@ -36,6 +46,8 @@ def evidence_from_tool(
         step_id=step_id,
         summary=str(output.get("summary", "")),
         evidence_type=infer_evidence_type(tool_name),
+        data_source=data_source
+        or str(output.get("source") or DEFAULT_DATA_SOURCE_BY_TOOL.get(tool_name, "unknown")),
         stance=stance,
         confidence_reason=build_confidence_reason(
             source_tool=tool_name,
@@ -96,6 +108,53 @@ def test_analyzer_marks_redis_maxclients_evidence_as_report_ready() -> None:
     assert any("阈值" in reason for reason in analysis.confidence_reasons)
 
 
+def test_analyzer_caps_unknown_successful_evidence_sources() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout and 5xx",
+        session_id="analysis-unknown-source",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_metrics",
+            {
+                "summary": "P95=3250ms, 5xx=8.20%",
+                "p95_latency_ms": {"status": "high"},
+                "error_rate": {"status": "high"},
+            },
+            "s1",
+            data_source="unknown",
+        ),
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "Redis connection timeout in /api/order/create"},
+            "s2",
+            data_source="unknown",
+        ),
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "connected_clients=9940/10000",
+                "connected_clients": 9940,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.994,
+                "alert_info": {"triggered": True},
+            },
+            "s3",
+            data_source="unknown",
+        ),
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert analysis.decision == "generate_report"
+    assert analysis.evidence_sufficient is False
+    assert analysis.confidence <= 0.5
+    assert analysis.evidence_profile["source_quality"] == "fallback_only"
+    assert analysis.evidence_profile["degraded_source_count"] == 3
+    assert any("未知来源" in reason for reason in analysis.confidence_reasons)
+
+
 def test_analyzer_marks_redpanda_lag_evidence_as_report_ready() -> None:
     state = create_initial_aiops_state(
         "checkout-service 响应慢，订单消息积压，怀疑 Redpanda consumer lag",
@@ -137,10 +196,14 @@ def test_analyzer_marks_redpanda_lag_evidence_as_report_ready() -> None:
     analysis = analyze_evidence(state)
 
     assert analysis.decision == "generate_report"
-    assert analysis.evidence_sufficient is True
+    assert analysis.evidence_sufficient is False
+    assert analysis.confidence <= 0.72
+    assert analysis.evidence_profile["source_quality"] == "mixed_with_fallback"
+    assert analysis.evidence_profile["fallback_source_count"] == 1
     assert any(item.category == "message_queue_lag" for item in analysis.hypothesis_ranking)
     assert "query_message_queue_status" not in analysis.missing_evidence
     assert any("Mock 回退证据" in reason for reason in analysis.confidence_reasons)
+    assert any("置信度封顶" in reason for reason in analysis.confidence_reasons)
 
 
 def test_message_queue_normal_state_refutes_lag_hypothesis() -> None:

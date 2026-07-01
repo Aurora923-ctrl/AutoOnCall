@@ -3,6 +3,7 @@
 import pytest
 from langchain_core.documents import Document
 
+from app.config import config
 from app.services.lexical_index_service import LexicalIndexService
 from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
@@ -21,6 +22,14 @@ class FakeVectorStore:
     def similarity_search_with_score(self, query: str, k: int, **kwargs):
         self.calls.append({"query": query, "k": k, **kwargs})
         return self.scored_documents[:k]
+
+
+class FakePlainVectorStore:
+    def __init__(self, documents):
+        self.documents = documents
+
+    def similarity_search(self, query: str, k: int, **kwargs):
+        return self.documents[:k]
 
 
 def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
@@ -89,6 +98,33 @@ def test_structured_retrieval_rejects_when_all_scores_exceed_threshold() -> None
     assert payload["rejected_results"][0]["retrieval_reason"] == (
         "L2 distance 8.0000 大于 阈值 0.5000"
     )
+
+
+def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    source = "aiops-docs/redis.md"
+    index.mark_source_stale(source, "new upload failed to index")
+    monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
+    document = Document(
+        page_content="Redis maxclients 耗尽会导致 connection timeout。",
+        metadata={
+            "_source": source,
+            "_file_name": "redis.md",
+            "_doc_id": source,
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        top_k=1,
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(document, 0.1)]),
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["retrieval_results"] == []
+    assert payload["rejected_results"] == []
 
 
 def test_structured_retrieval_supports_metadata_filter_and_expr() -> None:
@@ -196,6 +232,60 @@ def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) 
     assert payload["lexical_candidate_count"] == 1
     assert payload["retrieval_results"][0]["source_file"] == "redis.md"
     assert payload["retrieval_results"][0]["metadata"]["_retrieval_source"] == "lexical"
+    assert payload["retrieval_results"][0]["score"] is None
+    assert payload["retrieval_results"][0]["retrieval_reason"].startswith("lexical score")
+
+
+def test_lexical_only_candidate_must_pass_lexical_trust_threshold(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    document = Document(
+        page_content="Redis maxclients connection timeout runbook.",
+        metadata={
+            "_source": "aiops-docs/redis.md",
+            "_file_name": "redis.md",
+            "_doc_id": "aiops-docs/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+    index.upsert_source("aiops-docs/redis.md", [document])
+    monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
+    monkeypatch.setattr(config, "rag_min_lexical_trust_score", 1.1)
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        top_k=1,
+        vector_store=FakeVectorStore([]),
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["retrieval_results"] == []
+    assert payload["rejected_results"][0]["metadata"]["_retrieval_source"] == "lexical"
+    assert "lexical score" in payload["rejected_results"][0]["retrieval_reason"]
+
+
+def test_unscored_vector_results_are_not_trusted_by_default() -> None:
+    document = Document(
+        page_content="Redis maxclients 耗尽处理 runbook",
+        metadata={
+            "_source": "aiops-docs/redis.md",
+            "_file_name": "redis.md",
+            "_doc_id": "aiops-docs/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients",
+        top_k=1,
+        vector_store=FakePlainVectorStore([document]),
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["rejected_results"][0]["score"] is None
+    assert payload["rejected_results"][0]["retrieval_reason"] == "检索后端未返回距离分数"
 
 
 @pytest.mark.asyncio

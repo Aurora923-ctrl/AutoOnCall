@@ -8,7 +8,7 @@ from app.config import config
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.redis_info import RedisInfoAdapter
 from app.services.service_topology import get_primary_dependency_instance
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_duration
 
 
 class QueryRedisStatusTool(AIOpsTool):
@@ -44,7 +44,12 @@ class QueryRedisStatusTool(AIOpsTool):
             or get_primary_dependency_instance(service_name, "redis")
             or "redis-cluster-prod"
         )
-        time_range = input_args.get("time_range", "10m")
+        time_range = clamp_duration(
+            input_args.get("time_range"),
+            default="10m",
+            maximum_seconds=3600,
+        )
+        input_args["time_range"] = time_range
 
         if self._redis_adapter.configured:
             try:

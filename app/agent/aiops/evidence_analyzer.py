@@ -19,6 +19,7 @@ from app.services.diagnostic_signal_rules import (
     infer_evidence_type,
     mentions_any,
     missing_tools_from_context,
+    normalize_data_source,
     signal_context,
 )
 
@@ -32,6 +33,34 @@ AnalyzerDecision = Literal[
     "generate_report",
     "escalate_to_human",
 ]
+
+FALLBACK_EVIDENCE_SOURCES = {
+    "mock",
+    "not_configured",
+    "failed",
+    "manual_analysis",
+    "llm_toolnode_fallback",
+    "rule_based",
+}
+DEGRADED_EVIDENCE_SOURCES = {"mcp_monitor_mixed", "unknown"}
+TRUSTED_EVIDENCE_SOURCES = {
+    "prometheus",
+    "loki",
+    "log_gateway",
+    "cmdb",
+    "deploy_history",
+    "redis_info",
+    "kubernetes",
+    "mysql",
+    "ticket_api",
+    "alertmanager",
+    "jaeger",
+    "tempo",
+    "redpanda",
+    "mcp_monitor",
+    "mcp_cls",
+}
+NON_DIAGNOSTIC_EVIDENCE_TYPES = {"runbook", "risk"}
 
 
 class EvidenceAnalysis(BaseModel):
@@ -90,6 +119,14 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
         conflicts,
         exhausted_failed_records,
     )
+    sufficient, confidence, reason, quality_reason = _apply_source_quality_gate(
+        sufficient=sufficient,
+        confidence=confidence,
+        reason=reason,
+        evidence_profile=evidence_profile,
+    )
+    if quality_reason:
+        confidence_reasons = dedupe_strings([*confidence_reasons, quality_reason])
 
     if retry_steps:
         return EvidenceAnalysis(
@@ -166,6 +203,26 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
             evidence_sufficient=False,
             missing_evidence=missing_tools,
             recommended_steps=recommended_steps,
+            evidence_profile=evidence_profile,
+            confidence_reasons=confidence_reasons,
+            confidence=confidence,
+        )
+
+    if (
+        hypotheses
+        and not has_remaining_plan
+        and _should_generate_low_confidence_report(evidence_profile)
+    ):
+        return EvidenceAnalysis(
+            decision="generate_report",
+            reason=reason,
+            hypotheses=hypotheses,
+            hypothesis_ranking=hypothesis_ranking,
+            conflicts=conflicts,
+            evidence_sufficient=False,
+            missing_evidence=missing_tools,
+            recommended_steps=[],
+            retry_steps=[],
             evidence_profile=evidence_profile,
             confidence_reasons=confidence_reasons,
             confidence=confidence,
@@ -585,6 +642,7 @@ def _build_evidence_profile(
     """Summarize evidence quality for Replanner and reports."""
     by_type: dict[str, int] = {}
     by_stance: dict[str, int] = {}
+    by_data_source: dict[str, int] = {}
     failed_tools = dedupe_strings(
         [
             str(record.get("tool_name") or "")
@@ -593,30 +651,111 @@ def _build_evidence_profile(
         ]
     )
     confidence_values: list[float] = []
+    diagnostic_success_count = 0
+    trusted_source_count = 0
+    degraded_source_count = 0
+    fallback_source_count = 0
 
     for evidence in evidence_items:
         if not isinstance(evidence, dict):
             continue
         evidence_type = str(evidence.get("evidence_type") or _type_from_tool(evidence))
         stance = str(evidence.get("stance") or "neutral")
+        data_source = _evidence_data_source(evidence)
         by_type[evidence_type] = by_type.get(evidence_type, 0) + 1
         by_stance[stance] = by_stance.get(stance, 0) + 1
+        by_data_source[data_source] = by_data_source.get(data_source, 0) + 1
         confidence = evidence.get("confidence")
         if isinstance(confidence, int | float):
             confidence_values.append(float(confidence))
         raw_data = evidence.get("raw_data") or {}
         if isinstance(raw_data, dict) and raw_data.get("status") == "failed":
             failed_tools.append(str(evidence.get("source_tool") or raw_data.get("tool_name") or ""))
+        if _is_successful_diagnostic_evidence(evidence, evidence_type):
+            diagnostic_success_count += 1
+            if data_source in TRUSTED_EVIDENCE_SOURCES:
+                trusted_source_count += 1
+            elif data_source in DEGRADED_EVIDENCE_SOURCES:
+                degraded_source_count += 1
+            elif data_source in FALLBACK_EVIDENCE_SOURCES:
+                fallback_source_count += 1
+            else:
+                degraded_source_count += 1
+
+    source_quality = "trusted_or_unlabeled"
+    low_quality_count = fallback_source_count + degraded_source_count
+    if diagnostic_success_count and trusted_source_count == 0 and low_quality_count:
+        source_quality = "fallback_only"
+    elif low_quality_count:
+        source_quality = "mixed_with_fallback"
 
     return {
         "by_type": by_type,
         "by_stance": by_stance,
+        "by_data_source": by_data_source,
         "failed_tools": dedupe_strings([tool for tool in failed_tools if tool]),
         "average_evidence_confidence": _average(confidence_values),
+        "diagnostic_success_count": diagnostic_success_count,
+        "trusted_source_count": trusted_source_count,
+        "degraded_source_count": degraded_source_count,
+        "fallback_source_count": fallback_source_count,
+        "source_quality": source_quality,
         "supporting_count": by_stance.get("supporting", 0),
         "refuting_count": by_stance.get("refuting", 0),
         "neutral_count": by_stance.get("neutral", 0),
         "unknown_count": by_stance.get("unknown", 0),
+    }
+
+
+def _is_successful_diagnostic_evidence(evidence: dict[str, Any], evidence_type: str) -> bool:
+    if evidence_type in NON_DIAGNOSTIC_EVIDENCE_TYPES:
+        return False
+    raw_data = evidence.get("raw_data") or {}
+    return isinstance(raw_data, dict) and raw_data.get("status") == "success"
+
+
+def _evidence_data_source(evidence: dict[str, Any]) -> str:
+    data_source = str(evidence.get("data_source") or "").strip().lower()
+    if data_source and data_source != "unknown":
+        return data_source
+    raw_data = evidence.get("raw_data") or {}
+    if isinstance(raw_data, dict):
+        normalized = normalize_data_source(str(evidence.get("source_tool") or ""), raw_data)
+        if normalized and normalized != "unknown":
+            return normalized
+    return "unknown"
+
+
+def _apply_source_quality_gate(
+    *,
+    sufficient: bool,
+    confidence: float,
+    reason: str,
+    evidence_profile: dict[str, Any],
+) -> tuple[bool, float, str, str]:
+    source_quality = str(evidence_profile.get("source_quality") or "")
+    if source_quality == "fallback_only":
+        return (
+            False,
+            min(confidence, 0.5),
+            f"{reason}；但关键诊断证据来自 Mock/合成/未配置/未知来源，仅能低置信度参考",
+            "关键证据缺少可信生产数据源，诊断置信度封顶为 0.50",
+        )
+    if source_quality == "mixed_with_fallback":
+        return (
+            False,
+            min(confidence, 0.72),
+            f"{reason}；部分证据来自 Mock/合成/回退/未知来源，置信度已保守封顶",
+            "部分证据来自低可信或未知来源，诊断置信度封顶为 0.72",
+        )
+    return sufficient, confidence, reason, ""
+
+
+def _should_generate_low_confidence_report(evidence_profile: dict[str, Any]) -> bool:
+    """Allow a terminal report when only fallback evidence exists, without marking it sufficient."""
+    return str(evidence_profile.get("source_quality") or "") in {
+        "fallback_only",
+        "mixed_with_fallback",
     }
 
 
@@ -647,6 +786,8 @@ def _build_confidence_reasons(
     )
     if fallback_sources:
         reasons.append("规则或人工/LLM 兜底证据需要真实工具复核")
+    if "unknown" in sources:
+        reasons.append("存在未知来源证据，需要可信生产数据源复核")
     return dedupe_strings(reasons)
 
 
@@ -655,25 +796,7 @@ def _evidence_data_sources(evidence_items: list[Any]) -> set[str]:
     for evidence in evidence_items:
         if not isinstance(evidence, dict):
             continue
-        data_source = str(evidence.get("data_source") or "").strip()
-        if data_source and data_source != "unknown":
-            sources.add(data_source)
-        raw_data = evidence.get("raw_data") or {}
-        if not isinstance(raw_data, dict):
-            continue
-        raw_source = str(raw_data.get("source") or "").strip()
-        if raw_source:
-            sources.add(raw_source)
-        output = raw_data.get("output")
-        if isinstance(output, dict):
-            output_source = str(output.get("source") or "").strip()
-            if output_source:
-                sources.add(output_source)
-        metadata = raw_data.get("metadata")
-        if isinstance(metadata, dict):
-            execution_path = str(metadata.get("execution_path") or "").strip()
-            if execution_path:
-                sources.add(execution_path)
+        sources.add(_evidence_data_source(evidence))
     return sources
 
 

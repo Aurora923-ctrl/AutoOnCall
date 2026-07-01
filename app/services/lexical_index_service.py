@@ -38,6 +38,7 @@ class LexicalIndexService:
                 chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
             ]
             payload["chunks"].extend(chunks)
+            payload["stale_sources"].pop(source_path, None)
             self._save_index(payload)
         logger.info(f"本地词法索引更新完成: source={source_path}, chunks={len(chunks)}")
 
@@ -50,9 +51,33 @@ class LexicalIndexService:
                 chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
             ]
             deleted = before - len(payload["chunks"])
-            if deleted:
+            stale_removed = source_path in payload["stale_sources"]
+            payload["stale_sources"].pop(source_path, None)
+            if deleted or stale_removed:
                 self._save_index(payload)
             return deleted
+
+    def mark_source_stale(self, source_path: str, reason: str) -> None:
+        """Mark a source as stale so retrieval will not trust old chunks for it."""
+        with self._lock:
+            payload = self._load_index()
+            payload["stale_sources"][source_path] = str(reason or "indexing_failed")[:500]
+            self._save_index(payload)
+        logger.warning(f"本地词法索引标记为陈旧: source={source_path}, reason={reason}")
+
+    def clear_source_stale(self, source_path: str) -> None:
+        """Clear the stale marker for a source after a successful index update."""
+        with self._lock:
+            payload = self._load_index()
+            if source_path not in payload["stale_sources"]:
+                return
+            payload["stale_sources"].pop(source_path, None)
+            self._save_index(payload)
+
+    def is_source_stale(self, source_path: str) -> bool:
+        """Return True when a source should be excluded from retrieval."""
+        payload = self._load_index()
+        return source_path in payload["stale_sources"]
 
     def search(
         self,
@@ -67,9 +92,11 @@ class LexicalIndexService:
         if not query_terms:
             return []
 
+        stale_sources = set(payload["stale_sources"])
         chunks = [
             chunk
             for chunk in payload["chunks"]
+            if chunk.get("source_path") not in stale_sources
             if _metadata_matches_filter(chunk.get("metadata", {}), metadata_filter)
         ]
         scored: list[tuple[Document, float]] = []
@@ -116,14 +143,19 @@ class LexicalIndexService:
 
     def _load_index(self) -> dict[str, Any]:
         if not self.index_path.exists():
-            return {"version": 1, "chunks": []}
+            return {"version": 1, "chunks": [], "stale_sources": {}}
         try:
             payload = json.loads(self.index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning(f"读取本地词法索引失败，将使用空索引: {exc}")
-            return {"version": 1, "chunks": []}
+            return {"version": 1, "chunks": [], "stale_sources": {}}
         chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
-        return {"version": 1, "chunks": chunks if isinstance(chunks, list) else []}
+        stale_sources = payload.get("stale_sources", {}) if isinstance(payload, dict) else {}
+        return {
+            "version": 1,
+            "chunks": chunks if isinstance(chunks, list) else [],
+            "stale_sources": stale_sources if isinstance(stale_sources, dict) else {},
+        }
 
     def _save_index(self, payload: dict[str, Any]) -> None:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)

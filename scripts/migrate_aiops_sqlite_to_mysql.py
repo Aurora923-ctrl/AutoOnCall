@@ -16,8 +16,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.config import config
+from app.models.aiops_session import AIOpsSessionSnapshot
+from app.models.alert import AlertEvent
 from app.models.approval import ApprovalRequest
 from app.models.change_execution import ChangeExecution
+from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.mysql_store import AIOpsMySQLStore
@@ -43,33 +46,45 @@ def main() -> int:
     if not args.mysql_dsn:
         raise SystemExit("MySQL DSN is required via --mysql-dsn, MYSQL_DSN, or MYSQL_HOST fields")
 
+    alert_events = _read_models(sqlite_path, "alert_events", AlertEvent)
     traces = _read_models(sqlite_path, "trace_events", TraceEvent)
     approvals = _read_models(sqlite_path, "approval_requests", ApprovalRequest)
-    reports = _read_models(sqlite_path, "diagnosis_reports", DiagnosisReport)
     change_executions = _read_models(sqlite_path, "change_executions", ChangeExecution)
+    aiops_sessions = _read_models(sqlite_path, "aiops_sessions", AIOpsSessionSnapshot)
+    incident_states = _read_models(sqlite_path, "incident_states", IncidentState)
+    reports = _read_models(sqlite_path, "diagnosis_reports", DiagnosisReport)
 
     summary = {
         "sqlite": str(sqlite_path),
         "mysql": _redact_dsn(args.mysql_dsn),
         "dry_run": args.dry_run,
         "counts": {
+            "alert_events": len(alert_events),
             "trace_events": len(traces),
             "approval_requests": len(approvals),
-            "diagnosis_reports": len(reports),
             "change_executions": len(change_executions),
+            "aiops_sessions": len(aiops_sessions),
+            "incident_states": len(incident_states),
+            "diagnosis_reports": len(reports),
         },
     }
 
     if not args.dry_run:
         store = AIOpsMySQLStore(args.mysql_dsn)
+        for event in alert_events:
+            store.save_alert_event(event)
         for event in traces:
             store.save_trace_event(event)
         for approval in approvals:
             store.save_approval_request(approval)
-        for report in reports:
-            store.save_report(report)
         for execution in change_executions:
             store.save_change_execution(execution)
+        for snapshot in aiops_sessions:
+            store.save_aiops_session_snapshot(snapshot)
+        for state in incident_states:
+            store.save_incident_state(state)
+        for report in reports:
+            store.save_report(report)
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

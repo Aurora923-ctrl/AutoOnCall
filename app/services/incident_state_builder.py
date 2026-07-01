@@ -32,7 +32,11 @@ def build_incident_state_from_state(
     risk = _as_dict(state.get("risk_assessment"))
     incident_id = str(incident.get("incident_id") or state.get("incident_id") or "")
     report_id = str(report.get("report_id") or "") or None
-    latest_approval_id = str(pending_approval.get("approval_id") or "") or None
+    approval_decision = _as_dict(report.get("approval_decision"))
+    latest_approval_id = (
+        str(pending_approval.get("approval_id") or approval_decision.get("approval_id") or "")
+        or None
+    )
     approval_status = (
         str(pending_approval.get("status") or "")
         or str(report.get("approval_status") or "")
@@ -196,7 +200,11 @@ def build_incident_state_from_alert(
         f"Alertmanager webhook status={event.status}, "
         f"alertname={event.alertname}, fingerprint={event.fingerprint}"
     )
-    if existing is not None and not is_alert_mutable_incident_status(existing.status):
+    if (
+        existing is not None
+        and not is_alert_mutable_incident_status(existing.status)
+        and not _alert_can_override_auto_diagnosis_failure(existing)
+    ):
         status = existing.status
         reason = existing.status_reason
         preserved_existing = True
@@ -204,16 +212,19 @@ def build_incident_state_from_alert(
         status = desired_status
         reason = status_reason
         preserved_existing = False
-    metadata = {
-        "source": event.source or "alertmanager",
-        "alert_fingerprint": event.fingerprint,
-        "alert_status": event.status,
-        "alertname": event.alertname,
-        "labels": event.labels,
-        "annotations": event.annotations,
-        "starts_at": event.starts_at.isoformat() if event.starts_at else "",
-        "ends_at": event.ends_at.isoformat() if event.ends_at else "",
-    }
+    metadata = dict(existing.metadata if existing else {})
+    metadata.update(
+        {
+            "source": event.source or "alertmanager",
+            "alert_fingerprint": event.fingerprint,
+            "alert_status": event.status,
+            "alertname": event.alertname,
+            "labels": event.labels,
+            "annotations": event.annotations,
+            "starts_at": event.starts_at.isoformat() if event.starts_at else "",
+            "ends_at": event.ends_at.isoformat() if event.ends_at else "",
+        }
+    )
     if preserved_existing and existing is not None:
         metadata["preserved_incident_status"] = existing.status
 
@@ -234,6 +245,12 @@ def build_incident_state_from_alert(
         manual_action_required=existing.manual_action_required if existing else False,
         metadata=metadata,
     )
+
+
+def _alert_can_override_auto_diagnosis_failure(existing: IncidentState) -> bool:
+    """Allow alert lifecycle updates to recover a state failed only by auto diagnosis."""
+    metadata = dict(existing.metadata or {})
+    return existing.status == "failed" and metadata.get("alert_auto_diagnosis_status") == "failed"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

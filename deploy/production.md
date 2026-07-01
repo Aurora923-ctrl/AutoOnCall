@@ -7,6 +7,7 @@ AutoOnCall can run in local demo mode with mock/fallback data, but production-or
 - Treat all FastAPI routes as internal tooling; do not expose the service directly to the public internet.
 - Set `DEBUG=false`.
 - Set `CORS_ALLOWED_ORIGINS` to explicit internal frontend origins.
+- Treat startup warnings about non-local bind, disabled API auth, or wildcard CORS as release blockers.
 - Store `DASHSCOPE_API_KEY`, API tokens, Redis passwords, MySQL credentials, bearer tokens, and webhook secrets in a secret manager.
 - Require SSO/OIDC or an internal admin token for diagnosis, approval, upload, indexing, report, change, and alert-ingestion APIs.
 - Add RBAC for read-only incident viewing, diagnosis execution, alert ingestion, approval decisions, safe-change operations, and admin actions before exposing the service beyond a trusted network.

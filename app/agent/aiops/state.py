@@ -107,10 +107,11 @@ def remaining_plan_state_update(
 
 def create_initial_aiops_state(
     user_input: str,
-    session_id: str = "default",
+    session_id: str | None = None,
     incident: Incident | None = None,
 ) -> PlanExecuteState:
     """Create a backward-compatible initial LangGraph state."""
+    session_id = session_id or f"session-{uuid4().hex}"
     incident_obj = incident or Incident(
         title="AIOps diagnosis request",
         service_name="unknown-service",

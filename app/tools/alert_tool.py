@@ -7,7 +7,7 @@ from typing import Any
 from app.config import config
 from app.integrations.alertmanager import AlertmanagerAlertAdapter
 from app.integrations.base import adapter_failure, adapter_not_configured
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_int
 
 
 class QueryAlertsTool(AIOpsTool):
@@ -37,7 +37,8 @@ class QueryAlertsTool(AIOpsTool):
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
         state = input_args.get("state") or "active"
-        limit = int(input_args.get("limit") or 20)
+        limit = clamp_int(input_args.get("limit"), default=20, minimum=1, maximum=100)
+        input_args["limit"] = limit
         if self._alert_adapter.configured:
             try:
                 return await self._alert_adapter.query_alerts(service_name, state, limit)

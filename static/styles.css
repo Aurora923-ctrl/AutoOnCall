@@ -137,6 +137,69 @@ body {
     color: #8a4b00;
 }
 
+.auth-token-panel {
+    background: #ffffff;
+    border: 1px solid #d9e2f5;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.auth-token-heading,
+.auth-token-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.auth-token-heading span {
+    color: #3c4043;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.auth-token-heading strong {
+    border-radius: 999px;
+    background: #f1f3f4;
+    color: #5f6368;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+}
+
+.auth-token-heading strong.ready {
+    background: #e6f4ea;
+    color: #137333;
+}
+
+.auth-token-panel input {
+    width: 100%;
+    border: 1px solid #dadce0;
+    border-radius: 8px;
+    color: #202124;
+    font-size: 12px;
+    padding: 8px;
+    min-width: 0;
+}
+
+.auth-token-actions button {
+    border: 1px solid #dadce0;
+    background: #ffffff;
+    border-radius: 8px;
+    color: #3c4043;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 9px;
+}
+
+.auth-token-actions button:hover {
+    background: #f1f3f4;
+}
+
 .sidebar-btn {
     width: 100%;
     padding: 12px;
@@ -1179,6 +1242,21 @@ body {
 .source-pill.not_configured {
     background: #fef7e0;
     color: #b06000;
+}
+
+.source-pill.real {
+    background: #e6f4ea;
+    color: #137333;
+}
+
+.source-pill.mixed {
+    background: #e8f0fe;
+    color: #174ea6;
+}
+
+.source-pill.unavailable {
+    background: #f1f3f4;
+    color: #5f6368;
 }
 
 .source-pill.failed,

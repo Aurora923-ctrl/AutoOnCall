@@ -45,6 +45,76 @@ async def liveness_check():
 @router.get("/health/ready")
 async def readiness_check():
     """Return dependency readiness for RAG and production traffic."""
+    health_data = await _dependency_health_data()
+
+    overall_status = "healthy"
+    status_code = 200
+    if health_data["checks"]["milvus"]["status"] != "connected":
+        overall_status = "degraded"
+        status_code = 503
+        health_data["error"] = "RAG readiness dependency unavailable"
+
+    health_data["status"] = overall_status
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": (
+                "service dependencies are ready"
+                if status_code == 200
+                else "service dependency is unavailable"
+            ),
+            "data": health_data,
+        },
+    )
+
+
+@router.get("/health/ready/rag")
+async def rag_readiness_check():
+    """Return readiness for RAG search and upload indexing."""
+    health_data = await _dependency_health_data()
+    rag_ready = bool(health_data["capabilities"]["rag"]["ready"])
+    status_code = 200 if rag_ready else 503
+    health_data["selected_capability"] = "rag"
+    health_data["status"] = "healthy" if rag_ready else "degraded"
+    if not rag_ready:
+        health_data["error"] = "RAG readiness dependency unavailable"
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": (
+                "RAG capability is ready" if rag_ready else "RAG capability is unavailable"
+            ),
+            "data": health_data,
+        },
+    )
+
+
+@router.get("/health/ready/aiops")
+async def aiops_readiness_check():
+    """Return readiness for Alertmanager-driven AIOps diagnosis."""
+    health_data = await _dependency_health_data()
+    aiops_ready = bool(health_data["capabilities"]["aiops"]["ready"])
+    status_code = 200 if aiops_ready else 503
+    health_data["selected_capability"] = "aiops"
+    health_data["status"] = "healthy" if aiops_ready else "degraded"
+    if not aiops_ready:
+        health_data["error"] = "AIOps readiness dependency unavailable"
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": (
+                "AIOps capability is ready" if aiops_ready else "AIOps capability is unavailable"
+            ),
+            "data": health_data,
+        },
+    )
+
+
+async def _dependency_health_data() -> dict[str, Any]:
+    """Build the shared dependency view used by capability-specific probes."""
     health_data = _base_health_data()
     milvus = _check_milvus()
     external_systems = await _external_system_readiness()
@@ -66,26 +136,7 @@ async def readiness_check():
     health_data["capabilities"] = _capability_readiness(milvus, external_systems)
     health_data["milvus"] = milvus
 
-    overall_status = "healthy"
-    status_code = 200
-    if milvus["status"] != "connected":
-        overall_status = "degraded"
-        status_code = 503
-        health_data["error"] = "RAG readiness dependency unavailable"
-
-    health_data["status"] = overall_status
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "code": status_code,
-            "message": (
-                "service dependencies are ready"
-                if status_code == 200
-                else "service dependency is unavailable"
-            ),
-            "data": health_data,
-        },
-    )
+    return health_data
 
 
 def _base_health_data() -> dict[str, Any]:

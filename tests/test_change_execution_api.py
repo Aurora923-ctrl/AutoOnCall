@@ -107,7 +107,7 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
         assert response.status_code == 200
         events = _parse_sse_events(response.text)
         assert events[-1]["type"] == "complete"
-        assert events[-1]["status"] == "closed"
+        assert events[-1]["status"] == "dry_run_completed"
         assert "change_precheck" in [event["type"] for event in events]
         assert "change_dry_run" in [event["type"] for event in events]
 
@@ -115,7 +115,7 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
         assert list_response.status_code == 200
         items = list_response.json()["items"]
         assert len(items) == 1
-        assert items[0]["status_metadata"]["status"] == "resolved"
+        assert items[0]["status_metadata"]["status"] == "change_validated"
         assert [stage["key"] for stage in items[0]["stages"]] == [
             "pre_check",
             "dry_run",
@@ -127,8 +127,8 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
         detail_response = await client.get(f"/api/changes/{items[0]['change_execution_id']}")
         assert detail_response.status_code == 200
         detail = detail_response.json()["change_execution"]
-        assert detail["status"] == "closed"
-        assert detail["lifecycle_status"] == "resolved"
+        assert detail["status"] == "dry_run_completed"
+        assert detail["lifecycle_status"] == "change_validated"
         assert detail["stages"][0]["status"] == "passed"
 
 

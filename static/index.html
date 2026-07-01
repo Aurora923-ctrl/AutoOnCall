@@ -50,6 +50,18 @@
                         <span>环境就绪中心</span>
                     </button>
                 </nav>
+
+                <section class="auth-token-panel" aria-label="接口令牌">
+                    <div class="auth-token-heading">
+                        <span>接口令牌</span>
+                        <strong id="authStatusBadge">未设置</strong>
+                    </div>
+                    <input type="password" id="apiTokenInput" maxlength="256" placeholder="X-AutoOnCall-Token">
+                    <div class="auth-token-actions">
+                        <button type="button" id="apiTokenSaveBtn">保存</button>
+                        <button type="button" id="apiTokenClearBtn">清除</button>
+                    </div>
+                </section>
                 
                 <div class="chat-history-section">
                     <div class="history-header">

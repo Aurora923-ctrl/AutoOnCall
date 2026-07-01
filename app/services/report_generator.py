@@ -204,11 +204,15 @@ class ReportGenerator:
             if "等待人工审批" not in item and "需要人工审批" not in item
         ]
         uncertainties.append(
-            f"{decision_text}{actor_text}{reason_text}；Agent 仍不会自动执行生产变更。"
+            f"{decision_text}{actor_text}{reason_text}；Agent 不直接执行生产写操作，"
+            "审批通过后需进入安全变更流程。"
         )
         summary = report.summary
         if "审批已" not in summary:
-            summary = f"{summary} {decision_text}，Agent 不自动执行生产变更。"
+            summary = (
+                f"{summary} {decision_text}，审批通过后进入 pre-check、dry-run、"
+                "sandbox 或人工执行记录。"
+            )
 
         updated = report.model_copy(
             update={
@@ -791,6 +795,9 @@ def _calculate_confidence(
         errors or _has_failed_diagnostic_evidence(evidence)
     ) and _has_enough_successful_diagnostic_evidence(evidence):
         base = max(base, 0.55)
+    source_quality_cap = _source_quality_confidence_cap(evidence, analysis)
+    if source_quality_cap is not None:
+        base = min(base, source_quality_cap)
     return round(max(0.0, min(1.0, base)), 2)
 
 
@@ -801,6 +808,80 @@ def _top_hypothesis_confidence(evidence_analysis: dict[str, Any]) -> float | Non
     top = ranking[0] if isinstance(ranking[0], dict) else {}
     confidence = top.get("confidence")
     return float(confidence) if isinstance(confidence, int | float) else None
+
+
+def _source_quality_confidence_cap(
+    evidence: list[dict[str, Any]],
+    evidence_analysis: dict[str, Any],
+) -> float | None:
+    profile = _as_dict(evidence_analysis.get("evidence_profile"))
+    source_quality = str(profile.get("source_quality") or "")
+    if source_quality == "fallback_only":
+        return 0.5
+    if source_quality == "mixed_with_fallback":
+        return 0.72
+
+    diagnostic_success = [
+        item
+        for item in evidence
+        if str(item.get("evidence_type") or "") not in {"runbook", "risk"}
+        and _as_dict(item.get("raw_data")).get("status") == "success"
+    ]
+    if not diagnostic_success:
+        return None
+
+    trusted_sources = {
+        "prometheus",
+        "loki",
+        "log_gateway",
+        "cmdb",
+        "deploy_history",
+        "redis_info",
+        "kubernetes",
+        "mysql",
+        "ticket_api",
+        "alertmanager",
+        "jaeger",
+        "tempo",
+        "redpanda",
+        "mcp_monitor",
+        "mcp_cls",
+    }
+    fallback_sources = {
+        "mock",
+        "not_configured",
+        "failed",
+        "manual_analysis",
+        "llm_toolnode_fallback",
+        "rule_based",
+    }
+    degraded_sources = {"mcp_monitor_mixed", "unknown"}
+    trusted_count = 0
+    fallback_count = 0
+    degraded_count = 0
+    for item in diagnostic_success:
+        data_source = str(item.get("data_source") or "").strip().lower()
+        raw_data = _as_dict(item.get("raw_data"))
+        output = _as_dict(raw_data.get("output"))
+        if not data_source or data_source == "unknown":
+            data_source = (
+                str(output.get("source") or raw_data.get("source") or "unknown").strip().lower()
+            )
+        if data_source in trusted_sources:
+            trusted_count += 1
+        elif data_source in fallback_sources:
+            fallback_count += 1
+        elif data_source in degraded_sources:
+            degraded_count += 1
+        else:
+            degraded_count += 1
+
+    low_quality_count = fallback_count + degraded_count
+    if trusted_count == 0 and low_quality_count:
+        return 0.5
+    if low_quality_count:
+        return 0.72
+    return None
 
 
 def _has_failed_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:
@@ -1008,7 +1089,7 @@ def _render_change_plan(report: DiagnosisReport) -> str:
             _render_indented_bullets(plan.get("rollback_steps")),
             "- 验证步骤：",
             _render_indented_bullets(plan.get("verification_steps")),
-            "- 边界：Agent 只生成建议和计划，不自动执行生产变更。",
+            "- 边界：Agent 只生成建议和计划；生产写操作需在审批通过后进入安全变更流程。",
         ]
     )
 
@@ -1186,7 +1267,7 @@ def _render_manual_action_boundary(report: DiagnosisReport) -> str:
     if report.manual_action_required:
         return "\n".join(
             [
-                "- Agent 只输出诊断和处置建议，不自动执行生产变更。",
+                "- Agent 只输出诊断和处置建议；不直接执行生产写操作。",
                 "- 人工执行前需要确认审批、影响范围、观察窗口和回滚方案。",
                 "- 若变更后指标或日志未恢复，应立即回滚并升级人工排查。",
             ]

@@ -23,6 +23,7 @@ async def test_liveness_does_not_check_milvus(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
 
     response = await health_api.readiness_check()
@@ -40,6 +41,33 @@ async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_capability_readiness_splits_aiops_from_rag(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+
+    response = await health_api.aiops_readiness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert payload["data"]["selected_capability"] == "aiops"
+    assert payload["data"]["checks"]["milvus"]["status"] == "disconnected"
+    assert payload["data"]["capabilities"]["rag"]["ready"] is False
+    assert payload["data"]["capabilities"]["aiops"]["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_rag_readiness_uses_rag_dependency_status(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+
+    response = await health_api.rag_readiness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 503
+    assert payload["data"]["selected_capability"] == "rag"
+    assert payload["data"]["capabilities"]["rag"]["ready"] is False
+
+
+@pytest.mark.asyncio
 async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
 
@@ -52,6 +80,7 @@ async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
 
     class ConnectedRedis:

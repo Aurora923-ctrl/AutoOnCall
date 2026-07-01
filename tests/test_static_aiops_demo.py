@@ -138,6 +138,13 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "apiFetch(path, options = {})" in script
     assert "localStorage.getItem('autooncallApiToken')" in script
     assert "X-AutoOnCall-Token" in script
+    assert "renderAuthTokenState" in script
+    assert "saveApiToken" in script
+    assert "clearApiToken" in script
+    assert 'id="apiTokenInput"' in page
+    assert 'id="apiTokenSaveBtn"' in page
+    assert 'id="apiTokenClearBtn"' in page
+    assert 'id="authStatusBadge"' in page
     assert script.count("fetch(") == 1
     assert "AUTOONCALL_STATIC_PREFIX" in page
     assert "window.location.protocol === 'file:' ? '.' : '/static'" in page
@@ -179,6 +186,15 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "formatToolContractApproval" in script
     assert "renderEvidenceCards" in script
     assert "formatConfidence" in script
+    assert "sourcePill" in script
+    assert "sourceMetadata" in script
+    assert "mcp_monitor" in script
+    assert "Mixed" in script
+    assert "Mock" in script
+    assert "Real" in script
+    assert "source-pill.real" in style
+    assert "source-pill.mixed" in style
+    assert "source-pill.unavailable" in style
     assert "buildRagMetadata" in script
     assert "renderRagSources" in script
     assert "引用来源" in script
@@ -260,6 +276,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "暂无待审批请求" in script
     assert "暂无已批准待推进事项" in script
     assert "response-next-actions" in script
+    assert 'data-change-mode="sandbox"' in script
     assert 'id="planList"' in page
     assert 'id="toolCallTable"' in page
     assert 'id="evidenceList"' in page
@@ -343,6 +360,7 @@ async def test_aiops_status_catalog_exposes_backend_lifecycle_metadata() -> None
     assert payload["count"] == len(payload["items"])
     assert items["waiting_approval"]["label"] == "等待人工审批"
     assert items["approval_rejected"]["tone"] == "error"
+    assert items["change_validated"]["label"] == "变更已校验"
 
 
 @pytest.mark.asyncio

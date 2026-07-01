@@ -20,7 +20,7 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init bootstrap verify-local start stop restart check upload clean up down status wait \
+.PHONY: help init bootstrap verify-local hygiene-check start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick eval eval-rag eval-change format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
@@ -39,6 +39,7 @@ help:
 	@echo "  $(YELLOW)make init$(NC)         - 🚀 一键初始化（Docker → 服务 → 上传文档）"
 	@echo "  $(YELLOW)make bootstrap$(NC)    - 📦 安装项目和开发工具"
 	@echo "  $(YELLOW)make verify-local$(NC) - ✅ 快速测试 + AIOps/RAG/安全变更评测"
+	@echo "  $(YELLOW)make hygiene-check$(NC) - 🧼 检查本地生成产物"
 	@echo ""
 	@echo "$(CYAN)【Docker 管理】$(NC)"
 	@echo "  $(YELLOW)make up$(NC)           - 🐳 启动 Milvus 容器"
@@ -630,6 +631,10 @@ eval-rag:  ## 运行 RAG 检索离线评测
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
 	$(PYTHON) scripts/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
+
+hygiene-check:  ## 检查本地生成产物
+	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"
+	$(PYTHON) scripts/hygiene_check.py
 
 verify-local:  ## 面试前本地快速质量验证
 	@echo "$(YELLOW)✅ 运行 AutoOnCall 本地快速验证...$(NC)"

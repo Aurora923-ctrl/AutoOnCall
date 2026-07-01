@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from app.config import config
-from app.core.auth import READ_SCOPE, require_scope
+from app.core.auth import EVAL_SCOPE, require_scope
 from app.services.evaluation_read_models import (
     build_adapter_unavailable_payload,
     build_eval_summary_payload,
@@ -20,7 +20,7 @@ EVAL_SUMMARY_PATH = Path(config.eval_summary_path)
 ADAPTER_VERIFICATION_PATH = Path(config.adapter_verification_path)
 
 
-@router.get("/eval/summary", dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.get("/eval/summary", dependencies=[Depends(require_scope(EVAL_SCOPE))])
 async def get_eval_summary() -> dict[str, Any]:
     """Return the latest offline evaluation summary for the frontend dashboard."""
     if not EVAL_SUMMARY_PATH.exists():
@@ -46,7 +46,7 @@ async def get_eval_summary() -> dict[str, Any]:
     return build_eval_summary_payload(raw_payload, summary_path=EVAL_SUMMARY_PATH)
 
 
-@router.get("/eval/adapter-verification", dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.get("/eval/adapter-verification", dependencies=[Depends(require_scope(EVAL_SCOPE))])
 async def get_adapter_verification() -> dict[str, Any]:
     """Return the latest full-stack adapter verification payload for the frontend."""
     if not ADAPTER_VERIFICATION_PATH.exists():
@@ -72,6 +72,5 @@ async def get_adapter_verification() -> dict[str, Any]:
     return {
         **raw_payload,
         "available": True,
-        "path": str(ADAPTER_VERIFICATION_PATH),
         "message": str(raw_payload.get("message") or "adapter verification loaded"),
     }

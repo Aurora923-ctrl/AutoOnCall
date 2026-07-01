@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app.models.approval import ApprovalRequest
-from app.models.change_execution import ManualExecutionResultRequest
+from app.models.change_execution import ChangeExecution, ManualExecutionResultRequest
 from app.models.incident import utc_now
 from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService
@@ -33,6 +33,27 @@ def _build_runtime(tmp_path):
 
 def _state_store(service: ChangeExecutionService) -> AIOpsSQLiteStore:
     return AIOpsSQLiteStore(service.database_path)
+
+
+def test_sqlite_store_creates_change_execution_once_without_overwrite(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "safe-change-store.db")
+    execution = ChangeExecution(
+        change_execution_id="chgexec-stable",
+        change_plan_id="plan-1",
+        approval_id="approval-1",
+        incident_id="inc-1",
+        status="created",
+    )
+
+    first, first_created = store.create_change_execution_once(execution)
+    second, second_created = store.create_change_execution_once(
+        execution.model_copy(update={"status": "precheck_running"})
+    )
+
+    assert first_created is True
+    assert first.change_execution_id == execution.change_execution_id
+    assert second_created is False
+    assert second.status == "created"
 
 
 def _save_approved_report(report_store: ReportGenerator, *, incident_id: str) -> DiagnosisReport:
@@ -127,7 +148,7 @@ async def test_safe_change_requires_approved_request(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_change_dry_run_only_closes_without_production_execution(tmp_path) -> None:
+async def test_safe_change_dry_run_only_validates_without_resolving_incident(tmp_path) -> None:
     service, approval_store, trace_store, report_store = _build_runtime(tmp_path)
     approval, plan = _approved_request(approval_store)
     old_report = _save_approved_report(report_store, incident_id=approval.incident_id)
@@ -149,11 +170,11 @@ async def test_safe_change_dry_run_only_closes_without_production_execution(tmp_
         "change_report",
         "complete",
     ]
-    assert events[-1]["status"] == "closed"
-    assert events[-1]["change_execution"]["lifecycle_status"] == "resolved"
+    assert events[-1]["status"] == "dry_run_completed"
+    assert events[-1]["change_execution"]["lifecycle_status"] == "change_validated"
     assert events[-1]["change_execution"]["stages"][2]["status"] == "skipped"
     execution = service.list_executions(incident_id=approval.incident_id)[0]
-    assert execution.status == "closed"
+    assert execution.status == "dry_run_completed"
     assert execution.pre_check is not None
     assert execution.pre_check.status == "passed"
     assert execution.dry_run is not None
@@ -163,28 +184,161 @@ async def test_safe_change_dry_run_only_closes_without_production_execution(tmp_
 
     updated_report = report_store.get_report(approval.incident_id)
     assert updated_report is not None
-    assert updated_report.status == "resolved"
+    assert updated_report.status == "change_validated"
     assert updated_report.manual_action_required is False
-    assert updated_report.change_executions[0]["status"] == "closed"
+    assert updated_report.change_executions[0]["status"] == "dry_run_completed"
+    assert any("尚不能证明生产故障已经恢复" in item for item in updated_report.uncertainties)
 
     state = _state_store(service).get_incident_state(approval.incident_id)
     assert state is not None
-    assert state.status == "resolved"
+    assert state.status == "change_validated"
     assert state.latest_approval_id == approval.approval_id
     assert state.manual_action_required is False
 
     report_store.save_report(old_report)
     preserved_state = _state_store(service).get_incident_state(approval.incident_id)
     assert preserved_state is not None
-    assert preserved_state.status == "resolved"
+    assert preserved_state.status == "change_validated"
     assert preserved_state.latest_approval_id == approval.approval_id
     assert preserved_state.manual_action_required is False
 
 
 @pytest.mark.asyncio
-async def test_prod_sandbox_without_local_sandbox_escalates_with_clear_message(tmp_path) -> None:
-    service, approval_store, _, _ = _build_runtime(tmp_path)
+async def test_dry_run_can_resume_into_manual_record_waiting_state(tmp_path) -> None:
+    service, approval_store, _, report_store = _build_runtime(tmp_path)
     approval, plan = _approved_request(approval_store)
+    _save_approved_report(report_store, incident_id=approval.incident_id)
+
+    first = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="dry_run_only",
+        operator="pytest",
+    )
+    second = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="pytest",
+    )
+
+    assert first[-1]["status"] == "dry_run_completed"
+    assert second[0]["stage"] == "waiting_manual_execution"
+    assert second[-1]["status"] == "waiting_manual_execution"
+    executions = service.list_executions(incident_id=approval.incident_id)
+    assert len(executions) == 1
+    assert executions[0].mode == "manual_record"
+    assert executions[0].status == "waiting_manual_execution"
+
+    updated_report = report_store.get_report(approval.incident_id)
+    assert updated_report is not None
+    assert updated_report.status == "waiting_manual_execution"
+    assert updated_report.manual_action_required is True
+
+
+@pytest.mark.asyncio
+async def test_dry_run_can_resume_into_sandbox_validation(tmp_path) -> None:
+    service, approval_store, _, report_store = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store, environment="staging")
+    _save_approved_report(report_store, incident_id=approval.incident_id)
+
+    first = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="dry_run_only",
+        operator="pytest",
+    )
+    second = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="sandbox",
+        operator="pytest",
+    )
+
+    assert first[-1]["status"] == "dry_run_completed"
+    assert second[0]["stage"] == "sandbox_observed"
+    assert second[0]["status"] == "passed"
+    assert second[-1]["status"] == "sandbox_validated"
+    executions = service.list_executions(incident_id=approval.incident_id)
+    assert len(executions) == 1
+    assert executions[0].mode == "sandbox"
+    assert executions[0].status == "sandbox_validated"
+    assert executions[0].observation is not None
+
+    updated_report = report_store.get_report(approval.incident_id)
+    assert updated_report is not None
+    assert updated_report.status == "change_validated"
+    assert updated_report.change_executions[-1]["status"] == "sandbox_validated"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_mode", ["manual_record", "sandbox"])
+async def test_stale_plan_blocks_resume_from_completed_dry_run(
+    tmp_path,
+    resume_mode: str,
+) -> None:
+    service, approval_store, trace_store, report_store = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store, environment="staging")
+    _save_approved_report(report_store, incident_id=approval.incident_id)
+
+    first = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="dry_run_only",
+        operator="pytest",
+    )
+    stale_plan = plan.model_copy(
+        update={
+            "created_at": utc_now() - timedelta(hours=2),
+            "expires_in_seconds": 60,
+        }
+    )
+    approval_store.create_request(approval.model_copy(update={"change_plan": stale_plan}))
+
+    second = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=stale_plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode=resume_mode,
+        operator="pytest",
+    )
+
+    assert first[-1]["status"] == "dry_run_completed"
+    assert second[0]["stage"] == "precheck_completed"
+    assert second[0]["status"] == "failed"
+    assert "过期窗口" in second[0]["message"]
+    assert second[-1]["status"] == "precheck_failed"
+    execution = service.list_executions(incident_id=approval.incident_id)[0]
+    assert execution.status == "precheck_failed"
+    assert execution.dry_run is not None
+    assert execution.pre_check is not None
+    assert "过期窗口" in execution.pre_check.reason
+    assert trace_store.list_events(incident_id=approval.incident_id, event_type="change_precheck")
+
+    updated_report = report_store.get_report(approval.incident_id)
+    assert updated_report is not None
+    assert updated_report.change_executions[-1]["status"] == "precheck_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("environment", ["prod", "production", "prd", "线上", "生产"])
+async def test_prod_sandbox_without_local_sandbox_escalates_with_clear_message(
+    tmp_path,
+    environment: str,
+) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store, environment=environment)
 
     events = await _collect_events(
         service,
@@ -202,6 +356,49 @@ async def test_prod_sandbox_without_local_sandbox_escalates_with_clear_message(t
     assert "沙箱执行和观察已完成" not in observation_event["message"]
     assert events[-1]["status"] == "escalated"
     assert "未执行生产变更" in events[-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_validation_does_not_resolve_incident(tmp_path) -> None:
+    service, approval_store, _, report_store = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store, environment="staging")
+    _save_approved_report(report_store, incident_id=approval.incident_id)
+
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="sandbox",
+        operator="pytest",
+    )
+
+    observation_event = events[-2]
+    assert observation_event["stage"] == "sandbox_observed"
+    assert observation_event["status"] == "passed"
+    assert observation_event["change_execution"]["status"] == "sandbox_validated"
+    assert observation_event["change_execution"]["lifecycle_status"] == "change_validated"
+    assert events[-1]["status"] == "sandbox_validated"
+
+    execution = service.list_executions(incident_id=approval.incident_id)[0]
+    assert execution.status == "sandbox_validated"
+    assert execution.observation is not None
+    assert execution.observation.status == "passed"
+
+    updated_report = report_store.get_report(approval.incident_id)
+    assert updated_report is not None
+    assert updated_report.status == "change_validated"
+    assert updated_report.manual_action_required is False
+    assert updated_report.change_executions[-1]["status"] == "sandbox_validated"
+    assert any(
+        "sandbox" in item and "尚不能证明生产故障已经恢复" in item
+        for item in updated_report.uncertainties
+    )
+
+    state = _state_store(service).get_incident_state(approval.incident_id)
+    assert state is not None
+    assert state.status == "change_validated"
+    assert state.manual_action_required is False
 
 
 @pytest.mark.asyncio

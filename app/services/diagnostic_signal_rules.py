@@ -19,6 +19,7 @@ KNOWN_EVIDENCE_SOURCES = {
     "tempo",
     "redpanda",
     "mcp_monitor",
+    "mcp_monitor_mixed",
     "mcp_cls",
     "mock",
     "rule_based",

@@ -209,6 +209,36 @@ class AIOpsSQLiteStore:
                 ),
             )
 
+    def save_approval_decision_if_pending(self, request: ApprovalRequest) -> bool:
+        """Persist an approval decision only while the request is still pending."""
+        payload = _dump_model(request)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approval_requests
+                SET
+                    incident_id = ?,
+                    status = ?,
+                    risk_level = ?,
+                    action = ?,
+                    created_at = ?,
+                    decided_at = ?,
+                    payload = ?
+                WHERE approval_id = ? AND status = 'pending'
+                """,
+                (
+                    request.incident_id,
+                    request.status,
+                    request.risk_level,
+                    request.action,
+                    request.created_at.isoformat(),
+                    request.decided_at.isoformat() if request.decided_at else None,
+                    payload,
+                    request.approval_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def get_approval_request(self, approval_id: str) -> ApprovalRequest | None:
         """Return one approval request by id."""
         with self._connect() as connection:
@@ -278,6 +308,57 @@ class AIOpsSQLiteStore:
                     payload,
                 ),
             )
+
+    def create_change_execution_once(
+        self,
+        execution: ChangeExecution,
+    ) -> tuple[ChangeExecution, bool]:
+        """Create a safe change workflow once and return an existing row on conflict."""
+        payload = _dump_model(execution)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO change_executions (
+                    change_execution_id, change_plan_id, approval_id, incident_id,
+                    status, mode, created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(change_execution_id) DO NOTHING
+                """,
+                (
+                    execution.change_execution_id,
+                    execution.change_plan_id,
+                    execution.approval_id,
+                    execution.incident_id,
+                    execution.status,
+                    execution.mode,
+                    execution.created_at.isoformat(),
+                    execution.updated_at.isoformat(),
+                    payload,
+                ),
+            )
+            if cursor.rowcount == 1:
+                return execution, True
+
+            existing = connection.execute(
+                "SELECT payload FROM change_executions WHERE change_execution_id = ?",
+                (execution.change_execution_id,),
+            ).fetchone()
+            if existing is None:
+                existing = connection.execute(
+                    """
+                    SELECT payload FROM change_executions
+                    WHERE incident_id = ? AND change_plan_id = ? AND approval_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    LIMIT 1
+                    """,
+                    (execution.incident_id, execution.change_plan_id, execution.approval_id),
+                ).fetchone()
+            if existing is None:
+                raise RuntimeError(
+                    "change execution creation conflicted but existing record was not found"
+                )
+            return ChangeExecution.model_validate(_load_payload(existing)), False
 
     def get_change_execution(self, change_execution_id: str) -> ChangeExecution | None:
         """Return one safe change workflow by id."""
@@ -691,7 +772,8 @@ class AIOpsSQLiteStore:
                 """)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+        connection = sqlite3.connect(self.database_path, timeout=30)
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.row_factory = sqlite3.Row
         return connection
 

@@ -160,12 +160,22 @@ def effective_run_status(
     report_status = report.status if report and report.status else ""
     post_approval_statuses = {
         "approval_resumed",
+        "change_validated",
         "resolved",
         "rollback_recommended",
+        "precheck_running",
         "precheck_failed",
+        "dry_run_running",
+        "dry_run_completed",
         "dry_run_failed",
+        "waiting_manual_execution",
         "manual_result_required",
+        "manual_execution_recorded",
         "manual_result_recorded",
+        "sandbox_executing",
+        "sandbox_validated",
+        "observing",
+        "escalated",
         "closed",
         "failed",
     }

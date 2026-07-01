@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
 
 from app.config import config
-from app.models.alert import AlertEvent, AlertIngestionItem, AlertIngestionResult
+from app.models.alert import (
+    MAX_ALERT_NAME_LENGTH,
+    MAX_ALERT_URL_LENGTH,
+    AlertEvent,
+    AlertIngestionItem,
+    AlertIngestionResult,
+)
 from app.models.incident import Incident, utc_now
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.incident_lifecycle import normalize_alert_status
@@ -17,6 +24,34 @@ ALERT_SOURCE_ALERTMANAGER = "alertmanager"
 MAX_FINGERPRINT_LENGTH = 128
 MAX_SERVICE_NAME_LENGTH = 128
 MAX_ENVIRONMENT_LENGTH = 64
+MAX_ALERT_FIELD_VALUE_LENGTH = 4096
+REDACTED_VALUE = "[REDACTED]"
+SENSITIVE_ALERT_KEYWORDS = (
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "secret",
+    "apikey",
+    "api_key",
+    "access_key",
+    "credential",
+    "authorization",
+    "bearer",
+    "cookie",
+    "dsn",
+)
+_AUTH_HEADER_VALUE_RE = re.compile(
+    r"\b(authorization)\s*([:=])\s*(?:bearer|basic)?\s*[^,\s;&]+",
+    re.IGNORECASE,
+)
+_BEARER_VALUE_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential|cookie|dsn)"
+    r"(\s*[:=]\s*)"
+    r"[^,\s;&]+",
+    re.IGNORECASE,
+)
 
 
 class AlertIngestionService:
@@ -37,6 +72,9 @@ class AlertIngestionService:
             event = _normalize_alertmanager_alert(payload, raw_alert)
             existing = self.store.get_alert_event(event.fingerprint)
             created = existing is None
+            previous_status = existing.status if existing is not None else None
+            status_changed = previous_status is not None and previous_status != event.status
+            reopened = previous_status == "resolved" and event.status == "firing"
             if existing is not None:
                 event.created_at = existing.created_at
                 deduplicated_count += 1
@@ -56,6 +94,9 @@ class AlertIngestionService:
                     event=event,
                     created=created,
                     deduplicated=not created,
+                    previous_status=previous_status,
+                    status_changed=status_changed,
+                    reopened=reopened,
                     incident_id=incident.incident_id,
                     incident_status=incident_state.status,
                     status_reason=incident_state.status_reason,
@@ -119,18 +160,27 @@ def _normalize_alertmanager_alert(
     common_annotations = _as_dict(webhook_payload.get("commonAnnotations"))
     labels = {**common_labels, **_as_dict(raw_alert.get("labels"))}
     annotations = {**common_annotations, **_as_dict(raw_alert.get("annotations"))}
+    stored_labels = _redact_mapping(labels)
+    stored_annotations = _redact_mapping(annotations)
     status = _normalize_status(raw_alert.get("status") or webhook_payload.get("status"))
-    alertname = str(labels.get("alertname") or raw_alert.get("alertname") or "UnknownAlert")
+    alertname = _truncate_text(
+        str(labels.get("alertname") or raw_alert.get("alertname") or "UnknownAlert"),
+        MAX_ALERT_NAME_LENGTH,
+    )
     service_name = _truncate_text(_infer_service_name(labels), MAX_SERVICE_NAME_LENGTH)
     environment = _truncate_text(_infer_environment(labels), MAX_ENVIRONMENT_LENGTH)
     severity = _map_severity(str(labels.get("severity") or ""))
     summary = _first_non_empty(
-        annotations.get("summary"),
-        annotations.get("message"),
-        annotations.get("description"),
+        stored_annotations.get("summary"),
+        stored_annotations.get("message"),
+        stored_annotations.get("description"),
         f"{alertname} firing for {service_name}",
     )
-    description = _first_non_empty(annotations.get("description"), annotations.get("runbook"), "")
+    description = _first_non_empty(
+        stored_annotations.get("description"),
+        stored_annotations.get("runbook"),
+        "",
+    )
     fingerprint = _alert_fingerprint(
         source=ALERT_SOURCE_ALERTMANAGER,
         alertname=alertname,
@@ -150,11 +200,14 @@ def _normalize_alertmanager_alert(
         environment=environment,
         summary=summary,
         description=description,
-        labels=labels,
-        annotations=annotations,
+        labels=stored_labels,
+        annotations=stored_annotations,
         starts_at=_parse_datetime(raw_alert.get("startsAt") or raw_alert.get("starts_at")),
         ends_at=_parse_datetime(raw_alert.get("endsAt") or raw_alert.get("ends_at")),
-        generator_url=str(raw_alert.get("generatorURL") or raw_alert.get("generator_url") or ""),
+        generator_url=_truncate_text(
+            str(raw_alert.get("generatorURL") or raw_alert.get("generator_url") or ""),
+            MAX_ALERT_URL_LENGTH,
+        ),
         raw_payload=_raw_payload_for_storage(webhook_payload, raw_alert),
     )
 
@@ -197,7 +250,9 @@ def _alert_fingerprint(
     raw_fingerprint: Any,
 ) -> str:
     if raw_fingerprint:
-        return _normalize_fingerprint(raw_fingerprint)
+        normalized = _normalize_fingerprint(raw_fingerprint)
+        if normalized:
+            return normalized
     key_labels = {
         "alertname": alertname,
         "service": service_name,
@@ -280,25 +335,33 @@ def _raw_payload_for_storage(
 ) -> dict[str, Any]:
     """Return a compact payload unless raw external storage is explicitly enabled."""
     if config.aiops_store_raw_external_payload:
-        return {"webhook": webhook_payload, "alert": raw_alert}
+        return {"webhook": _redact_mapping(webhook_payload), "alert": _redact_mapping(raw_alert)}
     return {
         "raw_truncated": True,
         "webhook": {
             "receiver": webhook_payload.get("receiver", ""),
             "status": webhook_payload.get("status", ""),
-            "groupLabels": _as_dict(webhook_payload.get("groupLabels")),
-            "commonLabels": _as_dict(webhook_payload.get("commonLabels")),
-            "commonAnnotations": _as_dict(webhook_payload.get("commonAnnotations")),
-            "externalURL": webhook_payload.get("externalURL", ""),
+            "groupLabels": _redact_mapping(_as_dict(webhook_payload.get("groupLabels"))),
+            "commonLabels": _redact_mapping(_as_dict(webhook_payload.get("commonLabels"))),
+            "commonAnnotations": _redact_mapping(
+                _as_dict(webhook_payload.get("commonAnnotations"))
+            ),
+            "externalURL": _truncate_text(
+                str(webhook_payload.get("externalURL", "")),
+                MAX_ALERT_URL_LENGTH,
+            ),
         },
         "alert": {
             "status": raw_alert.get("status", ""),
             "fingerprint": raw_alert.get("fingerprint", ""),
-            "labels": _as_dict(raw_alert.get("labels")),
-            "annotations": _as_dict(raw_alert.get("annotations")),
+            "labels": _redact_mapping(_as_dict(raw_alert.get("labels"))),
+            "annotations": _redact_mapping(_as_dict(raw_alert.get("annotations"))),
             "startsAt": raw_alert.get("startsAt", ""),
             "endsAt": raw_alert.get("endsAt", ""),
-            "generatorURL": raw_alert.get("generatorURL", ""),
+            "generatorURL": _truncate_text(
+                str(raw_alert.get("generatorURL", "")),
+                MAX_ALERT_URL_LENGTH,
+            ),
         },
     }
 
@@ -320,6 +383,45 @@ def _truncate_text(value: str, max_length: int) -> str:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _redact_mapping(values: dict[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for key, value in values.items():
+        if _is_sensitive_alert_key(str(key)):
+            redacted[key] = REDACTED_VALUE
+        else:
+            redacted[key] = _redact_value(value)
+    return redacted
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _redact_mapping(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, str):
+        return _truncate_text(_redact_sensitive_text(value), MAX_ALERT_FIELD_VALUE_LENGTH)
+    return value
+
+
+def _redact_sensitive_text(value: str) -> str:
+    text = _AUTH_HEADER_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)} {REDACTED_VALUE}",
+        value,
+    )
+    text = _BEARER_VALUE_RE.sub(f"Bearer {REDACTED_VALUE}", text)
+    return _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED_VALUE}",
+        text,
+    )
+
+
+def _is_sensitive_alert_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_").replace(".", "_")
+    return any(keyword in normalized for keyword in SENSITIVE_ALERT_KEYWORDS)
 
 
 alert_ingestion_service = AlertIngestionService()

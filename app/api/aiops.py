@@ -2,14 +2,23 @@
 AIOps 智能运维接口
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.sse import is_terminal_event, sse_message
 from app.config import config
-from app.core.auth import CHANGE_SCOPE, DIAGNOSE_SCOPE, READ_SCOPE, require_scope
-from app.models.aiops import AIOpsRequest, AIOpsResumeRequest
+from app.core.auth import (
+    CHANGE_SCOPE,
+    DIAGNOSE_SCOPE,
+    READ_SCOPE,
+    AuthPrincipal,
+    audit_actor,
+    require_scope,
+)
+from app.models.aiops import AIOPS_SESSION_ID_MAX_LENGTH, AIOpsRequest, AIOpsResumeRequest
 from app.models.approval import ApprovalRequest
 from app.models.change_execution import ChangeResumeRequest, ManualExecutionResultRequest
 from app.services.aiops_service import aiops_service
@@ -110,9 +119,7 @@ async def list_aiops_runs(
             if known_incident
             else []
         )
-        report = (
-            get_report_generator().get_report(snapshot.incident_id) if known_incident else None
-        )
+        report = get_report_generator().get_report(snapshot.incident_id) if known_incident else None
         items.append(
             build_aiops_run_summary(
                 snapshot,
@@ -137,7 +144,9 @@ async def list_aiops_runs(
 
 
 @router.get("/aiops/runs/{session_id}", dependencies=[Depends(require_scope(READ_SCOPE))])
-async def get_aiops_run_status(session_id: str) -> dict:
+async def get_aiops_run_status(
+    session_id: str = Path(..., min_length=1, max_length=AIOPS_SESSION_ID_MAX_LENGTH),
+) -> dict:
     """Return the latest durable state for one diagnosis run."""
     snapshot = aiops_service.get_session_snapshot(session_id)
     if snapshot is None:
@@ -258,7 +267,7 @@ async def diagnose_stream(request: AIOpsRequest):
     Returns:
         SSE 事件流
     """
-    session_id = request.session_id or "default"
+    session_id = request.session_id or f"session-{uuid4().hex}"
 
     logger.info(f"[会话 {session_id}] 收到 AIOps 诊断请求（流式）")
 
@@ -314,7 +323,7 @@ async def run_demo_incident(case_id: str, request: AIOpsRequest | None = None):
     """Run a fixed demo incident through the normal AIOps SSE workflow."""
     canonical_id = canonical_demo_case_id(case_id)
     incident = _resolve_demo_incident(case_id)
-    request_session_id = request.session_id if request and request.session_id != "default" else None
+    request_session_id = request.session_id if request and request.session_id else None
     session_id = request_session_id or f"demo-{canonical_id}"
     if request and request.incident:
         incident = request.incident
@@ -384,14 +393,15 @@ async def resume_diagnosis_stream(incident_id: str, request: AIOpsResumeRequest)
 
 @router.post(
     "/incidents/{incident_id}/changes/{change_plan_id}/resume",
-    dependencies=[Depends(require_scope(CHANGE_SCOPE))],
 )
 async def resume_safe_change_stream(
     incident_id: str,
     change_plan_id: str,
     request: ChangeResumeRequest,
+    principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ):
     """Start the safe change workflow after an approval decision."""
+    operator = audit_actor(principal, request.operator)
 
     async def event_generator():
         try:
@@ -400,7 +410,7 @@ async def resume_safe_change_stream(
                 change_plan_id=change_plan_id,
                 approval_id=request.approval_id,
                 mode=request.mode,
-                operator=request.operator,
+                operator=operator,
                 observe_window_seconds=request.observe_window_seconds,
             ):
                 yield sse_message(event)
@@ -469,14 +479,15 @@ async def get_change_execution(change_execution_id: str) -> dict:
 
 @router.post(
     "/changes/{change_execution_id}/manual-result",
-    dependencies=[Depends(require_scope(CHANGE_SCOPE))],
 )
 async def submit_manual_change_result(
     change_execution_id: str,
     request: ManualExecutionResultRequest,
+    principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ) -> dict:
     """Record a manual execution result for a waiting safe change workflow."""
     try:
+        request = request.model_copy(update={"operator": audit_actor(principal, request.operator)})
         execution = get_change_execution_service().record_manual_result(
             change_execution_id=change_execution_id,
             request=request,
@@ -503,14 +514,14 @@ def _resolve_resume_approval(
                     detail="approval_id does not belong to the requested incident",
                 )
         else:
+            pending = service.list_requests(incident_id=incident_id, status="pending")
+            if pending:
+                raise HTTPException(
+                    status_code=409,
+                    detail="approval is still pending",
+                )
             approved = service.list_requests(incident_id=incident_id, status="approved")
             if not approved:
-                pending = service.list_requests(incident_id=incident_id, status="pending")
-                if pending:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="approval is still pending",
-                    )
                 raise HTTPException(
                     status_code=404,
                     detail=f"No approved approval for incident {incident_id}",

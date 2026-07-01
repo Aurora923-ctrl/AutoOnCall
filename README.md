@@ -208,7 +208,7 @@ Windows 下也可以使用：
 
 - DashScope：`DASHSCOPE_API_KEY`、`DASHSCOPE_API_BASE`、`DASHSCOPE_MODEL`、`DASHSCOPE_EMBEDDING_MODEL`、`RAG_MODEL`
 - Milvus：`MILVUS_HOST`、`MILVUS_PORT`、`MILVUS_RECREATE_ON_DIMENSION_MISMATCH`
-- RAG：`RAG_TOP_K`、`RAG_MAX_L2_DISTANCE`、`RAG_HYBRID_SEARCH_ENABLED`、`RAG_RERANK_ENABLED`、`INDEX_ALLOWED_ROOTS`
+- RAG：`RAG_TOP_K`、`RAG_MAX_L2_DISTANCE`、`RAG_MIN_LEXICAL_TRUST_SCORE`、`RAG_HYBRID_SEARCH_ENABLED`、`RAG_RERANK_ENABLED`、`INDEX_ALLOWED_ROOTS`
 - AIOps 状态：`AIOPS_STORAGE_BACKEND`、`AIOPS_SQLITE_PATH`、`MYSQL_DSN`
 - Mock 边界：`AIOPS_MOCK_FALLBACK_ENABLED`
 - 原始外部 payload：`AIOPS_STORE_RAW_EXTERNAL_PAYLOAD`
@@ -216,7 +216,7 @@ Windows 下也可以使用：
 - API 鉴权：`API_AUTH_ENABLED`、`API_READ_TOKEN`、`API_OPERATOR_TOKEN`、`API_APPROVER_TOKEN`、`API_ADMIN_TOKEN`、`API_AUTH_TOKENS`
 - 外部适配器：`ALERTMANAGER_BASE_URL`、`PROMETHEUS_BASE_URL`、`LOG_GATEWAY_URL`、`LOKI_BASE_URL`、`JAEGER_BASE_URL`、`TEMPO_BASE_URL`、`KUBERNETES_API_SERVER`、`REDIS_URL`、`MYSQL_DSN`、`CMDB_API_URL`、`DEPLOY_HISTORY_API_URL`、`TICKET_API_URL`
 
-默认 `API_AUTH_ENABLED=false`，适合本地 demo 和测试。内网或生产化环境应开启 token RBAC；更正式的生产环境应接入 SSO/OIDC，并在网关或应用层统一治理身份。
+默认 `API_AUTH_ENABLED=false`，适合本地 demo 和测试；默认 `AIOPS_MOCK_FALLBACK_ENABLED=false`，避免生产环境漏配外部系统时生成合成诊断证据。本地 demo 如需离线演示，可显式打开 mock fallback。内网或生产化环境应开启 token RBAC；更正式的生产环境应接入 SSO/OIDC，并在网关或应用层统一治理身份。
 
 ## 质量验证
 
@@ -234,7 +234,10 @@ make eval-change
 
 ```bash
 make verify-local
+make hygiene-check
 ```
+
+`make hygiene-check` 只报告不删除，用于发现 `venv/`、`logs/`、`data/*.db`、缓存目录、覆盖率文件和上传产物等本地生成物。
 
 如果浏览器 smoke 测试在受限环境下因为无法绑定本地端口失败，可以先跑非浏览器测试，再在本机可开放端口的环境补测前端。
 
@@ -244,6 +247,7 @@ make verify-local
 - 本地演示可能使用 mock/fallback；生产或严格验收应设置 `AIOPS_MOCK_FALLBACK_ENABLED=false`。
 - 外部响应和告警 webhook 默认保持精简存储，生产建议保留 `AIOPS_STORE_RAW_EXTERNAL_PAYLOAD=false`。
 - API token RBAC 已能支撑内网演示和轻量准入，生产仍建议接入 SSO/OIDC。
+- 服务绑定到 `0.0.0.0` 且鉴权关闭或 CORS 全开放时，启动日志会给出生产暴露配置提示。
 - 安全变更链路只支持 dry-run、sandbox 或人工执行记录，不自动执行重启、删 Pod、执行 SQL 或修改生产配置。
 - SQLite 适合单机本地或单副本演示，多副本部署应切 MySQL 并配合备份和迁移策略。
 - 离线评测用于稳定回归，不代表线上真实准确率。

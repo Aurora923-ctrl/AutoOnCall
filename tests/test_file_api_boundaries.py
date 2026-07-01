@@ -225,3 +225,101 @@ def test_splitter_treats_markdown_extension_as_markdown() -> None:
     assert docs[0].metadata["_extension"] == ".markdown"
     assert docs[0].metadata["_file_name"] == "redis.markdown"
     assert docs[0].metadata.get("h1") == "Redis"
+
+
+def test_index_single_file_marks_existing_index_stale_when_vector_add_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    runbook = docs_dir / "redis.md"
+    runbook.write_text("# Redis\n\nRedis maxclients timeout runbook", encoding="utf-8")
+    service = VectorIndexService()
+
+    class FailingVectorStoreManager:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+            self.deleted_versions: list[tuple[str, str]] = []
+
+        def add_documents(self, documents):
+            raise RuntimeError("milvus unavailable")
+
+        def delete_by_source(self, source: str) -> int:
+            self.deleted_sources.append(source)
+            return 0
+
+        def delete_by_source_except_version(self, source: str, version: str) -> int:
+            self.deleted_versions.append((source, version))
+            return 0
+
+    class RecordingLexicalIndex:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+            self.upserted_sources: list[str] = []
+            self.stale_sources: list[tuple[str, str]] = []
+
+        def delete_source(self, source: str) -> int:
+            self.deleted_sources.append(source)
+            return 0
+
+        def upsert_source(self, source: str, documents) -> None:
+            self.upserted_sources.append(source)
+
+        def mark_source_stale(self, source: str, reason: str) -> None:
+            self.stale_sources.append((source, reason))
+
+    fake_vector = FailingVectorStoreManager()
+    fake_lexical = RecordingLexicalIndex()
+
+    monkeypatch.setattr(vector_index_module.config, "index_allowed_roots", str(tmp_path))
+    monkeypatch.setattr(vector_index_module, "vector_store_manager", fake_vector)
+    monkeypatch.setattr(vector_index_module, "lexical_index_service", fake_lexical)
+
+    with pytest.raises(RuntimeError, match="索引文件失败"):
+        service.index_single_file(str(runbook))
+
+    assert fake_vector.deleted_sources == []
+    assert fake_vector.deleted_versions == []
+    assert fake_lexical.deleted_sources == []
+    assert fake_lexical.upserted_sources == []
+    assert fake_lexical.stale_sources == [(runbook.resolve().as_posix(), "milvus unavailable")]
+
+
+def test_index_single_file_empty_content_clears_existing_indexes(monkeypatch, tmp_path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    runbook = docs_dir / "redis.md"
+    runbook.write_text("   \n", encoding="utf-8")
+    service = VectorIndexService()
+
+    class RecordingVectorStoreManager:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+
+        def delete_by_source(self, source: str) -> int:
+            self.deleted_sources.append(source)
+            return 3
+
+    class RecordingLexicalIndex:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+
+        def delete_source(self, source: str) -> int:
+            self.deleted_sources.append(source)
+            return 2
+
+    fake_vector = RecordingVectorStoreManager()
+    fake_lexical = RecordingLexicalIndex()
+
+    monkeypatch.setattr(vector_index_module.config, "index_allowed_roots", str(tmp_path))
+    monkeypatch.setattr(vector_index_module, "vector_store_manager", fake_vector)
+    monkeypatch.setattr(vector_index_module, "lexical_index_service", fake_lexical)
+
+    result = service.index_single_file(str(runbook))
+    normalized_path = runbook.resolve().as_posix()
+
+    assert result.status == "empty"
+    assert fake_vector.deleted_sources == [normalized_path]
+    assert fake_lexical.deleted_sources == [normalized_path]
+    assert "已清理旧索引" in (result.message or "")

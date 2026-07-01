@@ -12,6 +12,7 @@ from app.integrations.base import (
     bearer_headers,
     parse_duration_seconds,
     require_config,
+    require_kubernetes_label_value,
 )
 
 
@@ -34,7 +35,8 @@ class KubernetesStatusAdapter:
         self, service_name: str, time_range: str = "10m"
     ) -> dict[str, Any]:
         api_server = require_config(self.api_server, "KUBERNETES_API_SERVER")
-        selector = f"app={service_name}"
+        label_value = require_kubernetes_label_value(service_name, field_name="service_name")
+        selector = f"app={label_value}"
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
             headers=bearer_headers(self.token),

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -88,7 +88,7 @@ class LokiLogAdapter:
 
     @staticmethod
     def _build_logql(service_name: str, query: str) -> str:
-        selector = f'{{service="{service_name}"}}'
+        selector = f'{{service="{_escape_logql_string(service_name)}"}}'
         keywords = [
             item.strip()
             for separator in [" OR ", " or ", "|", ","]
@@ -97,9 +97,9 @@ class LokiLogAdapter:
         ]
         if not keywords:
             return selector
-        filters = " ".join(f"|~ {quote(keyword, safe='')!r}" for keyword in keywords)
-        # Loki expects quoted regex strings; quote() keeps special user input inert.
-        filters = " ".join(f'|~ "{quote(keyword, safe="")}"' for keyword in keywords)
+        filters = " ".join(
+            f'|~ "{_escape_logql_string(re.escape(keyword))}"' for keyword in keywords
+        )
         return f"{selector} {filters}"
 
     @staticmethod
@@ -122,3 +122,8 @@ class LokiLogAdapter:
                     }
                 )
         return logs
+
+
+def _escape_logql_string(value: str) -> str:
+    """Escape a value for a quoted LogQL string literal."""
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')

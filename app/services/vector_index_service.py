@@ -249,22 +249,22 @@ class VectorIndexService:
             )
 
         logger.info(f"开始索引文件: {path}")
+        normalized_path = path.as_posix()
 
         try:
             content = path.read_text(encoding="utf-8")
             logger.info(f"读取文件: {path}, 内容长度: {len(content)} 字符")
 
-            normalized_path = path.as_posix()
-
-            vector_store_manager.delete_by_source(normalized_path)
-            lexical_index_service.delete_source(normalized_path)
-
             documents = document_splitter_service.split_document(content, normalized_path)
             logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
-            # 4. 添加文档到向量存储
             if documents:
+                document_version = str(documents[0].metadata.get("_document_version") or "")
                 vector_store_manager.add_documents(documents)
+                vector_store_manager.delete_by_source_except_version(
+                    normalized_path,
+                    document_version,
+                )
                 lexical_index_service.upsert_source(normalized_path, documents)
                 logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
                 return SingleFileIndexingResult(
@@ -274,16 +274,25 @@ class VectorIndexService:
                     message="文件索引完成",
                 ).finish()
             else:
+                vector_deleted = vector_store_manager.delete_by_source(normalized_path)
+                lexical_deleted = lexical_index_service.delete_source(normalized_path)
                 logger.warning(f"文件内容为空或无法分割: {file_path}")
                 return SingleFileIndexingResult(
                     file_path=normalized_path,
                     status="empty",
                     chunk_count=0,
-                    message="文件内容为空或无法切分，未写入向量索引",
+                    message=(
+                        "文件内容为空或无法切分，未写入向量索引；"
+                        f"已清理旧索引 vector={vector_deleted}, lexical={lexical_deleted}"
+                    ),
                 ).finish()
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")
+            try:
+                lexical_index_service.mark_source_stale(normalized_path, str(e))
+            except Exception as stale_exc:
+                logger.warning(f"标记陈旧索引失败: {normalized_path}, 错误: {stale_exc}")
             raise RuntimeError(f"索引文件失败: {e}") from e
 
     def _ensure_directory_allowed(self, dir_path: Path) -> None:

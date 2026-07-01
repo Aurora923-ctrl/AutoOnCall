@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from hashlib import sha256
 from typing import Any, Literal
 
 from app.models.approval import ApprovalRequest
@@ -42,8 +44,15 @@ def create_approval_request_from_risk_decision(
 ) -> ApprovalRequest:
     """Persist an ApprovalRequest derived from a risk decision."""
     plan = change_plan or build_change_plan_from_risk_decision(state, decision)
+    repository = approval_repository or approval_service
+    incident_id = extract_incident_id(state)
+    idempotency_key = build_approval_idempotency_key(state, decision)
+    existing = find_pending_approval_by_idempotency_key(repository, incident_id, idempotency_key)
+    if existing is not None:
+        return existing
+
     request = ApprovalRequest(
-        incident_id=extract_incident_id(state),
+        incident_id=incident_id,
         action=str(_decision_value(decision, "action", "需要人工确认的后续处置动作")),
         risk_level=_normalize_risk_level(_decision_value(decision, "risk_level", "medium")),
         reason=str(_decision_value(decision, "reason", "")),
@@ -56,16 +65,45 @@ def create_approval_request_from_risk_decision(
             "policy": _decision_value(decision, "policy", "approval_required"),
             "matched_rules": _decision_value(decision, "matched_rules", []),
             "read_only": _decision_value(decision, "read_only", False),
+            "idempotency_key": idempotency_key,
             "change_plan": plan.model_dump(mode="json"),
         },
     )
-    repository = approval_repository or approval_service
     return repository.create_request(request)
 
 
 def extract_incident_id(state: Mapping[str, Any]) -> str:
     """Extract incident_id from state values without assuming model instances."""
     return str(_incident_field(state, "incident_id", "incident-unknown"))
+
+
+def build_approval_idempotency_key(state: Mapping[str, Any], decision: Any) -> str:
+    """Build a stable key for one pending risky action within an incident."""
+    payload = {
+        "incident_id": extract_incident_id(state),
+        "step_id": _decision_value(decision, "step_id", None),
+        "tool_name": _decision_value(decision, "tool_name", None),
+        "action": _decision_value(decision, "action", ""),
+        "risk_level": _decision_value(decision, "risk_level", "medium"),
+        "policy": _decision_value(decision, "policy", "approval_required"),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return sha256(raw.encode("utf-8")).hexdigest()
+
+
+def find_pending_approval_by_idempotency_key(
+    repository: Any,
+    incident_id: str,
+    idempotency_key: str,
+) -> ApprovalRequest | None:
+    """Return an existing pending approval for the same risky action, when available."""
+    if not idempotency_key or not hasattr(repository, "list_pending"):
+        return None
+    for request in repository.list_pending(incident_id=incident_id):
+        metadata = request.metadata or {}
+        if metadata.get("idempotency_key") == idempotency_key:
+            return request
+    return None
 
 
 def _incident_field(state: Mapping[str, Any], field_name: str, default: str) -> Any:

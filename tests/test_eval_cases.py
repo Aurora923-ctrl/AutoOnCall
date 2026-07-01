@@ -139,7 +139,7 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
         assert result["passed"], result
         assert result["evidence_count"] >= 3
         assert result["report_status"] in {"completed", "waiting_approval", "blocked"}
-        assert result["confidence"] >= 0.55
+        assert result["confidence"] >= 0.5
         assert result["failed_metrics"] == []
         assert isinstance(result["latency_ms"], float)
 

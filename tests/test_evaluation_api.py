@@ -118,7 +118,7 @@ async def test_adapter_verification_api_returns_latest_payload(monkeypatch, tmp_
     assert payload["available"] is True
     assert payload["status"] == "passed"
     assert payload["checks"][0]["tool_name"] == "query_metrics"
-    assert payload["path"] == str(adapter_path)
+    assert "path" not in payload
 
 
 @pytest.mark.asyncio

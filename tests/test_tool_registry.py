@@ -89,10 +89,17 @@ async def test_query_metrics_uses_mcp_like_tools_when_available() -> None:
     assert result.output["source"] == "mcp_monitor"
     assert result.output["cpu"]["metric_name"] == "cpu_usage_percent"
     assert result.output["memory"]["metric_name"] == "memory_usage_percent"
+    assert result.output["source_detail"]["qps"] == "synthetic_demo_baseline"
+    assert "p95_latency_ms" in result.output["synthetic_fields"]
 
 
 @pytest.mark.asyncio
-async def test_query_metrics_marks_partial_mcp_failures_without_failed_evidence() -> None:
+async def test_query_metrics_marks_partial_mcp_failures_without_failed_evidence(
+    monkeypatch,
+) -> None:
+    from app.config import config
+
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     registry = create_default_tool_registry(
         [
             FailingAsyncTool("query_cpu_metrics"),
@@ -109,14 +116,75 @@ async def test_query_metrics_marks_partial_mcp_failures_without_failed_evidence(
     )
 
     assert result.status == "success"
-    assert result.output["source"] == "mcp_monitor"
+    assert result.output["source"] == "mcp_monitor_mixed"
+    assert result.output["source_detail"]["cpu"] == "mock_fallback"
+    assert result.output["source_detail"]["memory"] == "mcp_monitor"
     assert result.output["cpu"]["metric_name"] == "cpu_usage_percent"
     assert result.output["memory"]["metric_name"] == "memory_usage_percent"
     assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
 
 
 @pytest.mark.asyncio
-async def test_query_redis_status_returns_structured_mock_output() -> None:
+async def test_query_tools_clamp_unbounded_inputs() -> None:
+    registry = create_default_tool_registry([])
+
+    metrics = await registry.arun(
+        "query_metrics",
+        {"service_name": "order-service", "time_range": "999h", "interval": "999m"},
+    )
+    logs = await registry.arun(
+        "query_logs",
+        {"service_name": "order-service", "time_range": "999h", "limit": 99999},
+    )
+    traces = await registry.arun(
+        "query_traces",
+        {"service_name": "order-service", "lookback": "999d", "limit": 99999},
+    )
+
+    assert metrics.input_args["time_range"] == "1h"
+    assert metrics.input_args["interval"] == "5m"
+    assert logs.input_args["time_range"] == "1h"
+    assert logs.input_args["limit"] == 200
+    assert traces.input_args["lookback"] == "1d"
+    assert traces.input_args["limit"] == 50
+
+
+@pytest.mark.asyncio
+async def test_query_metrics_does_not_mock_partial_mcp_when_fallback_disabled(
+    monkeypatch,
+) -> None:
+    from app.config import config
+
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", False)
+    registry = create_default_tool_registry(
+        [
+            FakeAsyncTool(
+                "query_memory_metrics",
+                {"metric_name": "memory_usage_percent", "statistics": {"max": 76}},
+            ),
+        ]
+    )
+
+    result = await registry.arun(
+        "query_metrics",
+        {"service_name": "order-service", "time_range": "10m", "interval": "1m"},
+    )
+
+    assert result.status == "failed"
+    assert result.output["source"] == "mcp_monitor_mixed"
+    assert "mock fallback 已关闭" in result.output["summary"]
+    assert result.output["available_metrics"]["memory"]["metric_name"] == "memory_usage_percent"
+    assert result.output["source_detail"]["cpu"] == "unavailable"
+    assert result.output["source_detail"]["memory"] == "mcp_monitor"
+    assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
+    assert "synthetic_fields" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_query_redis_status_returns_structured_mock_output(monkeypatch) -> None:
+    from app.config import config
+
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     registry = create_default_tool_registry([])
 
     result = await registry.arun(

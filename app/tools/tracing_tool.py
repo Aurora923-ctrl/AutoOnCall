@@ -7,7 +7,7 @@ from typing import Any
 from app.config import config
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.tracing import TracingAdapter
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_duration, clamp_int
 
 
 class QueryTracesTool(AIOpsTool):
@@ -26,8 +26,13 @@ class QueryTracesTool(AIOpsTool):
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
-        lookback = input_args.get("lookback") or "1h"
-        limit = int(input_args.get("limit") or 20)
+        lookback = clamp_duration(
+            input_args.get("lookback"),
+            default="1h",
+            maximum_seconds=86400,
+        )
+        limit = clamp_int(input_args.get("limit"), default=20, minimum=1, maximum=50)
+        input_args.update({"lookback": lookback, "limit": limit})
         if self._tracing_adapter.configured:
             try:
                 return await self._tracing_adapter.query_service_traces(

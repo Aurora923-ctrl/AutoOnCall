@@ -8,7 +8,7 @@ from app.config import config
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.service_catalog import CMDBAdapter, DeployHistoryAdapter
 from app.services.service_topology import get_service_dependencies
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, clamp_int
 
 
 class QueryServiceContextTool(AIOpsTool):
@@ -93,7 +93,8 @@ class QueryDeployHistoryTool(AIOpsTool):
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
-        limit = int(input_args.get("limit") or 5)
+        limit = clamp_int(input_args.get("limit"), default=5, minimum=1, maximum=50)
+        input_args["limit"] = limit
         if self._deploy_history_adapter.configured:
             try:
                 return await self._deploy_history_adapter.query_deployments(service_name, limit)

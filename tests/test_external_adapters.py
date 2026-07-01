@@ -9,7 +9,12 @@ from app.agent.aiops.executor import _postpone_risky_step_until_read_only_eviden
 from app.agent.aiops.risk_controller import RiskControlDecision
 from app.config import Settings, config
 from app.integrations.alertmanager import AlertmanagerAlertAdapter
-from app.integrations.base import ExternalAdapterError, adapter_failure
+from app.integrations.base import (
+    ExternalAdapterError,
+    adapter_failure,
+    escape_prometheus_label_value,
+    require_kubernetes_label_value,
+)
 from app.integrations.kubernetes import KubernetesStatusAdapter
 from app.integrations.log_gateway import HTTPLogGatewayAdapter
 from app.integrations.loki import LokiLogAdapter
@@ -263,6 +268,15 @@ def test_adapter_failure_classifies_timeout_and_http_status() -> None:
     assert permission_payload["retryable"] is False
 
 
+def test_external_label_helpers_escape_or_reject_unsafe_values() -> None:
+    assert escape_prometheus_label_value('order"service\\prod\nblue') == (
+        'order\\"service\\\\prod\\nblue'
+    )
+    assert require_kubernetes_label_value("order-service_v1") == "order-service_v1"
+    with pytest.raises(ExternalAdapterError, match="service_name"):
+        require_kubernetes_label_value("order/service", field_name="service_name")
+
+
 def test_settings_derives_redis_and_mysql_urls_from_compatible_fields() -> None:
     redis_settings = Settings(
         _env_file=None,
@@ -399,6 +413,28 @@ async def test_prometheus_adapter_marks_empty_query_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prometheus_adapter_escapes_service_label_value_before_querying() -> None:
+    captured_queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_queries.append(str(request.url.params.get("query")))
+        return httpx.Response(
+            200,
+            json={"status": "success", "data": {"result": []}},
+        )
+
+    adapter = PrometheusMetricsAdapter(
+        base_url="https://prometheus.example",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await adapter.query_service_metrics('order"service\\prod\nblue')
+
+    assert captured_queries
+    assert all('order\\"service\\\\prod\\nblue' in query for query in captured_queries)
+
+
+@pytest.mark.asyncio
 async def test_log_gateway_adapter_sends_window_filters_and_bounded_limit() -> None:
     captured: dict[str, object] = {}
 
@@ -463,6 +499,16 @@ async def test_loki_adapter_queries_range_and_normalizes_streams() -> None:
     assert result["source"] == "loki"
     assert result["signals"]["log_count"] == 1
     assert result["logs"]["logs"][0]["message"] == "RedisConnectionTimeout"
+
+
+def test_loki_logql_escapes_regex_without_url_encoding() -> None:
+    logql = LokiLogAdapter._build_logql('order"service', "错误(超时) OR timeout.ms")
+
+    assert "%E9" not in logql
+    assert "错误" in logql
+    assert '\\"service' in logql
+    assert "timeout" in logql
+    assert "timeout\\\\.ms" in logql
 
 
 @pytest.mark.asyncio
@@ -674,6 +720,19 @@ async def test_kubernetes_adapter_returns_pods_events_and_restart_signals(monkey
     assert result["signals"]["warning_event_count"] == 1
     assert result["events"][0]["reason"] == "BackOff"
     assert result["partial_errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_adapter_rejects_invalid_service_label_before_query(monkeypatch) -> None:
+    monkeypatch.setattr(config, "kubernetes_api_server", "https://kubernetes.example")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected Kubernetes request: {request.url}")
+
+    adapter = KubernetesStatusAdapter(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ExternalAdapterError, match="service_name"):
+        await adapter.query_service_status("order/service", "5m")
 
 
 def test_redis_contract_helpers_report_slowlog_and_big_key_boundaries() -> None:

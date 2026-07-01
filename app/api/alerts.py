@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from loguru import logger
@@ -14,8 +15,10 @@ from app.models.alert import (
     AlertIngestionResult,
     AlertListResponse,
 )
+from app.models.incident_state import IncidentState
 from app.services.aiops_service import aiops_service
 from app.services.alert_ingestion_service import AlertIngestionService, alert_ingestion_service
+from app.services.trace_service import trace_service
 
 router = APIRouter()
 
@@ -38,9 +41,14 @@ async def ingest_alertmanager_webhook(
     """Ingest Alertmanager webhook payloads and create/update Incident state."""
     service = get_alert_ingestion_service()
     result = service.ingest_alertmanager_webhook(payload)
+    if result.received == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Alertmanager payload does not contain any valid alerts",
+        )
     if auto_diagnose:
         for item in result.items:
-            if item.event.status == "resolved":
+            if item.event.status == "resolved" or not (item.created or item.reopened):
                 continue
             background_tasks.add_task(_run_alert_diagnosis, item.event)
     return result
@@ -84,7 +92,7 @@ async def _run_alert_diagnosis(event: AlertEvent) -> None:
     """Run the normal AIOps workflow in the background for one firing alert."""
     service = get_alert_ingestion_service()
     incident = service.build_incident(event)
-    session_id = f"alert-{event.incident_id}"
+    session_id = f"alert-{event.incident_id}-{uuid4().hex}"
     try:
         async for _ in aiops_service.diagnose(session_id=session_id, incident=incident):
             pass
@@ -96,3 +104,62 @@ async def _run_alert_diagnosis(event: AlertEvent) -> None:
             exc,
             exc_info=True,
         )
+        _record_alert_diagnosis_failure(service, event, session_id, exc)
+
+
+def _record_alert_diagnosis_failure(
+    service: AlertIngestionService,
+    event: AlertEvent,
+    session_id: str,
+    exc: Exception,
+) -> None:
+    """Persist visible failure state for background alert diagnosis."""
+    existing = service.store.get_incident_state(event.incident_id)
+    trace_id = existing.trace_id if existing and existing.trace_id else f"trace-{event.incident_id}"
+    trace_event = trace_service.create_event(
+        trace_id=trace_id,
+        incident_id=event.incident_id,
+        node_name="workflow",
+        event_type="workflow_error",
+        input_summary=f"alert_fingerprint={event.fingerprint}",
+        output_summary="Alert auto diagnosis failed",
+        status="failed",
+        error_message=str(exc),
+        metadata={
+            "session_id": session_id,
+            "alert_fingerprint": event.fingerprint,
+            "alert_source": event.source,
+        },
+    )
+    metadata = dict(existing.metadata if existing else {})
+    metadata.update(
+        {
+            "alert_auto_diagnosis_status": "failed",
+            "alert_auto_diagnosis_error": str(exc),
+            "alert_auto_diagnosis_session_id": session_id,
+            "alert_auto_diagnosis_trace_event_id": trace_event.event_id,
+        }
+    )
+    state = (
+        existing
+        if existing is not None
+        else IncidentState(
+            incident_id=event.incident_id,
+            title=f"{event.service_name} {event.alertname}",
+            service_name=event.service_name,
+            severity=event.severity,
+            environment=event.environment,
+            summary=event.summary,
+        )
+    )
+    service.store.save_incident_state(
+        state.model_copy(
+            update={
+                "status": "failed",
+                "status_reason": f"Alert auto diagnosis failed: {exc}",
+                "trace_id": trace_id,
+                "session_id": session_id,
+                "metadata": metadata,
+            }
+        )
+    )

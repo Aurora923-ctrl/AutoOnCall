@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+from app import main as main_module
+from scripts.hygiene_check import find_hygiene_issues, main as hygiene_main
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -61,3 +64,56 @@ def test_runtime_paths_are_loaded_from_central_config() -> None:
     assert "EVAL_SUMMARY_PATH = Path(config.eval_summary_path)" in evaluations_api
     assert "ADAPTER_VERIFICATION_PATH = Path(config.adapter_verification_path)" in evaluations_api
     assert "DEFAULT_LEXICAL_INDEX_PATH = Path(config.rag_lexical_index_path)" in lexical_index
+
+
+def test_makefile_exposes_hygiene_check_target() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "hygiene-check:" in makefile
+    assert "scripts/hygiene_check.py" in makefile
+
+
+def test_hygiene_check_detects_generated_artifacts(tmp_path) -> None:
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "aiops_state.db").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "__pycache__").mkdir(parents=True)
+    (tmp_path / ".coverage").write_text("", encoding="utf-8")
+    (tmp_path / ".git" / "logs").mkdir(parents=True)
+
+    issues = find_hygiene_issues(tmp_path)
+    issue_paths = {issue.path for issue in issues}
+
+    assert "logs" in issue_paths
+    assert "data/aiops_state.db" in issue_paths
+    assert "app/__pycache__" in issue_paths
+    assert ".coverage" in issue_paths
+    assert not any(issue.path.startswith(".git/") for issue in issues)
+    assert hygiene_main(["--root", str(tmp_path), "--json"]) == 1
+
+
+def test_hygiene_check_passes_clean_repository_tree(tmp_path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    assert find_hygiene_issues(tmp_path) == []
+    assert hygiene_main(["--root", str(tmp_path)]) == 0
+
+
+def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
+    monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+
+    warnings = main_module.production_exposure_warnings()
+
+    assert "API auth is disabled while binding to a non-local host" in warnings
+    assert "CORS allows all origins while binding to a non-local host" in warnings
+
+
+def test_production_exposure_warnings_ignore_local_bind(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "host", "127.0.0.1")
+    monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
+    monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+
+    assert main_module.production_exposure_warnings() == []

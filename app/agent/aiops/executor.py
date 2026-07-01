@@ -4,6 +4,7 @@ Executor 节点：执行单个步骤
 """
 
 import json
+import re
 from typing import Any, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -160,8 +161,9 @@ async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
         temperature=0,
     )
 
-    llm_with_tools = llm.bind_tools(all_tools)
-    tool_node = ToolNode(all_tools)
+    safe_tools = _safe_fallback_tools(all_tools)
+    llm_with_tools = llm.bind_tools(safe_tools) if safe_tools else llm
+    tool_node = ToolNode(safe_tools) if safe_tools else None
 
     messages = [
         SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
@@ -183,7 +185,7 @@ async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
     llm_response = await llm_with_tools.ainvoke(messages)
     logger.info(f"LLM 响应类型: {type(llm_response)}")
 
-    if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
+    if tool_node is not None and hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
         logger.info(f"检测到 {len(llm_response.tool_calls)} 个工具调用")
         messages.append(llm_response)
         tool_messages = await tool_node.ainvoke({"messages": messages})
@@ -218,6 +220,16 @@ def _message_content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _safe_fallback_tools(all_tools: list[Any]) -> list[Any]:
+    """Limit legacy LLM fallback to explicitly safe local read-only helpers."""
+    safe_names = {"get_current_time", "retrieve_knowledge"}
+    return [
+        tool
+        for tool in all_tools
+        if getattr(tool, "name", getattr(tool, "__name__", "")) in safe_names
+    ]
+
+
 async def _try_execute_registered_step(
     plan_step: PlanStep | None,
     registry: ToolRegistry,
@@ -231,7 +243,10 @@ async def _try_execute_registered_step(
         logger.info(f"结构化工具 {plan_step.tool_name} 未注册，回退到 LLM 工具执行")
         return None
 
-    logger.info(f"通过 Tool Registry 调用 {plan_step.tool_name}: {plan_step.input_args}")
+    logger.info(
+        f"通过 Tool Registry 调用 {plan_step.tool_name}: "
+        f"{_summarize_input_args(plan_step.input_args)}"
+    )
     result = await registry.arun(plan_step.tool_name, plan_step.input_args)
     persisted_result = _result_for_persistence(result)
     evidence = _tool_result_to_evidence(persisted_result, plan_step)
@@ -583,14 +598,23 @@ def _mark_step(step: PlanStep | None, status: str) -> dict[str, Any] | None:
 
 def _result_for_persistence(result: ToolExecutionResult) -> ToolExecutionResult:
     """Return a copy with bulky external raw payloads removed for Trace/Report storage."""
+    redacted_args = _redact_sensitive_data(result.input_args)
+    redacted_output = _redact_sensitive_data(result.output)
+    updates: dict[str, Any] = {}
+    if redacted_args != result.input_args:
+        updates["input_args"] = redacted_args
+    if redacted_output != result.output:
+        updates["output"] = redacted_output
+    persisted_result = result.model_copy(update=updates) if updates else result
     if config.aiops_store_raw_external_payload:
-        return result
-    if not isinstance(result.output, dict):
-        return result
-    compact_output = _compact_external_payload(result.output)
-    if compact_output is result.output:
-        return result
-    return result.model_copy(update={"output": compact_output})
+        return persisted_result
+    if not isinstance(persisted_result.output, dict):
+        return persisted_result
+    compact_output = _compact_external_payload(persisted_result.output)
+    compact_output = _redact_sensitive_data(compact_output)
+    if compact_output is persisted_result.output:
+        return persisted_result
+    return persisted_result.model_copy(update={"output": compact_output})
 
 
 def _compact_external_payload(output: dict[str, Any]) -> dict[str, Any]:
@@ -743,16 +767,58 @@ def _summarize_input_args(input_args: dict[str, Any]) -> str:
     """Create a compact, non-secret input summary for tool audit displays."""
     if not input_args:
         return "无输入参数"
-    safe_args = {
-        key: ("***" if _is_sensitive_key(key) else value) for key, value in input_args.items()
-    }
+    safe_args = _redact_sensitive_data(input_args)
     text = json.dumps(safe_args, ensure_ascii=False, default=str)
     return text[:220] + "..." if len(text) > 220 else text
 
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in ["password", "token", "secret", "key", "dsn"])
+    return any(
+        token in lowered
+        for token in [
+            "password",
+            "passwd",
+            "pwd",
+            "token",
+            "secret",
+            "key",
+            "dsn",
+            "authorization",
+            "cookie",
+            "credential",
+            "bearer",
+        ]
+    )
+
+
+def _redact_sensitive_data(value: Any) -> Any:
+    """Recursively redact sensitive values before durable audit persistence."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if _is_sensitive_key(str(key)) else _redact_sensitive_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_data(item) for item in value]
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    return value
+
+
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|"
+    r"authorization|cookie|credential|dsn)\b\s*([=:])\s*(?!Bearer\b)([^,\s;&]+)"
+)
+
+
+def _redact_sensitive_text(text: str) -> str:
+    redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
+    return _SECRET_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        redacted,
+    )
 
 
 def _evidence_confidence(result: ToolExecutionResult, data_source: str) -> float:
@@ -777,8 +843,10 @@ def _evidence_confidence(result: ToolExecutionResult, data_source: str) -> float
         return 0.82
     if data_source in {"mcp_monitor", "mcp_cls", "rag"}:
         return 0.72
+    if data_source == "mcp_monitor_mixed":
+        return 0.6
     if data_source == "mock":
-        return 0.75
+        return 0.5
     if data_source == "rule_based":
         return 0.65
     if data_source == "failed":

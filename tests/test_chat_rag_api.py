@@ -2,8 +2,19 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 from app.main import app
+from app.models.request import ChatRequest, ClearRequest
+
+
+def test_chat_request_models_reject_unbounded_session_and_question_inputs() -> None:
+    with pytest.raises(ValidationError):
+        ChatRequest(Id="s" * 129, Question="hello")
+    with pytest.raises(ValidationError):
+        ChatRequest(Id="session-1", Question="")
+    with pytest.raises(ValidationError):
+        ClearRequest(sessionId="s" * 129)
 
 
 @pytest.mark.asyncio

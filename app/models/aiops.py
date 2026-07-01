@@ -6,12 +6,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.incident import Incident
 
+AIOPS_SESSION_ID_MAX_LENGTH = 128
+AIOPS_APPROVAL_ID_MAX_LENGTH = 128
+
 
 class AIOpsRequest(BaseModel):
     """Request body for the streaming `/api/aiops` diagnosis endpoint."""
 
     session_id: str | None = Field(
-        default="default",
+        default=None,
+        min_length=1,
+        max_length=AIOPS_SESSION_ID_MAX_LENGTH,
         description="会话ID，用于追踪诊断历史",
     )
 
@@ -41,10 +46,14 @@ class AIOpsResumeRequest(BaseModel):
 
     session_id: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=AIOPS_SESSION_ID_MAX_LENGTH,
         description="原诊断会话 ID；新审批会从 metadata 自动推断，旧审批可显式传入。",
     )
     approval_id: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=AIOPS_APPROVAL_ID_MAX_LENGTH,
         description="要恢复的审批 ID；不传时使用该事件最新 approved 审批。",
     )
 

@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.auth import APPROVE_SCOPE, READ_SCOPE, require_scope
+from app.core.auth import APPROVE_SCOPE, READ_SCOPE, AuthPrincipal, audit_actor, require_scope
 from app.models.api_contracts import (
     ApprovalDecisionResponse,
     ApprovalListResponse,
@@ -57,10 +57,14 @@ async def list_incident_approvals(
 @router.post(
     "/incidents/{incident_id}/approval",
     response_model=ApprovalDecisionResponse,
-    dependencies=[Depends(require_scope(APPROVE_SCOPE))],
 )
-async def submit_incident_approval(incident_id: str, request: ApprovalDecisionRequest) -> dict:
+async def submit_incident_approval(
+    incident_id: str,
+    request: ApprovalDecisionRequest,
+    principal: AuthPrincipal = Depends(require_scope(APPROVE_SCOPE)),
+) -> dict:
     """Approve or reject the latest pending request for an incident."""
+    decided_by = audit_actor(principal, request.decided_by)
     try:
         if request.approval_id:
             existing = get_approval_service().get_request(request.approval_id)
@@ -72,14 +76,14 @@ async def submit_incident_approval(incident_id: str, request: ApprovalDecisionRe
             approval = get_approval_service().decide_request(
                 approval_id=request.approval_id,
                 decision=request.decision,
-                decided_by=request.decided_by,
+                decided_by=decided_by,
                 reason=request.reason,
             )
         else:
             approval = get_approval_service().decide_latest_pending(
                 incident_id=incident_id,
                 decision=request.decision,
-                decided_by=request.decided_by,
+                decided_by=decided_by,
                 reason=request.reason,
             )
     except ApprovalNotFoundError as exc:

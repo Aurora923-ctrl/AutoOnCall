@@ -109,6 +109,31 @@ def test_sqlite_store_returns_none_for_missing_aiops_session_snapshot(tmp_path) 
     assert store.get_aiops_session_snapshot("missing-session") is None
 
 
+def test_aiops_session_snapshot_preserves_string_hypotheses(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "aiops.db")
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="session-hypothesis",
+        state={
+            "trace_id": "trace-hypothesis",
+            "incident": {"incident_id": "inc-hypothesis"},
+            "hypotheses": [
+                "Redis maxclients 接近上限导致连接被拒绝",
+                {"value": "应用连接池重试放大依赖压力"},
+            ],
+        },
+    )
+
+    store.save_aiops_session_snapshot(snapshot)
+
+    saved = store.get_aiops_session_snapshot("session-hypothesis")
+    assert saved is not None
+    assert saved.hypotheses == [
+        "Redis maxclients 接近上限导致连接被拒绝",
+        "应用连接池重试放大依赖压力",
+    ]
+    assert saved.to_state()["hypotheses"] == saved.hypotheses
+
+
 def test_sqlite_store_upserts_incident_state_without_losing_identity_fields(tmp_path) -> None:
     store = AIOpsSQLiteStore(tmp_path / "aiops.db")
     first = IncidentState(

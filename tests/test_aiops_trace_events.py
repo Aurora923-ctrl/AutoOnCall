@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from app.agent.aiops import create_initial_aiops_state
+from app.config import config
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.plan import PlanStep
@@ -43,6 +44,7 @@ def state_with_step(step: PlanStep) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_executor_records_tool_call_trace(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     trace_store = TraceService(tmp_path / "traces.db")
     monkeypatch.setattr(executor_module, "trace_service", trace_store)
     monkeypatch.setattr(

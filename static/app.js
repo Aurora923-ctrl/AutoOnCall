@@ -11,6 +11,7 @@ class AutoOnCallApp {
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
         this.currentWorkbenchView = 'incidents';
         this.currentIncidentTab = 'overview';
+        this.apiTokenStorageKey = 'autooncallApiToken';
         this.selectedIncidentId = '';
         this.aiOpsDemoIncidents = {};
         this.aiOpsDemoIncidentAliases = {};
@@ -43,6 +44,7 @@ class AutoOnCallApp {
         this.checkAndSetCentered();
         this.renderChatHistory();
         this.renderKnowledgeUploadState(this.knowledgeUploadState);
+        this.renderAuthTokenState();
         this.setWorkbenchView(this.currentWorkbenchView);
         this.loadAIOpsStatusCatalog();
         this.loadAIOpsDemoIncidents();
@@ -240,6 +242,10 @@ class AutoOnCallApp {
         this.adapterVerifyStatus = document.getElementById('adapterVerifyStatus');
         this.toolContractSummary = document.getElementById('toolContractSummary');
         this.toolContractCount = document.getElementById('toolContractCount');
+        this.apiTokenInput = document.getElementById('apiTokenInput');
+        this.apiTokenSaveBtn = document.getElementById('apiTokenSaveBtn');
+        this.apiTokenClearBtn = document.getElementById('apiTokenClearBtn');
+        this.authStatusBadge = document.getElementById('authStatusBadge');
         
         // 初始化时检查是否需要居中
         this.checkAndSetCentered();
@@ -255,6 +261,23 @@ class AutoOnCallApp {
         // AI Ops按钮
         if (this.aiOpsSidebarBtn) {
             this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
+        }
+
+        if (this.apiTokenSaveBtn) {
+            this.apiTokenSaveBtn.addEventListener('click', () => this.saveApiToken());
+        }
+
+        if (this.apiTokenClearBtn) {
+            this.apiTokenClearBtn.addEventListener('click', () => this.clearApiToken());
+        }
+
+        if (this.apiTokenInput) {
+            this.apiTokenInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    this.saveApiToken();
+                }
+            });
         }
 
         if (this.diagnosisForm) {
@@ -1485,6 +1508,39 @@ class AutoOnCallApp {
         }
     }
 
+    renderAuthTokenState() {
+        const token = (localStorage.getItem('autooncallApiToken') || '').trim();
+        if (this.apiTokenInput) {
+            this.apiTokenInput.value = token;
+        }
+        if (this.authStatusBadge) {
+            this.authStatusBadge.textContent = token ? '已设置' : '未设置';
+            this.authStatusBadge.className = token ? 'ready' : '';
+        }
+    }
+
+    saveApiToken() {
+        const token = (this.apiTokenInput?.value || '').trim();
+        if (token) {
+            localStorage.setItem(this.apiTokenStorageKey, token);
+            this.showNotification('接口令牌已保存', 'success');
+        } else {
+            localStorage.removeItem(this.apiTokenStorageKey);
+            this.showNotification('接口令牌已清除', 'info');
+        }
+        this.renderAuthTokenState();
+        this.refreshWorkbenchData(this.currentWorkbenchView);
+    }
+
+    clearApiToken() {
+        localStorage.removeItem(this.apiTokenStorageKey);
+        if (this.apiTokenInput) {
+            this.apiTokenInput.value = '';
+        }
+        this.renderAuthTokenState();
+        this.showNotification('接口令牌已清除', 'info');
+    }
+
     async apiGet(path) {
         const response = await this.apiFetch(path);
         if (!response.ok) {
@@ -2227,7 +2283,7 @@ class AutoOnCallApp {
                 </div>
                 <p>${this.escapeHtml(step.summary || '无摘要')}</p>
                 <div class="source-strip">
-                    <span class="source-pill ${this.escapeHtml(step.data_source || '')}">${this.escapeHtml(step.data_source || 'unknown')}</span>
+                    ${this.sourcePill(step.data_source)}
                     <span class="source-pill">${this.escapeHtml(step.tool_name || step.step_id || '-')}</span>
                     <span class="source-pill">${this.escapeHtml(String(step.latency_ms ?? 0))} ms</span>
                     <span class="source-pill">${this.formatDateTime(step.created_at)}</span>
@@ -2259,7 +2315,7 @@ class AutoOnCallApp {
                     ${items.map((call) => `
                         <tr>
                             <td>${this.escapeHtml(call.tool_name || 'unknown')}</td>
-                            <td><span class="source-pill ${this.escapeHtml(call.data_source || '')}">${this.escapeHtml(call.data_source || 'unknown')}</span></td>
+                            <td>${this.sourcePill(call.data_source)}</td>
                             <td><span class="meta-pill ${this.statusTone(call.status)}">${this.escapeHtml(call.status || 'unknown')}</span></td>
                             <td>${this.escapeHtml(String(call.latency_ms ?? 0))} ms</td>
                             <td>
@@ -2292,7 +2348,7 @@ class AutoOnCallApp {
                     <span class="meta-pill ${this.statusTone(call.status)}">${this.escapeHtml(call.status || 'unknown')}</span>
                 </div>
                 <div class="source-strip">
-                    <span class="source-pill ${this.escapeHtml(call.data_source || '')}">${this.escapeHtml(call.data_source || 'unknown')}</span>
+                    ${this.sourcePill(call.data_source)}
                     <span class="source-pill">${this.escapeHtml(call.backend || call.domain || 'dependency')}</span>
                     ${call.stance ? `<span class="source-pill">${this.escapeHtml(call.stance)}</span>` : ''}
                     ${call.confidence !== undefined ? `<span class="source-pill">conf ${this.escapeHtml(this.formatConfidence(call.confidence))}</span>` : ''}
@@ -2336,7 +2392,7 @@ class AutoOnCallApp {
                 </div>
                 <div class="source-strip">
                     <span class="source-pill">${this.escapeHtml(item.evidence_type || 'unknown')}</span>
-                    <span class="source-pill ${this.escapeHtml(item.data_source || '')}">${this.escapeHtml(item.data_source || 'unknown')}</span>
+                    ${this.sourcePill(item.data_source)}
                     <span class="source-pill">${this.escapeHtml(item.stance || 'neutral')}</span>
                     <span class="source-pill">${this.escapeHtml(item.source_tool || 'unknown')}</span>
                 </div>
@@ -2357,7 +2413,7 @@ class AutoOnCallApp {
         const sourceSummary = chain.data_sources || {};
         const bySource = sourceSummary.by_source || {};
         const sourceBadges = Object.entries(bySource)
-            .map(([source, count]) => `<span class="source-pill ${this.escapeHtml(source)}">${this.escapeHtml(source)}=${this.escapeHtml(String(count))}</span>`)
+            .map(([source, count]) => this.sourcePill(source, { count }))
             .join('');
         this.conclusionView.innerHTML = `
             <section class="conclusion-block">
@@ -2588,10 +2644,10 @@ class AutoOnCallApp {
         if (execution.status === 'waiting_manual_execution') return 'waiting_manual_execution';
         if (execution.status === 'sandbox_executing') return 'sandbox_executing';
         if (execution.status === 'manual_execution_recorded') return 'manual_execution_recorded';
-        if (['closed', 'rollback_recommended', 'escalated'].includes(execution.status)) {
+        if (['dry_run_completed', 'sandbox_validated', 'closed', 'rollback_recommended', 'escalated'].includes(execution.status)) {
             return execution.manual_result && Object.keys(execution.manual_result).length > 0
                 ? execution.status
-                : 'skipped';
+                : (execution.status === 'sandbox_validated' ? 'passed' : 'skipped');
         }
         return 'pending';
     }
@@ -2605,6 +2661,12 @@ class AutoOnCallApp {
         }
         if (execution.manual_result && Object.keys(execution.manual_result).length > 0) {
             return execution.manual_result.notes || `人工执行结果：${execution.manual_result.status || 'recorded'}`;
+        }
+        if (execution.status === 'dry_run_completed') {
+            return 'dry-run 已完成，未执行生产变更。';
+        }
+        if (execution.status === 'sandbox_validated') {
+            return '沙箱执行和观察通过，未调用生产写接口。';
         }
         if (execution.status === 'closed') {
             return '流程已关闭，未自动执行生产变更。';
@@ -2741,6 +2803,7 @@ class AutoOnCallApp {
                         <button class="action-btn primary" data-diagnosis-resume data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}">更新诊断闭环</button>
                         ${canStartChange ? `
                             <button class="action-btn" data-change-resume data-change-mode="dry_run_only" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">安全变更 dry-run</button>
+                            <button class="action-btn" data-change-resume data-change-mode="sandbox" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">沙箱验证</button>
                             <button class="action-btn" data-change-resume data-change-mode="manual_record" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">记录人工变更</button>
                         ` : ''}
                     </div>
@@ -3022,7 +3085,7 @@ class AutoOnCallApp {
                     <span>AIOps 工具能力</span>
                     <p>共 ${this.escapeHtml(String(contracts.length))} 个工具，${this.escapeHtml(String(readOnlyCount))} 个只读，${this.escapeHtml(String(elevatedRiskCount))} 个中高风险。</p>
                     <div class="source-strip">
-                        ${sources.slice(0, 8).map((source) => `<span class="source-pill">${this.escapeHtml(source)}</span>`).join('') || '<span class="source-pill">未声明数据源</span>'}
+                        ${sources.slice(0, 8).map((source) => this.sourcePill(source)).join('') || '<span class="source-pill">未声明数据源</span>'}
                     </div>
                 </div>
                 <div class="tool-call-table compact-tool-contracts">
@@ -3156,7 +3219,7 @@ class AutoOnCallApp {
         }
         if (!this.adapterVerification) return;
         const sourceBadges = (payload.data_sources || [])
-            .map((source) => `<span class="source-pill success">${this.escapeHtml(source)}</span>`)
+            .map((source) => this.sourcePill(source))
             .join('');
         const failedBadges = (payload.failed_tools || []).length > 0
             ? payload.failed_tools.map((tool) => `<span class="source-pill failed">${this.escapeHtml(tool)}</span>`).join('')
@@ -3204,7 +3267,7 @@ class AutoOnCallApp {
                                     <span class="meta-pill ${item.passed ? 'success' : 'error'}">${item.passed ? 'PASS' : 'FAIL'}</span>
                                 </div>
                                 <div class="source-strip">
-                                    <span class="source-pill ${this.escapeHtml(item.observed_source || '')}">${this.escapeHtml(item.observed_source || 'unknown')}</span>
+                                    ${this.sourcePill(item.observed_source)}
                                     <span class="source-pill">expected=${this.escapeHtml(item.expected_source || '')}</span>
                                     <span class="source-pill">${this.escapeHtml(String(item.latency_ms ?? 0))} ms</span>
                                 </div>
@@ -3344,7 +3407,7 @@ class AutoOnCallApp {
         if (catalogMetadata?.tone) {
             return catalogMetadata.tone === 'neutral' ? '' : catalogMetadata.tone;
         }
-        if (['healthy', 'completed', 'success', 'approved', 'approval_approved', 'approval_resumed', 'closed', 'passed', 'manual_execution_recorded', 'available', 'configured'].includes(status)) return 'success';
+        if (['healthy', 'completed', 'success', 'approved', 'approval_approved', 'approval_resumed', 'closed', 'dry_run_completed', 'sandbox_validated', 'change_validated', 'passed', 'manual_execution_recorded', 'available', 'configured'].includes(status)) return 'success';
         if (['waiting_approval', 'pending', 'degraded', 'running', 'waiting', 'empty', 'unknown', 'waiting_manual_execution', 'dry_run_running', 'precheck_running', 'sandbox_executing', 'observing'].includes(status)) return 'warning';
         if (['failed', 'error', 'rejected', 'approval_rejected', 'blocked', 'forbidden', 'unhealthy', 'unavailable', 'not_configured', 'precheck_failed', 'dry_run_failed', 'rollback_recommended', 'escalated'].includes(status)) return 'error';
         return '';
@@ -3355,6 +3418,79 @@ class AutoOnCallApp {
         if (riskLevel === 'medium') return 'warning';
         if (riskLevel === 'high') return 'error';
         return '';
+    }
+
+    sourcePill(source, options = {}) {
+        const value = String(source || 'unknown').trim() || 'unknown';
+        const metadata = this.sourceMetadata(value);
+        const text = options.count !== undefined
+            ? `${value}=${String(options.count)}`
+            : value;
+        const label = metadata.label ? ` · ${metadata.label}` : '';
+        const classNames = [
+            'source-pill',
+            metadata.tone,
+            this.sourceClassName(value)
+        ].filter(Boolean).join(' ');
+
+        return `<span class="${this.escapeHtml(classNames)}" title="${this.escapeHtml(metadata.title || value)}">${this.escapeHtml(text + label)}</span>`;
+    }
+
+    sourceClassName(source) {
+        const normalized = String(source || 'unknown')
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        return normalized ? `source-${normalized}` : 'source-unknown';
+    }
+
+    sourceMetadata(source) {
+        const value = String(source || 'unknown').trim().toLowerCase();
+        const realSources = new Set([
+            'alertmanager',
+            'cmdb',
+            'deploy_history',
+            'jaeger',
+            'kafka',
+            'kubernetes',
+            'log_gateway',
+            'loki',
+            'mcp_cls',
+            'mcp_monitor',
+            'milvus',
+            'mysql',
+            'prometheus',
+            'rag',
+            'redis',
+            'redpanda',
+            'session_snapshot',
+            'tempo',
+            'ticket_api',
+            'trace_store'
+        ]);
+
+        if (value.includes('mixed')) {
+            return { tone: 'mixed', label: 'Mixed', title: '包含真实适配器和模拟/降级数据' };
+        }
+        if (value.includes('mock') || value.includes('fallback') || value.includes('synthetic')) {
+            return { tone: 'mock', label: 'Mock', title: '模拟或降级数据，不能代表生产事实' };
+        }
+        if (
+            value === 'unknown'
+            || value === 'not_configured'
+            || value === 'unavailable'
+            || value.includes('not_configured')
+            || value.includes('unavailable')
+        ) {
+            return { tone: 'unavailable', label: 'Unavailable', title: '数据源未知、未配置或不可用' };
+        }
+        if (value.includes('failed') || value.includes('error')) {
+            return { tone: 'error', label: 'Failed', title: '数据源调用失败' };
+        }
+        if (realSources.has(value) || value.startsWith('mcp_')) {
+            return { tone: 'real', label: 'Real', title: '来自已配置的真实适配器或持久化数据' };
+        }
+        return { tone: '', label: '', title: source };
     }
 
     formatPercent(value) {

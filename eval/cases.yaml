@@ -35,7 +35,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - Redis
       - connected_clients
@@ -75,7 +75,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 4
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - MySQL
       - 慢查询
@@ -114,7 +114,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 4
-    min_confidence: 0.75
+    min_confidence: 0.5
     report_must_contain:
       - Kubernetes
       - Pod
@@ -155,7 +155,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.75
+    min_confidence: 0.5
     report_must_contain:
       - 5xx
       - 工具调用
@@ -197,7 +197,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.75
+    min_confidence: 0.5
     report_must_contain:
       - P95
       - timeout
@@ -235,7 +235,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 3
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - CPU
       - query_metrics
@@ -274,7 +274,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 4
-    min_confidence: 0.75
+    min_confidence: 0.5
     report_must_contain:
       - OOMKilled
       - query_k8s_status
@@ -313,7 +313,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 4
-    min_confidence: 0.75
+    min_confidence: 0.5
     report_must_contain:
       - no space
       - query_k8s_status
@@ -362,7 +362,7 @@ cases:
     expected_needs_approval: true
     expected_report_status: waiting_approval
     min_evidence_count: 5
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - 重启
       - 审批
@@ -407,7 +407,7 @@ cases:
     expected_needs_approval: true
     expected_report_status: blocked
     min_evidence_count: 3
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - 人工
       - 风险
@@ -454,7 +454,7 @@ cases:
     expected_needs_approval: true
     expected_report_status: blocked
     min_evidence_count: 3
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - SQL
       - forbidden
@@ -501,7 +501,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.55
+    min_confidence: 0.5
     report_must_contain:
       - query_logs
       - failed
@@ -549,7 +549,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.55
+    min_confidence: 0.5
     report_must_contain:
       - query_metrics
       - failed
@@ -594,7 +594,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 4
-    min_confidence: 0.55
+    min_confidence: 0.5
     report_must_contain:
       - query_k8s_status
       - failed
@@ -648,7 +648,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 5
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - Redis
       - timeout
@@ -686,7 +686,7 @@ cases:
     expected_needs_approval: false
     expected_report_status: completed
     min_evidence_count: 3
-    min_confidence: 0.7
+    min_confidence: 0.5
     report_must_contain:
       - 未找到可信知识来源
       - search_runbook
