@@ -103,17 +103,17 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert payload["summary"]["case_count"] == 16
     assert payload["summary"]["passed_count"] == 16
     assert payload["summary"]["pass_rate"] == 1.0
-    assert payload["summary"]["overall_case_count"] == 33
-    assert payload["summary"]["overall_passed_count"] == 33
+    assert payload["summary"]["overall_case_count"] == 38
+    assert payload["summary"]["overall_passed_count"] == 38
     assert payload["summary"]["overall_pass_rate"] == 1.0
     assert payload["summary"]["all_passed"] is True
-    assert payload["summary"]["rag_case_count"] == 17
-    assert payload["summary"]["rag_passed_count"] == 17
+    assert payload["summary"]["rag_case_count"] == 22
+    assert payload["summary"]["rag_passed_count"] == 22
     assert payload["summary"]["p95_latency_ms"] >= 0.0
     assert payload["summary"]["failed_cases"] == []
     assert payload["run"]["started_at"]
     assert payload["run"]["ended_at"]
-    assert payload["rag"]["summary"]["case_count"] == 17
+    assert payload["rag"]["summary"]["case_count"] == 22
 
     assert set(payload["summary"]["metrics"]) == set(METRIC_NAMES)
     for metric in payload["summary"]["metrics"].values():
@@ -125,14 +125,18 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert categories["risk"]["forbidden_action_block_rate"] == 1.0
     assert categories["risk"]["approval_recall"] == 1.0
     assert categories["rag"]["recall_at_k"] == 1.0
+    assert categories["rag"]["citation_coverage_rate"] == 1.0
     assert categories["rag"]["no_answer_rejection_rate"] == 1.0
+    assert categories["rag"]["confusion_case_pass_rate"] == 1.0
     assert categories["rag"]["runbook_no_answer_rejection_hit_rate"] == 1.0
     assert categories["stability"]["tool_failure_case_count"] == 3
     assert categories["stability"]["tool_failure_graceful_degradation_rate"] == 1.0
 
     resume_metrics = payload["summary"]["resume_metrics"]
     assert resume_metrics["aiops_case_count"] == 16
-    assert resume_metrics["rag_case_count"] == 17
+    assert resume_metrics["rag_case_count"] == 22
+    assert resume_metrics["rag_citation_coverage_rate"] == 1.0
+    assert resume_metrics["rag_confusion_case_pass_rate"] == 1.0
     assert resume_metrics["tool_failure_graceful_degradation_rate"] == 1.0
 
     for result in payload["cases"]:
@@ -152,7 +156,7 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert results["runbook_no_answer_rejection"]["runbook_rejected"] is True
 
     summary_text = render_summary(payload)
-    assert "Full eval: 33/33 cases passed" in summary_text
+    assert "Full eval: 38/38 cases passed" in summary_text
     assert "AIOps eval: 16/16 cases passed" in summary_text
     assert "RAG recall@3=100%" in summary_text
     assert "RAG PASS cpu_high_usage_alert" in summary_text
@@ -163,8 +167,11 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     markdown = render_markdown_summary(payload)
     assert "# AutoOnCall 离线评测摘要" in markdown
     assert "## 简历可摘取指标" in markdown
-    assert "完整评测通过率：33/33 (100%)" in markdown
+    assert "完整评测通过率：38/38 (100%)" in markdown
     assert "AIOps 离线 case：16 个" in markdown
+    assert "RAG case：22 个" in markdown
+    assert "引用覆盖率 100%" in markdown
+    assert "混淆 case 通过率 100%" in markdown
     assert "无失败 case" in markdown
 
     failed_payload = deepcopy(payload)

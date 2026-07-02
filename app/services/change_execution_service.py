@@ -393,7 +393,7 @@ class ChangeExecutionService:
         has_rollback = bool(plan.rollback_steps or plan.rollback_plan)
         check(
             plan.risk_level != "high" or has_rollback,
-            "中高风险变更包含回滚方案",
+            "高风险变更包含回滚方案",
             "高风险变更缺少 rollback plan，禁止进入 dry-run",
         )
         checked_items.extend(

@@ -41,6 +41,7 @@ class QueryLogsTool(AIOpsTool):
         log_gateway: HTTPLogGatewayAdapter | None = None,
         loki_adapter: LokiLogAdapter | None = None,
     ):
+        super().__init__()
         self._allow_adapter_failure_fallback = log_gateway is None and loki_adapter is None
         self._tools = tool_map(langchain_tools)
         self._log_gateway = log_gateway or HTTPLogGatewayAdapter()

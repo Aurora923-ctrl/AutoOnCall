@@ -155,7 +155,9 @@ class EvalFailureTool(AIOpsTool):
         self.read_only = wrapped.read_only
         self.timeout_seconds = wrapped.timeout_seconds
         self._error_type = str(failure.get("error_type") or "eval_injected_failure")
-        self._message = str(failure.get("error_message") or failure.get("message") or "评测注入失败")
+        self._message = str(
+            failure.get("error_message") or failure.get("message") or "评测注入失败"
+        )
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -211,9 +213,7 @@ async def evaluate_cases(
     cases = load_cases(cases_path)
     generator = ReportGenerator(report_path or DEFAULT_REPORT_PATH)
     results = [await evaluate_case_safely(case, generator) for case in cases]
-    rag_payload = (
-        evaluate_rag_cases(rag_cases_path, docs_dir=rag_docs_dir) if include_rag else None
-    )
+    rag_payload = evaluate_rag_cases(rag_cases_path, docs_dir=rag_docs_dir) if include_rag else None
     ended_at = datetime.now(UTC)
     summary = build_summary(results, rag_payload=rag_payload)
     payload = {
@@ -329,10 +329,7 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
             report.root_cause,
             report.markdown,
             *analysis.hypotheses,
-            *[
-                item.title
-                for item in analysis.hypothesis_ranking
-            ],
+            *[item.title for item in analysis.hypothesis_ranking],
         ]
     )
     trace_complete = bool(
@@ -362,7 +359,9 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
         == bool(case.get("expected_needs_approval", False)),
         "report_generated": report_generated,
         "report_status_hit": report.status == expected_status,
-        "report_contains_evidence": text_has_all(report.markdown, case.get("report_must_contain", [])),
+        "report_contains_evidence": text_has_all(
+            report.markdown, case.get("report_must_contain", [])
+        ),
         "evidence_count_hit": len(evidence) >= min_evidence_count,
         "confidence_hit": report.confidence >= min_confidence,
         "runbook_rejection_hit": (
@@ -374,7 +373,8 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
             else True
         ),
         "tool_selection_recall": contains_all(planned_tools, case.get("expected_tools", [])),
-        "unnecessary_tool_rate": unexpected_tool_rate <= float(case.get("max_unnecessary_tool_rate", 0.4)),
+        "unnecessary_tool_rate": unexpected_tool_rate
+        <= float(case.get("max_unnecessary_tool_rate", 0.4)),
         "hypothesis_ranking_hit": text_has_all(
             hypothesis_text,
             case.get("expected_root_keywords", []),
@@ -386,9 +386,7 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
             else True
         ),
         "forbidden_precision": (
-            risk_policy == "forbidden"
-            if case.get("expected_risk_policy") == "forbidden"
-            else True
+            risk_policy == "forbidden" if case.get("expected_risk_policy") == "forbidden" else True
         ),
         "degradation_success": (
             contains_all(failed_tools, expected_failed_tools) and report_generated
@@ -501,7 +499,10 @@ def _eval_metrics_output(service_name: str, text: str) -> dict[str, Any]:
             "alert_info": {"triggered": True, "message": "CPU 使用率超过阈值"},
         },
         "memory": {
-            "statistics": {"avg": 91.5 if memory_high else 68.1, "max": 98.0 if memory_high else 79.4},
+            "statistics": {
+                "avg": 91.5 if memory_high else 68.1,
+                "max": 98.0 if memory_high else 79.4,
+            },
             "alert_info": {
                 "triggered": memory_high,
                 "message": "Memory 使用率超过阈值" if memory_high else "内存未超过关键阈值",
@@ -567,7 +568,9 @@ def _eval_k8s_output(service_name: str, text: str) -> dict[str, Any]:
                 "status": status,
             }
         ],
-        "events": [{"reason": event_reason, "message": f"{event_reason} observed"}] if abnormal else [],
+        "events": (
+            [{"reason": event_reason, "message": f"{event_reason} observed"}] if abnormal else []
+        ),
         "summary": (
             f"Kubernetes Pod {status}, restarts={restarts}, event={event_reason}"
             if abnormal
@@ -586,12 +589,14 @@ def _eval_mysql_output(service_name: str, text: str) -> dict[str, Any]:
             if active
             else []
         ),
-        "connections": {"active": 188 if active else 84, "max": 200, "pool_waiting": 6 if active else 0},
+        "connections": {
+            "active": 188 if active else 84,
+            "max": 200,
+            "pool_waiting": 6 if active else 0,
+        },
         "lock_waits": 3 if active else 0,
         "summary": (
-            "MySQL 慢查询累计增加，连接池等待"
-            if active
-            else "MySQL 连接和慢查询未见关键异常"
+            "MySQL 慢查询累计增加，连接池等待" if active else "MySQL 连接和慢查询未见关键异常"
         ),
     }
 
@@ -682,7 +687,9 @@ def summarize_tool_result(result: ToolExecutionResult) -> str:
     return f"工具 {result.tool_name} 调用成功"
 
 
-def build_summary(results: list[dict[str, Any]], *, rag_payload: dict[str, Any] | None) -> dict[str, Any]:
+def build_summary(
+    results: list[dict[str, Any]], *, rag_payload: dict[str, Any] | None
+) -> dict[str, Any]:
     """Build aggregate metrics and category summaries."""
     rag_summary = (rag_payload or {}).get("summary", {})
     aiops_case_count = len(results)
@@ -771,7 +778,9 @@ def build_category_metrics(
             "root_cause_hit_rate": metric_rate(metric_summary, "root_cause_hit"),
             "evidence_count_hit_rate": metric_rate(metric_summary, "evidence_count_hit"),
             "confidence_hit_rate": metric_rate(metric_summary, "confidence_hit"),
-            "average_evidence_count": average([result.get("evidence_count", 0) for result in results]),
+            "average_evidence_count": average(
+                [result.get("evidence_count", 0) for result in results]
+            ),
             "average_confidence": average([result.get("confidence", 0.0) for result in results]),
         },
         "tool": {
@@ -798,7 +807,10 @@ def build_category_metrics(
             "recall_at_k": rag_summary.get("recall_at_k", 0.0),
             "top_k": rag_summary.get("top_k", 0),
             "mrr": rag_summary.get("mrr", 0.0),
+            "citation_coverage_rate": rag_summary.get("citation_coverage_rate", 0.0),
             "no_answer_rejection_rate": rag_summary.get("no_answer_rejection_rate", 0.0),
+            "confusion_case_pass_rate": rag_summary.get("confusion_case_pass_rate", 0.0),
+            "confusion_case_count": rag_summary.get("confusion_case_count", 0),
             "runbook_no_answer_rejection_hit_rate": ratio(
                 sum(1 for result in runbook_reject_results if result.get("runbook_rejected")),
                 len(runbook_reject_results),
@@ -819,7 +831,9 @@ def build_category_metrics(
                 sum(
                     1
                     for result in failure_results
-                    if contains_all(result.get("failed_tools", []), result.get("expected_failed_tools", []))
+                    if contains_all(
+                        result.get("failed_tools", []), result.get("expected_failed_tools", [])
+                    )
                 ),
                 len(failure_results),
             ),
@@ -860,21 +874,17 @@ def build_resume_metrics(
         "tool_failure_graceful_degradation_rate": categories["stability"][
             "tool_failure_graceful_degradation_rate"
         ],
-        "diagnostic_tool_selection_recall": categories["diagnostic_chain"][
-            "tool_selection_recall"
-        ],
-        "diagnostic_unnecessary_tool_rate": categories["diagnostic_chain"][
-            "unnecessary_tool_rate"
-        ],
+        "diagnostic_tool_selection_recall": categories["diagnostic_chain"]["tool_selection_recall"],
+        "diagnostic_unnecessary_tool_rate": categories["diagnostic_chain"]["unnecessary_tool_rate"],
         "diagnostic_root_cause_hit": categories["diagnostic_chain"]["root_cause_hit"],
-        "diagnostic_evidence_support_rate": categories["diagnostic_chain"][
-            "evidence_support_rate"
-        ],
+        "diagnostic_evidence_support_rate": categories["diagnostic_chain"]["evidence_support_rate"],
         "diagnostic_trace_completeness": categories["diagnostic_chain"]["trace_completeness"],
         "rag_case_count": rag_summary.get("case_count", 0),
         "rag_recall_at_k": categories["rag"]["recall_at_k"],
         "rag_mrr": categories["rag"]["mrr"],
+        "rag_citation_coverage_rate": categories["rag"]["citation_coverage_rate"],
         "rag_no_answer_rejection_rate": categories["rag"]["no_answer_rejection_rate"],
+        "rag_confusion_case_pass_rate": categories["rag"]["confusion_case_pass_rate"],
     }
 
 
@@ -1044,7 +1054,10 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"approval={categories['risk']['approval_recall']:.0%}, "
             f"forbidden={categories['risk']['forbidden_action_block_rate']:.0%}, "
             f"stability={categories['stability']['tool_failure_graceful_degradation_rate']:.0%}, "
-            f"RAG recall@{categories['rag']['top_k']}={categories['rag']['recall_at_k']:.0%}"
+            f"RAG recall@{categories['rag']['top_k']}={categories['rag']['recall_at_k']:.0%}, "
+            f"RAG cite={categories['rag']['citation_coverage_rate']:.0%}, "
+            f"RAG confusion={categories['rag']['confusion_case_pass_rate']:.0%}, "
+            f"RAG reject={categories['rag']['no_answer_rejection_rate']:.0%}"
         ),
     ]
     for result in payload["cases"]:
@@ -1093,7 +1106,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- 审批召回率：{resume['approval_recall']:.0%}，禁止动作拦截率：{resume['forbidden_action_block_rate']:.0%}",
         f"- 工具失败降级报告率：{resume['tool_failure_graceful_degradation_rate']:.0%}",
         f"- 诊断链路：工具选择召回 {resume['diagnostic_tool_selection_recall']:.0%}，假设根因命中 {resume['diagnostic_root_cause_hit']:.0%}，Trace 完整性 {resume['diagnostic_trace_completeness']:.0%}",
-        f"- RAG case：{resume['rag_case_count']} 个，recall@{categories['rag']['top_k']} {resume['rag_recall_at_k']:.0%}，MRR {resume['rag_mrr']:.2f}，无答案拒答率 {resume['rag_no_answer_rejection_rate']:.0%}",
+        f"- RAG case：{resume['rag_case_count']} 个，recall@{categories['rag']['top_k']} {resume['rag_recall_at_k']:.0%}，MRR {resume['rag_mrr']:.2f}，引用覆盖率 {resume['rag_citation_coverage_rate']:.0%}，混淆 case 通过率 {resume['rag_confusion_case_pass_rate']:.0%}，无答案拒答率 {resume['rag_no_answer_rejection_rate']:.0%}",
         "",
         "> 诊断链路指标用于验证离线 case 中的工具选择、证据、假设排序、风控、报告和 Trace 闭环，不代表线上根因准确率。",
         "",
@@ -1170,6 +1183,8 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
                 f"- recall@1：{rag.get('recall_at_1', 0.0):.0%}",
                 f"- recall@{rag.get('top_k', 0)}：{rag.get('recall_at_k', 0.0):.0%}",
                 f"- MRR：{rag.get('mrr', 0.0):.2f}",
+                f"- citation coverage：{rag.get('citation_coverage_rate', 0.0):.0%}",
+                f"- confusion case pass：{rag.get('confusion_case_pass_rate', 0.0):.0%}",
                 f"- no-answer rejection：{rag.get('no_answer_rejection_rate', 0.0):.0%}",
             ]
         )

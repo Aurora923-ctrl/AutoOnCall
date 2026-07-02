@@ -148,16 +148,20 @@ RiskAssessment approval_required
 
 ## 5. 推荐演示路径
 
-1. 启动服务并打开 `http://localhost:9900`。
-2. 确认 `aiops-docs/` 已上传或运行 `make upload`。
-3. 在 RAG 问答里问一个 Runbook 问题，展示引用来源和拒答边界。
-4. 在告警接入或 demo 场景里创建一个故障事件。
-5. 发起 AIOps 诊断，观察 SSE 事件、计划、工具调用和证据。
-6. 打开 Incident 详情，展示 Trace、报告、审批状态和变更记录。
-7. 如果出现待审批动作，演示 approve/reject 和安全变更 dry-run。
-8. 打开评测面板，说明指标来自离线回归，不能代表线上准确率。
+这一段是面试时最建议背熟和演练的部分。目标不是展示所有功能，而是在 10 分钟内讲清楚：
 
-本地命令：
+```text
+RAG 可信问答
+-> Incident 诊断输入
+-> Plan-Execute-Replan
+-> 工具取证和 Evidence
+-> 风险审批或 forbidden
+-> Trace / Report / Eval
+```
+
+### 5.1 演示前准备
+
+本地基础演示：
 
 ```bash
 make bootstrap
@@ -166,7 +170,14 @@ make dev
 make upload
 ```
 
-完整沙箱：
+打开：
+
+- 前端工作台：`http://localhost:9900`
+- OpenAPI：`http://localhost:9900/docs`
+- Liveness：`http://localhost:9900/health/live`
+- Readiness：`http://localhost:9900/health/ready`
+
+完整沙箱演示：
 
 ```bash
 make sandbox-up
@@ -175,7 +186,69 @@ make sandbox-verify
 make sandbox-demo
 ```
 
-验证：
+面试时如果时间有限，优先走基础演示；完整沙箱用于说明“真实适配器接入路径”，不要把它说成生产环境。
+
+### 5.2 10 分钟讲解脚本
+
+| 时间 | 操作 | 要讲清楚什么 |
+| --- | --- | --- |
+| 0:00-1:00 | 打开 README 和工作台 | 项目定位：面向 OnCall 的 RAG + AIOps Agent，不是普通聊天 |
+| 1:00-2:30 | 在知识问答中问 Runbook 问题 | 展示引用、拒答、RAG 可信边界 |
+| 2:30-4:30 | 选择 Redis maxclients demo 发起诊断 | 展示 Incident 输入、Planner 计划、SSE 过程 |
+| 4:30-6:00 | 打开工具调用和证据链 | 说明 ToolExecutionResult 如何转成 Evidence / ToolCallRecord |
+| 6:00-7:30 | 打开报告和 Trace | 说明结论来自证据，Trace 可复盘 |
+| 7:30-8:30 | 演示 forbidden SQL 或审批场景 | 说明风险动作不会自动执行 |
+| 8:30-10:00 | 展示评测命令或评测面板 | 说明测试/eval 是离线回归，不等于线上准确率 |
+
+### 5.3 RAG 问答演示问题
+
+| 问题 | 预期结果 | 讲解重点 |
+| --- | --- | --- |
+| `CPU 使用率过高怎么排查？` | 命中 `cpu_high_usage.md`，回答带引用 | 有可信来源才回答 |
+| `服务响应慢可能和 MySQL 慢查询有关吗？` | 命中 `slow_response.md`，说明慢查询和依赖排查 | RAG 是 Runbook 知识依据 |
+| `公司年假怎么申请？` | 拒答或提示没有可信知识来源 | 无来源不硬答，避免幻觉 |
+
+讲法：
+
+> 这里我不是简单把 top-k 文档拼给模型，而是做了向量检索、词法召回、rerank、trust gate 和引用兜底。没有可信来源时，系统会拒答。
+
+### 5.4 固定 AIOps demo case
+
+| Case | 入口 | 预期工具/证据 | 面试讲法 |
+| --- | --- | --- | --- |
+| Redis maxclients | 前端模板 `Redis maxclients`；接口 `/api/aiops/demo/incidents/redis_maxclients/run` | `query_redis_status`、`query_metrics`、`query_logs`、Runbook、历史工单 | Redis 连接数接近上限导致 timeout，Agent 通过多源证据形成根因 |
+| MySQL slow query | 前端模板 `MySQL slow query`；接口 `/api/aiops/demo/incidents/mysql_slow_query/run` | `query_mysql_status`、`query_metrics`、`query_logs`、Runbook | 慢 SQL 和连接池等待导致延迟，报告要说明证据来源 |
+| Pod CrashLoop | 前端模板 `Pod CrashLoop`；接口 `/api/aiops/demo/incidents/pod_crashloop/run` | `query_k8s_status`、`query_logs`、`query_metrics`、Runbook | Pod 重启、CrashLoopBackOff 或 OOMKilled 会被转成结构化 Evidence |
+| Forbidden SQL | 前端模板 `Forbidden SQL`；接口 `/api/aiops/demo/incidents/forbidden_sql/run` | Risk Controller、forbidden 证据 | 未审核删除 SQL 被禁止，体现 Agent 安全边界 |
+
+推荐主讲 Redis maxclients，因为它最容易串起：
+
+```text
+告警现象
+-> Redis 连接数证据
+-> 指标和日志佐证
+-> Runbook 建议
+-> 报告和风险边界
+```
+
+如果面试官追问“是不是都是真实数据”，回答要克制：
+
+> 本地演示可以使用 mock/fallback 或 full-stack sandbox。严格环境把 `AIOPS_MOCK_FALLBACK_ENABLED=false` 后，未配置工具会返回 `not_configured` 或 `failed`，不会伪装成真实生产证据。
+
+### 5.5 演示时看哪些页面
+
+| 页面/区域 | 展示点 |
+| --- | --- |
+| 知识问答 | RAG 引用和拒答 |
+| 新建故障诊断 | 结构化 Incident 输入和 demo 模板 |
+| Plan 卡片 | Planner 如何把故障拆成步骤 |
+| 工具调用 | 工具名、输入、输出、数据源、状态 |
+| 证据链 | Evidence 的 fact、inference、uncertainty、confidence |
+| 诊断报告 | 根因、证据、风险、建议 |
+| 审批/处置记录 | approval_required、forbidden、dry-run/manual record |
+| 环境就绪中心 | health、adapter verification、eval summary |
+
+### 5.6 演示后验证命令
 
 ```bash
 make lint
@@ -184,6 +257,10 @@ make eval
 make eval-rag
 make eval-change
 ```
+
+讲法：
+
+> 这些评测是为了保证工具选择、根因关键词、RAG 拒答和安全变更策略不回归；它们不是线上准确率声明。
 
 ## 6. 面试亮点
 

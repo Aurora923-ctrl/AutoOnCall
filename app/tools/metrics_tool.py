@@ -44,6 +44,7 @@ class QueryMetricsTool(AIOpsTool):
         langchain_tools: list[Any] | None = None,
         prometheus_adapter: PrometheusMetricsAdapter | None = None,
     ):
+        super().__init__()
         self._allow_adapter_failure_fallback = prometheus_adapter is None
         self._tools = tool_map(langchain_tools)
         self._prometheus = prometheus_adapter or PrometheusMetricsAdapter()

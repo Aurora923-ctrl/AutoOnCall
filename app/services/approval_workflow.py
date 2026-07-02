@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from hashlib import sha256
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from app.models.approval import ApprovalRequest
 from app.models.change_plan import ChangePlan
@@ -99,7 +99,8 @@ def find_pending_approval_by_idempotency_key(
     """Return an existing pending approval for the same risky action, when available."""
     if not idempotency_key or not hasattr(repository, "list_pending"):
         return None
-    for request in repository.list_pending(incident_id=incident_id):
+    for raw_request in repository.list_pending(incident_id=incident_id):
+        request = cast(ApprovalRequest, raw_request)
         metadata = request.metadata or {}
         if metadata.get("idempotency_key") == idempotency_key:
             return request

@@ -34,6 +34,7 @@ class QueryRedisStatusTool(AIOpsTool):
     )
 
     def __init__(self, redis_adapter: RedisInfoAdapter | None = None):
+        super().__init__()
         self._allow_adapter_failure_fallback = redis_adapter is None
         self._redis_adapter = redis_adapter or RedisInfoAdapter()
 

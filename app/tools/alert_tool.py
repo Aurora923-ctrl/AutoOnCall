@@ -31,6 +31,7 @@ class QueryAlertsTool(AIOpsTool):
     )
 
     def __init__(self, alert_adapter: AlertmanagerAlertAdapter | None = None):
+        super().__init__()
         self._allow_adapter_failure_fallback = alert_adapter is None
         self._alert_adapter = alert_adapter or AlertmanagerAlertAdapter()
 

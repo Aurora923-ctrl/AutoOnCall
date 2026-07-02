@@ -2,6 +2,8 @@
 
 This sandbox gives AutoOnCall a reproducible live-data environment for AIOps demos. It runs Redis, MySQL, Prometheus, Alertmanager, Grafana, Loki, a read-only Kubernetes API mock, Tempo, Jaeger, OpenTelemetry Collector, Redpanda, and small mock services for CMDB, ticketing, and deployment history.
 
+For a 10-minute campus-recruiting interview demo, use the main path in `README.md` first. This sandbox is the advanced path for proving that the same Tool Registry can consume adapter-backed evidence such as `redis_info`, `mysql`, `prometheus`, and `loki` instead of built-in mock output.
+
 It is intentionally local-only demo infrastructure. Do not reuse the demo passwords in production.
 
 All persistent Docker data is stored under:
@@ -30,6 +32,15 @@ D:\AppDataStorage\DockerData\autooncall-full
 | Deploy history mock | `autooncall-full-deploy-history-mock` | `18084` | Release/change correlation fixtures |
 
 ## Quick Start
+
+Interview quick path:
+
+1. Start the sandbox and seed demo data.
+2. Load `deploy/sandbox.env` before starting FastAPI.
+3. Run `redis_maxclients` or `mysql_slow_query` from the web UI.
+4. Confirm the report/trace shows adapter-backed data sources such as `redis_info`, `mysql`, `prometheus`, or `loki`, not `mock`.
+
+Full command path:
 
 ```powershell
 make sandbox-up

@@ -236,6 +236,49 @@ def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) 
     assert payload["retrieval_results"][0]["retrieval_reason"].startswith("lexical score")
 
 
+def test_retrieval_degrades_to_lexical_when_default_vector_store_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    document = Document(
+        page_content="Redis maxclients 耗尽会导致 connection timeout，需要扩容连接数。",
+        metadata={
+            "_source": "aiops-docs/redis.md",
+            "_file_name": "redis.md",
+            "_doc_id": "aiops-docs/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+    index.upsert_source("aiops-docs/redis.md", [document])
+
+    def raise_vector_unavailable():
+        raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(config, "rag_hybrid_search_enabled", True)
+    monkeypatch.setattr(config, "rag_rerank_enabled", True)
+    monkeypatch.setattr(config, "rag_min_lexical_trust_score", 0.0)
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        top_k=1,
+        max_distance=1.0,
+        lexical_index=index,
+        vector_store_provider=raise_vector_unavailable,
+    )
+
+    assert payload["status"] == "success"
+    assert payload["retrieval_mode"] == "lexical_degraded_rerank"
+    assert payload["retrieval_degraded"] is True
+    assert payload["vector_error_message"] == "向量检索暂不可用，已降级使用本地词法索引。"
+    assert payload["vector_error_type"] == "RuntimeError"
+    assert payload["vector_error_detail"] == "milvus unavailable"
+    assert payload["vector_candidate_count"] == 0
+    assert payload["lexical_candidate_count"] == 1
+    assert payload["retrieval_results"][0]["source_file"] == "redis.md"
+    assert payload["retrieval_results"][0]["metadata"]["_retrieval_source"] == "lexical"
+
+
 def test_lexical_only_candidate_must_pass_lexical_trust_threshold(
     monkeypatch,
     tmp_path,

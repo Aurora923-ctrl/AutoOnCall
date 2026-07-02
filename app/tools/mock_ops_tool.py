@@ -24,6 +24,7 @@ class QueryK8sStatusTool(AIOpsTool):
     )
 
     def __init__(self, k8s_adapter: KubernetesStatusAdapter | None = None):
+        super().__init__()
         self._allow_adapter_failure_fallback = k8s_adapter is None
         self._k8s_adapter = k8s_adapter or KubernetesStatusAdapter()
 
@@ -148,6 +149,7 @@ class QueryMySQLStatusTool(AIOpsTool):
     )
 
     def __init__(self, mysql_adapter: MySQLStatusAdapter | None = None):
+        super().__init__()
         self._allow_adapter_failure_fallback = mysql_adapter is None
         self._mysql_adapter = mysql_adapter or MySQLStatusAdapter()
 
@@ -215,6 +217,7 @@ class SearchHistoryTicketTool(AIOpsTool):
     degradation_strategy = "工单系统不可用时返回演示相似故障；关闭 mock 后返回结构化不可用结果"
 
     def __init__(self, ticketing_adapter: TicketingAdapter | None = None):
+        super().__init__()
         self._allow_adapter_failure_fallback = ticketing_adapter is None
         self._ticketing_adapter = ticketing_adapter or TicketingAdapter()
 

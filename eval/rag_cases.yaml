@@ -14,11 +14,20 @@ cases:
       - CPU
 
   - id: cpu_slow_sql_relation
+    case_type: confusion
     query: 应用 CPU 高，同时日志里出现慢 SQL，如何排查？
     expected_source: cpu_high_usage.md
     expected_keywords:
       - 慢SQL
       - CPU
+
+  - id: cpu_high_but_root_cause_slow_query
+    case_type: confusion
+    query: 接口变慢且 CPU 高，但火焰图没有明显热点，MySQL 慢查询和连接池等待上升，根因更像数据库慢查询
+    expected_source: slow_response.md
+    expected_keywords:
+      - 慢查询
+      - 数据库连接池
 
   - id: memory_oom
     query: recommendation-service 内存使用率 96%，Pod 出现 OOMKilled
@@ -48,6 +57,14 @@ cases:
       - Docker
       - 磁盘
 
+  - id: disk_high_but_container_logs
+    case_type: confusion
+    query: 磁盘使用率高但不是业务数据增长，Docker 容器日志占满磁盘，应该如何处理？
+    expected_source: disk_high_usage.md
+    expected_keywords:
+      - 容器日志
+      - Docker
+
   - id: disk_inode_and_large_files
     query: 服务器 inode 使用率异常，需要查找大文件和目录占用
     expected_source: disk_high_usage.md
@@ -63,11 +80,20 @@ cases:
       - 用户无法访问
 
   - id: service_dependency_redis_down
+    case_type: confusion
     query: order-service 依赖 Redis 或 MQ 不可用，导致接口失败
     expected_source: service_unavailable.md
     expected_keywords:
       - Redis
       - 依赖服务
+
+  - id: service_503_but_dependency_timeout
+    case_type: confusion
+    query: 服务出现 503，但应用没有崩溃日志，Redis 和 MQ 依赖超时导致接口失败
+    expected_source: service_unavailable.md
+    expected_keywords:
+      - 依赖服务
+      - Redis
 
   - id: service_config_error
     query: 服务启动失败，怀疑配置文件错误或环境变量缺失
@@ -107,4 +133,12 @@ cases:
 
   - id: reject_frontend_color
     query: 前端按钮颜色和页面圆角应该怎么设计？
+    should_reject: true
+
+  - id: reject_stock_investment
+    query: 最近股票和基金应该怎么买，帮我给一个投资组合
+    should_reject: true
+
+  - id: reject_meeting_room_booking
+    query: 公司会议室预订、团建预算和行政采购流程是什么？
     should_reject: true

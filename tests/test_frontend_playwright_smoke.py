@@ -39,7 +39,10 @@ def test_static_workbench_renders_in_browser(tmp_path) -> None:
             except Exception as exc:
                 pytest.skip(f"Playwright browser is not installed: {exc}")
             page = browser.new_page(viewport={"width": 1366, "height": 900})
-            page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+            page.on(
+                "console",
+                lambda message: errors.append(message.text) if message.type == "error" else None,
+            )
             page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
             page.locator("#apiTokenInput").fill("demo-token")
             page.locator("#apiTokenSaveBtn").click()
@@ -76,7 +79,10 @@ def test_static_workbench_renders_in_browser(tmp_path) -> None:
 
 def _unused_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except PermissionError as exc:
+            pytest.skip(f"Current environment does not allow binding localhost ports: {exc}")
         return int(sock.getsockname()[1])
 
 

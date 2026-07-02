@@ -29,6 +29,7 @@ DEFAULT_MIN_SCORE = 2.0
 RAG_METRIC_FAILURE_REASONS = {
     "recall_at_k": "Top-K 检索结果未命中期望 Runbook 来源。",
     "keyword_hit": "检索结果未覆盖 case 要求的关键证据词。",
+    "citation_coverage": "成功检索 case 缺少 source_file + chunk_id 引用信息。",
     "no_answer_rejection": "无答案 case 未被拒答，仍返回了 Runbook 片段。",
 }
 
@@ -42,6 +43,7 @@ DOMAIN_TERMS = {
     "gc",
     "inode",
     "jvm",
+    "panic",
     "mq",
     "mysql",
     "oom",
@@ -72,6 +74,10 @@ DOMAIN_TERMS = {
     "缓存",
     "缓存失效",
     "缓存穿透",
+    "火焰图",
+    "容器日志",
+    "业务数据",
+    "连接池",
     "配置错误",
     "超时",
 }
@@ -114,6 +120,18 @@ def evaluate_cases(
         sum(1 for result in non_reject_results if result["keyword_hit"]),
         len(non_reject_results),
     )
+    citation_results = [result for result in non_reject_results if result["citation_required"]]
+    citation_coverage_rate = _ratio(
+        sum(1 for result in citation_results if result["citation_hit"]),
+        len(citation_results),
+    )
+    confusion_results = [
+        result for result in non_reject_results if result["case_type"] == "confusion"
+    ]
+    confusion_case_pass_rate = _ratio(
+        sum(1 for result in confusion_results if result["passed"]),
+        len(confusion_results),
+    )
     rejection_rate = _ratio(
         sum(1 for result in reject_results if result["rejection_hit"]),
         len(reject_results),
@@ -134,20 +152,27 @@ def evaluate_cases(
         "top_k": top_k,
         "mrr": mrr,
         "keyword_hit_rate": keyword_hit_rate,
+        "citation_coverage_rate": citation_coverage_rate,
         "no_answer_rejection_rate": rejection_rate,
+        "confusion_case_pass_rate": confusion_case_pass_rate,
         "non_reject_case_count": len(non_reject_results),
         "reject_case_count": len(reject_results),
+        "citation_case_count": len(citation_results),
+        "confusion_case_count": len(confusion_results),
         "evaluated_metrics": [
             "recall_at_1",
             "recall_at_k",
             "strict_recall_at_k",
             "mrr",
             "keyword_hit_rate",
+            "citation_coverage_rate",
             "no_answer_rejection_rate",
+            "confusion_case_pass_rate",
         ],
         "failed_cases": [
             {
                 "id": result["id"],
+                "case_type": result["case_type"],
                 "failed_metrics": result["failed_metrics"],
                 "failure_reasons": result["failure_reasons"],
                 "retrieved_sources": result["retrieved_sources"],
@@ -170,6 +195,7 @@ def evaluate_case(
     """Evaluate one RAG retrieval case against the offline index."""
     query = str(case.get("query") or "")
     should_reject = bool(case.get("should_reject", False))
+    case_type = str(case.get("case_type") or "").strip()
     threshold = float(case.get("min_score", min_score))
     retrieved = search_offline(index, query, top_k=top_k, min_score=threshold)
     expected_sources = _expected_sources(case)
@@ -180,11 +206,14 @@ def evaluate_case(
         return {
             "id": case["id"],
             "query": query,
+            "case_type": case_type or "negative",
             "should_reject": True,
             "passed": rejection_hit,
             "failed_metrics": failed_metrics,
             "failure_reasons": failure_reasons(failed_metrics),
             "rejection_hit": rejection_hit,
+            "citation_required": False,
+            "citation_hit": True,
             "recall_at_1": False,
             "recall_at_k": False,
             "reciprocal_rank": 0.0,
@@ -196,25 +225,32 @@ def evaluate_case(
 
     rank = _first_expected_rank(retrieved, expected_sources)
     keyword_hit = _retrieved_text_has_keywords(retrieved, case.get("expected_keywords", []))
+    citation_required = bool(case.get("requires_citation", True))
+    citation_hit = (not citation_required) or _retrieved_has_valid_citation(retrieved)
     recall_at_1 = rank == 1
     recall_at_k = rank > 0
     strict_recall_at_k = _all_expected_sources_hit(retrieved, expected_sources)
     reciprocal_rank = round(1 / rank, 4) if rank > 0 else 0.0
-    passed = recall_at_k and keyword_hit
+    passed = recall_at_k and keyword_hit and citation_hit
     failed_metrics = []
     if not recall_at_k:
         failed_metrics.append("recall_at_k")
     if not keyword_hit:
         failed_metrics.append("keyword_hit")
+    if not citation_hit:
+        failed_metrics.append("citation_coverage")
 
     return {
         "id": case["id"],
         "query": query,
+        "case_type": case_type or "positive",
         "should_reject": False,
         "passed": passed,
         "failed_metrics": failed_metrics,
         "failure_reasons": failure_reasons(failed_metrics),
         "rejection_hit": False,
+        "citation_required": citation_required,
+        "citation_hit": citation_hit,
         "recall_at_1": recall_at_1,
         "recall_at_k": recall_at_k,
         "strict_recall_at_k": strict_recall_at_k,
@@ -312,6 +348,8 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"recall@{summary['top_k']}={summary['recall_at_k']:.0%}, "
             f"strict_recall@{summary['top_k']}={summary['strict_recall_at_k']:.0%}, "
             f"MRR={summary['mrr']:.2f}, "
+            f"cite={summary['citation_coverage_rate']:.0%}, "
+            f"confusion={summary['confusion_case_pass_rate']:.0%}, "
             f"reject={summary['no_answer_rejection_rate']:.0%}"
         )
     ]
@@ -326,9 +364,7 @@ def render_summary(payload: dict[str, Any]) -> str:
 
 def failure_reasons(failed_metrics: list[str]) -> dict[str, str]:
     """Map failed RAG metric names to human-readable reasons."""
-    return {
-        metric: RAG_METRIC_FAILURE_REASONS.get(metric, metric) for metric in failed_metrics
-    }
+    return {metric: RAG_METRIC_FAILURE_REASONS.get(metric, metric) for metric in failed_metrics}
 
 
 def _expected_sources(case: dict[str, Any]) -> list[str]:
@@ -362,6 +398,15 @@ def _retrieved_text_has_keywords(
         for item in retrieved
     ).lower()
     return all(str(keyword).lower() in text for keyword in expected_keywords)
+
+
+def _retrieved_has_valid_citation(retrieved: list[dict[str, Any]]) -> bool:
+    for item in retrieved:
+        source_file = str(item.get("source_file") or "").strip()
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        if source_file and source_file != "未知来源" and chunk_id:
+            return True
+    return False
 
 
 def _ratio(numerator: int, denominator: int) -> float:

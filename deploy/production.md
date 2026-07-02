@@ -2,6 +2,8 @@
 
 AutoOnCall can run in local demo mode with mock/fallback data, but production-oriented deployments should make data sources, authentication, storage, and retention explicit. The safest source of configuration defaults is `app/config.py`; a copyable environment template is available in `.env.example`.
 
+This file is not required for the 10-minute interview demo. Use it as a production-boundary appendix: it explains what would need to be tightened before a real internal deployment, and helps avoid overstating the local demo as a production-ready platform.
+
 ## Recommended Defaults
 
 - Treat all FastAPI routes as internal tooling; do not expose the service directly to the public internet.

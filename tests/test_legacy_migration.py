@@ -10,6 +10,7 @@ from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.legacy_migration import resolve_legacy_jsonl_path
+from app.services.mysql_store import AIOpsMySQLStore
 from app.services.sqlite_store import AIOpsSQLiteStore
 from scripts import migrate_aiops_sqlite_to_mysql
 
@@ -40,9 +41,7 @@ def test_sqlite_to_mysql_migration_dry_run_counts_all_runtime_tables(
     store.save_alert_event(
         AlertEvent(fingerprint="fp-1", incident_id="inc-1", service_name="order-service")
     )
-    store.save_trace_event(
-        TraceEvent(trace_id="trace-1", incident_id="inc-1", node_name="planner")
-    )
+    store.save_trace_event(TraceEvent(trace_id="trace-1", incident_id="inc-1", node_name="planner"))
     store.save_approval_request(
         ApprovalRequest(incident_id="inc-1", action="restart service", risk_level="high")
     )
@@ -76,3 +75,30 @@ def test_sqlite_to_mysql_migration_dry_run_counts_all_runtime_tables(
         "incident_states": 1,
         "diagnosis_reports": 1,
     }
+
+
+def test_mysql_store_scope_index_migration_warns_when_duplicate_groups_exist() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, params=None) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self):
+            last = self.statements[-1]
+            if "information_schema.statistics" in last:
+                return {"index_count": 0}
+            if "duplicate_groups" in last:
+                return {"duplicate_groups": 2}
+            return None
+
+    store = object.__new__(AIOpsMySQLStore)
+    store.migration_warnings = []
+    cursor = FakeCursor()
+
+    store._ensure_change_execution_scope_unique_index(cursor)
+
+    assert store.migration_warnings
+    assert "历史重复安全变更记录" in store.migration_warnings[0]
+    assert not any("ALTER TABLE change_executions" in statement for statement in cursor.statements)

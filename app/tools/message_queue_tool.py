@@ -24,6 +24,7 @@ class QueryMessageQueueStatusTool(AIOpsTool):
     )
 
     def __init__(self, redpanda_adapter: RedpandaStatusAdapter | None = None):
+        super().__init__()
         self._redpanda_adapter = redpanda_adapter or RedpandaStatusAdapter()
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:

@@ -3,6 +3,8 @@ Planner 节点：制定执行计划
 基于 LangGraph 官方教程实现
 """
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from textwrap import dedent
 from typing import Any, cast
 
@@ -34,6 +36,16 @@ class Plan(BaseModel):
     steps: list[PlanStep] = Field(
         description="完成任务所需的结构化排障步骤。每个步骤必须包含 tool_name、purpose、input_args、expected_evidence、risk_level 和 status。"
     )
+
+
+@dataclass(slots=True)
+class PlannerDependencies:
+    """Optional dependency overrides for tests and alternative planner runtimes."""
+
+    knowledge_retriever: Callable[[str], dict[str, Any]] | None = None
+    mcp_client_factory: Callable[[], Awaitable[Any]] | None = None
+    llm_factory: Callable[[], Any] | None = None
+    tool_registry_factory: Callable[[list[Any]], Any] | None = None
 
 
 planner_prompt = ChatPromptTemplate.from_messages(
@@ -91,7 +103,20 @@ planner_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def planner(state: PlanExecuteState) -> dict[str, Any]:
+def _create_planner_llm() -> Any:
+    """Create the default structured-output LLM used by the planner."""
+    return ChatQwen(
+        model=config.effective_rag_model,
+        api_key=cast(Any, config.dashscope_api_key),
+        base_url=config.dashscope_api_base,
+        temperature=0,
+    )
+
+
+async def planner(
+    state: PlanExecuteState,
+    dependencies: PlannerDependencies | None = None,
+) -> dict[str, Any]:
     """
     规划节点：根据用户输入生成执行计划
 
@@ -100,11 +125,17 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
     2. 基于经验文档和可用工具制定执行计划
     """
     logger.info("=== Planner：制定执行计划 ===")
+    dependencies = dependencies or PlannerDependencies()
+    knowledge_retriever = dependencies.knowledge_retriever or retrieve_structured_knowledge
+    mcp_client_factory = dependencies.mcp_client_factory or get_mcp_client_with_retry
+    llm_factory = dependencies.llm_factory or _create_planner_llm
+    tool_registry_factory = dependencies.tool_registry_factory or create_default_tool_registry
 
     input_text = state.get("input", "")
     incident = state.get("incident", {})
     retrieval_query = _build_planner_retrieval_query(input_text, incident)
     runbook_evidence: list[dict[str, Any]] = []
+    planner_warnings: list[str] = []
     logger.info(f"用户输入: {input_text}")
     logger.info(f"Runbook 检索查询: {retrieval_query}")
 
@@ -112,7 +143,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         logger.info("查询内部文档，寻找相关经验...")
         experience_docs = ""
         try:
-            retrieval_payload = retrieve_structured_knowledge(retrieval_query)
+            retrieval_payload = knowledge_retriever(retrieval_query)
             if retrieval_payload.get("status") == "success":
                 experience_docs = str(retrieval_payload.get("content") or "")
                 runbook_evidence.append(
@@ -142,14 +173,19 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
             logger.warning(f"查询内部文档失败: {e}")
 
         local_tools = [get_current_time, retrieve_knowledge]
-
-        mcp_client = await get_mcp_client_with_retry()
-        mcp_tools = await mcp_client.get_tools()
+        mcp_tools: list[Any] = []
+        try:
+            mcp_client = await mcp_client_factory()
+            mcp_tools = await mcp_client.get_tools()
+        except Exception as exc:
+            warning = "MCP 工具发现失败，Planner 已降级使用本地和标准工具契约继续规划。"
+            planner_warnings.append(warning)
+            logger.warning(f"{warning} error={exc}")
 
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
-        tool_contracts = create_default_tool_registry(all_tools).list_contracts()
+        tool_contracts = tool_registry_factory(all_tools).list_contracts()
         tools_description = format_tools_description(tool_contracts)
         standard_tool_names = [contract.name for contract in tool_contracts]
         runbook_steps = _extract_runbook_sop_steps(experience_docs, input_text, incident)
@@ -167,12 +203,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         else:
             experience_context = ""
 
-        llm = ChatQwen(
-            model=config.effective_rag_model,
-            api_key=cast(Any, config.dashscope_api_key),
-            base_url=config.dashscope_api_base,
-            temperature=0,
-        )
+        llm = llm_factory()
 
         planner_chain = planner_prompt | llm.with_structured_output(Plan)
 
@@ -203,6 +234,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         return {
             **normalize_plan_state_update(structured_steps),
             "gathered_evidence": runbook_evidence,
+            "warnings": planner_warnings,
         }
 
     except Exception as e:
@@ -214,6 +246,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         return {
             **normalize_plan_state_update(structured_steps),
             "gathered_evidence": runbook_evidence,
+            "warnings": planner_warnings,
         }
 
 

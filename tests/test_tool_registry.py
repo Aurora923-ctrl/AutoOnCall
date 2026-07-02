@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.tools.base import AIOpsTool
 from app.tools.registry import create_default_tool_registry
 
 
@@ -22,6 +23,20 @@ class FailingAsyncTool:
 
     async def ainvoke(self, input_args: dict):
         raise RuntimeError(f"{self.name} unavailable")
+
+
+class MutableContractTool(AIOpsTool):
+    name = "mutable_contract"
+    description = "tool with nested class-level defaults"
+    input_schema = {
+        "type": "object",
+        "properties": {"service_name": {"type": "string"}},
+    }
+    output_schema = {"properties": {"status": {"type": "string"}}}
+    data_sources = ["source-a"]
+
+    async def _call(self, input_args: dict):
+        return {"status": "ok"}
 
 
 def test_registry_registers_standard_aiops_tools() -> None:
@@ -178,6 +193,21 @@ async def test_query_metrics_does_not_mock_partial_mcp_when_fallback_disabled(
     assert result.output["source_detail"]["memory"] == "mcp_monitor"
     assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
     assert "synthetic_fields" not in result.output
+
+
+def test_tool_contract_defaults_are_isolated_per_instance() -> None:
+    first = MutableContractTool()
+    second = MutableContractTool()
+
+    first.input_schema["properties"]["mutated"] = {"type": "boolean"}
+    first.output_schema["properties"]["mutated"] = {"type": "boolean"}
+    first.data_sources.append("mutated-source")
+
+    assert "mutated" not in second.input_schema["properties"]
+    assert "mutated" not in second.output_schema["properties"]
+    assert second.data_sources == ["source-a"]
+    assert "mutated" not in MutableContractTool.input_schema["properties"]
+    assert "mutated-source" not in MutableContractTool.data_sources
 
 
 @pytest.mark.asyncio

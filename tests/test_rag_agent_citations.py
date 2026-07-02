@@ -9,6 +9,7 @@ from app.services.rag_agent_service import (
     build_no_answer_message,
     compact_retrieval_payload,
     ensure_citation_block,
+    has_valid_citations,
 )
 
 
@@ -28,6 +29,13 @@ def test_ensure_citation_block_appends_missing_sources() -> None:
     assert "source_file: redis.md" in grounded
     assert "chunk_id: redis.md#0001" in grounded
     assert "score: 0.1235" in grounded
+
+
+def test_has_valid_citations_requires_source_file_and_chunk_id() -> None:
+    assert has_valid_citations([{"source_file": "redis.md", "chunk_id": "redis.md#0001"}])
+    assert not has_valid_citations([])
+    assert not has_valid_citations([{"source_file": "redis.md", "chunk_id": ""}])
+    assert not has_valid_citations([{"source_file": "未知来源", "chunk_id": "chunk-1"}])
 
 
 def test_no_answer_payload_keeps_rejected_candidates_for_frontend() -> None:
@@ -62,6 +70,10 @@ def test_no_answer_payload_keeps_rejected_candidates_for_frontend() -> None:
 def test_compact_retrieval_payload_hides_absolute_source_path() -> None:
     payload = {
         "status": "success",
+        "retrieval_degraded": True,
+        "vector_error_message": "向量检索暂不可用，已降级使用本地词法索引。",
+        "vector_error_type": "RuntimeError",
+        "vector_error_detail": "http://milvus.internal:19530 unavailable",
         "retrieval_results": [
             {
                 "source_file": "redis.md",
@@ -74,6 +86,10 @@ def test_compact_retrieval_payload_hides_absolute_source_path() -> None:
     compact = compact_retrieval_payload(payload)
 
     assert compact["retrieval_results"][0]["source_path"] == "redis.md"
+    assert compact["retrieval_degraded"] is True
+    assert compact["vector_error_message"] == "向量检索暂不可用，已降级使用本地词法索引。"
+    assert compact["vector_error_type"] == "RuntimeError"
+    assert "vector_error_detail" not in compact
 
 
 @pytest.mark.asyncio
@@ -123,3 +139,44 @@ async def test_query_with_retrieval_uses_tool_free_grounded_model(monkeypatch) -
     assert [item["role"] for item in history] == ["user", "assistant"]
     assert history[0]["content"] == "Redis timeout 怎么处理？"
     assert "redis.md#0001" in history[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_query_with_retrieval_refuses_success_payload_without_citations(monkeypatch) -> None:
+    class NeverCalledModel:
+        async def ainvoke(self, messages):  # pragma: no cover - defensive assertion
+            raise AssertionError(
+                "RAG must refuse before model generation when citations are missing"
+            )
+
+    service = rag_module.RagAgentService()
+    service.model = NeverCalledModel()
+
+    monkeypatch.setattr(
+        rag_module,
+        "retrieve_structured_knowledge",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "content": "source_file: \nchunk_id: \nRedis 连接数过高会导致超时。",
+            "summary": "检索到 1 条可信知识来源",
+            "retrieval_results": [
+                {
+                    "source_file": "",
+                    "chunk_id": "",
+                    "score": 0.12,
+                    "content_preview": "Redis 连接数过高会导致超时。",
+                }
+            ],
+            "rejected_results": [],
+            "answer_policy": "answer_with_citations",
+        },
+    )
+
+    result = await service.query_with_retrieval("Redis timeout 怎么处理？", "missing-citation")
+
+    assert result["no_answer"] is True
+    assert result["answer_policy"] == "refuse_without_citation"
+    assert result["citations"] == []
+    assert "缺少可审计引用信息" in result["answer"]
+    assert result["retrieval"]["status"] == "no_answer"
+    assert result["retrieval"]["no_answer_rejected"] is True

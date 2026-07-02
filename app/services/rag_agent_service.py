@@ -252,9 +252,22 @@ class RagAgentService:
                 ),
             }
 
+        citations = build_citations(retrieval_payload)
+        if not has_valid_citations(citations):
+            answer = build_missing_citation_message()
+            guarded_payload = build_citation_guard_payload(retrieval_payload)
+            self._append_grounded_history(session_id, question, answer)
+            return {
+                "success": True,
+                "answer": answer,
+                "citations": [],
+                "retrieval": compact_retrieval_payload(guarded_payload),
+                "no_answer": True,
+                "answer_policy": "refuse_without_citation",
+            }
+
         grounded_question = build_grounded_question(question, retrieval_payload)
         answer = await self.query_grounded(grounded_question, session_id, history_question=question)
-        citations = build_citations(retrieval_payload)
         answer = ensure_citation_block(answer, citations)
         self._append_grounded_history(session_id, question, answer)
 
@@ -381,14 +394,14 @@ class RagAgentService:
         """Stream a grounded answer and expose retrieval details before generation."""
         retrieval_payload = retrieve_structured_knowledge(question, metadata_filter=metadata_filter)
         retrieval_context = compact_retrieval_payload(retrieval_payload)
-        yield {
-            "type": "search_results",
-            "data": retrieval_context,
-        }
 
         if retrieval_payload.get("status") != "success":
             answer = build_no_answer_message(retrieval_payload)
             self._append_grounded_history(session_id, question, answer)
+            yield {
+                "type": "search_results",
+                "data": retrieval_context,
+            }
             yield {
                 "type": "content",
                 "data": answer,
@@ -408,6 +421,37 @@ class RagAgentService:
             }
             return
 
+        citations = build_citations(retrieval_payload)
+        if not has_valid_citations(citations):
+            answer = build_missing_citation_message()
+            guarded_payload = build_citation_guard_payload(retrieval_payload)
+            guarded_context = compact_retrieval_payload(guarded_payload)
+            self._append_grounded_history(session_id, question, answer)
+            yield {
+                "type": "search_results",
+                "data": guarded_context,
+            }
+            yield {
+                "type": "content",
+                "data": answer,
+                "node": "citation_guard",
+            }
+            yield {
+                "type": "complete",
+                "data": {
+                    "answer": answer,
+                    "citations": [],
+                    "retrieval": guarded_context,
+                    "no_answer": True,
+                    "answer_policy": "refuse_without_citation",
+                },
+            }
+            return
+
+        yield {
+            "type": "search_results",
+            "data": retrieval_context,
+        }
         grounded_question = build_grounded_question(question, retrieval_payload)
         full_answer = ""
         async for chunk in self.query_grounded_stream(
@@ -423,7 +467,6 @@ class RagAgentService:
             else:
                 yield chunk
 
-        citations = build_citations(retrieval_payload)
         final_answer = ensure_citation_block(full_answer, citations)
         appended_content = final_answer[len(full_answer) :]
         if appended_content:
@@ -700,6 +743,36 @@ def build_no_answer_message(retrieval_payload: dict[str, Any]) -> str:
     if rejected:
         suffix = "\n\n已检索到候选片段，但距离分数超过可信阈值，已拒绝强答。"
     return f"{summary}请补充相关知识库文档后再提问。{suffix}"
+
+
+def build_missing_citation_message() -> str:
+    """Return a stable refusal when trusted chunks cannot be cited."""
+    return (
+        "检索到候选知识，但缺少可审计引用信息，已拒绝生成回答。"
+        "请重新索引文档或补齐 source_file 与 chunk_id 后再提问。"
+    )
+
+
+def build_citation_guard_payload(retrieval_payload: dict[str, Any]) -> dict[str, Any]:
+    """Mark a successful retrieval as unusable when citations are incomplete."""
+    guarded = dict(retrieval_payload)
+    guarded["status"] = "no_answer"
+    guarded["summary"] = "检索到候选知识，但缺少可审计引用信息。"
+    guarded["answer_policy"] = "refuse_without_citation"
+    guarded["no_answer_rejected"] = True
+    guarded["rejected_results"] = list(guarded.get("retrieval_results") or [])
+    guarded["retrieval_results"] = []
+    return guarded
+
+
+def has_valid_citations(citations: list[dict[str, Any]]) -> bool:
+    """Require at least one source_file + chunk_id citation before answering."""
+    for item in citations:
+        source_file = str(item.get("source_file") or "").strip()
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        if source_file and source_file != "未知来源" and chunk_id:
+            return True
+    return False
 
 
 def ensure_citation_block(answer: str, citations: list[dict[str, Any]]) -> str:

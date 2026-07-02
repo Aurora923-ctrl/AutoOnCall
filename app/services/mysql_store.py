@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from loguru import logger
+
 from app.config import config
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
@@ -27,6 +29,7 @@ class AIOpsMySQLStore:
             raise ValueError("AIOPS_STORAGE_BACKEND=mysql requires MYSQL_DSN or MYSQL_HOST")
         self.connection_settings = _parse_mysql_dsn(self.dsn)
         self.storage_path = _redact_mysql_dsn(self.dsn)
+        self.migration_warnings: list[str] = []
         self._initialize()
 
     def save_alert_event(self, event: AlertEvent) -> None:
@@ -239,7 +242,7 @@ class AIOpsMySQLStore:
                         request.approval_id,
                     ),
                 )
-                return cursor.rowcount == 1
+                return bool(cursor.rowcount == 1)
 
     def get_approval_request(self, approval_id: str) -> ApprovalRequest | None:
         """Return one approval request by id."""
@@ -324,6 +327,19 @@ class AIOpsMySQLStore:
         payload = _dump_model(execution)
         with self._connect() as connection:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT payload FROM change_executions
+                    WHERE incident_id = %s AND change_plan_id = %s AND approval_id = %s
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (execution.incident_id, execution.change_plan_id, execution.approval_id),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    return ChangeExecution.model_validate(_load_payload(existing)), False
+
                 cursor.execute(
                     """
                     INSERT IGNORE INTO change_executions (
@@ -744,6 +760,9 @@ class AIOpsMySQLStore:
                         created_at VARCHAR(64) NOT NULL,
                         updated_at VARCHAR(64) NOT NULL,
                         payload LONGTEXT NOT NULL,
+                        UNIQUE KEY uniq_change_executions_scope (
+                            incident_id, change_plan_id, approval_id
+                        ),
                         INDEX idx_change_executions_incident (incident_id, created_at),
                         INDEX idx_change_executions_plan (change_plan_id, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -793,6 +812,57 @@ class AIOpsMySQLStore:
                         INDEX idx_diagnosis_reports_incident (incident_id, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """)
+                self._ensure_change_execution_scope_unique_index(cursor)
+
+    def _ensure_change_execution_scope_unique_index(self, cursor: Any) -> None:
+        """Add the business idempotency unique key to older MySQL tables when safe."""
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) AS index_count
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'change_executions'
+                  AND index_name = 'uniq_change_executions_scope'
+                """)
+            row = cursor.fetchone() or {}
+            if int(row.get("index_count") or 0) > 0:
+                return
+
+            cursor.execute("""
+                SELECT COUNT(*) AS duplicate_groups
+                FROM (
+                    SELECT incident_id, change_plan_id, approval_id
+                    FROM change_executions
+                    GROUP BY incident_id, change_plan_id, approval_id
+                    HAVING COUNT(*) > 1
+                ) duplicate_scope
+                """)
+            duplicate_row = cursor.fetchone() or {}
+            duplicate_groups = int(duplicate_row.get("duplicate_groups") or 0)
+            if duplicate_groups > 0:
+                self._record_migration_warning(
+                    "无法为 MySQL change_executions 创建业务幂等唯一索引，"
+                    f"发现 {duplicate_groups} 组历史重复安全变更记录；"
+                    "运行时将继续通过应用层预查避免新增重复。"
+                )
+                return
+
+            cursor.execute("""
+                ALTER TABLE change_executions
+                ADD UNIQUE KEY uniq_change_executions_scope (
+                    incident_id, change_plan_id, approval_id
+                )
+                """)
+        except Exception as exc:
+            self._record_migration_warning(
+                "无法检查或创建 MySQL change_executions 业务幂等唯一索引；"
+                "运行时将继续通过应用层预查避免新增重复。"
+                f" error={exc}"
+            )
+
+    def _record_migration_warning(self, message: str) -> None:
+        self.migration_warnings.append(message)
+        logger.warning(message)
 
     def _connect(self):
         try:

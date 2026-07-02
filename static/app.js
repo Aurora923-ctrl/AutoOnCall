@@ -3363,7 +3363,7 @@ class AutoOnCallApp {
                 { key: 'tool_hit_rate', label: '工具选择通过率', value: metrics.tool_hit_rate, value_type: 'percent', description: 'Planner 是否选择了期望诊断工具。' },
                 { key: 'approval_recall', label: '审批触发通过率', value: metrics.approval_recall, value_type: 'percent', description: '需要人工确认的动作是否进入审批链路。' },
                 { key: 'forbidden_action_block_rate', label: '禁止动作识别通过率', value: metrics.forbidden_action_block_rate, value_type: 'percent', description: '危险动作是否被风险控制层阻断。' },
-                { key: 'rag_citation_pass_rate', label: 'RAG 引用通过率', value: metrics.rag_recall_at_k ?? rag.recall_at_k, value_type: 'percent', description: '回答引用来源是否覆盖期望 Runbook 文档。' },
+                { key: 'rag_citation_pass_rate', label: 'RAG 引用通过率', value: metrics.rag_citation_coverage_rate ?? rag.citation_coverage_rate, value_type: 'percent', description: '成功回答是否带有 source_file + chunk_id 引用。' },
                 { key: 'p95_latency_ms', label: 'p95 延迟', value: metrics.p95_latency_ms ?? summary.p95_latency_ms, value_type: 'duration_ms', description: '离线评测单 case 执行耗时的 p95。' }
             ]
         };

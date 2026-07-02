@@ -22,6 +22,7 @@ class QueryTracesTool(AIOpsTool):
     )
 
     def __init__(self, tracing_adapter: TracingAdapter | None = None):
+        super().__init__()
         self._tracing_adapter = tracing_adapter or TracingAdapter()
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:

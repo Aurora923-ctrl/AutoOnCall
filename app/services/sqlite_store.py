@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from app.config import config
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
@@ -35,6 +37,7 @@ class AIOpsSQLiteStore:
 
     def __init__(self, database_path: str | Path | None = None):
         self.database_path = resolve_sqlite_path(database_path)
+        self.migration_warnings: list[str] = []
         self._initialize()
 
     def save_alert_event(self, event: AlertEvent) -> None:
@@ -316,6 +319,18 @@ class AIOpsSQLiteStore:
         """Create a safe change workflow once and return an existing row on conflict."""
         payload = _dump_model(execution)
         with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT payload FROM change_executions
+                WHERE incident_id = ? AND change_plan_id = ? AND approval_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT 1
+                """,
+                (execution.incident_id, execution.change_plan_id, execution.approval_id),
+            ).fetchone()
+            if existing is not None:
+                return ChangeExecution.model_validate(_load_payload(existing)), False
+
             cursor = connection.execute(
                 """
                 INSERT INTO change_executions (
@@ -323,7 +338,7 @@ class AIOpsSQLiteStore:
                     status, mode, created_at, updated_at, payload
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(change_execution_id) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     execution.change_execution_id,
@@ -718,7 +733,8 @@ class AIOpsSQLiteStore:
                     mode TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
+                    payload TEXT NOT NULL,
+                    UNIQUE(incident_id, change_plan_id, approval_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_change_executions_incident
                     ON change_executions(incident_id, created_at);
@@ -770,6 +786,41 @@ class AIOpsSQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_diagnosis_reports_incident
                     ON diagnosis_reports(incident_id, created_at);
                 """)
+            try:
+                connection.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_executions_scope
+                    ON change_executions(incident_id, change_plan_id, approval_id)
+                    """)
+            except sqlite3.IntegrityError as exc:
+                duplicate_groups = self._count_change_execution_scope_duplicates(connection)
+                self._record_migration_warning(
+                    "无法为 change_executions 创建业务幂等唯一索引，"
+                    f"发现 {duplicate_groups} 组历史重复安全变更记录；"
+                    "运行时将继续通过应用层预查避免新增重复。"
+                    f" error={exc}"
+                )
+            except sqlite3.OperationalError as exc:
+                self._record_migration_warning(
+                    "无法检查或创建 change_executions 业务幂等唯一索引；"
+                    "运行时将继续通过应用层预查避免新增重复。"
+                    f" error={exc}"
+                )
+
+    def _count_change_execution_scope_duplicates(self, connection: sqlite3.Connection) -> int:
+        row = connection.execute("""
+            SELECT COUNT(*) AS duplicate_groups
+            FROM (
+                SELECT 1
+                FROM change_executions
+                GROUP BY incident_id, change_plan_id, approval_id
+                HAVING COUNT(*) > 1
+            )
+            """).fetchone()
+        return int(row["duplicate_groups"] or 0) if row is not None else 0
+
+    def _record_migration_warning(self, message: str) -> None:
+        self.migration_warnings.append(message)
+        logger.warning(message)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)

@@ -1,5 +1,6 @@
 """Service tests for approved safe change workflows."""
 
+import sqlite3
 from datetime import timedelta
 from typing import Any
 
@@ -54,6 +55,109 @@ def test_sqlite_store_creates_change_execution_once_without_overwrite(tmp_path) 
     assert first.change_execution_id == execution.change_execution_id
     assert second_created is False
     assert second.status == "created"
+
+
+def test_sqlite_store_treats_approval_plan_scope_as_idempotency_key(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "safe-change-store.db")
+    execution = ChangeExecution(
+        change_execution_id="chgexec-first",
+        change_plan_id="plan-1",
+        approval_id="approval-1",
+        incident_id="inc-1",
+        status="created",
+    )
+
+    first, first_created = store.create_change_execution_once(execution)
+    second, second_created = store.create_change_execution_once(
+        execution.model_copy(
+            update={
+                "change_execution_id": "chgexec-retry-with-new-id",
+                "status": "precheck_running",
+            }
+        )
+    )
+
+    assert first_created is True
+    assert first.change_execution_id == "chgexec-first"
+    assert second_created is False
+    assert second.change_execution_id == "chgexec-first"
+    assert second.status == "created"
+
+
+def test_sqlite_store_preserves_idempotency_for_legacy_tables_without_scope_index(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "legacy-safe-change-store.db"
+    first = ChangeExecution(
+        change_execution_id="chgexec-first",
+        change_plan_id="plan-1",
+        approval_id="approval-1",
+        incident_id="inc-1",
+        status="created",
+        created_at=utc_now() - timedelta(minutes=2),
+    )
+    duplicate = first.model_copy(
+        update={
+            "change_execution_id": "chgexec-existing-duplicate",
+            "status": "precheck_running",
+            "created_at": utc_now() - timedelta(minutes=1),
+        }
+    )
+    retry = first.model_copy(
+        update={
+            "change_execution_id": "chgexec-third-retry",
+            "status": "dry_run_running",
+            "created_at": utc_now(),
+        }
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("""
+            CREATE TABLE change_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_execution_id TEXT NOT NULL UNIQUE,
+                change_plan_id TEXT NOT NULL,
+                approval_id TEXT NOT NULL,
+                incident_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """)
+        for execution in (first, duplicate):
+            connection.execute(
+                """
+                INSERT INTO change_executions (
+                    change_execution_id, change_plan_id, approval_id, incident_id,
+                    status, mode, created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    execution.change_execution_id,
+                    execution.change_plan_id,
+                    execution.approval_id,
+                    execution.incident_id,
+                    execution.status,
+                    execution.mode,
+                    execution.created_at.isoformat(),
+                    execution.updated_at.isoformat(),
+                    execution.model_dump_json(),
+                ),
+            )
+
+    store = AIOpsSQLiteStore(database_path)
+    existing, created = store.create_change_execution_once(retry)
+
+    assert store.migration_warnings
+    assert "历史重复安全变更记录" in store.migration_warnings[0]
+    assert created is False
+    assert existing.change_execution_id == "chgexec-first"
+    with sqlite3.connect(database_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM change_executions").fetchone()[0]
+    assert count == 2
 
 
 def _save_approved_report(report_store: ReportGenerator, *, incident_id: str) -> DiagnosisReport:

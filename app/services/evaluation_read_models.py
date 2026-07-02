@@ -153,10 +153,14 @@ def build_eval_dashboard(
         _metric(
             "rag_citation_pass_rate",
             "RAG 引用通过率",
-            _first_present(resume_metrics.get("rag_recall_at_k"), rag_category.get("recall_at_k")),
+            _first_present(
+                resume_metrics.get("rag_citation_coverage_rate"),
+                rag_summary.get("citation_coverage_rate"),
+                rag_category.get("citation_coverage_rate"),
+            ),
             "percent",
-            "回答引用来源是否覆盖期望 Runbook 文档。",
-            "summary.resume_metrics.rag_recall_at_k",
+            "成功回答是否带有 source_file + chunk_id 引用。",
+            "summary.resume_metrics.rag_citation_coverage_rate",
         ),
         _metric(
             "rag_no_answer_rejection_rate",

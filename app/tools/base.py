@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import re
 import time
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -67,6 +68,18 @@ class AIOpsTool:
     retry_policy: ToolRetryPolicy | dict[str, Any] = ToolRetryPolicy()
     data_sources: list[str] = []
     degradation_strategy: str = "返回结构化失败结果，并保留错误信息供报告解释"
+
+    def __init__(self) -> None:
+        """Copy class-level contract defaults onto each tool instance."""
+        self.input_schema = deepcopy(type(self).input_schema or {})
+        self.output_schema = deepcopy(type(self).output_schema or {})
+        self.data_sources = list(deepcopy(type(self).data_sources or []))
+        retry_policy = type(self).retry_policy
+        self.retry_policy = (
+            retry_policy.model_copy(deep=True)
+            if isinstance(retry_policy, ToolRetryPolicy)
+            else ToolRetryPolicy(**dict(retry_policy or {}))
+        )
 
     async def arun(self, input_args: dict[str, Any]) -> ToolExecutionResult:
         """Run the tool with timeout and structured error handling."""

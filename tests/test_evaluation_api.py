@@ -18,28 +18,40 @@ async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) ->
                     "started_at": "2026-06-26T00:00:00+00:00",
                 },
                 "summary": {
-                    "overall_case_count": 33,
-                    "overall_passed_count": 33,
+                    "overall_case_count": 38,
+                    "overall_passed_count": 38,
                     "overall_pass_rate": 1.0,
                     "resume_metrics": {
                         "aiops_case_count": 16,
                         "aiops_pass_rate": 1.0,
-                        "rag_case_count": 17,
+                        "rag_case_count": 22,
                         "root_cause_hit_rate": 1.0,
                         "tool_hit_rate": 1.0,
                         "approval_recall": 1.0,
                         "forbidden_action_block_rate": 1.0,
                         "rag_recall_at_k": 1.0,
+                        "rag_citation_coverage_rate": 1.0,
                         "rag_no_answer_rejection_rate": 1.0,
                         "p95_latency_ms": 20.04,
                     },
                     "categories": {
-                        "rag": {"mrr": 0.96, "recall_at_k": 1.0},
+                        "rag": {
+                            "mrr": 0.96,
+                            "recall_at_k": 1.0,
+                            "citation_coverage_rate": 1.0,
+                        },
                         "risk": {"forbidden_action_block_rate": 1.0},
                     },
                     "failed_cases": [],
                 },
-                "rag": {"summary": {"case_count": 17, "pass_rate": 1.0, "mrr": 0.96}},
+                "rag": {
+                    "summary": {
+                        "case_count": 22,
+                        "pass_rate": 1.0,
+                        "mrr": 0.96,
+                        "citation_coverage_rate": 1.0,
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -49,7 +61,7 @@ async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) ->
     payload = await evaluations_api.get_eval_summary()
 
     assert payload["available"] is True
-    assert payload["summary"]["overall_case_count"] == 33
+    assert payload["summary"]["overall_case_count"] == 38
     assert payload["resume_metrics"]["aiops_case_count"] == 16
     assert payload["rag"]["mrr"] == 0.96
     assert payload["run"]["evaluation_scope"] == "offline deterministic regression"

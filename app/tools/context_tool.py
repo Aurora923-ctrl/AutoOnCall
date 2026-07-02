@@ -23,6 +23,7 @@ class QueryServiceContextTool(AIOpsTool):
     )
 
     def __init__(self, cmdb_adapter: CMDBAdapter | None = None):
+        super().__init__()
         self._cmdb_adapter = cmdb_adapter or CMDBAdapter()
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +90,7 @@ class QueryDeployHistoryTool(AIOpsTool):
     degradation_strategy = "发布系统不可用时返回演示发布记录；关闭 mock 后返回结构化不可用结果"
 
     def __init__(self, deploy_history_adapter: DeployHistoryAdapter | None = None):
+        super().__init__()
         self._deploy_history_adapter = deploy_history_adapter or DeployHistoryAdapter()
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:

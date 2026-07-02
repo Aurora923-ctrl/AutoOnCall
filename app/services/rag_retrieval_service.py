@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from collections.abc import Callable
 from typing import Any, cast
 
 from langchain_core.documents import Document
@@ -30,6 +31,8 @@ def retrieve_structured_knowledge(
     hybrid_search_enabled: bool | None = None,
     rerank_enabled: bool | None = None,
     vector_store: Any | None = None,
+    vector_store_provider: Callable[[], Any] | None = None,
+    lexical_index: Any | None = None,
 ) -> dict[str, Any]:
     """Retrieve knowledge chunks with source metadata, scores, and rejection details."""
     safe_query = str(query or "").strip()
@@ -42,17 +45,55 @@ def retrieve_structured_knowledge(
     rerank_on = config.rag_rerank_enabled if rerank_enabled is None else rerank_enabled
     candidate_k = _candidate_count(k) if hybrid_enabled or rerank_on else k
     expr = build_milvus_metadata_expr(metadata_filter)
+    resolved_lexical_index = lexical_index or lexical_index_service
+    resolved_vector_store_provider = vector_store_provider or vector_store_manager.get_vector_store
+
+    vector_error_detail = ""
+    vector_error_type = ""
 
     try:
-        store = vector_store or vector_store_manager.get_vector_store()
-        vector_results = _search_with_optional_scores(store, safe_query, candidate_k, expr=expr)
-        lexical_results = []
-        if hybrid_enabled and _should_query_lexical_index(vector_store, vector_results):
-            lexical_results = lexical_index_service.search(
+        vector_results: list[tuple[Document, float | None]] = []
+        try:
+            store = vector_store or resolved_vector_store_provider()
+            vector_results = _search_with_optional_scores(store, safe_query, candidate_k, expr=expr)
+        except Exception as exc:
+            vector_error_detail = str(exc)
+            vector_error_type = type(exc).__name__
+            if vector_store is not None or not hybrid_enabled:
+                raise
+            logger.warning(
+                "向量检索不可用，降级使用本地词法索引: query={}, error={}",
                 safe_query,
-                top_k=candidate_k,
-                metadata_filter=normalize_metadata_filter(metadata_filter),
+                vector_error_detail,
             )
+
+        lexical_results: list[tuple[Document, float]] = []
+        if hybrid_enabled and (
+            vector_error_detail or _should_query_lexical_index(vector_store, vector_results)
+        ):
+            try:
+                lexical_results = cast(
+                    list[tuple[Document, float]],
+                    resolved_lexical_index.search(
+                        safe_query,
+                        top_k=candidate_k,
+                        metadata_filter=normalize_metadata_filter(metadata_filter),
+                    ),
+                )
+            except Exception as exc:
+                if vector_error_detail:
+                    raise RuntimeError(
+                        "向量检索失败且词法索引降级也失败: "
+                        f"vector_error={vector_error_detail}; lexical_error={exc}"
+                    ) from exc
+                raise
+
+        retrieval_mode = (
+            build_degraded_retrieval_mode(rerank_on)
+            if vector_error_detail
+            else build_retrieval_mode(hybrid_enabled, rerank_on)
+        )
+        vector_error_message = build_public_vector_error_message(vector_error_detail)
         raw_results = merge_raw_retrieval_results(vector_results, lexical_results)
         candidates = [
             document_to_retrieval_chunk(document, score=score, rank=rank)
@@ -113,7 +154,11 @@ def retrieve_structured_knowledge(
                 "candidate_k": candidate_k,
                 "max_l2_distance": threshold,
                 "min_lexical_trust_score": lexical_threshold,
-                "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
+                "retrieval_mode": retrieval_mode,
+                "retrieval_degraded": bool(vector_error_detail),
+                "vector_error_message": vector_error_message,
+                "vector_error_type": vector_error_type,
+                "vector_error_detail": vector_error_detail,
                 "vector_candidate_count": len(vector_results),
                 "lexical_candidate_count": len(lexical_results),
                 "metadata_filter": normalize_metadata_filter(metadata_filter),
@@ -134,7 +179,11 @@ def retrieve_structured_knowledge(
             "candidate_k": candidate_k,
             "max_l2_distance": threshold,
             "min_lexical_trust_score": lexical_threshold,
-            "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
+            "retrieval_mode": retrieval_mode,
+            "retrieval_degraded": bool(vector_error_detail),
+            "vector_error_message": vector_error_message,
+            "vector_error_type": vector_error_type,
+            "vector_error_detail": vector_error_detail,
             "vector_candidate_count": len(vector_results),
             "lexical_candidate_count": len(lexical_results),
             "metadata_filter": normalize_metadata_filter(metadata_filter),
@@ -157,6 +206,10 @@ def retrieve_structured_knowledge(
             "max_l2_distance": threshold,
             "min_lexical_trust_score": lexical_threshold,
             "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
+            "retrieval_degraded": False,
+            "vector_error_message": build_public_vector_error_message(vector_error_detail),
+            "vector_error_type": vector_error_type,
+            "vector_error_detail": vector_error_detail,
             "vector_candidate_count": 0,
             "lexical_candidate_count": 0,
             "metadata_filter": normalize_metadata_filter(metadata_filter),
@@ -566,6 +619,18 @@ def build_retrieval_mode(hybrid_search_enabled: bool, rerank_enabled: bool) -> s
     if rerank_enabled:
         return "vector_rerank"
     return "vector"
+
+
+def build_degraded_retrieval_mode(rerank_enabled: bool) -> str:
+    """Return the retrieval mode used when vector search falls back to lexical only."""
+    return "lexical_degraded_rerank" if rerank_enabled else "lexical_degraded"
+
+
+def build_public_vector_error_message(error_detail: str) -> str:
+    """Return a frontend-safe vector retrieval error summary."""
+    if not error_detail:
+        return ""
+    return "向量检索暂不可用，已降级使用本地词法索引。"
 
 
 def _should_query_lexical_index(
