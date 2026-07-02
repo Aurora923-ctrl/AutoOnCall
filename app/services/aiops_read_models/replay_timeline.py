@@ -1,0 +1,148 @@
+"""Timeline and Replanner decision builders for incident replay."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.models.trace import TraceEvent
+from app.services.aiops_read_models.common import _as_list, _as_mapping, _safe_float
+from app.services.aiops_read_models.incident import compact_plan_step
+
+
+def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
+    """Normalize trace events into a frontend-friendly replay timeline."""
+    timeline = []
+    for event in events:
+        stage = replay_stage_for_event(event)
+        timeline.append(
+            {
+                "event_id": event.event_id,
+                "trace_id": event.trace_id,
+                "stage": stage,
+                "stage_label": replay_stage_label(stage),
+                "event_type": event.event_type,
+                "node_name": event.node_name,
+                "step_id": event.step_id or "",
+                "tool_name": event.tool_name or "",
+                "status": event.status,
+                "summary": event.output_summary or event.error_message or event.input_summary,
+                "input_summary": event.input_summary,
+                "output_summary": event.output_summary,
+                "error_message": event.error_message or "",
+                "data_source": str(event.metadata.get("data_source") or ""),
+                "latency_ms": event.latency_ms,
+                "created_at": event.created_at.isoformat(),
+                "metadata": event.metadata,
+                "tool_args": event.tool_args,
+                "tool_result": event.tool_result,
+            }
+        )
+    return timeline
+
+
+def replay_stage_for_event(event: TraceEvent) -> str:
+    """Classify a trace event into one diagnosis replay stage."""
+    event_type = str(event.event_type or "")
+    node_name = str(event.node_name or "")
+
+    if event_type.startswith("change") or node_name == "safe_change_workflow":
+        return "change"
+    if event_type.startswith("approval") or node_name == "approval_service":
+        return "approval"
+    if event_type == "risk_decision" or node_name == "risk_controller":
+        return "approval"
+    if event_type == "tool_call" or event.tool_name or node_name == "executor":
+        return "executor"
+    if "replan" in event_type or "replanner" in node_name:
+        return "replanner"
+    if node_name == "planner":
+        return "planner"
+    if "report" in event_type or "report" in node_name:
+        return "report"
+    if event_type in {"workflow_started", "alert_received"}:
+        return "alert"
+    return "trace"
+
+
+def replay_stage_label(stage: str) -> str:
+    """Return the display label for one replay stage."""
+    labels = {
+        "alert": "告警进入",
+        "planner": "诊断计划",
+        "executor": "工具取证",
+        "replanner": "重规划",
+        "approval": "审批与风险",
+        "change": "安全变更",
+        "report": "最终报告",
+        "trace": "诊断事件",
+        "evaluation": "评测结果",
+    }
+    return labels.get(stage, stage)
+
+
+def build_replay_replanner_decisions(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract structured Replanner decision cards from replay timeline events."""
+    decisions = []
+    for item in timeline:
+        if item.get("stage") != "replanner":
+            continue
+        metadata = _as_mapping(item.get("metadata"))
+        decision = str(metadata.get("decision") or _parse_decision_from_summary(item) or "")
+        reason = str(metadata.get("reason") or item.get("summary") or "")
+        evidence_profile = _as_mapping(metadata.get("evidence_profile"))
+        decisions.append(
+            {
+                "event_id": item.get("event_id", ""),
+                "created_at": item.get("created_at", ""),
+                "status": item.get("status", "unknown"),
+                "decision": decision or "unknown",
+                "decision_label": replanner_decision_label(decision),
+                "reason": reason,
+                "evidence_sufficient": bool(metadata.get("evidence_sufficient", False)),
+                "missing_evidence": _as_list(metadata.get("missing_evidence")),
+                "new_steps": [
+                    compact_plan_step(step)
+                    for step in _as_list(metadata.get("new_steps"))
+                ],
+                "conflicts": _as_list(metadata.get("conflicts")),
+                "confidence_reasons": _as_list(metadata.get("confidence_reasons")),
+                "evidence_profile": evidence_profile,
+                "average_evidence_confidence": _safe_float(
+                    evidence_profile.get("average_evidence_confidence")
+                )
+                or 0.0,
+                "source_quality": str(evidence_profile.get("source_quality") or "unknown"),
+                "summary": item.get("summary", ""),
+            }
+        )
+    return decisions
+
+
+def replanner_decision_label(decision: str) -> str:
+    """Return a short display label for a Replanner decision."""
+    labels = {
+        "continue_investigation": "继续诊断",
+        "add_steps": "追加证据",
+        "retry_failed_tool": "重试工具",
+        "generate_report": "生成报告",
+        "request_approval": "请求审批",
+        "escalate_to_human": "升级人工",
+    }
+    return labels.get(decision, decision or "unknown")
+
+
+def _parse_decision_from_summary(item: dict[str, Any]) -> str:
+    summary = str(item.get("summary") or item.get("output_summary") or "")
+    marker = "decision="
+    if marker not in summary:
+        return ""
+    suffix = summary.split(marker, 1)[1]
+    return suffix.split(",", 1)[0].strip()
+
+
+def latest_timeline_by_stage(timeline: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return the latest timeline item for every stage."""
+    latest: dict[str, dict[str, Any]] = {}
+    for item in timeline:
+        latest[str(item.get("stage") or "")] = item
+    return latest

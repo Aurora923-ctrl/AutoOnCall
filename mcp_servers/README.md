@@ -50,5 +50,5 @@ MCP_MONITOR_URL=http://localhost:8004/mcp
 ## 边界
 
 - 这些服务返回本地演示数据，不代表真实生产日志或监控。
-- 严格验收或生产化演示应优先使用 `deploy/full-stack-compose.yml` 和真实适配器，并设置 `AIOPS_MOCK_FALLBACK_ENABLED=false`。
+- 严格验收或生产化演示应优先使用 `deploy/compose/full-stack-compose.yml` 和真实适配器，并设置 `AIOPS_MOCK_FALLBACK_ENABLED=false`。
 - MCP 服务适合解释 fallback 机制，不适合宣传成已经接入生产系统。

@@ -2,6 +2,8 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
+cd /d "%~dp0..\.."
+
 echo ====================================
 echo 启动 SuperBizAgent 服务
 echo ====================================
@@ -99,7 +101,7 @@ docker ps --format "{{.Names}}" | findstr "milvus-standalone" >nul 2>&1
 if not errorlevel 1 (
     echo [信息] Milvus 容器已在运行
 ) else (
-    docker compose -f vector-database.yml up -d
+    docker compose -f deploy\compose\vector-database.yml up -d
     if errorlevel 1 (
         echo [错误] Docker 启动失败，请确保 Docker Desktop 已启动
         pause
@@ -166,6 +168,6 @@ echo 查看日志:
 echo   - FastAPI: logs\app_*.log（Loguru 日志，按天轮转）
 echo   - CLS MCP: type mcp_cls.log
 echo   - Monitor: type mcp_monitor.log
-echo 停止服务: stop-windows.bat
+echo 停止服务: scripts\dev\stop-windows.bat
 echo ====================================
 pause

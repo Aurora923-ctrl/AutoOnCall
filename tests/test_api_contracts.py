@@ -23,6 +23,7 @@ def test_incident_and_approval_routes_expose_response_models() -> None:
         ("/api/incidents/{incident_id}/approval", "post"): "ApprovalDecisionResponse",
         ("/api/incidents", "get"): "IncidentListResponse",
         ("/api/incidents/{incident_id}", "get"): "IncidentOverviewResponse",
+        ("/api/incidents/{incident_id}/replay", "get"): "IncidentReplayResponse",
         ("/api/incidents/{incident_id}/trace", "get"): "IncidentTraceResponse",
         ("/api/incidents/{incident_id}/report", "get"): "IncidentReportResponse",
     }

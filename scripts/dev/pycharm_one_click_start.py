@@ -1,8 +1,8 @@
 """One-click local launcher for PyCharm on Windows.
 
 This script starts the full AutoOnCall local demo stack:
-- Milvus/RAG containers from vector-database.yml
-- AIOps full-stack containers from deploy/full-stack-compose.yml
+- Milvus/RAG containers from deploy/compose/vector-database.yml
+- AIOps full-stack containers from deploy/compose/full-stack-compose.yml
 - CLS and Monitor MCP servers
 - FastAPI, which also serves the static frontend at the configured local API URL
 
@@ -22,7 +22,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -54,8 +54,8 @@ def main() -> int:
         install_dependencies(python_cmd)
 
     if not args.skip_docker:
-        compose_up("Milvus/RAG", ROOT / "vector-database.yml")
-        compose_up("AIOps full-stack", ROOT / "deploy" / "full-stack-compose.yml")
+        compose_up("Milvus/RAG", ROOT / "deploy" / "compose" / "vector-database.yml")
+        compose_up("AIOps full-stack", ROOT / "deploy" / "compose" / "full-stack-compose.yml")
 
     start_mcp_servers(python_cmd, restart=args.restart_processes)
     start_api(python_cmd, restart=args.restart_processes)
@@ -79,9 +79,9 @@ def main() -> int:
     print(f"       Grafana:  {LOCAL_FULL_STACK_ENV['GRAFANA_URL']}  admin/admin")
     print(f"       Jaeger:   {LOCAL_FULL_STACK_ENV['JAEGER_BASE_URL']}")
     print(f"       Redpanda Admin API: {LOCAL_FULL_STACK_ENV['REDPANDA_ADMIN_URL']}")
-    print("       Stop app processes: python scripts/pycharm_one_click_stop.py")
-    print("       Stop containers: docker compose -f vector-database.yml down")
-    print("                        docker compose -f deploy/full-stack-compose.yml down")
+    print("       Stop app processes: python scripts/dev/pycharm_one_click_stop.py")
+    print("       Stop containers: docker compose -f deploy/compose/vector-database.yml down")
+    print("                        docker compose -f deploy/compose/full-stack-compose.yml down")
 
     if args.open_browser:
         webbrowser.open(API_URL)
@@ -128,8 +128,8 @@ def print_project_summary() -> None:
     print("[INFO] Project analysis:")
     print("       FastAPI entry: app.main:app")
     print("       Frontend: static/index.html served by FastAPI /")
-    print("       RAG dependency: vector-database.yml (Milvus/MinIO/etcd/Attu)")
-    print("       AIOps dependencies: deploy/full-stack-compose.yml")
+    print("       RAG dependency: deploy/compose/vector-database.yml (Milvus/MinIO/etcd/Attu)")
+    print("       AIOps dependencies: deploy/compose/full-stack-compose.yml")
     print("       Local MCP servers: mcp_servers/cls_server.py, monitor_server.py")
 
 

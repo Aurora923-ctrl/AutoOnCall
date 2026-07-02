@@ -90,7 +90,7 @@ RAG 不是简单向量检索后拼上下文，而是包含：
 - Ruff：通过。
 - AIOps 离线评测：16/16。
 - RAG 离线评测：22/22。
-- 安全变更评测：6/6。
+- 安全变更评测：9/9。
 
 虽然这些评测是 deterministic/offline，并不代表真实生产准确率，但作为校招生作品，已经很强。
 
@@ -240,6 +240,23 @@ RAG 不是简单向量检索后拼上下文，而是包含：
 
 > 我不是只做了一个演示，而是用离线 case 固定验证工具选择、根因命中、审批策略和拒答策略。
 
+本次落实程度：
+
+- `eval/change_cases.yaml` 从 6 个安全变更 case 增加到 9 个，达到 8-10 个目标区间。
+- 新增 rejected approval 不能进入安全变更执行，补齐 pending 之外的审批拒绝边界。
+- 新增 staging sandbox validated，证明 sandbox 模式只做沙箱验证和观察记录，不执行生产变更。
+- 新增 prod sandbox without flag escalates，证明生产环境未显式开启沙箱时会转人工接管。
+- 新增 `tests/test_change_eval_cases.py`，固定验证 case 覆盖面、9/9 通过率和关键状态。
+
+当前验收命令：
+
+```bash
+make eval-change
+venv/bin/python -m pytest tests/test_change_eval_cases.py tests/test_change_execution_service.py
+```
+
+预期结果：`Safe-change eval: 9/9 cases passed`，并且 approval、dry-run、rollback、forbidden 指标都是 100%。
+
 ## 8. 第三优先：讲清 mock / sandbox / 真实适配器边界
 
 这是校招生项目最容易被质疑的地方。
@@ -286,7 +303,7 @@ RAG 不是简单向量检索后拼上下文，而是包含：
 当前验收命令：
 
 ```bash
-venv/bin/python scripts/eval_rag_cases.py
+venv/bin/python scripts/eval/eval_rag_cases.py
 ```
 
 预期结果：`RAG eval: 22/22 cases passed`，并且 `cite=100%`、`confusion=100%`、`reject=100%`。

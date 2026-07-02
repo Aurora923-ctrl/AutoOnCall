@@ -699,6 +699,7 @@ body {
 .alerts-section,
 .diagnosis-launch-section,
 .run-history-section,
+.replay-section,
 .plan-section,
 .steps-section,
 .tool-section,
@@ -744,6 +745,7 @@ body {
 .alert-list,
 .incident-detail,
 .trace-timeline,
+.incident-replay,
 .report-viewer,
 .approval-list,
 .change-execution-list,
@@ -981,6 +983,38 @@ body {
     gap: 10px;
 }
 
+.incident-path-card {
+    display: grid;
+    gap: 8px;
+    border: 1px solid #e8eaed;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.incident-path {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    color: #202124;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.incident-path-separator {
+    color: #9aa0a6;
+    font-weight: 650;
+}
+
+.incident-context-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
 .detail-field,
 .metric-tile {
     border: 1px solid #e8eaed;
@@ -1051,6 +1085,298 @@ body {
 
 .trace-timeline {
     position: relative;
+}
+
+.incident-replay {
+    display: grid;
+    gap: 14px;
+}
+
+.replay-summary-bar {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.replay-summary-bar > div,
+.replay-insight-block,
+.replay-timeline-panel,
+.replanner-decision-panel {
+    border: 1px solid #e8eaed;
+    border-radius: 8px;
+    background: #fbfcfe;
+    padding: 12px;
+}
+
+.replay-summary-bar span,
+.replay-insight-block h3,
+.replay-panel-heading span {
+    color: #5f6368;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.replay-summary-bar strong {
+    display: block;
+    color: #202124;
+    font-size: 14px;
+    line-height: 1.35;
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+}
+
+.replay-stage-rail {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+}
+
+.replay-stage-card {
+    border: 1px solid #e8eaed;
+    border-top: 3px solid #8ab4f8;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 12px;
+}
+
+.replay-stage-card.success {
+    border-top-color: #34a853;
+}
+
+.replay-stage-card.warning {
+    border-top-color: #fbbc04;
+}
+
+.replay-stage-card.error {
+    border-top-color: #ea4335;
+}
+
+.replanner-decision-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.replanner-decision-list {
+    display: grid;
+    gap: 10px;
+}
+
+.replanner-decision-card {
+    border: 1px solid #e8eaed;
+    border-left: 4px solid #8ab4f8;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 12px;
+}
+
+.replanner-decision-card.success {
+    border-left-color: #34a853;
+}
+
+.replanner-decision-card.warning {
+    border-left-color: #fbbc04;
+}
+
+.replanner-decision-card.error {
+    border-left-color: #ea4335;
+}
+
+.replay-stage-title,
+.replay-timeline-title,
+.replay-panel-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.replay-stage-title strong,
+.replay-timeline-title strong,
+.replay-panel-heading strong {
+    color: #202124;
+    font-size: 14px;
+    line-height: 1.35;
+}
+
+.replay-stage-card p,
+.replanner-decision-card p,
+.replay-insight-block p,
+.replay-timeline-content p {
+    color: #5f6368;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 8px 0 0;
+    overflow-wrap: anywhere;
+}
+
+.replay-eval-metric-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.replay-eval-metric {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    border: 1px solid #e8eaed;
+    border-left: 4px solid #8ab4f8;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px;
+}
+
+.replay-eval-metric.success {
+    border-left-color: #34a853;
+}
+
+.replay-eval-metric.warning {
+    border-left-color: #fbbc04;
+}
+
+.replay-eval-metric.error {
+    border-left-color: #ea4335;
+}
+
+.replay-eval-metric strong,
+.replay-eval-metric b {
+    color: #202124;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.replay-eval-metric span {
+    display: block;
+    color: #5f6368;
+    font-size: 12px;
+    line-height: 1.4;
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+}
+
+.replay-body-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.75fr);
+    gap: 12px;
+    align-items: start;
+}
+
+.replay-timeline-panel {
+    min-height: 320px;
+}
+
+.replay-filter-bar {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.8fr) minmax(110px, 0.7fr) minmax(180px, 1.2fr) auto auto auto;
+    gap: 8px;
+    align-items: end;
+    border: 1px solid #e8eaed;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px;
+    margin-top: 12px;
+}
+
+.replay-filter-bar label {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.replay-filter-bar label span,
+.replay-filter-count {
+    color: #5f6368;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.replay-filter-bar select,
+.replay-filter-bar input {
+    width: 100%;
+    height: 34px;
+    border: 1px solid #dadce0;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #202124;
+    font: inherit;
+    font-size: 13px;
+    padding: 0 10px;
+}
+
+.replay-filter-bar select:focus,
+.replay-filter-bar input:focus {
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.12);
+    outline: none;
+}
+
+.replay-filter-count {
+    align-self: center;
+    justify-self: end;
+    white-space: nowrap;
+}
+
+.replay-timeline-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.replay-timeline-item {
+    display: grid;
+    grid-template-columns: minmax(88px, 0.28fr) minmax(0, 1fr);
+    gap: 12px;
+    border-left: 3px solid #8ab4f8;
+    padding-left: 10px;
+}
+
+.replay-timeline-item.success {
+    border-left-color: #34a853;
+}
+
+.replay-timeline-item.warning {
+    border-left-color: #fbbc04;
+}
+
+.replay-timeline-item.error {
+    border-left-color: #ea4335;
+}
+
+.replay-timeline-marker {
+    color: #174ea6;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.replay-insight-panel {
+    display: grid;
+    gap: 10px;
+}
+
+.replay-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.replay-mini-list {
+    margin-top: 10px;
+}
+
+.replay-mini-list strong {
+    color: #202124;
+    font-size: 12px;
+}
+
+.replay-mini-list ul {
+    color: #5f6368;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 6px 0 0;
+    padding-left: 18px;
 }
 
 .trace-event {
@@ -1239,7 +1565,8 @@ body {
 }
 
 .source-pill.mock,
-.source-pill.not_configured {
+.source-pill.not_configured,
+.source-pill.warning {
     background: #fef7e0;
     color: #b06000;
 }
@@ -1414,6 +1741,62 @@ body {
     border: 1px dashed #dadce0;
     border-radius: 8px;
     background: #fbfcfe;
+}
+
+.panel-state {
+    display: grid;
+    gap: 5px;
+    border: 1px dashed #dadce0;
+    border-radius: 8px;
+    background: #fbfcfe;
+    color: #5f6368;
+    padding: 16px;
+    text-align: center;
+}
+
+.panel-state strong {
+    color: #202124;
+    font-size: 14px;
+    line-height: 1.35;
+}
+
+.panel-state span {
+    color: #5f6368;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.panel-state.loading {
+    border-style: solid;
+    background: #f8fbff;
+    border-color: #d2e3fc;
+}
+
+.panel-state.loading strong::after {
+    content: "";
+    display: inline-block;
+    width: 1.1em;
+    text-align: left;
+    animation: loadingDots 1.2s steps(4, end) infinite;
+}
+
+.panel-state.error {
+    border-style: solid;
+    background: #fce8e6;
+    border-color: #f4b7b2;
+}
+
+.panel-state.error strong,
+.panel-state.error span {
+    color: #c5221f;
+}
+
+@keyframes loadingDots {
+    0% { content: ""; }
+    25% { content: "."; }
+    50% { content: ".."; }
+    75% { content: "..."; }
+    100% { content: ""; }
 }
 
 .workbench-section.is-muted {
@@ -2421,6 +2804,7 @@ body {
     .incidents-section,
     .diagnosis-launch-section,
     .run-history-section,
+    .replay-section,
     .report-section,
     .eval-section,
     .health-section,
@@ -2435,7 +2819,11 @@ body {
     .diagnosis-form-grid,
     .run-history-controls,
     .run-compare-grid,
-    .run-compare-delta {
+    .run-compare-delta,
+    .replay-summary-bar,
+    .replay-body-grid,
+    .replay-filter-bar,
+    .replay-timeline-item {
         grid-template-columns: 1fr;
     }
     

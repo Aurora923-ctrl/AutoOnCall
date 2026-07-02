@@ -111,7 +111,7 @@ app/
   core/             鉴权、Milvus 等基础设施封装
   integrations/     Alertmanager、Prometheus、Loki/日志网关、K8s、Redis、MySQL、CMDB、Ticket 等适配器
   models/           Pydantic 请求、告警、事件、证据、审批、报告和变更模型
-  services/         RAG、索引、AIOps 编排、存储、Trace、审批、报告和告警接入服务
+  services/         RAG、索引、AIOps 编排、存储、Trace、审批、报告、告警接入和读模型服务
   tools/            Agent 工具抽象、工具注册表和本地工具
 aiops-docs/         写入向量库的运维 Runbook Markdown
 config/             服务拓扑等本地配置
@@ -119,7 +119,7 @@ deploy/             生产配置说明和本地 full-stack sandbox
 eval/               AIOps、RAG、安全变更离线评测用例
 mcp_servers/        可选本地 MCP mock 服务
 scripts/            评测、迁移、清理、沙箱验证脚本
-static/             前端工作台
+static/             前端工作台，static/js/ 存放拆分后的业务脚本
 tests/              pytest 测试
 文档/                项目分析书和面试讲解文档
 ```
@@ -228,7 +228,21 @@ Incident 输入
 -> Incident 详情里查看 Trace、证据、报告和审批状态
 ```
 
-### 4. 最后展示质量验证
+### 4. 一键准备面试演示数据
+
+```bash
+make seed-demo
+make demo
+```
+
+`make seed-demo` 会写入 4 条稳定样例：Redis 连接耗尽、MySQL 慢查询、Kubernetes
+CrashLoop、Forbidden SQL 阻断，并同步生成 `logs/eval_summary.json` 和真实适配器演示摘要。
+打开工作台后可以直接进入 Incident Replay，展示告警、Planner、Executor、Evidence、Replanner、
+审批、变更 dry-run、报告和评测结果的完整闭环。
+
+如果只想启动服务，也可以先执行 `make seed-demo`，再用已有的 `make dev`。
+
+### 5. 最后展示质量验证
 
 ```bash
 make test-quick
@@ -272,8 +286,8 @@ make sandbox-demo
 Windows 下也可以使用：
 
 ```powershell
-.\start-windows.bat
-.\stop-windows.bat
+.\scripts\dev\start-windows.bat
+.\scripts\dev\stop-windows.bat
 ```
 
 ## 常用接口

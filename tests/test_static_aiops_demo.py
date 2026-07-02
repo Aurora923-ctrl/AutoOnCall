@@ -9,9 +9,18 @@ from app.api.aiops import get_aiops_status_catalog, get_demo_incident, list_demo
 from app.config import config
 from app.main import app
 
+STATIC_DIR = Path("static")
+FRONTEND_JS_DIR = STATIC_DIR / "js"
+
+
+def read_frontend_scripts() -> str:
+    """Return the frontend source bundle used by static contract tests."""
+    script_paths = [STATIC_DIR / "app.js", *sorted(FRONTEND_JS_DIR.glob("*.js"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in script_paths)
+
 
 def test_static_aiops_page_consumes_structured_report_and_incident_links() -> None:
-    script = Path("static/app.js").read_text(encoding="utf-8")
+    script = read_frontend_scripts()
     page = Path("static/index.html").read_text(encoding="utf-8")
     style = Path("static/styles.css").read_text(encoding="utf-8")
 
@@ -106,6 +115,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "redpanda_lag" in page
     assert "redpanda_lag" in script
     assert "forbidden_sql" in page
+    assert "/incidents/${encodeURIComponent(incidentId)}/replay" in script
     assert "/api/incidents/${incidentId}/report" in script
     assert "/api/incidents/${incidentId}/changes" in script
     assert "/api/incidents/${runState.incidentId}/trace" in script
@@ -116,6 +126,17 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "startSafeChangeWorkflow" in script
     assert "submitManualChangeResult" in script
     assert "renderChangeStages" in script
+    assert "renderIncidentReplay" in script
+    assert "renderIncidentPanelsLoading" in script
+    assert "renderPanelState" in script
+    assert "renderIncidentPath" in script
+    assert "renderReplayStageCard" in script
+    assert "renderReplayTimelineItems" in script
+    assert "renderReplayTimelineControls" in script
+    assert "handleReplayFilterChange" in script
+    assert "filterReplayTimeline" in script
+    assert "renderReplayReplannerDecisions" in script
+    assert "renderReplayReplannerDecisionCard" in script
     assert "buildLegacyChangeStages" in script
     assert "execution?.stages" in script
     assert "execution.status_metadata?.label" in script
@@ -242,8 +263,12 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert 'data-incident-tab="evidence"' in page
     assert 'data-incident-tab="report"' in page
     assert 'data-incident-tab="response"' in page
+    assert 'id="incidentReplay"' in page
+    assert 'id="replayStatus"' in page
+    assert 'data-panel="replay"' in page
     assert "概览" in page
     assert "诊断过程" in page
+    assert "诊断回放" in page
     assert "证据与依赖" in page
     assert "处置记录" in page
     assert "normalizeWorkbenchView" in script
@@ -258,7 +283,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
         "overview: ['incidents', 'alerts', 'diagnosis-launch', 'run-history', 'detail', 'conclusion']"
         in script
     )
-    assert "process: ['incidents', 'plan', 'steps', 'tools']" in script
+    assert "process: ['incidents', 'replay', 'plan', 'steps', 'tools']" in script
     assert "evidence: ['incidents', 'dependencies', 'evidence', 'trace']" in script
     assert "report: ['incidents', 'report']" in script
     assert "response: ['incidents', 'approvals', 'changes', 'detail']" in script
@@ -282,6 +307,20 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert 'id="evidenceList"' in page
     assert 'id="conclusionView"' in page
     assert 'id="traceTimeline"' in page
+    assert ".replay-stage-rail" in style
+    assert ".replay-body-grid" in style
+    assert ".replanner-decision-panel" in style
+    assert ".replanner-decision-card" in style
+    assert ".replay-eval-metric-list" in style
+    assert ".replay-eval-metric" in style
+    assert ".panel-state" in style
+    assert ".incident-path-card" in style
+    assert ".replay-filter-bar" in style
+    assert "renderReplayEvaluationMetric" in script
+    assert "formatReplayEvaluationValue" in script
+    assert "evaluationMetricTone" in script
+    assert "未通过指标" in script
+    assert "没有匹配当前筛选条件的事件" in script
     assert 'id="reportViewer"' in page
     assert 'id="approvalList"' in page
     assert 'id="changeExecutionList"' in page
@@ -293,7 +332,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
 
 
 def test_static_upload_flow_warns_when_indexing_fails() -> None:
-    script = Path("static/app.js").read_text(encoding="utf-8")
+    script = read_frontend_scripts()
     page = Path("static/index.html").read_text(encoding="utf-8")
     style = Path("static/styles.css").read_text(encoding="utf-8")
 
@@ -369,10 +408,12 @@ async def test_static_workbench_assets_are_served_by_fastapi() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         index_response = await client.get("/")
         script_response = await client.get("/static/app.js")
+        core_script_response = await client.get("/static/js/app_core.js")
         style_response = await client.get("/static/styles.css")
 
     assert index_response.status_code == 200
     assert script_response.status_code == 200
+    assert core_script_response.status_code == 200
     assert style_response.status_code == 200
     assert "AutoOnCall" in index_response.text
     assert 'id="aiOpsPresetSelect"' in index_response.text
@@ -391,6 +432,7 @@ async def test_static_workbench_assets_are_served_by_fastapi() -> None:
         '<main class="main-content workbench-active" data-workbench-view="incidents">'
         in index_response.text
     )
-    assert "class AutoOnCallApp" in script_response.text
-    assert "this.currentWorkbenchView = 'incidents'" in script_response.text
+    assert "AUTOONCALL_SCRIPT_FILES" in script_response.text
+    assert "class AutoOnCallApp" in core_script_response.text
+    assert "this.currentWorkbenchView = 'incidents'" in core_script_response.text
     assert ".workbench" in style_response.text

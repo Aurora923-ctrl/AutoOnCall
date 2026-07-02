@@ -91,5 +91,5 @@ SQLite-to-MySQL migration:
 .\venv\Scripts\python.exe -m compileall app scripts tests
 .\venv\Scripts\python.exe -m ruff check app scripts tests
 .\venv\Scripts\python.exe -m pytest tests -q
-.\venv\Scripts\python.exe scripts\eval_cases.py --cases eval\cases.yaml --report-path logs\eval_reports.db --summary-json logs\eval_summary.json --summary-md logs\eval_summary.md
+.\venv\Scripts\python.exe scripts\eval\eval_cases.py --cases eval\cases.yaml --report-path logs\eval_reports.db --summary-json logs\eval_summary.json --summary-md logs\eval_summary.md
 ```

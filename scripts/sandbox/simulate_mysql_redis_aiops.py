@@ -15,8 +15,8 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI
 
-ROOT = Path(__file__).resolve().parents[1]
-SANDBOX_COMPOSE = ROOT / "deploy" / "full-stack-compose.yml"
+ROOT = Path(__file__).resolve().parents[2]
+SANDBOX_COMPOSE = ROOT / "deploy" / "compose" / "full-stack-compose.yml"
 SANDBOX_ENV = ROOT / "deploy" / "sandbox.env"
 SANDBOX_REDIS_CONTAINER = "autooncall-full-redis"
 SANDBOX_MYSQL_CONTAINER = "autooncall-full-mysql"

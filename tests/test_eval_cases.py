@@ -10,7 +10,7 @@ from app.agent.aiops.executor import (
 )
 from app.models.plan import PlanStep
 from app.tools.base import ToolExecutionResult
-from scripts.eval_cases import (
+from scripts.eval.eval_cases import (
     METRIC_NAMES,
     evaluate_cases,
     load_cases,

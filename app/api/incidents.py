@@ -1,11 +1,17 @@
 """Incident-oriented read APIs."""
 
+import json
+from pathlib import Path
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.config import config
 from app.core.auth import READ_SCOPE, require_scope
 from app.models.api_contracts import (
     IncidentListResponse,
     IncidentOverviewResponse,
+    IncidentReplayResponse,
     IncidentReportResponse,
     IncidentTraceResponse,
 )
@@ -13,7 +19,13 @@ from app.models.approval import ApprovalRequest
 from app.models.trace import TraceEvent
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.approval_service import ApprovalService, approval_service
-from app.services.read_models import build_incident_overview
+from app.services.change_execution_read_models import build_change_execution_read_model
+from app.services.change_execution_service import (
+    ChangeExecutionService,
+    change_execution_service,
+)
+from app.services.evaluation_read_models import build_eval_summary_payload
+from app.services.read_models import build_incident_overview, build_incident_replay
 from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
 
@@ -38,6 +50,25 @@ def get_approval_service() -> ApprovalService:
 def get_incident_state_store() -> AIOpsStateStore:
     """Return the incident lifecycle state store."""
     return create_aiops_store()
+
+
+def get_change_execution_service() -> ChangeExecutionService:
+    """Return the safe change execution service singleton."""
+    return change_execution_service
+
+
+def get_eval_summary_for_replay() -> dict[str, Any] | None:
+    """Load the latest offline evaluation summary for incident replay, if present."""
+    summary_path = Path(config.eval_summary_path)
+    if not summary_path.exists():
+        return None
+    try:
+        raw_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_payload, dict):
+        return None
+    return build_eval_summary_payload(raw_payload, summary_path=summary_path)
 
 
 @router.get(
@@ -97,6 +128,34 @@ async def get_incident_overview(incident_id: str) -> dict:
     if report is None and not events and not approvals and state is None:
         raise HTTPException(status_code=404, detail="incident not found")
     return build_incident_overview(incident_id, report, events, approvals, state)
+
+
+@router.get(
+    "/incidents/{incident_id}/replay",
+    response_model=IncidentReplayResponse,
+    dependencies=[Depends(require_scope(READ_SCOPE))],
+)
+async def get_incident_replay(incident_id: str) -> dict:
+    """Return a replay-ready incident view assembled from all diagnosis artifacts."""
+    report = get_report_generator().get_report(incident_id)
+    events = get_trace_service().list_events(incident_id=incident_id)
+    approvals = get_approval_service().list_requests(incident_id=incident_id)
+    state = get_incident_state_store().get_incident_state(incident_id)
+    change_executions = [
+        build_change_execution_read_model(execution)
+        for execution in get_change_execution_service().list_executions(incident_id=incident_id)
+    ]
+    if report is None and not events and not approvals and state is None and not change_executions:
+        raise HTTPException(status_code=404, detail="incident not found")
+    return build_incident_replay(
+        incident_id,
+        report,
+        events,
+        approvals,
+        state,
+        change_executions,
+        evaluation_summary=get_eval_summary_for_replay(),
+    )
 
 
 @router.get(

@@ -21,7 +21,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run test test-quick eval eval-rag eval-change format lint fix type-check \
+        install install-dev dev run seed-demo demo test test-quick eval eval-rag eval-change format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -38,6 +38,8 @@ help:
 	@echo "$(CYAN)【一键操作】$(NC)"
 	@echo "  $(YELLOW)make init$(NC)         - 🚀 一键初始化（Docker → 服务 → 上传文档）"
 	@echo "  $(YELLOW)make bootstrap$(NC)    - 📦 安装项目和开发工具"
+	@echo "  $(YELLOW)make seed-demo$(NC)    - 🎬 生成诊断回放工作台样例数据"
+	@echo "  $(YELLOW)make demo$(NC)         - 🎬 生成样例数据并启动本地演示服务"
 	@echo "  $(YELLOW)make verify-local$(NC) - ✅ 快速测试 + AIOps/RAG/安全变更评测"
 	@echo "  $(YELLOW)make hygiene-check$(NC) - 🧼 检查本地生成产物"
 	@echo ""
@@ -154,7 +156,7 @@ up:
 		docker ps --filter "name=milvus" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -10; \
 	else \
 		echo "$(YELLOW)🚀 启动 Milvus 相关容器...$(NC)"; \
-		docker compose -f vector-database.yml up -d; \
+		docker compose -f deploy/compose/vector-database.yml up -d; \
 		echo "$(YELLOW)⏳ 等待容器启动...$(NC)"; \
 		sleep 5; \
 		if docker ps --format '{{.Names}}' | grep -q "^$(MILVUS_CONTAINER)$$"; then \
@@ -177,7 +179,7 @@ up:
 down:
 	@echo "$(YELLOW)🛑 停止 Docker 容器...$(NC)"
 	@if docker ps --format '{{.Names}}' | grep -q "milvus"; then \
-		docker compose -f vector-database.yml down; \
+		docker compose -f deploy/compose/vector-database.yml down; \
 		echo "$(GREEN)✅ Docker 容器已停止$(NC)"; \
 	else \
 		echo "$(YELLOW)⚠️  没有运行中的 Milvus 容器$(NC)"; \
@@ -200,25 +202,25 @@ status:
 
 sandbox-up:  ## Start full local AIOps evidence sandbox
 	@echo "$(YELLOW)🧪 启动 AIOps 完整真实适配器沙箱...$(NC)"
-	docker compose -f deploy/full-stack-compose.yml up -d
+	docker compose -f deploy/compose/full-stack-compose.yml up -d
 	@echo "$(GREEN)✅ 沙箱已启动: MySQL 13306, Redis 16379, Prometheus 19090, Grafana 13000, Loki 13100, Jaeger 16686$(NC)"
 
 sandbox-down:  ## Stop full local AIOps evidence sandbox
 	@echo "$(YELLOW)🛑 停止 AIOps 完整真实适配器沙箱...$(NC)"
-	docker compose -f deploy/full-stack-compose.yml down
+	docker compose -f deploy/compose/full-stack-compose.yml down
 	@echo "$(GREEN)✅ 沙箱已停止$(NC)"
 
 sandbox-status:  ## Show local full evidence sandbox containers
 	@echo "$(YELLOW)📊 AIOps 沙箱容器状态:$(NC)"
-	docker compose -f deploy/full-stack-compose.yml ps
+	docker compose -f deploy/compose/full-stack-compose.yml ps
 
 sandbox-verify:  ## Verify ToolRegistry consumes real full-stack adapter sources
 	@echo "$(YELLOW)🔎 验证 AIOps 真实适配器数据源...$(NC)"
-	$(PYTHON) scripts/verify_full_stack_adapters.py
+	$(PYTHON) scripts/sandbox/verify_full_stack_adapters.py
 
 sandbox-demo:  ## Run deterministic AIOps scenarios against real sandbox adapters
 	@echo "$(YELLOW)🧪 运行 Redis/MySQL/Prometheus 真实数据流演示...$(NC)"
-	$(PYTHON) scripts/simulate_mysql_redis_aiops.py
+	$(PYTHON) scripts/sandbox/simulate_mysql_redis_aiops.py
 
 # ============================================================
 # MCP 服务管理
@@ -467,6 +469,20 @@ run:
 	@echo "$(YELLOW)🏭 启动生产服务器...$(NC)"
 	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 9900
 
+# 生成本地面试演示数据
+seed-demo:
+	@echo "$(YELLOW)🎬 生成 AIOps 诊断回放工作台样例数据...$(NC)"
+	$(PYTHON) scripts/data/seed_demo_data.py
+	@echo "$(GREEN)✅ 样例数据已写入 data/aiops_state.db，评测摘要已写入 logs/eval_summary.json$(NC)"
+
+# 一键演示：生成样例数据并前台启动服务
+demo: seed-demo
+	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
+	@echo "$(GREEN)🎬 AutoOnCall 面试演示已准备好$(NC)"
+	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
+	@echo "$(YELLOW)打开: $(SERVER_URL)$(NC)"
+	$(PYTHON) -m uvicorn app.main:app --host 127.0.0.1 --port 9900
+
 # ============================================================
 # 文档管理
 # ============================================================
@@ -622,19 +638,19 @@ test-integrations:  ## Run Docker/live integration tests
 
 eval:  ## 运行 AIOps 离线评测
 	@echo "$(YELLOW)🧪 运行 AIOps 离线评测...$(NC)"
-	$(PYTHON) scripts/eval_cases.py --cases eval/cases.yaml --report-path logs/eval_reports.db --summary-json logs/eval_summary.json --summary-md logs/eval_summary.md
+	$(PYTHON) scripts/eval/eval_cases.py --cases eval/cases.yaml --report-path logs/eval_reports.db --summary-json logs/eval_summary.json --summary-md logs/eval_summary.md
 
 eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
-	$(PYTHON) scripts/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs
 
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
-	$(PYTHON) scripts/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
+	$(PYTHON) scripts/eval/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
 
 hygiene-check:  ## 检查本地生成产物
 	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"
-	$(PYTHON) scripts/hygiene_check.py
+	$(PYTHON) scripts/maintenance/hygiene_check.py
 
 verify-local:  ## 面试前本地快速质量验证
 	@echo "$(YELLOW)✅ 运行 AutoOnCall 本地快速验证...$(NC)"

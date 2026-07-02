@@ -59,6 +59,34 @@ class IncidentOverviewResponse(BaseModel):
     updated_at: str = ""
 
 
+class IncidentReplayResponse(BaseModel):
+    """Replay-ready view of one diagnosis from alert to report."""
+
+    incident_id: str
+    trace_id: str = ""
+    status: str
+    status_metadata: dict[str, Any] = Field(default_factory=dict)
+    title: str
+    service_name: str
+    severity: str
+    environment: str
+    summary: str = ""
+    root_cause: str = ""
+    overview: dict[str, Any] = Field(default_factory=dict)
+    stages: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    replanner_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    evidence_quality: dict[str, Any] = Field(default_factory=dict)
+    tooling: dict[str, Any] = Field(default_factory=dict)
+    approval_flow: dict[str, Any] = Field(default_factory=dict)
+    change_flow: dict[str, Any] = Field(default_factory=dict)
+    report_summary: dict[str, Any] = Field(default_factory=dict)
+    evaluation: dict[str, Any] = Field(default_factory=dict)
+    links: dict[str, str] = Field(default_factory=dict)
+    updated_at: str = ""
+
+
 class IncidentTraceResponse(BaseModel):
     """Trace response for one incident."""
 

@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_ENV = ROOT / "deploy" / "sandbox.env"
 DEFAULT_OUTPUT_PATH = ROOT / "logs" / "full_stack_adapter_verification.json"
 

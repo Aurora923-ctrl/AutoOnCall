@@ -7,7 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 PROCESS_TOKENS = [
     "uvicorn",
@@ -27,8 +27,8 @@ def main() -> int:
     print("=" * 72)
     stop_app_processes()
     if args.containers:
-        compose_down(ROOT / "vector-database.yml")
-        compose_down(ROOT / "deploy" / "full-stack-compose.yml")
+        compose_down(ROOT / "deploy" / "compose" / "vector-database.yml")
+        compose_down(ROOT / "deploy" / "compose" / "full-stack-compose.yml")
     print("[DONE] Stop command completed.")
     return 0
 

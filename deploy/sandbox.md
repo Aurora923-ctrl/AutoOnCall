@@ -105,7 +105,7 @@ The Redis demo should collect evidence from `cmdb`, `redis_info`, `prometheus`, 
 ## Useful Checks
 
 ```powershell
-docker compose -f deploy/full-stack-compose.yml ps
+docker compose -f deploy/compose/full-stack-compose.yml ps
 curl http://127.0.0.1:19108/metrics
 curl "http://127.0.0.1:19090/api/v1/query?query=autooncall_p95_latency_ms%7Bservice%3D%22order-service%22%7D"
 curl "http://127.0.0.1:13100/loki/api/v1/labels"

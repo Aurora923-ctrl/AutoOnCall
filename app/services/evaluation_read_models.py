@@ -28,6 +28,7 @@ def build_eval_summary_payload(
         "categories": categories,
         "rag": rag_summary,
         "dashboard": build_eval_dashboard(run, summary, resume_metrics, categories, rag_summary),
+        "cases": raw_payload.get("cases", []) if isinstance(raw_payload.get("cases"), list) else [],
         "failed_cases": summary.get("failed_cases", []),
         "message": "evaluation summary loaded",
     }
@@ -50,6 +51,7 @@ def build_eval_unavailable_payload(message: str, *, summary_path: Path) -> dict[
             "artifacts": {},
             "metrics": [],
         },
+        "cases": [],
         "failed_cases": [],
         "message": message,
     }

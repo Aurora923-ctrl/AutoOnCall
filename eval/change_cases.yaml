@@ -84,3 +84,43 @@ cases:
     approval_status: pending
     mode: dry_run_only
     expected_status: rejected_before_execution
+
+  - id: rejected_approval_before_change_execution
+    title: Rejected approval cannot start safe change workflow
+    scenario: safe_change
+    incident_id: inc-change-rejected-approval
+    action: 人工调整 Redis maxclients
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: rejected
+    mode: dry_run_only
+    expected_status: rejected_before_execution
+
+  - id: staging_sandbox_validated
+    title: Staging sandbox validates without production mutation
+    scenario: safe_change
+    incident_id: inc-change-staging-sandbox
+    action: 沙箱验证 Redis maxclients 变更
+    risk_level: high
+    service_name: order-service
+    environment: staging
+    approval_status: approved
+    mode: sandbox
+    expected_status: sandbox_validated
+    expected_precheck: passed
+    expected_dry_run: passed
+
+  - id: prod_sandbox_without_flag_escalates
+    title: Production sandbox without explicit flag escalates to manual handoff
+    scenario: safe_change
+    incident_id: inc-change-prod-sandbox-escalated
+    action: 生产环境沙箱验证 Redis maxclients 变更
+    risk_level: high
+    service_name: order-service
+    environment: prod
+    approval_status: approved
+    mode: sandbox
+    expected_status: escalated
+    expected_precheck: passed
+    expected_dry_run: passed

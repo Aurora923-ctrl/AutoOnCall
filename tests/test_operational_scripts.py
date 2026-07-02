@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app import main as main_module
-from scripts.hygiene_check import find_hygiene_issues, main as hygiene_main
+from scripts.maintenance.hygiene_check import find_hygiene_issues, main as hygiene_main
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,7 +18,7 @@ def test_makefile_separates_liveness_from_readiness_checks() -> None:
 
 
 def test_windows_start_script_checks_live_before_ready_upload() -> None:
-    script = (ROOT / "start-windows.bat").read_text(encoding="utf-8")
+    script = (ROOT / "scripts" / "dev" / "start-windows.bat").read_text(encoding="utf-8")
 
     live_index = script.index("http://localhost:9900/health/live")
     ready_index = script.index("http://localhost:9900/health/ready")
@@ -70,7 +70,7 @@ def test_makefile_exposes_hygiene_check_target() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
     assert "hygiene-check:" in makefile
-    assert "scripts/hygiene_check.py" in makefile
+    assert "scripts/maintenance/hygiene_check.py" in makefile
 
 
 def test_hygiene_check_detects_generated_artifacts(tmp_path) -> None:

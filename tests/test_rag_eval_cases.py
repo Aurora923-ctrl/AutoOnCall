@@ -1,6 +1,6 @@
 """Tests for offline RAG retrieval evaluation cases."""
 
-from scripts.eval_rag_cases import (
+from scripts.eval.eval_rag_cases import (
     build_offline_index,
     evaluate_case,
     evaluate_cases,

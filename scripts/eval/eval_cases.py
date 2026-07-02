@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -44,7 +44,7 @@ from app.tools.mock_ops_tool import (
 )
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.registry import ToolRegistry
-from scripts.eval_rag_cases import evaluate_cases as evaluate_rag_cases
+from scripts.eval.eval_rag_cases import evaluate_cases as evaluate_rag_cases
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "cases.yaml"
 DEFAULT_REPORT_PATH = REPO_ROOT / "logs" / "eval_reports.db"

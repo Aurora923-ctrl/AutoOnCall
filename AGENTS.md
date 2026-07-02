@@ -7,12 +7,13 @@
 - `app/main.py` 是应用入口。
 - `app/api/` 存放聊天、文件上传、AIOps、健康检查等路由。
 - `app/services/` 存放 RAG、向量、Embedding、文档处理等业务服务。
+- `app/services/aiops_read_models/` 存放 AIOps 运行、Incident 概览、Replay 和评测相关读模型，`app/services/read_models.py` 仅保留兼容导出。
 - `app/agent/aiops/` 实现 Plan-Execute-Replan 诊断流程。
 - `app/models/` 定义 Pydantic 数据模型。
 - `app/core/`、`app/tools/`、`app/utils/` 存放基础设施、Agent 工具和日志辅助代码。
 - `app/integrations/` 存放 Prometheus、日志网关、Kubernetes、Redis、MySQL、工单系统等外部系统适配器。
 - `mcp_servers/` 存放 MCP 服务脚本。
-- `static/` 存放 HTML/CSS/JS 前端页面。
+- `static/` 存放前端工作台页面；`static/app.js` 只负责按顺序加载分片，业务脚本放在 `static/js/`。
 - `aiops-docs/` 存放写入 Milvus 的 Markdown 知识库文档。
 - `deploy/` 存放生产部署与配置示例。
 
@@ -24,9 +25,9 @@
 - `make install-dev` 在支持 GNU Make 的环境中执行同类安装。
 - `make dev` 以热重载方式在 `9900` 端口启动 FastAPI。
 - `make run` 以非热重载方式启动 FastAPI。
-- `make up` 使用 `vector-database.yml` 启动 Milvus。
+- `make up` 使用 `deploy/compose/vector-database.yml` 启动 Milvus。
 - `make start` 启动 MCP 服务和 FastAPI。
-- `.\start-windows.bat`、`.\stop-windows.bat` 用于 Windows 下启动和停止服务。
+- `.\scripts\dev\start-windows.bat`、`.\scripts\dev\stop-windows.bat` 用于 Windows 下启动和停止服务。
 - `make upload` 将 `aiops-docs/*.md` 上传到正在运行的 API。
 
 ## 编码风格与命名约定

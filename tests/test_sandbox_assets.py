@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_sandbox_compose_declares_real_dependency_services() -> None:
-    compose = (ROOT / "deploy" / "full-stack-compose.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy" / "compose" / "full-stack-compose.yml").read_text(
+        encoding="utf-8"
+    )
 
     for service_name in [
         "autooncall-full-redis",
@@ -46,7 +48,9 @@ def test_sandbox_env_disables_mock_and_wires_adapters() -> None:
 
 
 def test_pycharm_launcher_uses_adapter_endpoint_shapes() -> None:
-    script = (ROOT / "scripts" / "pycharm_one_click_start.py").read_text(encoding="utf-8")
+    script = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "from app.config import LOCAL_DEMO_API_URL, LOCAL_FULL_STACK_ENV" in script
     assert LOCAL_FULL_STACK_ENV["CMDB_API_URL"] == "http://127.0.0.1:18081"
@@ -65,9 +69,11 @@ def test_pycharm_launcher_uses_adapter_endpoint_shapes() -> None:
 
 
 def test_sandbox_demo_script_targets_full_stack_compose() -> None:
-    script = (ROOT / "scripts" / "simulate_mysql_redis_aiops.py").read_text(encoding="utf-8")
+    script = (ROOT / "scripts" / "sandbox" / "simulate_mysql_redis_aiops.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert 'SANDBOX_COMPOSE = ROOT / "deploy" / "full-stack-compose.yml"' in script
+    assert 'SANDBOX_COMPOSE = ROOT / "deploy" / "compose" / "full-stack-compose.yml"' in script
     assert 'SANDBOX_REDIS_CONTAINER = "autooncall-full-redis"' in script
     assert 'SANDBOX_MYSQL_CONTAINER = "autooncall-full-mysql"' in script
     assert 'SANDBOX_PROMETHEUS_CONTAINER = "autooncall-full-prometheus"' in script
