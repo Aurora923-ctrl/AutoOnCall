@@ -34,9 +34,7 @@ def build_replay_metrics(
         if latency and latency > 0:
             latencies.append(latency)
     failed_events = [
-        item
-        for item in timeline
-        if str(item.get("status") or "") in {"failed", "error", "blocked"}
+        item for item in timeline if str(item.get("status") or "") in {"failed", "error", "blocked"}
     ]
     return {
         "trace_event_count": len(timeline),
@@ -75,9 +73,7 @@ def build_replay_evidence_quality(evidence: list[Any]) -> dict[str, Any]:
         "by_type": dict(by_type),
         "by_source": dict(by_source),
         "by_stance": dict(by_stance),
-        "average_confidence": round(sum(confidences) / len(confidences), 3)
-        if confidences
-        else 0.0,
+        "average_confidence": round(sum(confidences) / len(confidences), 3) if confidences else 0.0,
         "high_confidence_count": sum(1 for value in confidences if value >= 0.8),
         "low_confidence_count": sum(1 for value in confidences if value < 0.5),
         "has_mock": by_source.get("mock", 0) > 0,

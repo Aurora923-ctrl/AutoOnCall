@@ -84,6 +84,8 @@ help:
 	@echo "$(CYAN)【代码质量】$(NC)"
 	@echo "  $(YELLOW)make format$(NC)       - 🎨 格式化代码"
 	@echo "  $(YELLOW)make lint$(NC)         - 🔍 代码检查"
+	@echo "  $(YELLOW)make type-check$(NC)   - 🔍 类型检查"
+	@echo "  $(YELLOW)make security$(NC)     - 🔒 安全检查"
 	@echo "  $(YELLOW)make fix$(NC)          - 🔧 自动修复问题"
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
 	@echo "  $(YELLOW)make eval$(NC)         - 🧪 运行 AIOps 离线评测"
@@ -664,10 +666,13 @@ check-all:  ## 运行所有检查
 	@echo "$(YELLOW)🚀 运行所有检查...$(NC)"
 	@$(MAKE) format
 	@$(MAKE) lint
+	@$(MAKE) type-check
+	@$(MAKE) security
 	@$(MAKE) test
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
 	@$(MAKE) eval-change
+	@$(MAKE) hygiene-check
 	@echo "$(GREEN)✅ 所有检查通过！$(NC)"
 
 pre-commit-install:  ## 安装 pre-commit hooks

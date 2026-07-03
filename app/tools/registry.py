@@ -24,7 +24,7 @@ from app.tools.tracing_tool import QueryTracesTool
 class ToolRegistry:
     """Registry that exposes stable AIOps tool names to the Executor."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools: dict[str, AIOpsTool] = {}
 
     def register(self, tool: AIOpsTool) -> None:

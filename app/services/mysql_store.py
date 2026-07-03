@@ -19,6 +19,37 @@ from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.incident_lifecycle import merge_incident_state
 
+_RETENTION_SQL: dict[str, tuple[str, str]] = {
+    "alert_events": (
+        "SELECT COUNT(*) AS count FROM alert_events WHERE updated_at < %s",
+        "DELETE FROM alert_events WHERE updated_at < %s",
+    ),
+    "trace_events": (
+        "SELECT COUNT(*) AS count FROM trace_events WHERE created_at < %s",
+        "DELETE FROM trace_events WHERE created_at < %s",
+    ),
+    "approval_requests": (
+        "SELECT COUNT(*) AS count FROM approval_requests WHERE created_at < %s",
+        "DELETE FROM approval_requests WHERE created_at < %s",
+    ),
+    "diagnosis_reports": (
+        "SELECT COUNT(*) AS count FROM diagnosis_reports WHERE created_at < %s",
+        "DELETE FROM diagnosis_reports WHERE created_at < %s",
+    ),
+    "change_executions": (
+        "SELECT COUNT(*) AS count FROM change_executions WHERE created_at < %s",
+        "DELETE FROM change_executions WHERE created_at < %s",
+    ),
+    "aiops_sessions": (
+        "SELECT COUNT(*) AS count FROM aiops_sessions WHERE updated_at < %s",
+        "DELETE FROM aiops_sessions WHERE updated_at < %s",
+    ),
+    "incident_states": (
+        "SELECT COUNT(*) AS count FROM incident_states WHERE updated_at < %s",
+        "DELETE FROM incident_states WHERE updated_at < %s",
+    ),
+}
+
 
 class AIOpsMySQLStore:
     """Small PyMySQL-backed repository for trace, approval, and report state."""
@@ -660,30 +691,15 @@ class AIOpsMySQLStore:
 
         cutoff = datetime.now(UTC) - timedelta(days=keep_days)
         cutoff_text = cutoff.isoformat()
-        tables = {
-            "alert_events": "updated_at",
-            "trace_events": "created_at",
-            "approval_requests": "created_at",
-            "diagnosis_reports": "created_at",
-            "change_executions": "created_at",
-            "aiops_sessions": "updated_at",
-            "incident_states": "updated_at",
-        }
         deleted: dict[str, int] = {}
 
         with self._connect() as connection:
             with connection.cursor() as cursor:
-                for table, timestamp_column in tables.items():
-                    cursor.execute(
-                        f"SELECT COUNT(*) AS count FROM {table} WHERE {timestamp_column} < %s",
-                        (cutoff_text,),
-                    )
+                for table, (count_sql, delete_sql) in _RETENTION_SQL.items():
+                    cursor.execute(count_sql, (cutoff_text,))
                     deleted[table] = int(cursor.fetchone()["count"])
                     if not dry_run:
-                        cursor.execute(
-                            f"DELETE FROM {table} WHERE {timestamp_column} < %s",
-                            (cutoff_text,),
-                        )
+                        cursor.execute(delete_sql, (cutoff_text,))
 
         return {
             "backend": "mysql",

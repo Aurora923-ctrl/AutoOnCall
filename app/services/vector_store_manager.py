@@ -16,7 +16,7 @@ COLLECTION_NAME = "biz"
 class VectorStoreManager:
     """向量存储管理器"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化向量存储管理器"""
         self.vector_store: Milvus | None = None
 
@@ -24,7 +24,7 @@ class VectorStoreManager:
 
         logger.info("VectorStore 管理器初始化完成，等待首次使用时连接 Milvus")
 
-    def _initialize_vector_store(self):
+    def _initialize_vector_store(self) -> None:
         """初始化 Milvus VectorStore"""
         if self.vector_store is not None:
             return
@@ -95,7 +95,7 @@ class VectorStoreManager:
             elapsed = time.time() - start_time
             logger.info(
                 f"批量添加 {len(documents)} 个文档到 VectorStore 完成, "
-                f"耗时: {elapsed:.2f}秒, 平均: {elapsed/len(documents):.2f}秒/个"
+                f"耗时: {elapsed:.2f}秒, 平均: {elapsed / len(documents):.2f}秒/个"
             )
             return result_ids
         except Exception as e:

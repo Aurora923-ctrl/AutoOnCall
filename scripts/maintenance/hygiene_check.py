@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -48,7 +49,7 @@ class HygieneIssue:
     reason: str
 
 
-def find_hygiene_issues(root: Path) -> list[HygieneIssue]:
+def find_hygiene_issues(root: Path, *, include_ignored: bool = False) -> list[HygieneIssue]:
     """Return generated artifact issues under root without deleting anything."""
 
     resolved_root = root.resolve()
@@ -63,14 +64,30 @@ def find_hygiene_issues(root: Path) -> list[HygieneIssue]:
             path = current_path / dir_name
             reason = _directory_reason(path, resolved_root)
             if reason:
-                _append_issue(issues, seen, resolved_root, path, "directory", reason)
+                _append_issue(
+                    issues,
+                    seen,
+                    resolved_root,
+                    path,
+                    "directory",
+                    reason,
+                    include_ignored=include_ignored,
+                )
                 dir_names.remove(dir_name)
 
         for file_name in file_names:
             path = current_path / file_name
             reason = _file_reason(path, resolved_root)
             if reason:
-                _append_issue(issues, seen, resolved_root, path, "file", reason)
+                _append_issue(
+                    issues,
+                    seen,
+                    resolved_root,
+                    path,
+                    "file",
+                    reason,
+                    include_ignored=include_ignored,
+                )
 
     return sorted(issues, key=lambda issue: issue.path)
 
@@ -82,8 +99,12 @@ def _append_issue(
     path: Path,
     kind: str,
     reason: str,
+    *,
+    include_ignored: bool,
 ) -> None:
     relative_path = path.relative_to(root).as_posix()
+    if not include_ignored and _is_git_ignored(root, relative_path):
+        return
     key = (relative_path, kind, reason)
     if key in seen:
         return
@@ -118,13 +139,29 @@ def _file_reason(path: Path, root: Path) -> str:
     return ""
 
 
+def _is_git_ignored(root: Path, relative_path: str) -> bool:
+    """Return True when Git ignore rules already cover a generated artifact."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "--quiet", "--", relative_path],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="repository root to inspect")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="also report generated artifacts that are already covered by .gitignore",
+    )
     args = parser.parse_args(argv)
 
-    issues = find_hygiene_issues(Path(args.root))
+    issues = find_hygiene_issues(Path(args.root), include_ignored=args.include_ignored)
     if args.json:
         print(json.dumps([asdict(issue) for issue in issues], ensure_ascii=False, indent=2))
     elif issues:

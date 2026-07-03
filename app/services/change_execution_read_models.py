@@ -97,7 +97,10 @@ def execution_stage_reason(execution: Mapping[str, Any]) -> str:
     if status == "sandbox_executing":
         return "沙箱执行中，不调用生产写接口。"
     if manual_result:
-        return str(manual_result.get("notes") or f"人工执行结果：{manual_result.get('status') or 'recorded'}")
+        return str(
+            manual_result.get("notes")
+            or f"人工执行结果：{manual_result.get('status') or 'recorded'}"
+        )
     if mode == "sandbox" and observation:
         return str(observation.get("recommendation") or "沙箱执行和观察通过，未调用生产写接口。")
     if status == "sandbox_validated":
@@ -129,7 +132,9 @@ def change_execution_next_steps(existing: list[str], status: str) -> list[str]:
     elif status == "dry_run_completed":
         steps.append("dry-run 已完成且未执行生产变更；如需恢复生产，请走人工执行记录或变更平台。")
     elif status == "sandbox_validated":
-        steps.append("sandbox 验证已完成且未执行生产变更；如需恢复生产，请走人工执行记录或变更平台。")
+        steps.append(
+            "sandbox 验证已完成且未执行生产变更；如需恢复生产，请走人工执行记录或变更平台。"
+        )
     elif status == "closed":
         steps.append("安全变更流程已关闭，继续按观察窗口复核关键指标是否稳定。")
     return _dedupe_strings(steps)[:8]

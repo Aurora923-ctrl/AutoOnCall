@@ -78,9 +78,7 @@ class AlertmanagerAlertAdapter:
         raw_annotations = alert.get("annotations")
         raw_status = alert.get("status")
         labels: dict[str, Any] = raw_labels if isinstance(raw_labels, dict) else {}
-        annotations: dict[str, Any] = (
-            raw_annotations if isinstance(raw_annotations, dict) else {}
-        )
+        annotations: dict[str, Any] = raw_annotations if isinstance(raw_annotations, dict) else {}
         status: dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
         return {
             "alertname": labels.get("alertname", ""),

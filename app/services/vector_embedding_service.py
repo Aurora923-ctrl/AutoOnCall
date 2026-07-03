@@ -21,7 +21,7 @@ class DashScopeEmbeddings(Embeddings):
         model: str = "text-embedding-v4",
         dimensions: int = 1024,
         base_url: str | None = None,
-    ):
+    ) -> None:
         """
         初始化 DashScope Embeddings
 
@@ -117,7 +117,7 @@ class DashScopeEmbeddings(Embeddings):
 class LazyDashScopeEmbeddings(Embeddings):
     """Lazily create DashScopeEmbeddings on first real embedding call."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._service: DashScopeEmbeddings | None = None
 
     def _get_service(self) -> DashScopeEmbeddings:

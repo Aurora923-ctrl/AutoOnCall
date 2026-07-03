@@ -395,7 +395,7 @@ def build_retrieval_reason(
     if lexical_score is None:
         return "词法召回缺少可信分数" if not trusted else "词法召回通过可信阈值"
     relation = "大于等于" if lexical_score >= min_lexical_score else "小于"
-    return f"lexical score {lexical_score:.4f} {relation} " f"阈值 {min_lexical_score:.4f}"
+    return f"lexical score {lexical_score:.4f} {relation} 阈值 {min_lexical_score:.4f}"
 
 
 def format_retrieval_results(results: list[dict[str, Any]]) -> str:
@@ -711,7 +711,7 @@ def _document_identity(document: Document) -> tuple[str, str]:
     chunk_id = str(metadata.get("_chunk_id") or metadata.get("chunk_id") or "")
     if source or chunk_id:
         return source, chunk_id
-    digest = hashlib.sha1(str(document.page_content or "").encode()).hexdigest()
+    digest = hashlib.sha256(str(document.page_content or "").encode()).hexdigest()
     return "", digest
 
 
@@ -723,7 +723,7 @@ def _coerce_score(score: Any) -> float | None:
 
 
 def _stable_chunk_id(source_file: str, heading_path: str, content: str) -> str:
-    digest = hashlib.sha1(f"{source_file}\n{heading_path}\n{content}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{source_file}\n{heading_path}\n{content}".encode()).hexdigest()
     return f"chunk-{digest[:12]}"
 
 

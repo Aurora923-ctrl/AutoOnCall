@@ -61,8 +61,7 @@ class RedpandaStatusAdapter:
         return adapter_success(
             source="redpanda",
             summary=(
-                f"Redpanda ready，topics={len(topics)}, "
-                f"matched_partitions={len(topic_partitions)}"
+                f"Redpanda ready，topics={len(topics)}, matched_partitions={len(topic_partitions)}"
             ),
             signals={
                 "ready": True,

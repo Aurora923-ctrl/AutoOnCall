@@ -87,7 +87,11 @@ def build_replay_stages(
         replay_stage_card(
             "change",
             "安全变更",
-            str(latest_change.get("lifecycle_status") or latest_change.get("status") or "not_started"),
+            str(
+                latest_change.get("lifecycle_status")
+                or latest_change.get("status")
+                or "not_started"
+            ),
             str(latest_change.get("status") or "未启动安全变更流程"),
             events_by_stage,
             failed_by_stage,

@@ -73,6 +73,19 @@ def test_makefile_exposes_hygiene_check_target() -> None:
     assert "scripts/maintenance/hygiene_check.py" in makefile
 
 
+def test_makefile_check_all_runs_quality_gate_targets() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    check_all = makefile.split("check-all:  ## 运行所有检查", maxsplit=1)[1]
+    check_all = check_all.split("pre-commit-install:", maxsplit=1)[0]
+
+    assert "@$(MAKE) lint" in check_all
+    assert "@$(MAKE) type-check" in check_all
+    assert "@$(MAKE) security" in check_all
+    assert "@$(MAKE) test" in check_all
+    assert "@$(MAKE) hygiene-check" in check_all
+
+
 def test_hygiene_check_detects_generated_artifacts(tmp_path) -> None:
     (tmp_path / "logs").mkdir()
     (tmp_path / "data").mkdir()

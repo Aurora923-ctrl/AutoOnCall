@@ -101,8 +101,7 @@ def build_replay_replanner_decisions(timeline: list[dict[str, Any]]) -> list[dic
                 "evidence_sufficient": bool(metadata.get("evidence_sufficient", False)),
                 "missing_evidence": _as_list(metadata.get("missing_evidence")),
                 "new_steps": [
-                    compact_plan_step(step)
-                    for step in _as_list(metadata.get("new_steps"))
+                    compact_plan_step(step) for step in _as_list(metadata.get("new_steps"))
                 ],
                 "conflicts": _as_list(metadata.get("conflicts")),
                 "confidence_reasons": _as_list(metadata.get("confidence_reasons")),

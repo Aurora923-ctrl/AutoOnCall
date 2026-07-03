@@ -166,7 +166,8 @@ async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
     tool_node = ToolNode(safe_tools) if safe_tools else None
 
     messages = [
-        SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
+        SystemMessage(
+            content="""你是一个能力强大的助手，负责执行具体的任务步骤。
 
 你可以使用各种工具来完成任务。对于每个步骤：
 1. 理解步骤的目标
@@ -178,7 +179,8 @@ async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
 - 如果工具调用失败，请说明失败原因
 - 不要编造数据，只返回实际获取的信息
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
+- 专注于当前步骤，不要考虑其他任务"""
+        ),
         HumanMessage(content=f"请执行以下任务: {task}"),
     ]
 

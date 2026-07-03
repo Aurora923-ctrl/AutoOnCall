@@ -57,8 +57,7 @@ async def retry_interceptor(
         except Exception as e:
             last_error = e
             logger.warning(
-                f"MCP 工具 {request.name} 调用失败 "
-                f"(第 {attempt + 1}/{max_retries} 次): {str(e)}"
+                f"MCP 工具 {request.name} 调用失败 (第 {attempt + 1}/{max_retries} 次): {str(e)}"
             )
 
             if attempt < max_retries - 1:

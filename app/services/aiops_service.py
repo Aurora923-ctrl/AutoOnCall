@@ -3,7 +3,6 @@
 基于 LangGraph 官方教程实现
 """
 
-import json
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 from uuid import uuid4
@@ -24,6 +23,16 @@ from app.models.approval import ApprovalRequest
 from app.models.incident import Incident
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from app.services.aiops_event_formatters import (
+    format_executor_event,
+    format_planner_event,
+    format_replanner_event,
+)
+from app.services.aiops_prompt_builder import (
+    build_incident_diagnosis_input,
+    format_raw_alert_for_prompt,
+)
+from app.services.aiops_snapshot_service import save_session_snapshot
 from app.services.aiops_store import create_aiops_store
 from app.services.incident_lifecycle import (
     incident_status_from_runtime_status,
@@ -31,7 +40,6 @@ from app.services.incident_lifecycle import (
     snapshot_status_from_event,
     terminal_event_status,
 )
-from app.services.incident_state_builder import build_incident_state_from_state
 from app.services.report_generator import report_generator
 from app.services.trace_service import trace_service
 
@@ -697,144 +705,28 @@ class AIOpsService:
         node_name: str,
     ) -> None:
         """Persist a best-effort durable snapshot for diagnosis recovery."""
-        if not state:
-            return
         try:
-            snapshot_state = dict(state)
-            existing = self.state_store.get_aiops_session_snapshot(session_id)
-            if existing is not None:
-                if not snapshot_state.get("trace_id"):
-                    snapshot_state["trace_id"] = existing.trace_id
-                incident_payload = snapshot_state.get("incident")
-                if not incident_payload:
-                    snapshot_state["incident"] = existing.incident or {
-                        "incident_id": existing.incident_id
-                    }
-                elif isinstance(incident_payload, dict) and not incident_payload.get("incident_id"):
-                    incident_payload["incident_id"] = existing.incident_id
-
-            snapshot = AIOpsSessionSnapshot.from_state(
+            save_session_snapshot(
+                self.state_store,
                 session_id=session_id,
-                state=snapshot_state,
+                state=state,
                 status=status,
                 node_name=node_name,
             )
-            self.state_store.save_aiops_session_snapshot(snapshot)
-            incident_state = build_incident_state_from_state(
-                state={
-                    **snapshot_state,
-                    "node_name": node_name,
-                },
-                status=_incident_status_from_runtime_status(status),
-                status_reason=f"AIOps workflow node={node_name}, status={status}",
-                session_id=session_id,
-            )
-            if incident_state.incident_id and incident_state.incident_id != "incident-unknown":
-                self.state_store.save_incident_state(incident_state)
         except Exception as exc:
             logger.warning(f"保存 AIOps session snapshot 失败: {exc}")
 
     def _format_planner_event(self, state: dict | None) -> dict:
         """格式化 Planner 节点事件"""
-        if not state:
-            return {"type": "status", "stage": "planner", "message": "规划节点执行中"}
-
-        plan = state.get("plan", [])
-        current_plan = state.get("current_plan", [])
-
-        return {
-            "type": "plan",
-            "stage": "plan_created",
-            "message": f"执行计划已制定，共 {len(plan)} 个步骤",
-            "plan": plan,
-            "current_plan": current_plan,
-        }
+        return format_planner_event(state)
 
     def _format_executor_event(self, state: dict | None) -> dict:
         """格式化 Executor 节点事件"""
-        if not state:
-            return {"type": "status", "stage": "executor", "message": "执行节点运行中"}
-
-        plan = state.get("plan", [])
-        past_steps = state.get("past_steps", [])
-        gathered_evidence = state.get("gathered_evidence", [])
-        tool_call_records = state.get("tool_call_records", [])
-        errors = state.get("errors", [])
-        warnings = state.get("warnings", [])
-        pending_approval = state.get("pending_approval")
-
-        if pending_approval:
-            return {
-                "type": "approval_required",
-                "stage": "approval_required",
-                "message": "后续动作需要人工审批",
-                "pending_approval": pending_approval,
-                "risk_assessment": state.get("risk_assessment"),
-                "structured_report": state.get("report"),
-                "warnings": warnings,
-            }
-
-        if past_steps:
-            last_step, result = past_steps[-1]
-            result_text = str(result)
-            return {
-                "type": "step_complete",
-                "stage": "step_executed",
-                "message": f"步骤执行完成 ({len(past_steps)}/{len(past_steps) + len(plan)})",
-                "current_step": last_step,
-                "result_preview": result_text[:500],
-                "remaining_steps": len(plan),
-                "evidence": gathered_evidence,
-                "tool_call_records": tool_call_records,
-                "errors": errors,
-                "warnings": warnings,
-            }
-        else:
-            return {"type": "status", "stage": "executor", "message": "开始执行步骤"}
+        return format_executor_event(state)
 
     def _format_replanner_event(self, state: dict | None) -> dict:
         """格式化 Replanner 节点事件"""
-        if not state:
-            return {"type": "status", "stage": "replanner", "message": "评估节点运行中"}
-
-        pending_approval = state.get("pending_approval")
-        response = state.get("response", "")
-        plan = state.get("current_plan") or state.get("plan", [])
-        structured_report = state.get("report")
-        warnings = state.get("warnings", [])
-
-        if pending_approval:
-            return {
-                "type": "approval_required",
-                "stage": "approval_required",
-                "message": "后续动作需要人工审批",
-                "pending_approval": pending_approval,
-                "risk_assessment": state.get("risk_assessment"),
-                "structured_report": structured_report,
-                "warnings": warnings,
-            }
-
-        if response:
-            return {
-                "type": "report",
-                "stage": "final_report",
-                "message": "最终报告已生成",
-                "report": response,
-                "structured_report": structured_report,
-                "hypotheses": state.get("hypotheses", []),
-                "final_diagnosis": state.get("final_diagnosis", ""),
-                "warnings": warnings,
-            }
-        else:
-            return {
-                "type": "status",
-                "stage": "replanner",
-                "message": f"评估完成，{'继续执行剩余步骤' if plan else '准备生成最终响应'}",
-                "remaining_steps": len(plan),
-                "hypotheses": state.get("hypotheses", []),
-                "final_diagnosis": state.get("final_diagnosis", ""),
-                "warnings": warnings,
-            }
+        return format_replanner_event(state)
 
 
 aiops_service = AIOpsService()
@@ -875,8 +767,7 @@ def _build_persisted_resume_report(
         if "等待人工审批" not in item and "需要人工审批" not in item
     ]
     uncertainties.append(
-        "审批已通过；本次恢复使用持久化报告补齐 Trace 和报告闭环，"
-        "后续风险操作需进入安全变更流程。"
+        "审批已通过；本次恢复使用持久化报告补齐 Trace 和报告闭环，后续风险操作需进入安全变更流程。"
     )
     summary = persisted_report.summary
     if "审批已通过" not in summary:
@@ -1046,50 +937,9 @@ def _list_endswith(values: list[Any], suffix: list[Any]) -> bool:
 
 def _build_incident_diagnosis_input(base_task: str, incident: Incident | None) -> str:
     """Render the structured incident into the planner-facing diagnosis request."""
-    if incident is None:
-        return base_task
-
-    lines = [
-        "请基于以下结构化故障事件进行诊断，不要只按通用巡检处理。",
-        "",
-        "## 故障事件",
-        f"- incident_id: {incident.incident_id}",
-        f"- title: {incident.title}",
-        f"- service_name: {incident.service_name}",
-        f"- severity: {incident.severity}",
-        f"- environment: {incident.environment}",
-        f"- status: {incident.status}",
-        f"- start_time: {incident.start_time.isoformat()}",
-        f"- symptom: {incident.symptom or '未提供'}",
-    ]
-
-    raw_alert_text = _format_raw_alert_for_prompt(incident.raw_alert)
-    if raw_alert_text:
-        lines.extend(
-            [
-                "",
-                "## 原始告警",
-                "```json",
-                raw_alert_text,
-                "```",
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            "## 诊断与报告要求",
-            base_task.strip(),
-        ]
-    )
-    return "\n".join(lines)
+    return build_incident_diagnosis_input(base_task, incident)
 
 
 def _format_raw_alert_for_prompt(raw_alert: dict[str, Any], max_chars: int = 4000) -> str:
     """Serialize raw alert fields for planning while keeping the prompt bounded."""
-    if not raw_alert:
-        return ""
-    text = json.dumps(raw_alert, ensure_ascii=False, default=str, indent=2, sort_keys=True)
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}\n...<truncated>"
+    return format_raw_alert_for_prompt(raw_alert, max_chars=max_chars)

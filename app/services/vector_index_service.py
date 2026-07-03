@@ -15,7 +15,7 @@ from app.services.vector_store_manager import vector_store_manager
 class IndexingResult:
     """索引结果类"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.success = False
 
         self.directory_path = ""
@@ -35,19 +35,19 @@ class IndexingResult:
         self.empty_count = 0
         self.empty_files: dict[str, str] = {}
 
-    def increment_success_count(self):
+    def increment_success_count(self) -> None:
         """增加成功计数"""
         self.success_count += 1
 
-    def increment_fail_count(self):
+    def increment_fail_count(self) -> None:
         """增加失败计数"""
         self.fail_count += 1
 
-    def increment_empty_count(self):
+    def increment_empty_count(self) -> None:
         """增加空索引计数"""
         self.empty_count += 1
 
-    def add_failed_file(self, file_path: str, error: str):
+    def add_failed_file(self, file_path: str, error: str) -> None:
         """添加失败文件"""
         self.failed_files[file_path] = error
 
@@ -63,7 +63,7 @@ class IndexingResult:
             }
         )
 
-    def add_empty_file(self, file_path: str, message: str):
+    def add_empty_file(self, file_path: str, message: str) -> None:
         """添加未产生 chunk 的文件"""
         self.empty_files[file_path] = message
 
@@ -131,7 +131,7 @@ class SingleFileIndexingResult:
 class VectorIndexService:
     """向量索引服务 - 负责读取文件、生成向量、存储到 Milvus"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化向量索引服务"""
         self.upload_path = "./uploads"
         logger.info("向量索引服务初始化完成")

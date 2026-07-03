@@ -384,7 +384,11 @@ def replay_evidence_is_sufficient(
     return bool(
         evidence_count >= 2
         and not evidence_quality.get("has_not_configured")
-        and (average_evidence_confidence >= 0.6 or report_confidence >= 0.6 or has_replanner_sufficient)
+        and (
+            average_evidence_confidence >= 0.6
+            or report_confidence >= 0.6
+            or has_replanner_sufficient
+        )
     )
 
 

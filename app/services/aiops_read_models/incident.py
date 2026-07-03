@@ -35,7 +35,11 @@ def build_incident_overview(
     trace_id = (
         report.trace_id
         if report and report.trace_id
-        else latest_event.trace_id if latest_event else state.trace_id if state else ""
+        else latest_event.trace_id
+        if latest_event
+        else state.trace_id
+        if state
+        else ""
     )
     updated_at = latest_timestamp(report, latest_event, latest_approval, state)
     effective_approval_status = approval_status_from_approvals(approvals)
@@ -43,7 +47,9 @@ def build_incident_overview(
     manual_action_required = (
         state.manual_action_required
         if state
-        else report.manual_action_required if report else bool(approvals)
+        else report.manual_action_required
+        if report
+        else bool(approvals)
     ) or effective_status in {"waiting_approval", "approval_approved", "approval_rejected"}
     title = state.title if state else report.title if report else "AIOps incident"
     service_name = (
@@ -75,7 +81,9 @@ def build_incident_overview(
             else (
                 state.approval_status
                 if state
-                else report.approval_status if report else "not_required"
+                else report.approval_status
+                if report
+                else "not_required"
             )
         ),
         "session_id": state.session_id if state else "",

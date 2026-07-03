@@ -38,7 +38,7 @@ LOCAL_FULL_STACK_ENV = {
     "REDIS_URL": "redis://127.0.0.1:16379/0",
     "REDIS_INSTANCES": '{"redis-cluster-prod":"redis://127.0.0.1:16379/0"}',
     "MYSQL_DSN": (
-        "mysql+pymysql://autooncall:autooncall123@127.0.0.1:13306/autooncall" "?charset=utf8mb4"
+        "mysql+pymysql://autooncall:autooncall123@127.0.0.1:13306/autooncall?charset=utf8mb4"
     ),
     "MYSQL_INSTANCES": (
         '{"order-mysql":"mysql+pymysql://autooncall:autooncall123@127.0.0.1:13306/'

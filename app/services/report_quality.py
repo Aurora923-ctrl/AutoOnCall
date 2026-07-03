@@ -1,0 +1,241 @@
+"""Evidence quality and confidence helpers for diagnosis reports."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def build_evidence_profile(
+    evidence: list[dict[str, Any]],
+    evidence_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    """Return evidence distribution metadata for report quality sections."""
+    profile = _as_dict(evidence_analysis.get("evidence_profile"))
+    if profile:
+        return profile
+
+    by_type: dict[str, int] = {}
+    by_stance: dict[str, int] = {}
+    for item in evidence:
+        evidence_type = str(item.get("evidence_type") or "unknown")
+        stance = str(item.get("stance") or "neutral")
+        by_type[evidence_type] = by_type.get(evidence_type, 0) + 1
+        by_stance[stance] = by_stance.get(stance, 0) + 1
+    return {"by_type": by_type, "by_stance": by_stance}
+
+
+def build_confidence_reason(
+    evidence: list[dict[str, Any]],
+    evidence_analysis: dict[str, Any],
+    errors: list[str],
+) -> str:
+    """Build a concise explanation for the final report confidence."""
+    reasons = [
+        str(item) for item in evidence_analysis.get("confidence_reasons", []) if str(item).strip()
+    ]
+    if not reasons:
+        reasons = [
+            f"{item.get('source_tool', 'unknown')}: {item.get('confidence_reason')}"
+            for item in evidence
+            if item.get("confidence_reason")
+        ]
+    if errors:
+        reasons.append(f"{len(errors)} 个错误降低报告置信度")
+    return "；".join(_dedupe_strings(reasons[:8])) or "基于证据数量、工具状态和风险状态综合计算"
+
+
+def build_uncertainties(
+    evidence_analysis: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    risk_summary: dict[str, Any],
+    status: str,
+) -> list[str]:
+    """Build the uncertainty list shown in reports and incident views."""
+    uncertainties = [
+        str(item) for item in evidence_analysis.get("conflicts", []) if str(item).strip()
+    ]
+    uncertainties.extend(
+        f"缺失关键证据: {item}"
+        for item in evidence_analysis.get("missing_evidence", [])
+        if str(item).strip()
+    )
+    uncertainties.extend(warnings)
+    uncertainties.extend(errors)
+    if risk_summary.get("policy") == "forbidden":
+        uncertainties.append("存在禁止自动执行动作，处置必须转人工变更流程")
+    elif risk_summary.get("need_approval") or status == "waiting_approval":
+        uncertainties.append("后续变更动作需要人工审批，Agent 仅输出建议不自动执行")
+    return _dedupe_strings(uncertainties)[:8]
+
+
+def calculate_confidence(
+    evidence: list[dict[str, Any]],
+    errors: list[str],
+    manual_action_required: bool,
+    evidence_analysis: dict[str, Any] | None = None,
+) -> float:
+    """Calculate bounded report confidence from evidence and analysis metadata."""
+    if not evidence:
+        base = 0.25
+    else:
+        scoring_evidence = [
+            item
+            for item in evidence
+            if str(item.get("evidence_type") or "") not in {"runbook", "risk"}
+        ] or evidence
+        values = []
+        for item in scoring_evidence:
+            confidence = item.get("confidence")
+            if isinstance(confidence, int | float):
+                values.append(float(confidence))
+        base = sum(values) / len(values) if values else 0.5
+
+    analysis = _as_dict(evidence_analysis)
+    analysis_confidence = analysis.get("confidence")
+    analysis_confidence_value: float | None = None
+    if isinstance(analysis_confidence, int | float):
+        analysis_confidence_value = float(analysis_confidence)
+
+    top_hypothesis_confidence = _top_hypothesis_confidence(analysis)
+    analysis_confidence_candidates = [
+        value
+        for value in (analysis_confidence_value, top_hypothesis_confidence)
+        if value is not None and value > 0
+    ]
+    if analysis_confidence_candidates:
+        base = max(base, *analysis_confidence_candidates)
+    if errors and not analysis_confidence_candidates:
+        base -= min(0.18, 0.03 * len(errors))
+    if (
+        errors or _has_failed_diagnostic_evidence(evidence)
+    ) and _has_enough_successful_diagnostic_evidence(evidence):
+        base = max(base, 0.55)
+
+    source_quality_cap = _source_quality_confidence_cap(evidence, analysis)
+    if source_quality_cap is not None:
+        base = min(base, source_quality_cap)
+
+    return round(max(0.0, min(1.0, base)), 2)
+
+
+def _top_hypothesis_confidence(evidence_analysis: dict[str, Any]) -> float | None:
+    ranking = evidence_analysis.get("hypothesis_ranking")
+    if not isinstance(ranking, list) or not ranking:
+        return None
+    top = ranking[0] if isinstance(ranking[0], dict) else {}
+    confidence = top.get("confidence")
+    return float(confidence) if isinstance(confidence, int | float) else None
+
+
+def _source_quality_confidence_cap(
+    evidence: list[dict[str, Any]],
+    evidence_analysis: dict[str, Any],
+) -> float | None:
+    profile = _as_dict(evidence_analysis.get("evidence_profile"))
+    source_quality = str(profile.get("source_quality") or "")
+    if source_quality == "fallback_only":
+        return 0.5
+    if source_quality == "mixed_with_fallback":
+        return 0.72
+
+    diagnostic_success = [
+        item
+        for item in evidence
+        if str(item.get("evidence_type") or "") not in {"runbook", "risk"}
+        and _as_dict(item.get("raw_data")).get("status") == "success"
+    ]
+    if not diagnostic_success:
+        return None
+
+    trusted_sources = {
+        "prometheus",
+        "loki",
+        "log_gateway",
+        "cmdb",
+        "deploy_history",
+        "redis_info",
+        "kubernetes",
+        "mysql",
+        "ticket_api",
+        "alertmanager",
+        "jaeger",
+        "tempo",
+        "redpanda",
+        "mcp_monitor",
+        "mcp_cls",
+    }
+    fallback_sources = {
+        "mock",
+        "not_configured",
+        "failed",
+        "manual_analysis",
+        "llm_toolnode_fallback",
+        "rule_based",
+    }
+    degraded_sources = {"mcp_monitor_mixed", "unknown"}
+    trusted_count = 0
+    fallback_count = 0
+    degraded_count = 0
+    for item in diagnostic_success:
+        data_source = str(item.get("data_source") or "").strip().lower()
+        raw_data = _as_dict(item.get("raw_data"))
+        output = _as_dict(raw_data.get("output"))
+        if not data_source or data_source == "unknown":
+            data_source = (
+                str(output.get("source") or raw_data.get("source") or "unknown").strip().lower()
+            )
+        if data_source in trusted_sources:
+            trusted_count += 1
+        elif data_source in fallback_sources:
+            fallback_count += 1
+        elif data_source in degraded_sources:
+            degraded_count += 1
+        else:
+            degraded_count += 1
+
+    low_quality_count = fallback_count + degraded_count
+    if trusted_count == 0 and low_quality_count:
+        return 0.5
+    if low_quality_count:
+        return 0.72
+    return None
+
+
+def _has_failed_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:
+    """Return True when tool failure is captured as structured evidence."""
+    for item in evidence:
+        raw_data = _as_dict(item.get("raw_data"))
+        if raw_data.get("status") == "failed":
+            return True
+    return False
+
+
+def _has_enough_successful_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:
+    """Return True for graceful-degradation reports with enough supporting evidence."""
+    successful = 0
+    for item in evidence:
+        evidence_type = str(item.get("evidence_type") or "")
+        if evidence_type == "risk":
+            continue
+        raw_data = _as_dict(item.get("raw_data"))
+        if raw_data.get("status") == "success" or (
+            evidence_type == "runbook" and item.get("stance") == "supporting"
+        ):
+            successful += 1
+    return successful >= 3
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result

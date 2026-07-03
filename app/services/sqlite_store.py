@@ -20,6 +20,37 @@ from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.incident_lifecycle import merge_incident_state
 
+_RETENTION_SQL: dict[str, tuple[str, str]] = {
+    "alert_events": (
+        "SELECT COUNT(*) FROM alert_events WHERE updated_at < ?",
+        "DELETE FROM alert_events WHERE updated_at < ?",
+    ),
+    "trace_events": (
+        "SELECT COUNT(*) FROM trace_events WHERE created_at < ?",
+        "DELETE FROM trace_events WHERE created_at < ?",
+    ),
+    "approval_requests": (
+        "SELECT COUNT(*) FROM approval_requests WHERE created_at < ?",
+        "DELETE FROM approval_requests WHERE created_at < ?",
+    ),
+    "diagnosis_reports": (
+        "SELECT COUNT(*) FROM diagnosis_reports WHERE created_at < ?",
+        "DELETE FROM diagnosis_reports WHERE created_at < ?",
+    ),
+    "change_executions": (
+        "SELECT COUNT(*) FROM change_executions WHERE created_at < ?",
+        "DELETE FROM change_executions WHERE created_at < ?",
+    ),
+    "aiops_sessions": (
+        "SELECT COUNT(*) FROM aiops_sessions WHERE updated_at < ?",
+        "DELETE FROM aiops_sessions WHERE updated_at < ?",
+    ),
+    "incident_states": (
+        "SELECT COUNT(*) FROM incident_states WHERE updated_at < ?",
+        "DELETE FROM incident_states WHERE updated_at < ?",
+    ),
+}
+
 
 def resolve_sqlite_path(storage_path: str | Path | None = None) -> Path:
     """Resolve a runtime storage path to a SQLite database path."""
@@ -629,29 +660,14 @@ class AIOpsSQLiteStore:
 
         cutoff = datetime.now(UTC) - timedelta(days=keep_days)
         cutoff_text = cutoff.isoformat()
-        tables = {
-            "alert_events": "updated_at",
-            "trace_events": "created_at",
-            "approval_requests": "created_at",
-            "diagnosis_reports": "created_at",
-            "change_executions": "created_at",
-            "aiops_sessions": "updated_at",
-            "incident_states": "updated_at",
-        }
         deleted: dict[str, int] = {}
 
         with self._connect() as connection:
-            for table, timestamp_column in tables.items():
-                count = connection.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE {timestamp_column} < ?",
-                    (cutoff_text,),
-                ).fetchone()[0]
+            for table, (count_sql, delete_sql) in _RETENTION_SQL.items():
+                count = connection.execute(count_sql, (cutoff_text,)).fetchone()[0]
                 deleted[table] = int(count)
                 if not dry_run:
-                    connection.execute(
-                        f"DELETE FROM {table} WHERE {timestamp_column} < ?",
-                        (cutoff_text,),
-                    )
+                    connection.execute(delete_sql, (cutoff_text,))
             if not dry_run:
                 try:
                     connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")

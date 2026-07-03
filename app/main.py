@@ -16,7 +16,8 @@ from app.api import aiops, alerts, approvals, chat, evaluations, file, health, i
 from app.config import config
 from app.core.milvus_client import milvus_manager
 
-EXTERNALLY_BOUND_HOSTS = {"0.0.0.0", "::", "[::]"}
+# Used only to detect risky configuration values; this constant does not bind a socket.
+EXTERNALLY_BOUND_HOSTS = {"0.0.0.0", "::", "[::]"}  # nosec B104
 
 
 def production_exposure_warnings() -> list[str]:
