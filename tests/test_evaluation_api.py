@@ -61,6 +61,9 @@ async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) ->
     payload = await evaluations_api.get_eval_summary()
 
     assert payload["available"] is True
+    assert payload["path"] == "eval_summary.json"
+    assert payload["artifact"] == "eval_summary.json"
+    assert str(tmp_path) not in payload["path"]
     assert payload["summary"]["overall_case_count"] == 38
     assert payload["resume_metrics"]["aiops_case_count"] == 16
     assert payload["rag"]["mrr"] == 0.96
@@ -83,6 +86,9 @@ async def test_eval_summary_api_returns_unavailable_when_missing(monkeypatch, tm
     payload = await evaluations_api.get_eval_summary()
 
     assert payload["available"] is False
+    assert payload["path"] == "missing.json"
+    assert payload["artifact"] == "missing.json"
+    assert str(tmp_path) not in payload["path"]
     assert payload["summary"] is None
     assert payload["resume_metrics"] == {}
     assert payload["dashboard"]["metrics"] == []
@@ -102,6 +108,7 @@ async def test_eval_summary_api_returns_unavailable_for_invalid_json(
     payload = await evaluations_api.get_eval_summary()
 
     assert payload["available"] is False
+    assert payload["path"] == "eval_summary.json"
     assert payload["failed_cases"] == []
     assert "unreadable" in payload["message"]
 
@@ -148,6 +155,9 @@ async def test_adapter_verification_api_returns_unavailable_when_missing(
     payload = await evaluations_api.get_adapter_verification()
 
     assert payload["available"] is False
+    assert payload["path"] == "missing-adapter-verification.json"
+    assert payload["artifact"] == "missing-adapter-verification.json"
+    assert str(tmp_path) not in payload["path"]
     assert payload["status"] == "missing"
     assert payload["checks"] == []
     assert "not been generated" in payload["message"]

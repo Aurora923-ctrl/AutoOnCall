@@ -288,6 +288,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
         if (this.aiOpsSeverity) {
             this.aiOpsSeverity.value = 'P2';
         }
+        this.clearLastAIOpsRunState();
+        this.activeAIOpsRun = null;
         this.setAIOpsFormStatus('手动输入', 'warning');
     }
 ,

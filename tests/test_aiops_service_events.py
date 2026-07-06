@@ -11,6 +11,7 @@ from app.services.aiops_service import (
     aiops_service,
 )
 from app.services.report_generator import ReportGenerator
+from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR
 
 
 def test_planner_event_includes_structured_plan_for_new_clients() -> None:
@@ -223,3 +224,30 @@ async def test_execute_complete_generates_structured_report_when_graph_has_no_re
     assert complete["structured_report"]["incident_id"] == "inc-fallback"
     assert complete["structured_report"]["status"] == "escalated"
     assert complete["response"] == complete["structured_report"]["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_execute_error_event_uses_public_message_without_raw_exception() -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+
+    async def fake_astream(input, config, stream_mode):
+        raise RuntimeError("mysql://user:secret@db.internal/orders unavailable")
+        yield {}
+
+    class FakeGraph:
+        def astream(self, input, config, stream_mode):
+            return fake_astream(input, config, stream_mode)
+
+    service = service_module.AIOpsService()
+    service.graph = FakeGraph()
+
+    events = [event async for event in service.execute("orders incident", "error-session")]
+    error_event = events[-1]
+    serialized = str(error_event)
+
+    assert error_event["type"] == "error"
+    assert error_event["message"] == GENERIC_DIAGNOSIS_ERROR
+    assert error_event["trace_event"]["error_message"] == GENERIC_DIAGNOSIS_ERROR
+    assert "secret" not in serialized
+    assert "db.internal" not in serialized
+    assert "orders unavailable" not in serialized

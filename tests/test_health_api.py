@@ -177,3 +177,14 @@ def test_external_overall_status_respects_mock_fallback_flag() -> None:
 
     assert health_api._external_overall_status(statuses, True) == "mock_fallback"
     assert health_api._external_overall_status(statuses, False) == "not_configured"
+
+
+def test_failed_readiness_hides_raw_exception_detail() -> None:
+    payload = health_api._failed_readiness(
+        ConnectionError("mysql://user:secret@internal-db:3306 unavailable")
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["error_type"] == "connection_error"
+    assert "secret" not in payload["message"]
+    assert "internal-db" not in payload["message"]

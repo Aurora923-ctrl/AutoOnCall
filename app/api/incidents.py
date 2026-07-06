@@ -2,9 +2,9 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query
 
 from app.config import config
 from app.core.auth import READ_SCOPE, require_scope
@@ -30,6 +30,8 @@ from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
 
 router = APIRouter()
+INCIDENT_ID_MAX_LENGTH = 128
+IncidentId = Annotated[str, ApiPath(..., min_length=1, max_length=INCIDENT_ID_MAX_LENGTH)]
 _incident_state_store: AIOpsStateStore | None = None
 
 
@@ -123,7 +125,7 @@ async def list_incidents(
     response_model=IncidentOverviewResponse,
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_incident_overview(incident_id: str) -> dict:
+async def get_incident_overview(incident_id: IncidentId) -> dict:
     """Return one incident overview assembled from report, trace, and approval state."""
     report = get_report_generator().get_report(incident_id)
     events = get_trace_service().list_events(incident_id=incident_id)
@@ -139,7 +141,7 @@ async def get_incident_overview(incident_id: str) -> dict:
     response_model=IncidentReplayResponse,
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_incident_replay(incident_id: str) -> dict:
+async def get_incident_replay(incident_id: IncidentId) -> dict:
     """Return a replay-ready incident view assembled from all diagnosis artifacts."""
     report = get_report_generator().get_report(incident_id)
     events = get_trace_service().list_events(incident_id=incident_id)
@@ -168,7 +170,7 @@ async def get_incident_replay(incident_id: str) -> dict:
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def get_incident_trace(
-    incident_id: str,
+    incident_id: IncidentId,
     event_type: str | None = Query(default=None),
 ) -> dict:
     """Return trace events for one incident."""
@@ -202,7 +204,7 @@ async def get_incident_trace(
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def get_incident_report(
-    incident_id: str,
+    incident_id: IncidentId,
     response_format: str | None = Query(default=None, alias="format"),
 ) -> dict:
     """Return the latest structured diagnosis report for one incident."""

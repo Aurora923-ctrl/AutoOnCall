@@ -14,8 +14,10 @@ from loguru import logger
 from app.config import config
 from app.services.lexical_index_service import lexical_index_service
 from app.services.vector_store_manager import vector_store_manager
+from app.utils.log_safety import summarize_text_for_log
 
 NO_TRUSTED_KNOWLEDGE = "未找到可信知识来源。"
+PUBLIC_RETRIEVAL_ERROR = "知识库检索暂不可用，请稍后重试或查看服务端日志。"
 CITATION_INSTRUCTION = (
     "引用要求: 仅基于下列可信知识回答；回答末尾列出引用来源，格式为 source_file + chunk_id。"
 )
@@ -62,9 +64,9 @@ def retrieve_structured_knowledge(
             if vector_store is not None or not hybrid_enabled:
                 raise
             logger.warning(
-                "向量检索不可用，降级使用本地词法索引: query={}, error={}",
-                safe_query,
-                vector_error_detail,
+                "向量检索不可用，降级使用本地词法索引: {}, error_type={}",
+                summarize_text_for_log(safe_query, label="query"),
+                vector_error_type,
             )
 
         lexical_results: list[tuple[Document, float]] = []
@@ -218,9 +220,9 @@ def retrieve_structured_knowledge(
             "answer_policy": "retrieval_failed",
             "retrieval_results": [],
             "rejected_results": [],
-            "summary": f"检索知识时发生错误: {exc}",
-            "content": f"检索知识时发生错误: {exc}",
-            "error_message": str(exc),
+            "summary": PUBLIC_RETRIEVAL_ERROR,
+            "content": PUBLIC_RETRIEVAL_ERROR,
+            "error_message": PUBLIC_RETRIEVAL_ERROR,
         }
 
 

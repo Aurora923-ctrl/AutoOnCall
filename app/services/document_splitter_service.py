@@ -155,7 +155,11 @@ class DocumentSplitterService:
 
             if current_doc is None:
                 current_doc = doc
-            elif doc_size < min_size and len(current_doc.page_content) < self.chunk_size * 2:
+            elif (
+                doc_size < min_size
+                and len(current_doc.page_content) < self.chunk_size * 2
+                and _same_markdown_heading(current_doc, doc)
+            ):
                 current_doc.page_content += "\n\n" + doc.page_content
             else:
                 merged_docs.append(current_doc)
@@ -174,6 +178,12 @@ def _build_chunk_id(file_path: str, index: int) -> str:
     """Build a stable human-readable chunk id for one source document."""
     file_name = Path(file_path).name or "document"
     return f"{file_name}#{index:04d}"
+
+
+def _same_markdown_heading(left: Document, right: Document) -> bool:
+    """Return True when two chunks share the same Markdown heading metadata."""
+    heading_keys = ("h1", "h2")
+    return all(left.metadata.get(key) == right.metadata.get(key) for key in heading_keys)
 
 
 def build_version_metadata(

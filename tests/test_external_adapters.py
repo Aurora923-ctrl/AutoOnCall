@@ -1,4 +1,4 @@
-"""Tests for production external adapters wired into AIOps tools."""
+﻿"""Tests for production external adapters wired into AIOps tools."""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -267,6 +267,9 @@ def test_adapter_failure_classifies_timeout_and_http_status() -> None:
     assert timeout_payload["retryable"] is True
     assert timeout_payload["signals"] == {}
     assert timeout_payload["raw"] == {}
+    assert "query timeout" not in timeout_payload["message"]
+    assert "query timeout" not in timeout_payload["error_message"]
+    assert "query timeout" not in timeout_payload["summary"]
 
     request = httpx.Request("GET", "https://kubernetes.example/api")
     response = httpx.Response(403, request=request)
@@ -276,6 +279,8 @@ def test_adapter_failure_classifies_timeout_and_http_status() -> None:
     )
     assert permission_payload["error_type"] == "permission_denied"
     assert permission_payload["retryable"] is False
+    assert "forbidden" not in permission_payload["message"]
+    assert "kubernetes.example" not in permission_payload["summary"]
 
 
 def test_external_label_helpers_escape_or_reject_unsafe_values() -> None:
@@ -516,10 +521,10 @@ async def test_loki_adapter_queries_range_and_normalizes_streams() -> None:
 
 
 def test_loki_logql_escapes_regex_without_url_encoding() -> None:
-    logql = LokiLogAdapter._build_logql('order"service', "错误(超时) OR timeout.ms")
+    logql = LokiLogAdapter._build_logql('order"service', "閿欒(瓒呮椂) OR timeout.ms")
 
     assert "%E9" not in logql
-    assert "错误" in logql
+    assert "閿欒" in logql
     assert '\\"service' in logql
     assert "timeout" in logql
     assert "timeout\\\\.ms" in logql
@@ -1159,8 +1164,9 @@ async def test_structured_adapter_failure_marks_tool_result_failed() -> None:
     assert result.output["retryable"] is False
     assert result.output["signals"] == {}
     assert result.output["raw"] == {}
-    assert result.error_message == "prometheus unavailable"
-    assert "降级" not in result.output["summary"]
+    assert result.error_message == "外部依赖暂时不可用"
+    assert "prometheus unavailable" not in result.output["summary"]
+    assert "闄嶇骇" not in result.output["summary"]
 
 
 def test_synthetic_mcp_metric_fields_are_degraded_data_source() -> None:
@@ -1316,7 +1322,7 @@ async def test_service_context_falls_back_to_topology_when_configured_cmdb_fails
     assert result.output["source"] == "rule_based"
     assert result.output["dependencies"] == ["redis-cluster-prod", "order-mysql"]
     assert result.output["partial_errors"][0]["source"] == "cmdb"
-    assert "本地拓扑" in result.output["summary"]
+    assert "local topology" in result.output["summary"]
 
 
 @pytest.mark.asyncio

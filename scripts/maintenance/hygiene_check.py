@@ -141,12 +141,15 @@ def _file_reason(path: Path, root: Path) -> str:
 
 def _is_git_ignored(root: Path, relative_path: str) -> bool:
     """Return True when Git ignore rules already cover a generated artifact."""
-    result = subprocess.run(
-        ["git", "-C", str(root), "check-ignore", "--quiet", "--", relative_path],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--quiet", "--", relative_path],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
     return result.returncode == 0
 
 

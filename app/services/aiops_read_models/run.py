@@ -15,7 +15,7 @@ from app.services.aiops_read_models.common import (
     latest_approval_request,
     latest_trace_event,
 )
-from app.services.incident_lifecycle import status_metadata
+from app.services.incident_lifecycle import status_after_approved_run, status_metadata
 
 
 def build_aiops_run_status(
@@ -221,29 +221,8 @@ def effective_run_status(
     latest_approval = latest_approval_request(approvals)
     approval_status = latest_approval.status if latest_approval else ""
     report_status = report.status if report and report.status else ""
-    post_approval_statuses = {
-        "approval_resumed",
-        "change_validated",
-        "resolved",
-        "rollback_recommended",
-        "precheck_running",
-        "precheck_failed",
-        "dry_run_running",
-        "dry_run_completed",
-        "dry_run_failed",
-        "waiting_manual_execution",
-        "manual_result_required",
-        "manual_execution_recorded",
-        "manual_result_recorded",
-        "sandbox_executing",
-        "sandbox_validated",
-        "observing",
-        "escalated",
-        "closed",
-        "failed",
-    }
     if approval_status == "approved":
-        return report_status if report_status in post_approval_statuses else "approval_approved"
+        return status_after_approved_run(report_status)
     if approval_status == "rejected":
         return "approval_rejected"
     if approval_status == "cancelled":

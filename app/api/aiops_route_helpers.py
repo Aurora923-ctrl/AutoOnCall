@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any, cast
+from uuid import uuid4
 
 from fastapi import HTTPException
 from loguru import logger
@@ -34,6 +35,11 @@ from app.services.read_models import (
     filter_aiops_run_summaries,
     is_known_incident_id,
     list_run_trace_events,
+)
+from app.utils.public_errors import (
+    GENERIC_CHANGE_ERROR,
+    GENERIC_DIAGNOSIS_ERROR,
+    public_exception_message,
 )
 
 
@@ -167,7 +173,14 @@ async def diagnosis_event_stream(
 
     except Exception as exc:
         logger.error(f"[会话 {session_id}] AIOps 诊断流式响应异常: {exc}", exc_info=True)
-        yield sse_message({"type": "error", "stage": "exception", "message": f"诊断异常: {exc}"})
+        yield sse_message(
+            {
+                "type": "error",
+                "stage": "exception",
+                "status": "failed",
+                "message": public_exception_message(exc, fallback=GENERIC_DIAGNOSIS_ERROR),
+            }
+        )
 
 
 def build_demo_incident_payload(case_id: str) -> dict:
@@ -175,7 +188,7 @@ def build_demo_incident_payload(case_id: str) -> dict:
     canonical_id = canonical_demo_case_id(case_id)
     incident = resolve_demo_incident(case_id)
     payload = {
-        "session_id": f"demo-{canonical_id}",
+        "session_id": f"demo-{canonical_id}-{uuid4().hex}",
         "incident": incident.model_dump(mode="json"),
     }
     return {
@@ -269,7 +282,7 @@ async def resume_diagnosis_event_stream(
                 "type": "error",
                 "stage": "resume_not_found",
                 "status": "failed",
-                "message": str(exc),
+                "message": public_exception_message(exc),
                 "incident_id": incident_id,
             }
         )
@@ -279,7 +292,7 @@ async def resume_diagnosis_event_stream(
                 "type": "error",
                 "stage": "resume_rejected",
                 "status": "failed",
-                "message": str(exc),
+                "message": public_exception_message(exc),
                 "incident_id": incident_id,
             }
         )
@@ -290,7 +303,7 @@ async def resume_diagnosis_event_stream(
                 "type": "error",
                 "stage": "resume_exception",
                 "status": "failed",
-                "message": f"恢复诊断异常: {exc}",
+                "message": public_exception_message(exc, fallback=GENERIC_DIAGNOSIS_ERROR),
                 "incident_id": incident_id,
             }
         )
@@ -333,7 +346,7 @@ def _change_resume_error_payload(
             "type": "error",
             "stage": "change_approval_not_found",
             "status": "failed",
-            "message": str(exc),
+            "message": public_exception_message(exc),
             "incident_id": incident_id,
             "change_plan_id": change_plan_id,
         }
@@ -342,7 +355,7 @@ def _change_resume_error_payload(
             "type": "error",
             "stage": "change_resume_rejected",
             "status": "failed",
-            "message": str(exc),
+            "message": public_exception_message(exc),
             "incident_id": incident_id,
             "change_plan_id": change_plan_id,
         }
@@ -351,7 +364,7 @@ def _change_resume_error_payload(
         "type": "error",
         "stage": "change_resume_exception",
         "status": "failed",
-        "message": f"安全变更流程异常: {exc}",
+        "message": public_exception_message(exc, fallback=GENERIC_CHANGE_ERROR),
         "incident_id": incident_id,
         "change_plan_id": change_plan_id,
     }

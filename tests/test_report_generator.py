@@ -83,12 +83,23 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert report.confirmed_facts
     assert report.inferred_conclusions
     assert report.next_steps
+    assert "## 面试速览" in report.markdown
+    assert "### Tool Call Table" in report.markdown
+    assert "### Evidence Quick View" in report.markdown
+    assert "| Tool | Source | Status | Latency ms | Summary |" in report.markdown
+    assert "| supporting | 1 |" in report.markdown
+    assert "Risk boundary: policy=allow" in report.markdown
+    assert "does not directly perform production write actions" in report.markdown
     assert "关键证据" in report.markdown
     assert "## 已确认事实" in report.markdown
     assert "## 推断结论" in report.markdown
     assert "## 根因假设矩阵" in report.markdown
     assert "## 下一步建议" in report.markdown
     assert "## 证据质量" in report.markdown
+    assert "## 证据矩阵" in report.markdown
+    assert "### 支持证据" in report.markdown
+    assert "数据源分布" in report.markdown
+    assert "失败工具" in report.markdown
     assert "## 运行告警" in report.markdown
     assert report.warnings == state["warnings"]
     assert state["warnings"][0] in report.uncertainties
@@ -282,6 +293,8 @@ def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> N
     assert report.approval_decision["approval_id"] == "apr-1"
     assert report.approval_decision["action"] == "调整 Redis maxclients 配置"
     assert report.change_plan["change_plan_id"] == "chg-1"
+    assert "Risk boundary: policy=approval_required" in report.markdown
+    assert "manual_action_required=true" in report.markdown
     assert "等待人工审批" in report.markdown
     assert "审批动作：调整 Redis maxclients 配置" in report.markdown
     assert "## 人工动作与回滚边界" in report.markdown
@@ -480,6 +493,8 @@ def test_report_generator_keeps_graceful_degradation_confidence_floor(tmp_path) 
     )
 
     assert report.confidence == 0.5
+    assert "### 不确定证据" in report.markdown
+    assert "query_k8s_status" in report.markdown
 
 
 def test_report_generator_caps_mock_only_analysis_confidence(tmp_path) -> None:

@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from app.api import aiops, approvals, evaluations
+from app.api import aiops, approvals, chat, evaluations, file as file_api
 from app.config import config
 from app.models.approval import ApprovalRequest
 from app.services.approval_service import ApprovalService
@@ -34,7 +34,9 @@ def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(aiops.router, prefix="/api")
     app.include_router(approvals.router, prefix="/api")
+    app.include_router(chat.router, prefix="/api")
     app.include_router(evaluations.router, prefix="/api")
+    app.include_router(file_api.router, prefix="/api")
     return app
 
 
@@ -87,6 +89,10 @@ async def test_read_token_can_read_but_cannot_approve_or_diagnose(monkeypatch) -
             "/api/aiops/tools/contracts",
             headers={"X-AutoOnCall-Token": "read-secret"},
         )
+        upload_config = await client.get(
+            "/api/upload/config",
+            headers={"X-AutoOnCall-Token": "read-secret"},
+        )
         diagnose = await client.post(
             "/api/aiops",
             headers={"X-AutoOnCall-Token": "read-secret"},
@@ -101,6 +107,11 @@ async def test_read_token_can_read_but_cannot_approve_or_diagnose(monkeypatch) -
             "/api/eval/summary",
             headers={"X-AutoOnCall-Token": "read-secret"},
         )
+        chat_with_reader = await client.post(
+            "/api/chat",
+            headers={"X-AutoOnCall-Token": "read-secret"},
+            json={"Id": "auth-chat", "Question": "Redis timeout 怎么处理？"},
+        )
         approve_with_approver = await client.post(
             "/api/incidents/inc-auth/approval",
             headers={"Authorization": "Bearer approve-secret"},
@@ -109,9 +120,11 @@ async def test_read_token_can_read_but_cannot_approve_or_diagnose(monkeypatch) -
 
     assert missing.status_code == 401
     assert readable.status_code == 200
+    assert upload_config.status_code == 200
     assert diagnose.status_code == 403
     assert approve_with_reader.status_code == 403
     assert eval_with_reader.status_code == 403
+    assert chat_with_reader.status_code == 403
     assert approve_with_approver.status_code == 404
 
 

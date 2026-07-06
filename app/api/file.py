@@ -1,5 +1,6 @@
 """文件上传接口模块"""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,7 +10,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.config import config
-from app.core.auth import KNOWLEDGE_WRITE_SCOPE, require_scope
+from app.core.auth import KNOWLEDGE_WRITE_SCOPE, READ_SCOPE, require_scope
 from app.services.vector_index_service import vector_index_service
 
 router = APIRouter()
@@ -24,9 +25,18 @@ UPLOAD_READ_CHUNK_SIZE = config.upload_read_chunk_size
 PUBLIC_UPLOAD_ERROR_MESSAGE = "文件上传失败，请稍后重试"
 PUBLIC_INDEXING_ERROR_MESSAGE = "向量索引失败，请检查服务端日志"
 PUBLIC_DIRECTORY_INDEX_ERROR_MESSAGE = "索引目录失败，请检查服务端日志"
+MAX_SAFE_FILENAME_LENGTH = 160
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
-@router.get("/upload/config", dependencies=[Depends(require_scope(KNOWLEDGE_WRITE_SCOPE))])
+@router.get("/upload/config", dependencies=[Depends(require_scope(READ_SCOPE))])
 async def upload_config():
     """Return upload constraints used by the frontend before selecting a file."""
     return {
@@ -86,7 +96,10 @@ async def upload_file(file: UploadFile = File(...)):
         }
         try:
             logger.info(f"开始为上传文件创建向量索引: {file_path}")
-            indexing_result = vector_index_service.index_single_file(str(file_path))
+            indexing_result = await asyncio.to_thread(
+                vector_index_service.index_single_file,
+                str(file_path),
+            )
             if hasattr(indexing_result, "to_dict"):
                 indexing_status = indexing_result.to_dict()
             elif isinstance(indexing_result, dict):
@@ -118,7 +131,7 @@ async def upload_file(file: UploadFile = File(...)):
                 "message": response_message,
                 "data": {
                     "filename": safe_filename,
-                    "file_path": str(file_path),
+                    "file_path": safe_filename,
                     "size": uploaded_size,
                     "overwritten": overwritten,
                     "indexing_ready": indexing_ready,
@@ -155,7 +168,7 @@ async def index_directory(directory_path: str | None = None):
     try:
         logger.info(f"开始索引目录: {directory_path or 'uploads'}")
 
-        result = vector_index_service.index_directory(directory_path)
+        result = await asyncio.to_thread(vector_index_service.index_directory, directory_path)
         response_status = _index_directory_response_status(result)
 
         return JSONResponse(
@@ -163,7 +176,7 @@ async def index_directory(directory_path: str | None = None):
             content={
                 "code": response_status,
                 "message": "success" if result.success else "partial_success",
-                "data": result.to_dict(),
+                "data": result.to_public_dict(),
             },
         )
 
@@ -238,6 +251,13 @@ def _validate_safe_filename(filename: str) -> None:
     normalized_stem = stem.replace("_", "").replace(".", "").strip()
     if not filename or not normalized_stem:
         raise HTTPException(status_code=400, detail="文件名不能为空")
+    if len(filename) > MAX_SAFE_FILENAME_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件名过长（最大 {MAX_SAFE_FILENAME_LENGTH} 字符）",
+        )
+    if stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        raise HTTPException(status_code=400, detail="文件名不能使用系统保留名称")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -254,4 +274,5 @@ def _sanitize_filename(filename: str) -> str:
     sanitized = filename.strip().replace(" ", "_")
     for char in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
         sanitized = sanitized.replace(char, "_")
+    sanitized = "".join("_" if ord(char) < 32 else char for char in sanitized)
     return sanitized

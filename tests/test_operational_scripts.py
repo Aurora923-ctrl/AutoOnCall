@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from app import main as main_module
 from scripts.maintenance.hygiene_check import find_hygiene_issues, main as hygiene_main
 
@@ -121,6 +123,13 @@ def test_makefile_exposes_hygiene_check_target() -> None:
     assert "scripts/maintenance/hygiene_check.py" in makefile
 
 
+def test_makefile_exposes_demo_reports_target() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "demo-reports:" in makefile
+    assert "scripts/demo/generate_demo_reports.py" in makefile
+
+
 def test_makefile_verify_runs_quality_gate_targets() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
@@ -180,6 +189,16 @@ def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> Non
 
     assert "API auth is disabled while binding to a non-local host" in warnings
     assert "CORS allows all origins while binding to a non-local host" in warnings
+
+
+def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
+    monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+    monkeypatch.setattr(main_module.config, "production_exposure_strict", True)
+
+    with pytest.raises(RuntimeError, match="Unsafe production exposure configuration"):
+        main_module.enforce_production_exposure_policy()
 
 
 def test_production_exposure_warnings_ignore_local_bind(monkeypatch) -> None:

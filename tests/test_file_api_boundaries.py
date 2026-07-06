@@ -54,6 +54,8 @@ async def test_upload_file_reports_indexing_failure_without_failing_upload(
     assert payload["code"] == 207
     assert payload["message"] == "partial_success"
     assert payload["data"]["filename"] == "runbook.md"
+    assert payload["data"]["file_path"] == "runbook.md"
+    assert str(tmp_path) not in payload["data"]["file_path"]
     assert payload["data"]["overwritten"] is False
     assert payload["data"]["indexing_ready"] is False
     assert payload["data"]["indexing"] == {
@@ -135,6 +137,22 @@ async def test_upload_file_rejects_filename_without_useful_basename() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "文件名不能为空"
+
+
+@pytest.mark.asyncio
+async def test_upload_file_rejects_reserved_or_too_long_filename() -> None:
+    reserved = UploadFile(file=io.BytesIO(b"content"), filename="CON.md")
+    with pytest.raises(HTTPException) as reserved_exc:
+        await file_api.upload_file(reserved)
+    assert reserved_exc.value.status_code == 400
+    assert "系统保留名称" in str(reserved_exc.value.detail)
+
+    long_name = f"{'a' * (file_api.MAX_SAFE_FILENAME_LENGTH + 1)}.md"
+    too_long = UploadFile(file=io.BytesIO(b"content"), filename=long_name)
+    with pytest.raises(HTTPException) as long_exc:
+        await file_api.upload_file(too_long)
+    assert long_exc.value.status_code == 400
+    assert "文件名过长" in str(long_exc.value.detail)
 
 
 @pytest.mark.asyncio
@@ -229,6 +247,38 @@ async def test_index_directory_api_returns_400_for_missing_allowed_directory(
     assert payload["data"]["error_message"] == "目录不存在或不是有效目录"
 
 
+@pytest.mark.asyncio
+async def test_index_directory_api_hides_paths_and_raw_file_errors(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    runbook = docs_dir / "runbook.md"
+    runbook.write_text("# Redis", encoding="utf-8")
+    service = VectorIndexService()
+
+    def fail_index(path: str) -> SingleFileIndexingResult:
+        raise RuntimeError(f"milvus unavailable at {path}")
+
+    monkeypatch.setattr(vector_index_module.config, "index_allowed_roots", str(tmp_path))
+    monkeypatch.setattr(service, "index_single_file", fail_index)
+    monkeypatch.setattr(file_api, "vector_index_service", service)
+
+    response = await file_api.index_directory(str(docs_dir))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 207
+    assert payload["data"]["directory_path"] == "docs"
+    assert payload["data"]["directory_name"] == "docs"
+    assert payload["data"]["failed_files"] == {
+        "runbook.md": "索引失败，请检查服务端日志",
+    }
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert str(tmp_path) not in serialized
+    assert "milvus unavailable" not in serialized
+
+
 def test_index_single_file_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path) -> None:
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"
@@ -316,6 +366,17 @@ def test_splitter_treats_markdown_extension_as_markdown() -> None:
     assert docs[0].metadata["_extension"] == ".markdown"
     assert docs[0].metadata["_file_name"] == "redis.markdown"
     assert docs[0].metadata.get("h1") == "Redis"
+
+
+def test_splitter_does_not_merge_chunks_across_markdown_headings() -> None:
+    docs = document_splitter_service.split_document(
+        "# Redis\n\n## maxclients\n\n连接数耗尽处理。\n\n## latency\n\n延迟升高处理。",
+        "aiops-docs/redis.md",
+    )
+
+    assert len(docs) == 2
+    assert [doc.metadata.get("h2") for doc in docs] == ["maxclients", "latency"]
+    assert "latency" not in docs[0].page_content
 
 
 def test_index_single_file_marks_existing_index_stale_when_vector_add_fails(

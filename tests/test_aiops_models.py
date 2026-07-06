@@ -7,9 +7,11 @@ from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.planner import _build_planner_retrieval_query
 from app.agent.aiops.state import normalize_plan_state_update, remaining_plan_state_update
 from app.models.aiops import AIOpsRequest, AIOpsResumeRequest
-from app.models.approval import ApprovalRequest, RiskAssessment
+from app.models.approval import ApprovalDecisionRequest, ApprovalRequest, RiskAssessment
+from app.models.change_execution import ChangeResumeRequest, ManualExecutionResultRequest
 from app.models.evidence import Evidence
 from app.models.incident import Incident
+from app.models.incident_state import IncidentState
 from app.models.plan import PlanStep
 from app.models.report import DiagnosisReport
 from app.models.trace import ToolCallRecord, TraceEvent
@@ -18,7 +20,7 @@ from app.services.incident_state_builder import build_incident_state_from_state
 
 
 def test_aiops_request_keeps_legacy_session_only_payload() -> None:
-    request = AIOpsRequest(session_id="session-123")
+    request = AIOpsRequest(session_id=" session-123 ")
 
     assert request.session_id == "session-123"
     assert request.incident is None
@@ -50,6 +52,13 @@ def test_aiops_resume_request_rejects_invalid_ids() -> None:
         AIOpsResumeRequest(approval_id="")
 
 
+def test_aiops_resume_request_strips_optional_ids() -> None:
+    request = AIOpsResumeRequest(session_id=" session-123 ", approval_id=" apr-123 ")
+
+    assert request.session_id == "session-123"
+    assert request.approval_id == "apr-123"
+
+
 def test_initial_aiops_state_generates_unique_session_when_missing() -> None:
     first = create_initial_aiops_state("diagnose current alerts")
     second = create_initial_aiops_state("diagnose current alerts")
@@ -64,17 +73,53 @@ def test_aiops_request_accepts_optional_structured_incident() -> None:
     request = AIOpsRequest(
         session_id="session-redis",
         incident={
-            "title": "order-service Redis timeout",
-            "service_name": "order-service",
-            "severity": "P1",
+            "title": " order-service Redis timeout ",
+            "service_name": " order-service ",
+            "severity": " P1 ",
             "symptom": "5xx and Redis connection timeout",
-            "environment": "prod",
+            "environment": " prod ",
         },
     )
 
     assert request.incident is not None
     assert request.incident.service_name == "order-service"
     assert request.incident.severity == "P1"
+    assert request.incident.title == "order-service Redis timeout"
+    assert request.incident.environment == "prod"
+
+
+def test_core_models_reject_oversized_user_controlled_fields() -> None:
+    with pytest.raises(ValidationError):
+        Incident(title="x" * 201)
+    with pytest.raises(ValidationError):
+        Incident(title=" ")
+    with pytest.raises(ValidationError):
+        Incident(service_name=" ")
+    with pytest.raises(ValidationError):
+        Incident(severity=" ")
+    with pytest.raises(ValidationError):
+        Incident(environment=" ")
+    with pytest.raises(ValidationError):
+        Incident(raw_alert={"payload": "x" * 20_001})
+    with pytest.raises(ValidationError):
+        PlanStep(retry_count=4)
+    with pytest.raises(ValidationError):
+        PlanStep(input_args={"payload": "x" * 20_001})
+    with pytest.raises(ValidationError):
+        ApprovalDecisionRequest(decision="approve", reason="x" * 2001)
+    with pytest.raises(ValidationError):
+        ApprovalRequest(
+            incident_id="inc-1",
+            action="restart service",
+            risk_level="high",
+            metadata={"payload": "x" * 20_001},
+        )
+    with pytest.raises(ValidationError):
+        ChangeResumeRequest(approval_id="")
+    with pytest.raises(ValidationError):
+        ManualExecutionResultRequest(status="succeeded", notes="x" * 4001)
+    with pytest.raises(ValidationError):
+        IncidentState(incident_id="inc-1", metadata={"payload": "x" * 20_001})
 
 
 def test_incident_diagnosis_input_includes_structured_context() -> None:

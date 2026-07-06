@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from loguru import logger
 
 from app.services.rag_retrieval_service import documents_to_context, retrieve_structured_knowledge
+from app.utils.log_safety import summarize_text_for_log
 
 
 @tool(response_format="content_and_artifact")
@@ -21,7 +22,7 @@ def retrieve_knowledge(query: str) -> tuple[str, dict[str, Any]]:
     Returns:
         Tuple[str, dict]: (格式化的上下文文本, 结构化检索结果)
     """
-    logger.info(f"知识检索工具被调用: query='{query}'")
+    logger.info(f"知识检索工具被调用: {summarize_text_for_log(query, label='query')}")
     payload = retrieve_structured_knowledge(query)
     logger.info(
         "知识检索完成: "

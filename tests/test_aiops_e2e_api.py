@@ -57,11 +57,18 @@ async def test_demo_incident_run_delegates_to_standard_aiops_stream(monkeypatch)
     transport = httpx.ASGITransport(app=test_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post("/api/aiops/demo/incidents/redis-maxclients/run", json={})
+        second_response = await client.post(
+            "/api/aiops/demo/incidents/redis-maxclients/run",
+            json={},
+        )
 
     assert response.status_code == 200
+    assert second_response.status_code == 200
     events = _parse_sse_events(response.text)
     assert events[-1]["type"] == "complete"
-    assert fake_service.calls[0]["session_id"] == "demo-redis_maxclients"
+    assert fake_service.calls[0]["session_id"].startswith("demo-redis_maxclients-")
+    assert fake_service.calls[1]["session_id"].startswith("demo-redis_maxclients-")
+    assert fake_service.calls[0]["session_id"] != fake_service.calls[1]["session_id"]
     assert fake_service.calls[0]["incident"].incident_id == "INC-REDIS-001"
 
 

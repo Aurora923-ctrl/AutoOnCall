@@ -1,5 +1,6 @@
 """向量嵌入服务模块 - 基于 LangChain Embeddings 标准接口"""
 
+import time
 from threading import RLock
 
 from langchain_core.embeddings import Embeddings
@@ -42,6 +43,8 @@ class DashScopeEmbeddings(Embeddings):
 
         self.model = model
         self.dimensions = dimensions
+        self.batch_size = max(1, int(config.dashscope_embedding_batch_size))
+        self.max_retries = max(0, int(config.dashscope_embedding_max_retries))
 
         masked_key = self._mask_api_key(api_key)
         logger.info(
@@ -70,13 +73,14 @@ class DashScopeEmbeddings(Embeddings):
             return []
 
         try:
-            logger.info(f"批量嵌入 {len(texts)} 个文档")
-
-            response = self.client.embeddings.create(
-                model=self.model, input=texts, dimensions=self.dimensions, encoding_format="float"
+            logger.info(
+                f"批量嵌入 {len(texts)} 个文档, batch_size={self.batch_size}, "
+                f"max_retries={self.max_retries}"
             )
 
-            embeddings = [item.embedding for item in response.data]
+            embeddings: list[list[float]] = []
+            for batch_index, batch in enumerate(self._embedding_batches(texts), start=1):
+                embeddings.extend(self._embed_document_batch(batch, batch_index=batch_index))
 
             logger.debug(f"批量嵌入完成, 维度: {len(embeddings[0])}")
 
@@ -85,6 +89,40 @@ class DashScopeEmbeddings(Embeddings):
         except Exception as e:
             logger.error(f"批量嵌入失败: {e}")
             raise RuntimeError(f"批量嵌入失败: {e}") from e
+
+    def _embedding_batches(self, texts: list[str]) -> list[list[str]]:
+        return [
+            texts[index : index + self.batch_size]
+            for index in range(0, len(texts), self.batch_size)
+        ]
+
+    def _embed_document_batch(self, batch: list[str], *, batch_index: int) -> list[list[float]]:
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=batch,
+                    dimensions=self.dimensions,
+                    encoding_format="float",
+                )
+                embeddings = [item.embedding for item in response.data]
+                if len(embeddings) != len(batch):
+                    raise RuntimeError(
+                        f"Embedding 返回数量不一致: expected={len(batch)}, actual={len(embeddings)}"
+                    )
+                return embeddings
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    break
+                sleep_seconds = min(2**attempt, 5)
+                logger.warning(
+                    f"文档嵌入 batch {batch_index} 失败，准备重试 "
+                    f"({attempt + 1}/{self.max_retries}): {exc}"
+                )
+                time.sleep(sleep_seconds)
+        raise RuntimeError(f"文档嵌入 batch {batch_index} 失败: {last_error}") from last_error
 
     def embed_query(self, text: str) -> list[float]:
         """

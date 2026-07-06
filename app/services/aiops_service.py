@@ -45,6 +45,8 @@ from app.services.aiops_snapshot_service import save_session_snapshot
 from app.services.aiops_store import create_aiops_store
 from app.services.report_generator import report_generator
 from app.services.trace_service import trace_service
+from app.utils.log_safety import summarize_text_for_log
+from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR, public_exception_message
 
 NODE_PLANNER = "planner"
 NODE_EXECUTOR = "executor"
@@ -136,7 +138,10 @@ class AIOpsService:
             Dict[str, Any]: 流式事件
         """
         session_id = session_id or f"session-{uuid4().hex}"
-        logger.info(f"[会话 {session_id}] 开始执行任务: {user_input}")
+        logger.info(
+            f"[会话 {session_id}] 开始执行任务: "
+            f"{summarize_text_for_log(user_input, label='aiops_input')}"
+        )
 
         try:
             initial_state = create_initial_aiops_state(
@@ -284,7 +289,11 @@ class AIOpsService:
             logger.info(f"[会话 {session_id}] 任务执行完成")
 
         except Exception as e:
-            logger.error(f"[会话 {session_id}] 任务执行失败: {e}", exc_info=True)
+            logger.error(
+                f"[会话 {session_id}] 任务执行失败: "
+                f"error_type={type(e).__name__}, {summarize_text_for_log(e, label='error')}"
+            )
+            public_message = public_exception_message(e, fallback=GENERIC_DIAGNOSIS_ERROR)
             self._save_session_snapshot(
                 session_id=session_id,
                 state=dict(locals().get("initial_state", {}) or {}),
@@ -296,16 +305,16 @@ class AIOpsService:
                 incident_id=locals().get("incident_id", "incident-unknown"),
                 node_name="workflow",
                 event_type="workflow_error",
-                output_summary=str(e),
+                output_summary=public_message,
                 status="failed",
-                error_message=str(e),
+                error_message=public_message,
                 metadata={"session_id": session_id},
             )
             yield {
                 "type": "error",
                 "stage": "error",
                 "status": "failed",
-                "message": f"任务执行出错: {str(e)}",
+                "message": public_message,
                 "trace_id": error_trace_event.trace_id,
                 "trace_event_id": error_trace_event.event_id,
                 "trace_event": error_trace_event.model_dump(mode="json"),

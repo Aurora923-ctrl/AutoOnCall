@@ -67,7 +67,7 @@ def test_registry_exposes_auditable_tool_contracts() -> None:
     assert redis_contract["read_only"] is True
     assert redis_contract["risk_level"] == "low"
     assert "Redis INFO" in redis_contract["data_sources"]
-    assert "结构化" in redis_contract["degradation_strategy"]
+    assert "structured unavailable payload" in redis_contract["degradation_strategy"]
     assert redis_contract["retry_policy"]["max_attempts"] == 1
 
     assert remediation_contract["risk_level"] == "medium"

@@ -10,6 +10,7 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 - Set `DEBUG=false`.
 - Set `CORS_ALLOWED_ORIGINS` to explicit internal frontend origins.
 - Treat startup warnings about non-local bind, disabled API auth, or wildcard CORS as release blockers.
+- Set `PRODUCTION_EXPOSURE_STRICT=true` so unsafe externally bound demo defaults fail closed during startup instead of only logging warnings.
 - Store `DASHSCOPE_API_KEY`, API tokens, Redis passwords, MySQL credentials, bearer tokens, and webhook secrets in a secret manager.
 - Require SSO/OIDC or an internal admin token for diagnosis, approval, upload, indexing, report, change, and alert-ingestion APIs.
 - Add RBAC for read-only incident viewing, diagnosis execution, alert ingestion, approval decisions, safe-change operations, and admin actions before exposing the service beyond a trusted network.
@@ -32,6 +33,10 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 - `API_AUTH_TOKENS`: optional JSON map for multiple tokens, for example `{"ops-token":["operator"],"sre-token":["approver"]}`.
 
 Clients can send either `Authorization: Bearer <token>` or `X-AutoOnCall-Token: <token>`. If auth is enabled but no token is configured, protected APIs return 503 so the service fails closed.
+
+## Exposure Guard
+
+`PRODUCTION_EXPOSURE_STRICT=true` turns startup exposure warnings into a hard failure when the app is configured to bind to a non-local host while API auth is disabled, CORS allows all origins, or mock fallback is enabled. The Docker image enables this guard by default. For a trusted local-only demo, set `HOST=127.0.0.1` or explicitly set `PRODUCTION_EXPOSURE_STRICT=false`.
 
 ## External Adapters
 
@@ -99,6 +104,9 @@ This image is a delivery wrapper, not a full production platform. It does not
 bundle Milvus, MySQL, Redis, Prometheus, Loki, Kubernetes mocks, or secret
 management. Configure those dependencies through compose, managed services, or
 an internal platform, and keep the safety defaults in this document in place.
+Because the image defaults to `PRODUCTION_EXPOSURE_STRICT=true`, an externally
+bound container must enable API auth and configure scoped tokens before it will
+serve traffic.
 The `.dockerignore` file excludes local virtual environments, logs, uploads,
 SQLite databases, coverage reports, and `.env` files from the image context.
 

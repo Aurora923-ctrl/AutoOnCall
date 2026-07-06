@@ -24,6 +24,9 @@ def render_markdown(report: DiagnosisReport) -> str:
             "## 摘要",
             report.summary or "暂无摘要。",
             "",
+            "## 面试速览",
+            _render_interview_snapshot(report),
+            "",
             "## 根因判断",
             report.root_cause or "暂未形成明确根因。",
             "",
@@ -44,6 +47,9 @@ def render_markdown(report: DiagnosisReport) -> str:
             "",
             "## 证据质量",
             _render_evidence_quality(report),
+            "",
+            "## 证据矩阵",
+            _render_evidence_matrix(report),
             "",
             "## 不确定性",
             _render_bullets(report.uncertainties) if report.uncertainties else "- 暂无",
@@ -94,6 +100,90 @@ def render_markdown(report: DiagnosisReport) -> str:
             f"> 报告置信度：{report.confidence:.2f}",
         ]
     )
+
+
+def _render_interview_snapshot(report: DiagnosisReport) -> str:
+    """Render a compact top-of-report section for interview walkthroughs."""
+    risk_level = report.risk_summary.get("risk_level", "low")
+    risk_policy = report.risk_summary.get("policy", "allow")
+    profile = report.evidence_profile or {}
+    by_stance = _as_dict(profile.get("by_stance"))
+    by_type = _as_dict(profile.get("by_type"))
+    by_data_source = _as_dict(profile.get("by_data_source"))
+
+    lines = [
+        f"- Status: {report.status}",
+        f"- Selected root cause: {report.root_cause or 'unknown'}",
+        f"- Confidence: {report.confidence:.2f}",
+        f"- Confidence reason: {report.confidence_reason or 'not recorded'}",
+        f"- Evidence stance: {_render_counter(by_stance)}",
+        f"- Evidence types: {_render_counter(by_type)}",
+        f"- Data sources: {_render_counter(by_data_source)}",
+        f"- Risk boundary: policy={risk_policy}, level={risk_level}, "
+        f"manual_action_required={str(report.manual_action_required).lower()}",
+        "- Safety statement: the Agent can produce diagnosis, plans, approvals, dry-run "
+        "records, sandbox execution, or manual records; it does not directly perform "
+        "production write actions.",
+        "",
+        "### Tool Call Table",
+        _render_tool_call_table(report.tool_calls),
+        "",
+        "### Evidence Quick View",
+        _render_evidence_quick_view(report.evidence),
+    ]
+    return "\n".join(lines)
+
+
+def _render_tool_call_table(tool_calls: list[dict[str, Any]]) -> str:
+    """Render the most important tool-call fields as a Markdown table."""
+    if not tool_calls:
+        return "- No tool calls recorded."
+    lines = [
+        "| Tool | Source | Status | Latency ms | Summary |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for call in tool_calls[:8]:
+        lines.append(
+            "| "
+            f"{_md_cell(call.get('tool_name', 'unknown'))} | "
+            f"{_md_cell(call.get('data_source', 'unknown'))} | "
+            f"{_md_cell(call.get('status', 'unknown'))} | "
+            f"{call.get('latency_ms', 0)} | "
+            f"{_md_cell(call.get('output_summary') or call.get('error_message') or '')} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_evidence_quick_view(evidence: list[dict[str, Any]]) -> str:
+    """Render supporting/refuting/unknown examples for quick report inspection."""
+    rows = [
+        ("supporting", _evidence_by_stance(evidence, "supporting")),
+        ("refuting", _evidence_by_stance(evidence, "refuting")),
+        ("unknown", _unknown_evidence(evidence)),
+    ]
+    lines = ["| Stance | Count | Example |", "| --- | ---: | --- |"]
+    for stance, items in rows:
+        example = _evidence_example(items[0]) if items else ""
+        lines.append(f"| {stance} | {len(items)} | {_md_cell(example)} |")
+    return "\n".join(lines)
+
+
+def _evidence_example(item: dict[str, Any]) -> str:
+    text = (
+        str(item.get("fact") or "").strip()
+        or str(item.get("summary") or "").strip()
+        or str(item.get("uncertainty") or "").strip()
+    )
+    source = item.get("data_source", "unknown")
+    tool = item.get("source_tool", "unknown")
+    confidence = float(item.get("confidence") or 0.0)
+    return f"{tool} source={source} confidence={confidence:.2f} {text}".strip()
+
+
+def _md_cell(value: Any) -> str:
+    """Keep Markdown table cells compact and valid."""
+    text = str(value or "").replace("\n", " ").replace("|", "\\|").strip()
+    return text[:180] + "..." if len(text) > 180 else text
 
 
 def _render_bullets(items: list[str]) -> str:
@@ -244,9 +334,13 @@ def _render_evidence_quality(report: DiagnosisReport) -> str:
     profile = report.evidence_profile or {}
     by_type = _as_dict(profile.get("by_type"))
     by_stance = _as_dict(profile.get("by_stance"))
+    by_data_source = _as_dict(profile.get("by_data_source"))
+    failed_tools = profile.get("failed_tools")
     lines = [
         f"- 类型分布：{_render_counter(by_type)}",
         f"- 立场分布：{_render_counter(by_stance)}",
+        f"- 数据源分布：{_render_counter(by_data_source)}",
+        f"- 失败工具：{_render_inline_list(failed_tools)}",
     ]
     for item in report.evidence[:8]:
         lines.append(
@@ -259,6 +353,59 @@ def _render_evidence_quality(report: DiagnosisReport) -> str:
             f"reason={item.get('confidence_reason', '') or '未标注'}"
         )
     return "\n".join(lines)
+
+
+def _render_evidence_matrix(report: DiagnosisReport) -> str:
+    groups = {
+        "支持证据": _evidence_by_stance(report.evidence, "supporting"),
+        "反驳证据": _evidence_by_stance(report.evidence, "refuting"),
+        "不确定证据": _unknown_evidence(report.evidence),
+        "中性上下文": _evidence_by_stance(report.evidence, "neutral"),
+    }
+    lines: list[str] = []
+    for title, items in groups.items():
+        lines.append(f"### {title}")
+        if not items:
+            lines.append("- 无")
+            continue
+        for item in items[:8]:
+            lines.append(_render_evidence_matrix_item(item))
+    return "\n".join(lines)
+
+
+def _evidence_by_stance(evidence: list[dict[str, Any]], stance: str) -> list[dict[str, Any]]:
+    return [item for item in evidence if str(item.get("stance") or "neutral") == stance]
+
+
+def _unknown_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in evidence:
+        raw_data = _as_dict(item.get("raw_data"))
+        stance = str(item.get("stance") or "neutral")
+        if stance == "unknown" or raw_data.get("status") == "failed":
+            items.append(item)
+    return items
+
+
+def _render_evidence_matrix_item(item: dict[str, Any]) -> str:
+    raw_data = _as_dict(item.get("raw_data"))
+    status = raw_data.get("status") or "unknown"
+    summary = (
+        str(item.get("fact") or "").strip()
+        or str(item.get("summary") or "").strip()
+        or str(item.get("uncertainty") or "").strip()
+        or "无摘要"
+    )
+    return (
+        "- "
+        f"id={item.get('evidence_id', 'unknown')} "
+        f"tool={item.get('source_tool', 'unknown')} "
+        f"source={item.get('data_source', 'unknown')} "
+        f"type={item.get('evidence_type', 'unknown')} "
+        f"status={status} "
+        f"confidence={float(item.get('confidence') or 0.0):.2f} "
+        f"summary={summary}"
+    )
 
 
 def _render_manual_action_boundary(report: DiagnosisReport) -> str:

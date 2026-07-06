@@ -10,6 +10,7 @@ from app.config import config
 from app.models.plan import PlanStep
 from app.tools.base import AIOpsTool, ToolExecutionResult
 from app.tools.registry import ToolRegistry
+from app.utils.public_errors import GENERIC_OPERATION_ERROR
 
 executor_module = importlib.import_module("app.agent.aiops.executor")
 
@@ -193,11 +194,12 @@ async def test_executor_failed_tool_creates_error_evidence_without_breaking_flow
     assert "调用失败" in evidence["summary"]
     assert "证据缺口" in evidence["inference"]
     assert evidence["raw_data"]["status"] == "failed"
-    assert evidence["raw_data"]["error_message"] == "redis backend unavailable"
+    assert evidence["raw_data"]["error_message"] == GENERIC_OPERATION_ERROR
+    assert "redis backend unavailable" not in str(evidence["raw_data"])
 
     record = update["tool_call_records"][0]
     assert record["status"] == "failed"
-    assert record["error_message"] == "redis backend unavailable"
+    assert record["error_message"] == GENERIC_OPERATION_ERROR
     assert record["output"] is None
 
 

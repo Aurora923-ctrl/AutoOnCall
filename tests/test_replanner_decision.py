@@ -48,6 +48,35 @@ def evidence_from_tool(tool_name: str, output: dict, step_id: str) -> dict:
     ).model_dump(mode="json")
 
 
+def test_extract_risk_decision_uses_tool_registry(monkeypatch) -> None:
+    registry = object()
+    captured: dict[str, Any] = {}
+
+    def fake_assess_plan_step(step, tool_registry=None, incident=None):
+        captured["tool_registry"] = tool_registry
+        captured["incident"] = incident
+        return replanner_module.RiskControlDecision(
+            action="query",
+            tool_name=step.tool_name,
+            step_id=step.step_id,
+            policy="allow",
+            allowed=True,
+            need_approval=False,
+            reason="allowed",
+        )
+
+    monkeypatch.setattr(replanner_module, "create_default_tool_registry", lambda _tools: registry)
+    monkeypatch.setattr(replanner_module, "assess_plan_step", fake_assess_plan_step)
+    state = create_initial_aiops_state("diagnose", session_id="risk-registry")
+    state["current_plan"] = [
+        PlanStep(step_id="step-1", tool_name="query_metrics").model_dump(mode="json")
+    ]
+
+    assert replanner_module._extract_risk_decision(state) is None
+    assert captured["tool_registry"] is registry
+    assert captured["incident"] == state["incident"]
+
+
 async def fake_generate_response_with_analysis(state, analysis):
     return {"response": f"report: {analysis.decision}"}
 

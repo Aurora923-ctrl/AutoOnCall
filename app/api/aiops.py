@@ -1,5 +1,6 @@
 """AIOps 智能运维接口."""
 
+from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Path, Query
@@ -43,6 +44,8 @@ from app.services.trace_service import TraceService, trace_service
 from app.tools.registry import create_default_tool_registry
 
 router = APIRouter()
+RESOURCE_ID_MAX_LENGTH = 128
+ResourceId = Annotated[str, Path(..., min_length=1, max_length=RESOURCE_ID_MAX_LENGTH)]
 
 
 def get_approval_service() -> ApprovalService:
@@ -92,7 +95,7 @@ async def get_aiops_status_catalog() -> dict:
 
 @router.get("/aiops/runs", dependencies=[Depends(require_scope(READ_SCOPE))])
 async def list_aiops_runs(
-    incident_id: str | None = Query(default=None),
+    incident_id: str | None = Query(default=None, min_length=1, max_length=RESOURCE_ID_MAX_LENGTH),
     status: str | None = Query(default=None),
     service_name: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
@@ -139,7 +142,9 @@ async def diagnose_stream(request: AIOpsRequest):
 
 
 @router.get("/aiops/demo/incidents/{case_id}", dependencies=[Depends(require_scope(READ_SCOPE))])
-async def get_demo_incident(case_id: str):
+async def get_demo_incident(
+    case_id: ResourceId,
+):
     """Return a ready-to-run demo incident payload for interviews and local demos."""
     return build_demo_incident_payload(case_id)
 
@@ -148,12 +153,12 @@ async def get_demo_incident(case_id: str):
     "/aiops/demo/incidents/{case_id}/run",
     dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))],
 )
-async def run_demo_incident(case_id: str, request: AIOpsRequest | None = None):
+async def run_demo_incident(case_id: ResourceId, request: AIOpsRequest | None = None):
     """Run a fixed demo incident through the normal AIOps SSE workflow."""
     canonical_id = canonical_demo_case_id(case_id)
     incident = _resolve_demo_incident(case_id)
     request_session_id = request.session_id if request and request.session_id else None
-    session_id = request_session_id or f"demo-{canonical_id}"
+    session_id = request_session_id or f"demo-{canonical_id}-{uuid4().hex}"
     if request and request.incident:
         incident = request.incident
     return await diagnose_stream(AIOpsRequest(session_id=session_id, incident=incident))
@@ -163,7 +168,10 @@ async def run_demo_incident(case_id: str, request: AIOpsRequest | None = None):
     "/incidents/{incident_id}/diagnosis/resume",
     dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))],
 )
-async def resume_diagnosis_stream(incident_id: str, request: AIOpsResumeRequest):
+async def resume_diagnosis_stream(
+    incident_id: ResourceId,
+    request: AIOpsResumeRequest,
+):
     """Record an approved human decision and close the paused diagnosis loop."""
     approval = _resolve_resume_approval(incident_id, request.approval_id)
     session_id = request.session_id or str(approval.metadata.get("session_id") or "")
@@ -188,8 +196,8 @@ async def resume_diagnosis_stream(incident_id: str, request: AIOpsResumeRequest)
     "/incidents/{incident_id}/changes/{change_plan_id}/resume",
 )
 async def resume_safe_change_stream(
-    incident_id: str,
-    change_plan_id: str,
+    incident_id: ResourceId,
+    change_plan_id: ResourceId,
     request: ChangeResumeRequest,
     principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ):
@@ -212,13 +220,17 @@ async def resume_safe_change_stream(
     "/incidents/{incident_id}/changes",
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def list_incident_changes(incident_id: str) -> dict:
+async def list_incident_changes(
+    incident_id: ResourceId,
+) -> dict:
     """List safe change executions for one incident."""
     return build_incident_changes_payload(get_change_execution_service(), incident_id)
 
 
 @router.get("/changes/{change_execution_id}", dependencies=[Depends(require_scope(READ_SCOPE))])
-async def get_change_execution(change_execution_id: str) -> dict:
+async def get_change_execution(
+    change_execution_id: ResourceId,
+) -> dict:
     """Return one safe change execution."""
     return build_change_execution_payload(get_change_execution_service(), change_execution_id)
 
@@ -227,7 +239,7 @@ async def get_change_execution(change_execution_id: str) -> dict:
     "/changes/{change_execution_id}/manual-result",
 )
 async def submit_manual_change_result(
-    change_execution_id: str,
+    change_execution_id: ResourceId,
     request: ManualExecutionResultRequest,
     principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ) -> dict:

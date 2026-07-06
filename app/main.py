@@ -38,10 +38,16 @@ def production_exposure_warnings() -> list[str]:
     return warnings
 
 
-def log_production_exposure_warnings() -> None:
-    """Log startup warnings for unsafe production-facing demo defaults."""
+def enforce_production_exposure_policy() -> None:
+    """Warn or fail closed for unsafe production-facing demo defaults."""
 
-    for warning in production_exposure_warnings():
+    warnings = production_exposure_warnings()
+    if warnings and config.production_exposure_strict:
+        message = "Unsafe production exposure configuration: " + "; ".join(warnings)
+        logger.error(message)
+        raise RuntimeError(message)
+
+    for warning in warnings:
         logger.warning(f"⚠️ 生产暴露配置提示: {warning}")
 
 
@@ -54,7 +60,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
     logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
 
-    log_production_exposure_warnings()
+    enforce_production_exposure_policy()
 
     logger.info("🔌 Milvus 将在 readiness、RAG 检索或文档索引首次使用时按需连接")
 

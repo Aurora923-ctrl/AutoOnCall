@@ -1,0 +1,1 @@
+"""Demo artifact generation helpers."""

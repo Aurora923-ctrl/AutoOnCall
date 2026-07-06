@@ -1,26 +1,24 @@
-"""Message queue status tool backed by Redpanda/Kafka adapters."""
+﻿"""Message queue status tool backed by Redpanda/Kafka adapters."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.config import config
-from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.redpanda import RedpandaStatusAdapter
 from app.tools.base import AIOpsTool
+from app.tools.fallback import run_adapter_or_mock
 
 
 class QueryMessageQueueStatusTool(AIOpsTool):
     name = "query_message_queue_status"
-    description = (
-        "通过 Redpanda Admin API 查询 Kafka-compatible topic、partition 和集群 readiness 状态"
-    )
+    description = "Query Redpanda/Kafka topic, partition, and readiness status."
     risk_level = "low"
     read_only = True
     timeout_seconds = 10.0
     data_sources = ["Redpanda Admin API", "mock"]
     degradation_strategy = (
-        "消息队列管理端不可用时返回 mock topic readiness；关闭 mock 后返回结构化不可用结果"
+        "Use Redpanda/Kafka adapters when configured; otherwise return mock queue data "
+        "when enabled or a structured unavailable payload when mock fallback is disabled."
     )
 
     def __init__(self, redpanda_adapter: RedpandaStatusAdapter | None = None):
@@ -30,30 +28,17 @@ class QueryMessageQueueStatusTool(AIOpsTool):
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
         topic = input_args.get("topic") or ""
-        if self._redpanda_adapter.configured:
-            try:
-                return await self._redpanda_adapter.query_status(service_name, topic)
-            except Exception as exc:
-                payload = adapter_failure(
-                    "redpanda",
-                    exc,
-                    summary_prefix="Redpanda/Kafka 查询失败",
-                    service_name=service_name,
-                    topic=topic,
-                )
-                payload.update({"topics": [], "partitions": []})
-                return payload
-        if not config.aiops_mock_fallback_enabled:
-            payload = adapter_not_configured(
-                "redpanda",
-                required_config="REDPANDA_ADMIN_URL",
-                summary_prefix="消息队列查询不可用",
-                service_name=service_name,
-                topic=topic,
-            )
-            payload.update({"topics": [], "partitions": []})
-            return payload
-        return self._mock_status(service_name, topic)
+        return await run_adapter_or_mock(
+            configured=self._redpanda_adapter.configured,
+            adapter_call=lambda: self._redpanda_adapter.query_status(service_name, topic),
+            mock_call=lambda: self._mock_status(service_name, topic),
+            source="redpanda",
+            required_config="REDPANDA_ADMIN_URL",
+            failure_summary_prefix="Redpanda/Kafka query failed",
+            not_configured_summary_prefix="Message queue query unavailable",
+            payload={"service_name": service_name, "topic": topic},
+            unavailable_defaults={"topics": [], "partitions": []},
+        )
 
     @staticmethod
     def _mock_status(service_name: str, topic: str) -> dict[str, Any]:
@@ -97,8 +82,8 @@ class QueryMessageQueueStatusTool(AIOpsTool):
                     "under_replicated_partitions": 0,
                 },
                 "summary": (
-                    f"mock Redpanda 返回 {topic_name} consumer lag 高，"
-                    "总积压 128400，最大分区积压 79000"
+                    f"mock Redpanda returned high consumer lag for {topic_name}; "
+                    "total_lag=128400, max_partition_lag=79000"
                 ),
             }
         return {
@@ -124,5 +109,5 @@ class QueryMessageQueueStatusTool(AIOpsTool):
                 "max_partition_lag": 0,
                 "under_replicated_partitions": 0,
             },
-            "summary": "mock Redpanda 返回 topic 正常，无 consumer lag 积压",
+            "summary": "mock Redpanda returned a healthy topic with no consumer lag",
         }

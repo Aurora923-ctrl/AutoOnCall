@@ -1,5 +1,7 @@
 """Unit tests for RAG answer citation helpers."""
 
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -180,3 +182,29 @@ async def test_query_with_retrieval_refuses_success_payload_without_citations(mo
     assert "缺少可审计引用信息" in result["answer"]
     assert result["retrieval"]["status"] == "no_answer"
     assert result["retrieval"]["no_answer_rejected"] is True
+
+
+@pytest.mark.asyncio
+async def test_query_with_retrieval_offloads_sync_retrieval(monkeypatch) -> None:
+    service = rag_module.RagAgentService()
+
+    def slow_retrieve(*_args, **_kwargs):
+        time.sleep(0.25)
+        return {
+            "status": "no_answer",
+            "summary": "未找到可信知识来源。",
+            "retrieval_results": [],
+            "rejected_results": [],
+            "answer_policy": "refuse_without_trusted_source",
+        }
+
+    monkeypatch.setattr(rag_module, "retrieve_structured_knowledge", slow_retrieve)
+
+    started_at = time.perf_counter()
+    task = asyncio.create_task(service.query_with_retrieval("Redis timeout", "session-offload"))
+    await asyncio.sleep(0)
+    elapsed_to_yield = time.perf_counter() - started_at
+    result = await task
+
+    assert elapsed_to_yield < 0.12
+    assert result["no_answer"] is True

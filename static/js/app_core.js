@@ -71,41 +71,32 @@ window.AutoOnCallApp = AutoOnCallApp;
 // Core AutoOnCall application shell, DOM wiring, and markdown rendering.
 Object.assign(window.AutoOnCallApp.prototype, {
     initMarkdown() {
-        // 等待 marked 库加载完成
-        const checkMarked = () => {
-            if (typeof marked !== 'undefined') {
-                try {
-                    // 配置marked选项
-                    marked.setOptions({
-                        breaks: true,  // 支持GFM换行
-                        gfm: true,     // 启用GitHub风格的Markdown
-                        headerIds: false,
-                        mangle: false
-                    });
+        if (typeof marked === 'undefined') return;
+        try {
+            marked.setOptions({
+                breaks: true,
+                gfm: true,
+                headerIds: false,
+                mangle: false
+            });
 
-                    // 配置代码高亮
-                    if (typeof hljs !== 'undefined') {
-                        marked.setOptions({
-                            highlight: function(code, lang) {
-                                if (lang && hljs.getLanguage(lang)) {
-                                    try {
-                                        return hljs.highlight(code, { language: lang }).value;
-                                    } catch (err) {
-                                        console.error('代码高亮失败:', err);
-                                    }
-                                }
-                                return code;
+            if (typeof hljs !== 'undefined') {
+                marked.setOptions({
+                    highlight: function(code, lang) {
+                        if (lang && hljs.getLanguage(lang)) {
+                            try {
+                                return hljs.highlight(code, { language: lang }).value;
+                            } catch (err) {
+                                console.error('代码高亮失败:', err);
                             }
-                        });
-                    }                } catch (e) {
-                    console.error('Markdown 配置失败:', e);
-                }
-            } else {
-                // 如果 marked 还没加载，等待一段时间后重试
-                setTimeout(checkMarked, 100);
+                        }
+                        return code;
+                    }
+                });
             }
-        };
-        checkMarked();
+        } catch (e) {
+            console.error('Markdown 配置失败:', e);
+        }
     }
 
     // 安全地渲染 Markdown
@@ -113,14 +104,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
     renderMarkdown(content) {
         if (!content) return '';
         
-        // 检查 marked 是否可用
-        if (typeof marked === 'undefined') {
-            console.warn('marked 库未加载，使用纯文本显示');
-            return this.escapeHtml(content);
-        }
-        
         try {
-            const html = marked.parse(content);
+            const html = typeof marked !== 'undefined'
+                ? marked.parse(content)
+                : this.renderBasicMarkdown(content);
             return this.sanitizeRenderedHtml(html);
         } catch (e) {
             console.error('Markdown 渲染失败:', e);
@@ -152,6 +139,87 @@ Object.assign(window.AutoOnCallApp.prototype, {
         });
 
         return container.innerHTML;
+    }
+
+    // 无外部依赖的简版 Markdown 渲染，保障离线演示可读性
+,
+    renderBasicMarkdown(content) {
+        const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+        const blocks = [];
+        let paragraph = [];
+        let listItems = [];
+        let inCode = false;
+        let codeLanguage = '';
+        let codeLines = [];
+
+        const flushParagraph = () => {
+            if (!paragraph.length) return;
+            blocks.push(`<p>${this.renderInlineMarkdown(paragraph.join(' '))}</p>`);
+            paragraph = [];
+        };
+        const flushList = () => {
+            if (!listItems.length) return;
+            blocks.push(`<ul>${listItems.map((item) => `<li>${this.renderInlineMarkdown(item)}</li>`).join('')}</ul>`);
+            listItems = [];
+        };
+        const flushCode = () => {
+            const languageClass = codeLanguage ? ` class="language-${this.escapeHtml(codeLanguage)}"` : '';
+            blocks.push(`<pre><code${languageClass}>${this.escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            codeLanguage = '';
+            codeLines = [];
+        };
+
+        lines.forEach((line) => {
+            const codeFence = line.match(/^```(\w+)?\s*$/);
+            if (codeFence) {
+                if (inCode) {
+                    flushCode();
+                    inCode = false;
+                } else {
+                    flushParagraph();
+                    flushList();
+                    inCode = true;
+                    codeLanguage = codeFence[1] || '';
+                }
+                return;
+            }
+            if (inCode) {
+                codeLines.push(line);
+                return;
+            }
+            if (!line.trim()) {
+                flushParagraph();
+                flushList();
+                return;
+            }
+            const heading = line.match(/^(#{1,4})\s+(.+)$/);
+            if (heading) {
+                flushParagraph();
+                flushList();
+                const level = heading[1].length;
+                blocks.push(`<h${level}>${this.renderInlineMarkdown(heading[2])}</h${level}>`);
+                return;
+            }
+            const list = line.match(/^\s*[-*]\s+(.+)$/);
+            if (list) {
+                flushParagraph();
+                listItems.push(list[1]);
+                return;
+            }
+            paragraph.push(line.trim());
+        });
+
+        if (inCode) flushCode();
+        flushParagraph();
+        flushList();
+        return blocks.join('');
+    }
+,
+    renderInlineMarkdown(text) {
+        return this.escapeHtml(text)
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>');
     }
 
     // 高亮代码块

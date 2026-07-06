@@ -1,4 +1,4 @@
-"""Service-context tools backed by CMDB and deployment-history adapters."""
+﻿"""Service-context tools backed by CMDB and deployment-history adapters."""
 
 from __future__ import annotations
 
@@ -9,17 +9,19 @@ from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.service_catalog import CMDBAdapter, DeployHistoryAdapter
 from app.services.service_topology import get_service_dependencies
 from app.tools.base import AIOpsTool, clamp_int
+from app.tools.fallback import run_adapter_or_mock
 
 
 class QueryServiceContextTool(AIOpsTool):
     name = "query_service_context"
-    description = "查询服务 owner、namespace、上下游依赖和业务上下文"
+    description = "Query service owner, namespace, dependencies, and business context."
     risk_level = "low"
     read_only = True
     timeout_seconds = 8.0
     data_sources = ["CMDB", "local service topology", "mock"]
     degradation_strategy = (
-        "CMDB 不可用时优先读取本地拓扑配置；仍无结果时按 mock 策略返回 owner 和依赖"
+        "Use CMDB when configured; fall back to local topology, then mock data when enabled "
+        "or a structured unavailable payload when mock fallback is disabled."
     )
 
     def __init__(self, cmdb_adapter: CMDBAdapter | None = None):
@@ -36,7 +38,7 @@ class QueryServiceContextTool(AIOpsTool):
                 cmdb_error = adapter_failure(
                     "cmdb",
                     exc,
-                    summary_prefix="CMDB 查询失败",
+                    summary_prefix="CMDB 鏌ヨ澶辫触",
                     service_name=service_name,
                 )
 
@@ -45,7 +47,7 @@ class QueryServiceContextTool(AIOpsTool):
             if cmdb_error:
                 topology_payload["partial_errors"] = [_adapter_partial_error(cmdb_error)]
                 topology_payload["summary"] = (
-                    f"{topology_payload['summary']}；CMDB 查询失败，已使用本地拓扑降级"
+                    f"{topology_payload['summary']}; CMDB query failed, using local topology"
                 )
             return topology_payload
 
@@ -57,7 +59,7 @@ class QueryServiceContextTool(AIOpsTool):
             payload = adapter_not_configured(
                 "cmdb",
                 required_config="CMDB_API_URL",
-                summary_prefix="CMDB 查询不可用",
+                summary_prefix="CMDB query unavailable",
                 service_name=service_name,
             )
             payload.update({"service": {}, "dependencies": []})
@@ -75,22 +77,25 @@ class QueryServiceContextTool(AIOpsTool):
             },
             "dependencies": ["redis-cluster-prod", "order-mysql"],
             "signals": {"dependency_count": 2, "has_owner": True},
-            "summary": f"mock CMDB 返回 {service_name} 的 owner 和依赖关系",
+            "summary": f"mock CMDB returned owner and dependencies for {service_name}",
         }
         if cmdb_error:
             payload["partial_errors"] = [_adapter_partial_error(cmdb_error)]
-            payload["summary"] = f"{payload['summary']}；CMDB 查询失败，已使用 mock 降级"
+            payload["summary"] = f"{payload['summary']}; CMDB query failed, using mock fallback"
         return payload
 
 
 class QueryDeployHistoryTool(AIOpsTool):
     name = "query_deploy_history"
-    description = "查询服务近期发布、变更和回滚记录，用于变更关联分析"
+    description = "Query recent service deployments, changes, and rollback records."
     risk_level = "low"
     read_only = True
     timeout_seconds = 8.0
     data_sources = ["deployment history API", "mock"]
-    degradation_strategy = "发布系统不可用时返回演示发布记录；关闭 mock 后返回结构化不可用结果"
+    degradation_strategy = (
+        "Use deployment history API when configured; otherwise return mock deployments when "
+        "enabled or a structured unavailable payload when mock fallback is disabled."
+    )
 
     def __init__(self, deploy_history_adapter: DeployHistoryAdapter | None = None):
         super().__init__()
@@ -100,47 +105,40 @@ class QueryDeployHistoryTool(AIOpsTool):
         service_name = input_args.get("service_name") or "unknown-service"
         limit = clamp_int(input_args.get("limit"), default=5, minimum=1, maximum=50)
         input_args["limit"] = limit
-        if self._deploy_history_adapter.configured:
-            try:
-                return await self._deploy_history_adapter.query_deployments(service_name, limit)
-            except Exception as exc:
-                payload = adapter_failure(
-                    "deploy_history",
-                    exc,
-                    summary_prefix="发布历史查询失败",
-                    service_name=service_name,
-                )
-                payload.update({"deployments": [], "recent_change": {}})
-                return payload
+        return await run_adapter_or_mock(
+            configured=self._deploy_history_adapter.configured,
+            adapter_call=lambda: self._deploy_history_adapter.query_deployments(
+                service_name, limit
+            ),
+            mock_call=lambda: _mock_deploy_history(service_name),
+            source="deploy_history",
+            required_config="DEPLOY_HISTORY_API_URL",
+            failure_summary_prefix="Deploy history query failed",
+            not_configured_summary_prefix="Deploy history query unavailable",
+            payload={"service_name": service_name},
+            unavailable_defaults={"deployments": [], "recent_change": {}},
+        )
 
-        if not config.aiops_mock_fallback_enabled:
-            payload = adapter_not_configured(
-                "deploy_history",
-                required_config="DEPLOY_HISTORY_API_URL",
-                summary_prefix="发布历史查询不可用",
-                service_name=service_name,
-            )
-            payload.update({"deployments": [], "recent_change": {}})
-            return payload
 
-        deployments = [
-            {
-                "service_name": service_name,
-                "version": "2026.06.27-demo",
-                "deployed_at": "2026-06-27T06:30:00Z",
-                "operator": "release-bot",
-                "status": "succeeded",
-            }
-        ]
-        return {
-            "status": "success",
-            "source": "mock",
+def _mock_deploy_history(service_name: str) -> dict[str, Any]:
+    deployments = [
+        {
             "service_name": service_name,
-            "deployments": deployments,
-            "recent_change": deployments[0],
-            "signals": {"deployment_count": 1, "latest_status": "succeeded"},
-            "summary": f"mock 发布历史返回 {service_name} 最近 1 条变更",
+            "version": "2026.06.27-demo",
+            "deployed_at": "2026-06-27T06:30:00Z",
+            "operator": "release-bot",
+            "status": "succeeded",
         }
+    ]
+    return {
+        "status": "success",
+        "source": "mock",
+        "service_name": service_name,
+        "deployments": deployments,
+        "recent_change": deployments[0],
+        "signals": {"deployment_count": 1, "latest_status": "succeeded"},
+        "summary": f"mock deploy history returned 1 recent change for {service_name}",
+    }
 
 
 def _flatten_topology_dependencies(topology: dict[str, Any]) -> list[str]:
@@ -163,7 +161,7 @@ def _topology_context_payload(service_name: str) -> dict[str, Any] | None:
         "service": {"service_name": service_name, "dependencies": dependencies},
         "dependencies": dependencies,
         "signals": {"dependency_count": len(dependencies), "topology_configured": True},
-        "summary": f"本地拓扑返回 {service_name} 的 {len(dependencies)} 个依赖",
+        "summary": f"local topology returned {len(dependencies)} dependencies for {service_name}",
     }
 
 

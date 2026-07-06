@@ -360,3 +360,31 @@ async def test_search_runbook_tool_returns_structured_retrieval_payload(monkeypa
     assert result.output["status"] == "success"
     assert result.output["retrieval_results"][0]["source_file"] == "cpu_high_usage.md"
     assert result.output["summary"] == "Runbook 检索命中 1 条可信片段，来源：cpu_high_usage.md"
+
+
+@pytest.mark.asyncio
+async def test_search_runbook_tool_hides_vector_error_detail(monkeypatch) -> None:
+    def fake_retrieve(query: str, *, top_k=None):
+        return {
+            "status": "no_answer",
+            "query": query,
+            "retrieval_degraded": True,
+            "vector_error_message": "向量检索暂不可用，已降级使用本地词法索引。",
+            "vector_error_type": "RuntimeError",
+            "vector_error_detail": "http://milvus.internal:19530 unavailable",
+            "retrieval_results": [],
+            "rejected_results": [],
+            "summary": "未找到可信知识来源。",
+            "content": "",
+        }
+
+    monkeypatch.setattr(runbook_module, "retrieve_structured_knowledge", fake_retrieve)
+    tool = SearchRunbookTool()
+
+    result = await tool.arun({"query": "Redis timeout", "top_k": 1})
+
+    assert result.status == "success"
+    assert result.output["retrieval_degraded"] is True
+    assert result.output["vector_error_message"] == "向量检索暂不可用，已降级使用本地词法索引。"
+    assert "vector_error_detail" not in result.output
+    assert "milvus.internal" not in str(result.output)

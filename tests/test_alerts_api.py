@@ -161,6 +161,36 @@ async def test_alertmanager_auto_diagnose_runs_for_reopened_alert(
 
 
 @pytest.mark.asyncio
+async def test_alertmanager_auto_diagnose_skips_incident_already_in_flight(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = _build_test_app(monkeypatch, tmp_path)
+    diagnosis_calls = []
+
+    async def fake_run_alert_diagnosis(event):
+        diagnosis_calls.append(event.fingerprint)
+
+    seed_service = AlertIngestionService(AIOpsSQLiteStore(tmp_path / "seed.db"))
+    incident_id = seed_service.ingest_alertmanager_webhook(_payload()).items[0].event.incident_id
+    alerts._mark_alert_diagnosis_in_flight(incident_id)
+    monkeypatch.setattr(alerts, "_run_alert_diagnosis", fake_run_alert_diagnosis)
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/alerts/alertmanager?auto_diagnose=true",
+                json=_payload(),
+            )
+    finally:
+        alerts._clear_alert_diagnosis_in_flight(incident_id)
+
+    assert response.status_code == 200
+    assert diagnosis_calls == []
+
+
+@pytest.mark.asyncio
 async def test_alert_auto_diagnosis_uses_unique_session_ids(monkeypatch, tmp_path) -> None:
     store = AIOpsSQLiteStore(tmp_path / "aiops.db")
     alert_service = AlertIngestionService(store)
@@ -204,8 +234,10 @@ async def test_alert_auto_diagnosis_failure_updates_incident_state(monkeypatch, 
     state = store.get_incident_state(event.incident_id)
     assert state is not None
     assert state.status == "failed"
-    assert "planner unavailable" in state.status_reason
+    assert "planner unavailable" not in state.status_reason
+    assert "诊断服务暂时不可用" in state.status_reason
     assert state.metadata["alert_auto_diagnosis_status"] == "failed"
+    assert "planner unavailable" not in state.metadata["alert_auto_diagnosis_error"]
 
 
 @pytest.mark.asyncio

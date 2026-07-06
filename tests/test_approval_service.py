@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models.approval import ApprovalRequest
+from app.models.change_plan import ChangePlan
 from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService, ApprovalStateError
 from app.services.approval_workflow import create_approval_request_from_risk_decision
@@ -75,11 +76,28 @@ async def test_pending_approval_api_can_include_approved_followups(monkeypatch, 
     pending = service.create_request(
         ApprovalRequest(incident_id="inc-queue", action="新变更", risk_level="high")
     )
-    approved = service.create_request(
-        ApprovalRequest(incident_id="inc-queue", action="已批准变更", risk_level="medium")
+    approved_without_change = service.create_request(
+        ApprovalRequest(incident_id="inc-queue", action="已批准诊断", risk_level="medium")
     )
-    approved = service.decide_request(
-        approved.approval_id,
+    service.decide_request(
+        approved_without_change.approval_id,
+        decision="approve",
+        decided_by="sre",
+        reason="窗口已确认",
+    )
+    approved_with_change = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-queue",
+            action="已批准变更",
+            risk_level="medium",
+            change_plan=ChangePlan(
+                incident_id="inc-queue",
+                action="调整 Redis maxclients",
+            ),
+        )
+    )
+    approved_with_change = service.decide_request(
+        approved_with_change.approval_id,
         decision="approve",
         decided_by="sre",
         reason="窗口已确认",
@@ -94,7 +112,7 @@ async def test_pending_approval_api_can_include_approved_followups(monkeypatch, 
     assert [item["approval_id"] for item in default_payload["items"]] == [pending.approval_id]
     assert [item["approval_id"] for item in followup_payload["items"]] == [
         pending.approval_id,
-        approved.approval_id,
+        approved_with_change.approval_id,
     ]
 
 

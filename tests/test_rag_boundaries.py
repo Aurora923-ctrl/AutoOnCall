@@ -1,6 +1,7 @@
 """RAG dependency boundary tests."""
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,37 @@ def test_lazy_embedding_does_not_require_api_key_until_first_call(monkeypatch) -
     assert service._service is None
     with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):
         service.embed_query("order-service timeout")
+
+
+def test_dashscope_embedding_batches_documents_and_retries(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    attempts = {"count": 0}
+
+    class FakeEmbeddingsClient:
+        def create(self, *, model, input, dimensions, encoding_format):
+            attempts["count"] += 1
+            batch = list(input)
+            calls.append(batch)
+            if attempts["count"] == 1:
+                raise RuntimeError("temporary provider error")
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(embedding=[float(len(text)), 1.0])
+                    for text in batch
+                ]
+            )
+
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_batch_size", 2)
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_max_retries", 1)
+    monkeypatch.setattr(embedding_module.time, "sleep", lambda _seconds: None)
+
+    service = embedding_module.DashScopeEmbeddings(api_key="test-key")
+    service.client = SimpleNamespace(embeddings=FakeEmbeddingsClient())
+
+    embeddings = service.embed_documents(["a", "bb", "ccc"])
+
+    assert calls == [["a", "bb"], ["a", "bb"], ["ccc"]]
+    assert embeddings == [[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]]
 
 
 def test_vector_store_manager_does_not_connect_milvus_during_construction(monkeypatch) -> None:

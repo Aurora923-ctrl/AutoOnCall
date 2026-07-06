@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.incident import Incident
 
@@ -40,6 +40,12 @@ class AIOpsRequest(BaseModel):
         }
     )
 
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def strip_session_id(cls, value: Any) -> Any:
+        """Trim optional session IDs before length validation."""
+        return value.strip() if isinstance(value, str) else value
+
 
 class AIOpsResumeRequest(BaseModel):
     """Request body for resuming a paused AIOps diagnosis after approval."""
@@ -65,6 +71,12 @@ class AIOpsResumeRequest(BaseModel):
             }
         }
     )
+
+    @field_validator("session_id", "approval_id", mode="before")
+    @classmethod
+    def strip_optional_ids(cls, value: Any) -> Any:
+        """Trim optional IDs before length validation."""
+        return value.strip() if isinstance(value, str) else value
 
 
 class AlertInfo(BaseModel):

@@ -1,18 +1,17 @@
-"""Alert query tool backed by Alertmanager with mock fallback."""
+﻿"""Alert query tool backed by Alertmanager with mock fallback."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.config import config
 from app.integrations.alertmanager import AlertmanagerAlertAdapter
-from app.integrations.base import adapter_failure, adapter_not_configured
 from app.tools.base import AIOpsTool, clamp_int
+from app.tools.fallback import run_adapter_or_mock
 
 
 class QueryAlertsTool(AIOpsTool):
     name = "query_alerts"
-    description = "查询 Alertmanager 当前告警，确认 Incident 输入和告警上下文"
+    description = "Query current Alertmanager alerts for incident context."
     input_schema = {
         "type": "object",
         "properties": {
@@ -27,7 +26,8 @@ class QueryAlertsTool(AIOpsTool):
     timeout_seconds = 8.0
     data_sources = ["Alertmanager", "mock"]
     degradation_strategy = (
-        "Alertmanager 未配置或短暂失败时返回演示告警；关闭 mock 后返回结构化不可用结果"
+        "Use Alertmanager when configured; otherwise return mock alerts when enabled or a "
+        "structured unavailable payload when mock fallback is disabled."
     )
 
     def __init__(self, alert_adapter: AlertmanagerAlertAdapter | None = None):
@@ -40,34 +40,18 @@ class QueryAlertsTool(AIOpsTool):
         state = input_args.get("state") or "active"
         limit = clamp_int(input_args.get("limit"), default=20, minimum=1, maximum=100)
         input_args["limit"] = limit
-        if self._alert_adapter.configured:
-            try:
-                return await self._alert_adapter.query_alerts(service_name, state, limit)
-            except Exception as exc:
-                if config.aiops_mock_fallback_enabled and self._allow_adapter_failure_fallback:
-                    return self._mock_alerts(service_name)
-                payload = adapter_failure(
-                    "alertmanager",
-                    exc,
-                    summary_prefix="Alertmanager 查询失败",
-                    service_name=service_name,
-                    state=state,
-                )
-                payload.update({"alerts": []})
-                return payload
-
-        if not config.aiops_mock_fallback_enabled:
-            payload = adapter_not_configured(
-                "alertmanager",
-                required_config="ALERTMANAGER_BASE_URL",
-                summary_prefix="告警查询不可用",
-                service_name=service_name,
-                state=state,
-            )
-            payload.update({"alerts": []})
-            return payload
-
-        return self._mock_alerts(service_name)
+        return await run_adapter_or_mock(
+            configured=self._alert_adapter.configured,
+            adapter_call=lambda: self._alert_adapter.query_alerts(service_name, state, limit),
+            mock_call=lambda: self._mock_alerts(service_name),
+            source="alertmanager",
+            required_config="ALERTMANAGER_BASE_URL",
+            failure_summary_prefix="Alertmanager query failed",
+            not_configured_summary_prefix="Alert query unavailable",
+            payload={"service_name": service_name, "state": state},
+            unavailable_defaults={"alerts": []},
+            allow_failure_fallback=self._allow_adapter_failure_fallback,
+        )
 
     @staticmethod
     def _mock_alerts(service_name: str) -> dict[str, Any]:
@@ -77,7 +61,7 @@ class QueryAlertsTool(AIOpsTool):
                 "service_name": service_name,
                 "severity": "critical",
                 "state": "active",
-                "summary": f"{service_name} 5xx 错误率超过阈值",
+                "summary": f"{service_name} 5xx error rate exceeded threshold",
             }
         ]
         return {
@@ -86,5 +70,5 @@ class QueryAlertsTool(AIOpsTool):
             "service_name": service_name,
             "alerts": alerts,
             "signals": {"alert_count": len(alerts), "firing_count": len(alerts)},
-            "summary": f"mock Alertmanager 返回 {len(alerts)} 条当前告警",
+            "summary": f"mock Alertmanager returned {len(alerts)} active alerts",
         }

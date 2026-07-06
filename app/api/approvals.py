@@ -120,6 +120,4 @@ def _approval_has_next_action(request: object) -> bool:
     if status != "approved":
         return False
     change_plan = getattr(request, "change_plan", None)
-    return bool(getattr(request, "approval_id", "")) or bool(
-        getattr(change_plan, "change_plan_id", "")
-    )
+    return bool(getattr(change_plan, "change_plan_id", ""))

@@ -21,7 +21,8 @@ def build_eval_summary_payload(
 
     return {
         "available": True,
-        "path": str(summary_path),
+        "path": summary_path.name,
+        "artifact": summary_path.name,
         "run": run,
         "summary": summary,
         "resume_metrics": resume_metrics,
@@ -38,7 +39,8 @@ def build_eval_unavailable_payload(message: str, *, summary_path: Path) -> dict[
     """Build the stable unavailable payload for missing or invalid eval summaries."""
     return {
         "available": False,
-        "path": str(summary_path),
+        "path": summary_path.name,
+        "artifact": summary_path.name,
         "run": None,
         "summary": None,
         "resume_metrics": {},
@@ -61,7 +63,8 @@ def build_adapter_unavailable_payload(message: str, *, adapter_path: Path) -> di
     """Build the stable unavailable payload for adapter verification status."""
     return {
         "available": False,
-        "path": str(adapter_path),
+        "path": adapter_path.name,
+        "artifact": adapter_path.name,
         "status": "missing",
         "checks": [],
         "data_sources": [],

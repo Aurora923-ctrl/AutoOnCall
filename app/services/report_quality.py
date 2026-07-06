@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.evidence_quality import (
+    build_evidence_quality_profile,
+    source_quality_confidence_cap,
+)
+
 
 def build_evidence_profile(
     evidence: list[dict[str, Any]],
@@ -13,15 +18,7 @@ def build_evidence_profile(
     profile = _as_dict(evidence_analysis.get("evidence_profile"))
     if profile:
         return profile
-
-    by_type: dict[str, int] = {}
-    by_stance: dict[str, int] = {}
-    for item in evidence:
-        evidence_type = str(item.get("evidence_type") or "unknown")
-        stance = str(item.get("stance") or "neutral")
-        by_type[evidence_type] = by_type.get(evidence_type, 0) + 1
-        by_stance[stance] = by_stance.get(stance, 0) + 1
-    return {"by_type": by_type, "by_stance": by_stance}
+    return build_evidence_quality_profile(evidence)
 
 
 def build_confidence_reason(
@@ -112,7 +109,7 @@ def calculate_confidence(
     ) and _has_enough_successful_diagnostic_evidence(evidence):
         base = max(base, 0.55)
 
-    source_quality_cap = _source_quality_confidence_cap(evidence, analysis)
+    source_quality_cap = source_quality_confidence_cap(evidence, analysis)
     if source_quality_cap is not None:
         base = min(base, source_quality_cap)
 
@@ -126,80 +123,6 @@ def _top_hypothesis_confidence(evidence_analysis: dict[str, Any]) -> float | Non
     top = ranking[0] if isinstance(ranking[0], dict) else {}
     confidence = top.get("confidence")
     return float(confidence) if isinstance(confidence, int | float) else None
-
-
-def _source_quality_confidence_cap(
-    evidence: list[dict[str, Any]],
-    evidence_analysis: dict[str, Any],
-) -> float | None:
-    profile = _as_dict(evidence_analysis.get("evidence_profile"))
-    source_quality = str(profile.get("source_quality") or "")
-    if source_quality == "fallback_only":
-        return 0.5
-    if source_quality == "mixed_with_fallback":
-        return 0.72
-
-    diagnostic_success = [
-        item
-        for item in evidence
-        if str(item.get("evidence_type") or "") not in {"runbook", "risk"}
-        and _as_dict(item.get("raw_data")).get("status") == "success"
-    ]
-    if not diagnostic_success:
-        return None
-
-    trusted_sources = {
-        "prometheus",
-        "loki",
-        "log_gateway",
-        "cmdb",
-        "deploy_history",
-        "redis_info",
-        "kubernetes",
-        "mysql",
-        "ticket_api",
-        "alertmanager",
-        "jaeger",
-        "tempo",
-        "redpanda",
-        "mcp_monitor",
-        "mcp_cls",
-    }
-    fallback_sources = {
-        "mock",
-        "not_configured",
-        "failed",
-        "manual_analysis",
-        "llm_toolnode_fallback",
-        "rule_based",
-    }
-    degraded_sources = {"mcp_monitor_mixed", "unknown"}
-    trusted_count = 0
-    fallback_count = 0
-    degraded_count = 0
-    for item in diagnostic_success:
-        data_source = str(item.get("data_source") or "").strip().lower()
-        raw_data = _as_dict(item.get("raw_data"))
-        output = _as_dict(raw_data.get("output"))
-        if not data_source or data_source == "unknown":
-            data_source = (
-                str(output.get("source") or raw_data.get("source") or "unknown").strip().lower()
-            )
-        if data_source in trusted_sources:
-            trusted_count += 1
-        elif data_source in fallback_sources:
-            fallback_count += 1
-        elif data_source in degraded_sources:
-            degraded_count += 1
-        else:
-            degraded_count += 1
-
-    low_quality_count = fallback_count + degraded_count
-    if trusted_count == 0 and low_quality_count:
-        return 0.5
-    if low_quality_count:
-        return 0.72
-    return None
 
 
 def _has_failed_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:

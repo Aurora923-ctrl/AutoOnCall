@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from app.services.rag_read_models import build_runbook_summary
+from app.services.rag_read_models import build_runbook_summary, compact_retrieval_payload
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
 from app.tools.base import AIOpsTool, clamp_int
 
@@ -37,9 +38,11 @@ class SearchRunbookTool(AIOpsTool):
         )
         if bounded_top_k is not None:
             input_args["top_k"] = bounded_top_k
-        payload = retrieve_structured_knowledge(
+        raw_payload = await asyncio.to_thread(
+            retrieve_structured_knowledge,
             str(query),
             top_k=bounded_top_k,
         )
+        payload = compact_retrieval_payload(raw_payload)
         payload["summary"] = build_runbook_summary(payload)
         return payload

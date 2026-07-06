@@ -94,7 +94,7 @@ def adapter_failure(
 ) -> dict[str, Any]:
     """Return the common failure envelope used by AIOps tools and reports."""
     error_type = classify_adapter_error(exc)
-    message = str(exc)
+    message = public_adapter_failure_message(error_type)
     return {
         **payload,
         "status": "failed",
@@ -149,3 +149,17 @@ def classify_adapter_error(exc: Exception) -> str:
     if "timeout" in text or "timed out" in text or "超时" in text:
         return "timeout"
     return "adapter_error"
+
+
+def public_adapter_failure_message(error_type: str) -> str:
+    """Return a stable adapter error message safe for API, evidence, and reports."""
+    messages = {
+        "timeout": "外部依赖查询超时",
+        "connection_error": "外部依赖连接失败",
+        "permission_denied": "外部依赖权限校验失败",
+        "not_found": "外部依赖端点不存在",
+        "server_error": "外部依赖返回服务端错误",
+        "http_error": "外部依赖返回非预期状态",
+        "not_configured": "外部依赖未配置",
+    }
+    return messages.get(error_type, "外部依赖暂时不可用")

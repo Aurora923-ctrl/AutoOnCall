@@ -26,6 +26,34 @@ Alert / Incident
 
 > 面向 OnCall 场景的 RAG + AIOps Agent 故障诊断系统，基于 FastAPI、LangGraph、Milvus 和 Pydantic 实现告警接入、Runbook 检索、Plan-Execute-Replan 诊断、工具取证、证据链追踪、人工审批、诊断报告和安全变更 dry-run 闭环。
 
+## 架构总览
+
+```mermaid
+flowchart LR
+  Alert["Alertmanager / 手工 Incident"] --> API["FastAPI API 层"]
+  Docs["Runbook Markdown / 文件上传"] --> RAG["RAG 索引<br/>Splitter + Embedding + Milvus + Lexical"]
+  API --> Planner["Planner"]
+  Planner --> Executor["Executor + Tool Registry"]
+  Executor --> Tools["只读工具适配器<br/>Prometheus / Logs / Trace / K8s / Redis / MySQL / Ticket"]
+  Executor --> Evidence["Evidence + ToolCallRecord + Trace"]
+  RAG --> Executor
+  Evidence --> Replanner["Replanner + Evidence Analyzer"]
+  Replanner -->|证据不足| Planner
+  Replanner -->|证据充分| Report["Diagnosis Report"]
+  Replanner -->|中高风险| Approval["Approval + Safe Change<br/>dry-run / sandbox / manual record"]
+  Report --> UI["Static Workbench / Replay / Eval"]
+  Approval --> UI
+```
+
+代码阅读建议按业务闭环而不是目录顺序展开：
+
+1. `app/main.py` 看路由装配、静态工作台和生产暴露提示。
+2. `app/api/alerts.py` 与 `app/services/alert_ingestion_service.py` 看告警如何变成 Incident。
+3. `app/api/aiops.py` 与 `app/services/aiops_service.py` 看 SSE 诊断入口和 Agent 编排。
+4. `app/agent/aiops/planner.py`、`executor.py`、`replanner.py`、`evidence_analyzer.py` 看 Plan-Execute-Replan 主循环。
+5. `app/services/rag_retrieval_service.py`、`rag_agent_service.py` 和 `vector_embedding_service.py` 看 RAG 检索、拒答和 Embedding 边界。
+6. `static/` 与 `tests/` 看演示工作台和核心链路回归测试。
+
 ## 面试演示路径（10 分钟）
 
 面试演示时不要平均展示所有页面，建议只讲一条主线：
@@ -52,6 +80,27 @@ RAG 可信问答
 | 9:00-10:00 | 测试和离线评测 | 说明质量门禁和 eval 是回归保障，不是线上准确率声明 |
 
 详细讲解脚本见 [从零上手与面试讲解](文档/AutoOnCall项目从零上手与面试讲解.md)。
+
+## 面试前检查清单
+
+- 基础门禁：优先运行 `make verify`；时间紧时至少运行 `make test-quick`、`make eval`、`make eval-rag`、`make eval-change`。
+- RAG 演示：确认 `make up`、`make upload` 已完成，Runbook 问答能看到 citation，无可信来源问题能稳定拒答。
+- AIOps 演示：Redis maxclients、MySQL slow query、K8s CrashLoop 至少跑通一个主线 case，并能打开 Trace、Evidence 和 Report。
+- 风险边界：准备一个审批或 forbidden case，明确说明高风险动作不会自动执行生产写操作。
+- 环境边界：本地离线演示可显式开启 `AIOPS_MOCK_FALLBACK_ENABLED=true`；严格验收、沙箱或生产化说明应设置为 `false`。
+- 前端稳定性：提前打开 `http://localhost:9900`、`/health/live`、`/health/ready` 和 OpenAPI，避免现场再排依赖问题。
+- 结果表述：离线 eval 只讲“回归保障”和“case 覆盖”，不要包装成线上真实准确率。
+
+## 面试官高频追问边界
+
+| 追问 | 推荐回答边界 |
+| --- | --- |
+| 这是 Agent 还是规则流程？ | LLM 负责计划生成和语言表达，工具调用、风险控制、状态流转和报告落库由后端契约约束。 |
+| mock/fallback 算不算真实能力？ | mock/fallback 是本地演示和失败降级路径，数据源和 `source_quality` 会显式标记；严格环境关闭后未配置工具会返回结构化失败。 |
+| 怎么防止 RAG 幻觉？ | 检索结果会经过 hybrid search、rerank、trust gate 和 citation guard；没有可信引用时拒答。 |
+| 为什么不会误操作生产？ | Executor 先做风险评估；中高风险进入审批，危险动作 forbidden；审批后也只进入 dry-run、sandbox 或人工记录。 |
+| eval 结果能代表线上准确率吗？ | 不能。eval 是固定 case 的回归门禁，用来验证工具选择、根因关键词、拒答和风险策略没有回退。 |
+| 项目还差哪些生产化能力？ | 主要是 SSO/OIDC、后台任务队列、数据库 migration、多副本治理、审计防篡改和真实样本反馈闭环。 |
 
 ## 项目边界
 
@@ -212,6 +261,14 @@ make sandbox-demo
 
 沙箱会启动 Redis、MySQL、Prometheus、Alertmanager、Grafana、Loki、Kubernetes API mock、Tempo、Jaeger、OpenTelemetry Collector、Redpanda，以及 CMDB、工单和发布历史 mock 服务。详细说明见 [沙箱说明](deploy/sandbox.md)。
 
+如果面试前只需要一组不依赖 Docker 沙箱的固定报告资产，可以运行：
+
+```bash
+make demo-reports
+```
+
+该命令会从离线评测集中生成 Redis maxclients、MySQL 慢查询、K8s CrashLoop 三份 Markdown 诊断报告和索引，默认输出到 `logs/demo_reports/`。这些报告用于稳定讲解 Plan、ToolCall、Evidence、Trace、Risk 和 Report 闭环，不代表线上真实 RCA 准确率。
+
 Windows 下也可以使用：
 
 ```powershell
@@ -267,7 +324,7 @@ docker run --rm -p 9900:9900 --env-file .env autooncall:local
 
 常用配置：
 
-- DashScope：`DASHSCOPE_API_KEY`、`DASHSCOPE_API_BASE`、`DASHSCOPE_MODEL`、`DASHSCOPE_EMBEDDING_MODEL`、`RAG_MODEL`
+- DashScope：`DASHSCOPE_API_KEY`、`DASHSCOPE_API_BASE`、`DASHSCOPE_MODEL`、`DASHSCOPE_EMBEDDING_MODEL`、`DASHSCOPE_EMBEDDING_BATCH_SIZE`、`DASHSCOPE_EMBEDDING_MAX_RETRIES`、`RAG_MODEL`
 - Milvus：`MILVUS_HOST`、`MILVUS_PORT`、`MILVUS_RECREATE_ON_DIMENSION_MISMATCH`
 - RAG：`RAG_TOP_K`、`RAG_MAX_L2_DISTANCE`、`RAG_MIN_LEXICAL_TRUST_SCORE`、`RAG_HYBRID_SEARCH_ENABLED`、`RAG_RERANK_ENABLED`、`INDEX_ALLOWED_ROOTS`
 - AIOps 状态：`AIOPS_STORAGE_BACKEND`、`AIOPS_SQLITE_PATH`、`MYSQL_DSN`、`AIOPS_REPLANNER_LLM_ENABLED`
@@ -276,9 +333,12 @@ docker run --rm -p 9900:9900 --env-file .env autooncall:local
 - 原始外部 payload：`AIOPS_STORE_RAW_EXTERNAL_PAYLOAD`
 - CORS：`CORS_ALLOWED_ORIGINS`
 - API 鉴权：`API_AUTH_ENABLED`、`API_READ_TOKEN`、`API_OPERATOR_TOKEN`、`API_APPROVER_TOKEN`、`API_ADMIN_TOKEN`、`API_AUTH_TOKENS`
+- 生产暴露保护：`PRODUCTION_EXPOSURE_STRICT`
 - 外部适配器：`ALERTMANAGER_BASE_URL`、`PROMETHEUS_BASE_URL`、`LOG_GATEWAY_URL`、`LOKI_BASE_URL`、`JAEGER_BASE_URL`、`TEMPO_BASE_URL`、`KUBERNETES_API_SERVER`、`REDIS_URL`、`MYSQL_DSN`、`CMDB_API_URL`、`DEPLOY_HISTORY_API_URL`、`TICKET_API_URL`
 
 默认 `API_AUTH_ENABLED=false`，适合本地 demo 和测试；默认 `AIOPS_MOCK_FALLBACK_ENABLED=false`，避免生产环境漏配外部系统时生成合成诊断证据；默认 `AIOPS_REPLANNER_LLM_ENABLED=false`，Replanner 先使用确定性证据分析，启用后才调用结构化 LLM 决策；默认 `A2A_ENABLED=false`，A2A 只作为受信任 Agent 运行时调用 AutoOnCall 诊断、状态、Replay 和 Runbook 问答的北向协作入口，不暴露底层工具、审批决策或生产变更执行。本地 demo 如需离线演示，可显式打开 mock fallback。内网或生产化环境应开启 token RBAC；更正式的生产环境应接入 SSO/OIDC，并在网关或应用层统一治理身份。
+
+`PRODUCTION_EXPOSURE_STRICT=true` 时，如果服务绑定到 `0.0.0.0` / `::` 且仍使用关闭鉴权、通配 CORS 或 mock fallback 等演示默认值，应用会在启动期 fail closed。Docker 镜像默认开启该保护；本地可信 demo 可显式关闭。
 
 ## 质量验证
 

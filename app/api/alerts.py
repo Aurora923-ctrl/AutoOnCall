@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -19,8 +21,13 @@ from app.models.incident_state import IncidentState
 from app.services.aiops_service import aiops_service
 from app.services.alert_ingestion_service import AlertIngestionService, alert_ingestion_service
 from app.services.trace_service import trace_service
+from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR, public_exception_message
 
 router = APIRouter()
+ALERT_AUTO_DIAGNOSIS_MAX_CONCURRENCY = 2
+_alert_auto_diagnosis_semaphore = asyncio.Semaphore(ALERT_AUTO_DIAGNOSIS_MAX_CONCURRENCY)
+_alert_auto_diagnosis_lock = Lock()
+_alert_auto_diagnosis_in_flight: set[str] = set()
 
 
 def get_alert_ingestion_service() -> AlertIngestionService:
@@ -50,7 +57,14 @@ async def ingest_alertmanager_webhook(
         for item in result.items:
             if item.event.status == "resolved" or not (item.created or item.reopened):
                 continue
-            background_tasks.add_task(_run_alert_diagnosis, item.event)
+            if _mark_alert_diagnosis_in_flight(item.event.incident_id):
+                background_tasks.add_task(_run_alert_diagnosis_guarded, item.event)
+            else:
+                logger.info(
+                    "Alert auto diagnosis already running: incident_id={}, fingerprint={}",
+                    item.event.incident_id,
+                    item.event.fingerprint,
+                )
     return result
 
 
@@ -107,6 +121,30 @@ async def _run_alert_diagnosis(event: AlertEvent) -> None:
         _record_alert_diagnosis_failure(service, event, session_id, exc)
 
 
+async def _run_alert_diagnosis_guarded(event: AlertEvent) -> None:
+    """Run one auto diagnosis with process-local dedupe and backpressure."""
+    try:
+        async with _alert_auto_diagnosis_semaphore:
+            await _run_alert_diagnosis(event)
+    finally:
+        _clear_alert_diagnosis_in_flight(event.incident_id)
+
+
+def _mark_alert_diagnosis_in_flight(incident_id: str) -> bool:
+    """Return True when this process should start a new alert diagnosis."""
+    with _alert_auto_diagnosis_lock:
+        if incident_id in _alert_auto_diagnosis_in_flight:
+            return False
+        _alert_auto_diagnosis_in_flight.add(incident_id)
+        return True
+
+
+def _clear_alert_diagnosis_in_flight(incident_id: str) -> None:
+    """Clear the process-local in-flight marker for an alert diagnosis."""
+    with _alert_auto_diagnosis_lock:
+        _alert_auto_diagnosis_in_flight.discard(incident_id)
+
+
 def _record_alert_diagnosis_failure(
     service: AlertIngestionService,
     event: AlertEvent,
@@ -114,6 +152,7 @@ def _record_alert_diagnosis_failure(
     exc: Exception,
 ) -> None:
     """Persist visible failure state for background alert diagnosis."""
+    public_error = public_exception_message(exc, fallback=GENERIC_DIAGNOSIS_ERROR)
     existing = service.store.get_incident_state(event.incident_id)
     trace_id = existing.trace_id if existing and existing.trace_id else f"trace-{event.incident_id}"
     trace_event = trace_service.create_event(
@@ -124,7 +163,7 @@ def _record_alert_diagnosis_failure(
         input_summary=f"alert_fingerprint={event.fingerprint}",
         output_summary="Alert auto diagnosis failed",
         status="failed",
-        error_message=str(exc),
+        error_message=public_error,
         metadata={
             "session_id": session_id,
             "alert_fingerprint": event.fingerprint,
@@ -135,7 +174,7 @@ def _record_alert_diagnosis_failure(
     metadata.update(
         {
             "alert_auto_diagnosis_status": "failed",
-            "alert_auto_diagnosis_error": str(exc),
+            "alert_auto_diagnosis_error": public_error,
             "alert_auto_diagnosis_session_id": session_id,
             "alert_auto_diagnosis_trace_event_id": trace_event.event_id,
         }
@@ -156,7 +195,7 @@ def _record_alert_diagnosis_failure(
         state.model_copy(
             update={
                 "status": "failed",
-                "status_reason": f"Alert auto diagnosis failed: {exc}",
+                "status_reason": f"Alert auto diagnosis failed: {public_error}",
                 "trace_id": trace_id,
                 "session_id": session_id,
                 "metadata": metadata,

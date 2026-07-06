@@ -241,7 +241,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     }
 ,
     renderAuthTokenState() {
-        const token = (localStorage.getItem('autooncallApiToken') || '').trim();
+        const token = this.readApiToken();
         if (this.apiTokenInput) {
             this.apiTokenInput.value = token;
         }
@@ -254,10 +254,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
     saveApiToken() {
         const token = (this.apiTokenInput?.value || '').trim();
         if (token) {
-            localStorage.setItem(this.apiTokenStorageKey, token);
-            this.showNotification('接口令牌已保存', 'success');
+            this.writeApiToken(token);
+            this.showNotification('接口令牌已保存至当前浏览器会话', 'success');
         } else {
-            localStorage.removeItem(this.apiTokenStorageKey);
+            this.clearApiTokenStorage();
             this.showNotification('接口令牌已清除', 'info');
         }
         this.renderAuthTokenState();
@@ -265,7 +265,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     }
 ,
     clearApiToken() {
-        localStorage.removeItem(this.apiTokenStorageKey);
+        this.clearApiTokenStorage();
         if (this.apiTokenInput) {
             this.apiTokenInput.value = '';
         }
@@ -300,11 +300,45 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     authHeaders(headers = {}) {
         const normalizedHeaders = { ...headers };
-        const token = (localStorage.getItem('autooncallApiToken') || '').trim();
+        const token = this.readApiToken();
         if (token) {
             normalizedHeaders['X-AutoOnCall-Token'] = token;
         }
         return normalizedHeaders;
+    }
+,
+    readApiToken() {
+        try {
+            const sessionToken = (sessionStorage.getItem(this.apiTokenStorageKey) || '').trim();
+            if (sessionToken) return sessionToken;
+            const legacyToken = (localStorage.getItem(this.apiTokenStorageKey) || '').trim();
+            if (legacyToken) {
+                sessionStorage.setItem(this.apiTokenStorageKey, legacyToken);
+                localStorage.removeItem(this.apiTokenStorageKey);
+                return legacyToken;
+            }
+        } catch (error) {
+            console.warn('读取接口令牌失败:', error);
+        }
+        return '';
+    }
+,
+    writeApiToken(token) {
+        try {
+            sessionStorage.setItem(this.apiTokenStorageKey, token);
+            localStorage.removeItem(this.apiTokenStorageKey);
+        } catch (error) {
+            console.warn('保存接口令牌失败:', error);
+        }
+    }
+,
+    clearApiTokenStorage() {
+        try {
+            sessionStorage.removeItem(this.apiTokenStorageKey);
+            localStorage.removeItem(this.apiTokenStorageKey);
+        } catch (error) {
+            console.warn('清除接口令牌失败:', error);
+        }
     }
 ,
     async apiFetch(path, options = {}) {

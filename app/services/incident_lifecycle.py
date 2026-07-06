@@ -62,6 +62,28 @@ AIOPS_RUN_FILTER_STATUSES = [
     "escalated",
 ]
 
+POST_APPROVAL_RUN_STATUSES = {
+    "approval_resumed",
+    "change_validated",
+    "resolved",
+    "rollback_recommended",
+    "precheck_running",
+    "precheck_failed",
+    "dry_run_running",
+    "dry_run_completed",
+    "dry_run_failed",
+    "waiting_manual_execution",
+    "manual_result_required",
+    "manual_execution_recorded",
+    "manual_result_recorded",
+    "sandbox_executing",
+    "sandbox_validated",
+    "observing",
+    "escalated",
+    "closed",
+    "failed",
+}
+
 ALERT_FIRING_STATUSES = {"firing", "active", "triggered"}
 ALERT_RESOLVED_STATUSES = {"resolved", "inactive", "ok", "closed"}
 PRODUCTION_ENVIRONMENT_NAMES = {"prod", "production", "prd", "线上", "生产"}
@@ -365,6 +387,11 @@ def status_from_change_execution(status: str) -> str:
     if status in {"precheck_failed", "dry_run_failed", "escalated"}:
         return status
     return status or "change_pending"
+
+
+def status_after_approved_run(report_status: str) -> str:
+    """Resolve a diagnosis run status after its approval has been granted."""
+    return report_status if report_status in POST_APPROVAL_RUN_STATUSES else "approval_approved"
 
 
 def manual_action_required_from_change_execution(status: str, *, fallback: bool) -> bool:

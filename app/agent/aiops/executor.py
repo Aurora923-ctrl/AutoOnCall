@@ -30,6 +30,8 @@ from app.services.trace_service import trace_service
 from app.tools import get_current_time, retrieve_knowledge
 from app.tools.base import ToolExecutionResult
 from app.tools.registry import ToolRegistry, create_default_tool_registry
+from app.utils.log_safety import summarize_text_for_log
+from app.utils.public_errors import public_exception_message
 
 from .risk_controller import RiskControlDecision, assess_plan_step
 from .state import (
@@ -57,7 +59,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
     plan_step = _get_current_plan_step(current_plan)
     task = _format_plan_step_for_execution(plan_step) if plan_step else plan[0]
-    logger.info(f"当前任务: {task}")
+    logger.info(f"当前任务: {summarize_text_for_log(task, label='task')}")
 
     try:
         local_tools = [get_current_time, retrieve_knowledge]
@@ -126,20 +128,24 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return state_update
 
     except Exception as e:
-        logger.error(f"执行步骤失败: {e}", exc_info=True)
+        public_message = public_exception_message(e, fallback="步骤执行失败，请检查服务端日志")
+        logger.error(
+            "执行步骤失败: "
+            f"error_type={type(e).__name__}, {summarize_text_for_log(e, label='error')}"
+        )
         executed_step = _mark_step(plan_step, "failed") if plan_step else None
         state_update = {
             **remaining_plan_state_update(current_plan, plan),
-            "past_steps": [(task, f"执行失败: {str(e)}")],
+            "past_steps": [(task, public_message)],
             "executed_steps": [executed_step] if executed_step else [],
-            "errors": [f"步骤 {task} 执行失败: {str(e)}"],
+            "errors": [public_message],
         }
         if plan_step:
             failed_result = ToolExecutionResult(
                 tool_name=plan_step.tool_name,
                 status="failed",
                 input_args=plan_step.input_args,
-                error_message=str(e),
+                error_message=public_message,
             )
             persisted_result = _result_for_persistence(failed_result)
             state_update["gathered_evidence"] = [

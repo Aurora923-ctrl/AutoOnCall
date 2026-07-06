@@ -2,15 +2,17 @@
 
 from typing import Any
 
+import httpx
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
-from app.integrations.base import classify_adapter_error
+from app.integrations.base import bearer_headers, classify_adapter_error
 from app.integrations.mysql import MySQLStatusAdapter
 from app.integrations.redis_info import RedisInfoAdapter
+from app.utils.public_errors import public_adapter_error_message
 
 router = APIRouter()
 
@@ -163,7 +165,8 @@ def _check_milvus() -> dict[str, str]:
                 logger.warning(f"Milvus readiness connection failed: {exc}")
                 return {
                     "status": "disconnected",
-                    "message": f"Milvus disconnected: {exc}",
+                    "error_type": classify_adapter_error(exc),
+                    "message": "Milvus disconnected",
                 }
 
         milvus_healthy = milvus_manager.health_check()
@@ -175,19 +178,51 @@ def _check_milvus() -> dict[str, str]:
         logger.warning(f"Milvus health check failed: {exc}")
         return {
             "status": "error",
-            "message": f"Milvus check failed: {exc}",
+            "error_type": classify_adapter_error(exc),
+            "message": "Milvus check failed",
         }
 
 
 async def _external_system_readiness() -> dict[str, Any]:
     checks = {
-        "alertmanager": _configured_only_check(bool(config.alertmanager_base_url)),
-        "prometheus": _configured_only_check(bool(config.prometheus_base_url)),
+        "alertmanager": await _http_get_readiness(
+            base_url=config.alertmanager_base_url,
+            path="/-/ready",
+            token=config.alertmanager_bearer_token,
+            timeout_seconds=config.alertmanager_timeout_seconds,
+        ),
+        "prometheus": await _http_get_readiness(
+            base_url=config.prometheus_base_url,
+            path="/-/ready",
+            token=config.prometheus_bearer_token,
+            timeout_seconds=config.prometheus_timeout_seconds,
+        ),
         "log_gateway": _configured_only_check(bool(config.log_gateway_url)),
-        "jaeger": _configured_only_check(bool(config.jaeger_base_url)),
-        "tempo": _configured_only_check(bool(config.tempo_base_url)),
-        "redpanda": _configured_only_check(bool(config.redpanda_admin_url)),
-        "kubernetes": _configured_only_check(bool(config.kubernetes_api_server)),
+        "jaeger": await _http_get_readiness(
+            base_url=config.jaeger_base_url,
+            path="/api/services",
+            token=config.jaeger_bearer_token,
+            timeout_seconds=config.jaeger_timeout_seconds,
+        ),
+        "tempo": await _http_get_readiness(
+            base_url=config.tempo_base_url,
+            path="/ready",
+            token=config.tempo_bearer_token,
+            timeout_seconds=config.tempo_timeout_seconds,
+        ),
+        "redpanda": await _http_get_readiness(
+            base_url=config.redpanda_admin_url,
+            path="/v1/status/ready",
+            token=config.redpanda_bearer_token,
+            timeout_seconds=config.redpanda_timeout_seconds,
+        ),
+        "kubernetes": await _http_get_readiness(
+            base_url=config.kubernetes_api_server,
+            path="/version",
+            token=config.kubernetes_bearer_token,
+            timeout_seconds=config.kubernetes_timeout_seconds,
+            verify=config.kubernetes_verify_ssl,
+        ),
         "redis": await _redis_readiness(),
         "mysql": await _mysql_readiness(),
         "ticket": _configured_only_check(bool(config.ticket_api_url)),
@@ -211,6 +246,38 @@ def _configured_only_check(configured: bool) -> dict[str, Any]:
     return {
         "status": "configured" if configured else "not_configured",
         "configured": configured,
+    }
+
+
+async def _http_get_readiness(
+    *,
+    base_url: str,
+    path: str,
+    token: str = "",
+    timeout_seconds: float = 5.0,
+    verify: bool = True,
+) -> dict[str, Any]:
+    if not base_url:
+        return {"status": "not_configured", "configured": False}
+
+    normalized_base = base_url.rstrip("/")
+    probe_path = path if path.startswith("/") else f"/{path}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds,
+            headers=bearer_headers(token),
+            verify=verify,
+        ) as client:
+            response = await client.get(f"{normalized_base}{probe_path}")
+            response.raise_for_status()
+    except Exception as exc:
+        return _failed_readiness(exc)
+
+    return {
+        "status": "connected",
+        "configured": True,
+        "probe": probe_path,
+        "message": "external dependency is reachable",
     }
 
 
@@ -241,7 +308,7 @@ def _failed_readiness(exc: Exception) -> dict[str, Any]:
         "status": "failed",
         "configured": True,
         "error_type": classify_adapter_error(exc),
-        "message": str(exc),
+        "message": public_adapter_error_message(exc),
     }
 
 

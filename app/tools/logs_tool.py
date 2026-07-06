@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.config import config
@@ -217,14 +218,19 @@ class QueryLogsTool(AIOpsTool):
 
     @staticmethod
     def _mock_logs(service_name: str) -> list[dict[str, Any]]:
+        now = datetime.now()
         return [
             {
-                "timestamp": "2026-06-22 16:00:01",
+                "timestamp": (now - timedelta(minutes=3, seconds=12)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
                 "level": "ERROR",
                 "message": f"{service_name} Redis connection timeout while calling /api/order/create",
             },
             {
-                "timestamp": "2026-06-22 16:01:14",
+                "timestamp": (now - timedelta(minutes=1, seconds=44)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
                 "level": "ERROR",
                 "message": f"{service_name} request failed with 5xx due to downstream cache timeout",
             },

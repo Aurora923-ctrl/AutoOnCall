@@ -21,7 +21,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo test test-quick eval eval-rag eval-change eval-replanner format format-check lint fix type-check \
+        install install-dev dev run seed-demo demo demo-reports interview-demo test test-quick eval eval-rag eval-change eval-replanner format format-check lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -226,6 +226,14 @@ sandbox-verify:  ## Verify ToolRegistry consumes real full-stack adapter sources
 sandbox-demo:  ## Run deterministic AIOps scenarios against real sandbox adapters
 	@echo "$(YELLOW)🧪 运行 Redis/MySQL/Prometheus 真实数据流演示...$(NC)"
 	$(PYTHON) scripts/sandbox/simulate_mysql_redis_aiops.py
+
+demo-reports:  ## Generate deterministic Redis/MySQL/K8s interview demo reports
+	@echo "$(YELLOW)📝 生成 AIOps 面试演示报告...$(NC)"
+	$(PYTHON) scripts/demo/generate_demo_reports.py
+
+interview-demo:  ## Build fixed interview demo reports and eval summary package
+	@echo "$(YELLOW)📝 生成 AutoOnCall 面试演示包...$(NC)"
+	$(PYTHON) scripts/demo/run_interview_demo.py
 
 # ============================================================
 # MCP 服务管理

@@ -4,6 +4,7 @@
 支持真正的流式输出和更好的模型适配。
 """
 
+import asyncio
 from collections.abc import AsyncGenerator, Sequence
 from datetime import datetime
 from typing import Annotated, Any, cast
@@ -42,6 +43,7 @@ from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
 )
 from app.tools import get_current_time, retrieve_knowledge
+from app.utils.log_safety import summarize_text_for_log
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -198,7 +200,10 @@ class RagAgentService:
             await self._initialize_agent()
             agent = self._require_agent()
 
-            logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
+            logger.info(
+                f"[会话 {session_id}] RAG Agent 收到查询（非流式）: "
+                f"{summarize_text_for_log(question, label='question')}"
+            )
 
             messages = [SystemMessage(content=self.system_prompt), HumanMessage(content=question)]
 
@@ -244,7 +249,11 @@ class RagAgentService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Answer a knowledge-base question with explicit retrieval citations."""
-        retrieval_payload = retrieve_structured_knowledge(question, metadata_filter=metadata_filter)
+        retrieval_payload = await asyncio.to_thread(
+            retrieve_structured_knowledge,
+            question,
+            metadata_filter=metadata_filter,
+        )
         retrieval_context = compact_retrieval_payload(retrieval_payload)
 
         if retrieval_payload.get("status") != "success":
@@ -307,7 +316,10 @@ class RagAgentService:
         content = result.content if hasattr(result, "content") else result
         answer = message_content_to_text(content)
         if history_question:
-            logger.debug(f"[会话 {session_id}] grounded 问答原始问题: {history_question}")
+            logger.debug(
+                f"[会话 {session_id}] grounded 问答原始问题: "
+                f"{summarize_text_for_log(history_question, label='question')}"
+            )
         return answer
 
     async def query_stream(
@@ -333,7 +345,10 @@ class RagAgentService:
             await self._initialize_agent()
             agent = self._require_agent()
 
-            logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
+            logger.info(
+                f"[会话 {session_id}] RAG Agent 收到查询（流式）: "
+                f"{summarize_text_for_log(question, label='question')}"
+            )
 
             # 构建消息列表（系统提示 + 用户问题）
             messages = [SystemMessage(content=self.system_prompt), HumanMessage(content=question)]
@@ -401,7 +416,11 @@ class RagAgentService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream a grounded answer and expose retrieval details before generation."""
-        retrieval_payload = retrieve_structured_knowledge(question, metadata_filter=metadata_filter)
+        retrieval_payload = await asyncio.to_thread(
+            retrieve_structured_knowledge,
+            question,
+            metadata_filter=metadata_filter,
+        )
         retrieval_context = compact_retrieval_payload(retrieval_payload)
 
         if retrieval_payload.get("status") != "success":
@@ -528,7 +547,10 @@ class RagAgentService:
             if text:
                 yield {"type": "content", "data": text, "node": "grounded_model"}
         if history_question:
-            logger.debug(f"[会话 {session_id}] grounded 流式问答原始问题: {history_question}")
+            logger.debug(
+                f"[会话 {session_id}] grounded 流式问答原始问题: "
+                f"{summarize_text_for_log(history_question, label='question')}"
+            )
         yield {"type": "complete"}
 
     def get_session_history(self, session_id: str) -> list:

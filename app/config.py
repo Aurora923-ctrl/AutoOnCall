@@ -37,6 +37,7 @@ LOCAL_FULL_STACK_ENV = {
     "KUBERNETES_VERIFY_SSL": "false",
     "REDIS_URL": "redis://127.0.0.1:16379/0",
     "REDIS_INSTANCES": '{"redis-cluster-prod":"redis://127.0.0.1:16379/0"}',
+    "REDIS_ALLOW_ADMIN_COMMANDS": "true",
     "MYSQL_DSN": (
         "mysql+pymysql://autooncall:autooncall123@127.0.0.1:13306/autooncall?charset=utf8mb4"
     ),
@@ -79,6 +80,8 @@ class Settings(BaseSettings):
     dashscope_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_model: str = "qwen-max"
     dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
+    dashscope_embedding_batch_size: int = 64
+    dashscope_embedding_max_retries: int = 2
 
     # ---- Milvus 向量库配置 ----------------------------------------------------
     milvus_host: str = "localhost"
@@ -121,6 +124,7 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = (
         f"http://{LOCAL_DEMO_HOST}:{LOCAL_DEMO_PORT},http://localhost:{LOCAL_DEMO_PORT}"
     )
+    production_exposure_strict: bool = False
     log_retention_days: int = 14
 
     # ---- 内部 API Token / RBAC 配置 ------------------------------------------
@@ -202,7 +206,7 @@ class Settings(BaseSettings):
     redis_url: str = ""
     redis_instances: str = ""
     redis_timeout_seconds: float = 5.0
-    redis_allow_admin_commands: bool = True
+    redis_allow_admin_commands: bool = False
 
     # ---- MySQL 适配器与状态存储配置 ------------------------------------------
     mysql_dsn: str = ""

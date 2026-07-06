@@ -442,4 +442,21 @@ async def test_a2a_message_send_rejects_unknown_skill(monkeypatch) -> None:
         )
 
     assert response.status_code == 400
-    assert "Unsupported A2A skill" in response.json()["detail"]
+    assert response.json()["detail"] == "请求状态不满足当前操作，请刷新后重试"
+    assert "Unsupported A2A skill" not in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a2a_get_task_hides_internal_lookup_error(monkeypatch) -> None:
+    install_fake_facade(monkeypatch)
+    app = build_test_app(monkeypatch, enabled=True)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/a2a/v1/tasks/a2a-task-secret-url")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "请求的资源不存在或已过期"
+    assert "a2a-task-secret-url" not in response.json()["detail"]

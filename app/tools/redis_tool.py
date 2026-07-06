@@ -1,21 +1,20 @@
-"""Redis status tool with deterministic mock output."""
+﻿"""Redis status tool with deterministic mock output."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.config import config
-from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.redis_info import RedisInfoAdapter
 from app.services.service_topology import get_primary_dependency_instance
 from app.tools.base import AIOpsTool, clamp_duration
+from app.tools.fallback import run_adapter_or_mock
 
 
 class QueryRedisStatusTool(AIOpsTool):
     """Query or mock Redis connection, maxclients, memory, and slowlog status."""
 
     name = "query_redis_status"
-    description = "查询 Redis 连接数、maxclients、内存使用和慢日志状态"
+    description = "Query Redis connection, maxclients, memory, and slowlog status."
     input_schema = {
         "type": "object",
         "properties": {
@@ -30,7 +29,8 @@ class QueryRedisStatusTool(AIOpsTool):
     timeout_seconds = 8.0
     data_sources = ["Redis INFO", "service topology", "mock"]
     degradation_strategy = (
-        "Redis 实例不可达时使用拓扑推断实例并返回 mock 连接数证据；关闭 mock 后返回结构化不可用结果"
+        "Use Redis INFO when configured; otherwise return mock data when enabled or a "
+        "structured unavailable payload when mock fallback is disabled."
     )
 
     def __init__(self, redis_adapter: RedisInfoAdapter | None = None):
@@ -52,35 +52,23 @@ class QueryRedisStatusTool(AIOpsTool):
         )
         input_args["time_range"] = time_range
 
-        if self._redis_adapter.configured:
-            try:
-                return await self._redis_adapter.query_status(
-                    service_name, redis_instance, time_range
-                )
-            except Exception as exc:
-                if config.aiops_mock_fallback_enabled and self._allow_adapter_failure_fallback:
-                    return self._mock_status(service_name, redis_instance, time_range)
-                payload = adapter_failure(
-                    "redis_info",
-                    exc,
-                    summary_prefix="Redis INFO 查询失败",
-                    service_name=service_name,
-                    redis_instance=redis_instance,
-                    time_range=time_range,
-                )
-                return payload
-
-        if not config.aiops_mock_fallback_enabled:
-            return adapter_not_configured(
-                "redis_info",
-                required_config="REDIS_HOST",
-                summary_prefix="Redis 状态查询不可用",
-                service_name=service_name,
-                redis_instance=redis_instance,
-                time_range=time_range,
-            )
-
-        return self._mock_status(service_name, redis_instance, time_range)
+        return await run_adapter_or_mock(
+            configured=self._redis_adapter.configured,
+            adapter_call=lambda: self._redis_adapter.query_status(
+                service_name, redis_instance, time_range
+            ),
+            mock_call=lambda: self._mock_status(service_name, redis_instance, time_range),
+            source="redis_info",
+            required_config="REDIS_HOST",
+            failure_summary_prefix="Redis INFO query failed",
+            not_configured_summary_prefix="Redis status query unavailable",
+            payload={
+                "service_name": service_name,
+                "redis_instance": redis_instance,
+                "time_range": time_range,
+            },
+            allow_failure_fallback=self._allow_adapter_failure_fallback,
+        )
 
     @staticmethod
     def _mock_status(service_name: str, redis_instance: str, time_range: str) -> dict[str, Any]:
@@ -107,9 +95,9 @@ class QueryRedisStatusTool(AIOpsTool):
             "alert_info": {
                 "triggered": exhausted,
                 "message": (
-                    "Redis connected_clients 接近 maxclients，疑似连接数耗尽"
+                    "Redis connected_clients is close to maxclients"
                     if exhausted
-                    else "Redis 连接数处于正常范围"
+                    else "Redis connection count is within normal range"
                 ),
             },
             "summary": (

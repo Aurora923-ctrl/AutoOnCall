@@ -580,12 +580,17 @@ def _approval_state_update(
 
 def _extract_risk_decision(state: PlanExecuteState) -> RiskControlDecision | None:
     """Infer risk from remaining structured plan steps."""
+    registry = create_default_tool_registry([])
     for raw_step in state.get("current_plan", []):
         try:
             step = raw_step if isinstance(raw_step, PlanStep) else PlanStep(**raw_step)
         except Exception:
             continue
-        decision = assess_plan_step(step, incident=state.get("incident"))
+        decision = assess_plan_step(
+            step,
+            tool_registry=registry,
+            incident=state.get("incident"),
+        )
         if decision.policy != "allow":
             return decision
     return None

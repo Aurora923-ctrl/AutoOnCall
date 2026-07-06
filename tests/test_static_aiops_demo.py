@@ -52,6 +52,10 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "autooncallAIOpsRun" in script
     assert "loadLastAIOpsRunState" in script
     assert "saveLastAIOpsRunState" in script
+    assert "sessionStorage.getItem(this.aiOpsRunStorageKey)" in script
+    assert "sessionStorage.setItem(this.aiOpsRunStorageKey" in script
+    assert "localStorage.removeItem(this.aiOpsRunStorageKey)" in script
+    assert "clearLastAIOpsRunState" in script
     assert "restoreLastAIOpsRun" in script
     assert "refreshAIOpsRunStatus" in script
     assert "refreshAIOpsRuns" in script
@@ -157,7 +161,10 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "formatEvalMetric" in script
     assert "apiGetWithStatus" in script
     assert "apiFetch(path, options = {})" in script
-    assert "localStorage.getItem('autooncallApiToken')" in script
+    assert "sessionStorage.getItem(this.apiTokenStorageKey)" in script
+    assert "localStorage.removeItem(this.apiTokenStorageKey)" in script
+    assert "readApiToken" in script
+    assert "writeApiToken" in script
     assert "X-AutoOnCall-Token" in script
     assert "renderAuthTokenState" in script
     assert "saveApiToken" in script
@@ -171,6 +178,8 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "window.location.protocol === 'file:' ? '.' : '/static'" in page
     assert "autooncallStylesheet" in page
     assert "appScript.src" in page
+    assert "cdn.jsdelivr.net" not in page
+    assert "renderBasicMarkdown" in script
     assert "/health/live" in script
     assert "/health/ready" in script
     assert "mergeHealthChecks" in script

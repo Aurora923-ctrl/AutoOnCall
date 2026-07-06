@@ -32,6 +32,7 @@ from app.services.a2a_facade import (
     SUPPORTED_A2A_SKILLS,
     a2a_facade,
 )
+from app.utils.public_errors import public_exception_message
 
 discovery_router = APIRouter()
 router = APIRouter()
@@ -108,9 +109,9 @@ async def message_send(
         authenticate_a2a_message(payload, credentials, x_autooncall_token)
         return a2a_json(await a2a_facade.send_message(payload))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_exception_message(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_exception_message(exc)) from exc
 
 
 @router.post("/message:stream")
@@ -124,16 +125,20 @@ async def message_stream(
     try:
         authenticate_a2a_message(payload, credentials, x_autooncall_token)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_exception_message(exc)) from exc
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         try:
             async for event in a2a_facade.stream_message(payload):
                 yield a2a_sse_message(event)
         except LookupError as exc:
-            yield a2a_sse_message({"error": {"code": "not_found", "message": str(exc)}})
+            yield a2a_sse_message(
+                {"error": {"code": "not_found", "message": public_exception_message(exc)}}
+            )
         except ValueError as exc:
-            yield a2a_sse_message({"error": {"code": "bad_request", "message": str(exc)}})
+            yield a2a_sse_message(
+                {"error": {"code": "bad_request", "message": public_exception_message(exc)}}
+            )
 
     return EventSourceResponse(event_generator(), media_type="text/event-stream")
 
@@ -145,7 +150,7 @@ async def get_task(task_id: str) -> JSONResponse:
     try:
         return a2a_json(a2a_facade.get_task(task_id))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_exception_message(exc)) from exc
 
 
 @router.get("/tasks", dependencies=[Depends(require_scope(READ_SCOPE))])

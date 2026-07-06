@@ -3,6 +3,8 @@ Planner 节点：制定执行计划
 基于 LangGraph 官方教程实现
 """
 
+import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from textwrap import dedent
@@ -18,9 +20,11 @@ from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
 from app.models.evidence import Evidence
 from app.models.plan import PlanStep
+from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
 from app.tools import get_current_time, retrieve_knowledge
 from app.tools.registry import create_default_tool_registry
+from app.utils.log_safety import summarize_text_for_log
 
 from .plan_fallback import (
     build_fallback_plan,
@@ -113,6 +117,17 @@ def _create_planner_llm() -> Any:
     )
 
 
+async def _call_knowledge_retriever(
+    knowledge_retriever: Callable[[str], dict[str, Any]],
+    query: str,
+) -> dict[str, Any]:
+    """Call the sync retrieval stack without blocking the event loop."""
+    result = await asyncio.to_thread(knowledge_retriever, query)
+    if inspect.isawaitable(result):
+        result = await result
+    return dict(result or {})
+
+
 async def planner(
     state: PlanExecuteState,
     dependencies: PlannerDependencies | None = None,
@@ -136,14 +151,19 @@ async def planner(
     retrieval_query = _build_planner_retrieval_query(input_text, incident)
     runbook_evidence: list[dict[str, Any]] = []
     planner_warnings: list[str] = []
-    logger.info(f"用户输入: {input_text}")
-    logger.info(f"Runbook 检索查询: {retrieval_query}")
+    logger.info(f"用户输入: {summarize_text_for_log(input_text, label='aiops_input')}")
+    logger.info(
+        f"Runbook 检索查询: {summarize_text_for_log(retrieval_query, label='retrieval_query')}"
+    )
 
     try:
         logger.info("查询内部文档，寻找相关经验...")
         experience_docs = ""
         try:
-            retrieval_payload = knowledge_retriever(retrieval_query)
+            retrieval_payload = await _call_knowledge_retriever(
+                knowledge_retriever,
+                retrieval_query,
+            )
             if retrieval_payload.get("status") == "success":
                 experience_docs = str(retrieval_payload.get("content") or "")
                 runbook_evidence.append(
@@ -161,7 +181,7 @@ async def planner(
                         inference="Runbook 命中结果用于约束诊断计划，但仍需工具证据验证现场状态。",
                         uncertainty="知识库内容可能滞后，不能替代实时指标、日志和依赖状态。",
                         next_step="按计划调用只读工具采集实时证据。",
-                        raw_data={"output": retrieval_payload},
+                        raw_data={"output": compact_retrieval_payload(retrieval_payload)},
                         confidence=0.65,
                         related_hypothesis="Runbook knowledge used for planning",
                     ).model_dump(mode="json")
@@ -229,7 +249,10 @@ async def planner(
         )
         logger.info(f"结构化计划已生成，共 {len(structured_steps)} 个步骤")
         for i, step in enumerate(structured_steps, 1):
-            logger.info(f"  步骤{i}: {step.model_dump(mode='json')}")
+            logger.info(
+                f"  步骤{i}: tool={step.tool_name}, risk={step.risk_level}, "
+                f"{summarize_text_for_log(step.purpose, label='purpose')}"
+            )
 
         return {
             **normalize_plan_state_update(structured_steps),

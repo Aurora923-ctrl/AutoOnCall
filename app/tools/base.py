@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.utils.public_errors import public_exception_message
+
 ToolStatus = Literal["success", "failed"]
 RiskLevel = Literal["low", "medium", "high"]
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhd])\s*$", re.IGNORECASE)
@@ -107,7 +109,7 @@ class AIOpsTool:
                 latency_ms=elapsed_ms(started_at),
                 risk_level=self.risk_level,
                 read_only=self.read_only,
-                error_message=str(exc),
+                error_message=public_exception_message(exc),
             )
 
     async def run(self, input_args: dict[str, Any]) -> ToolExecutionResult:

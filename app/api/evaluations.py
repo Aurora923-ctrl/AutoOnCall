@@ -31,9 +31,9 @@ async def get_eval_summary() -> dict[str, Any]:
 
     try:
         raw_payload = json.loads(EVAL_SUMMARY_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError):
         return build_eval_unavailable_payload(
-            f"evaluation summary is unreadable: {exc}",
+            "evaluation summary is unreadable",
             summary_path=EVAL_SUMMARY_PATH,
         )
 
@@ -57,9 +57,9 @@ async def get_adapter_verification() -> dict[str, Any]:
 
     try:
         raw_payload = json.loads(ADAPTER_VERIFICATION_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError):
         return build_adapter_unavailable_payload(
-            f"adapter verification is unreadable: {exc}",
+            "adapter verification is unreadable",
             adapter_path=ADAPTER_VERIFICATION_PATH,
         )
 

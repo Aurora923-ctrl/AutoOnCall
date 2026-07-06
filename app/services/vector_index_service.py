@@ -91,6 +91,33 @@ class IndexingResult:
             "empty_files": self.empty_files,
         }
 
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return an API-safe result without local filesystem details."""
+        payload = self.to_dict()
+        payload["directory_path"] = _public_path_label(self.directory_path)
+        payload["directory_name"] = _public_path_label(self.directory_path)
+        payload["error_message"] = _public_index_error_message(
+            self.error_type,
+            self.error_message,
+        )
+        payload["success_files"] = [
+            {
+                **file_info,
+                "file_path": _public_path_label(str(file_info.get("file_path") or "")),
+                "file_name": _public_path_label(str(file_info.get("file_path") or "")),
+            }
+            for file_info in self.success_files
+        ]
+        payload["failed_files"] = {
+            _public_path_label(file_path): _public_index_error_message("file_indexing_error", error)
+            for file_path, error in self.failed_files.items()
+        }
+        payload["empty_files"] = {
+            _public_path_label(file_path): message
+            for file_path, message in self.empty_files.items()
+        }
+        return payload
+
 
 class SingleFileIndexingResult:
     """Result for indexing one uploaded knowledge file."""
@@ -140,6 +167,23 @@ class IndexPathForbiddenError(IndexingValidationError):
 
 class InvalidIndexDirectoryError(IndexingValidationError):
     """Raised when a directory target cannot be indexed."""
+
+
+def _public_path_label(path: str) -> str:
+    """Return a display label for a path without exposing parent directories."""
+    normalized = str(path or "").replace("\\", "/").rstrip("/")
+    if not normalized:
+        return ""
+    return normalized.rsplit("/", 1)[-1] or "root"
+
+
+def _public_index_error_message(error_type: str, message: str) -> str:
+    """Return an indexing error message safe for API responses."""
+    if not message:
+        return ""
+    if error_type in {"forbidden_directory", "invalid_directory"}:
+        return message
+    return "索引失败，请检查服务端日志"
 
 
 class VectorIndexService:

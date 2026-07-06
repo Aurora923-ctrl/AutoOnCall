@@ -200,13 +200,22 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     loadLastAIOpsRunState() {
         try {
-            const stored = localStorage.getItem('autooncallAIOpsRun');
-            if (!stored) return null;
-            const payload = JSON.parse(stored);
+            const stored = sessionStorage.getItem(this.aiOpsRunStorageKey);
+            const legacyStored = localStorage.getItem(this.aiOpsRunStorageKey);
+            if (!stored && legacyStored) {
+                sessionStorage.setItem(this.aiOpsRunStorageKey, legacyStored);
+            }
+            if (legacyStored) {
+                localStorage.removeItem(this.aiOpsRunStorageKey);
+            }
+            const activeStored = stored || legacyStored;
+            if (!activeStored) return null;
+            const payload = JSON.parse(activeStored);
             if (!payload || typeof payload !== 'object') return null;
             return payload.session_id || payload.diagnosis_run_id ? payload : null;
         } catch (e) {
             console.error('加载最近诊断任务失败:', e);
+            this.clearLastAIOpsRunState();
             return null;
         }
     }
@@ -256,11 +265,22 @@ Object.assign(window.AutoOnCallApp.prototype, {
 
         this.lastAIOpsRunState = payload;
         try {
-            localStorage.setItem(this.aiOpsRunStorageKey, JSON.stringify(payload));
+            sessionStorage.setItem(this.aiOpsRunStorageKey, JSON.stringify(payload));
+            localStorage.removeItem(this.aiOpsRunStorageKey);
         } catch (e) {
             console.error('保存最近诊断任务失败:', e);
         }
         this.upsertAIOpsRunHistoryItem(this.buildAIOpsRunHistoryItem(payload));
+    }
+,
+    clearLastAIOpsRunState() {
+        this.lastAIOpsRunState = null;
+        try {
+            sessionStorage.removeItem(this.aiOpsRunStorageKey);
+            localStorage.removeItem(this.aiOpsRunStorageKey);
+        } catch (e) {
+            console.error('清理最近诊断任务失败:', e);
+        }
     }
 ,
     async restoreLastAIOpsRun() {
