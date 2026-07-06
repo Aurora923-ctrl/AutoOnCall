@@ -2,13 +2,56 @@
 
 这份文档用于快速理解 AutoOnCall 的当前代码和面试表达。根目录 `README.md` 是项目主说明，完整项目分析见 `文档/AutoOnCall项目分析书.md`；这里重点讲“怎么读代码、怎么演示、怎么回答追问、哪些边界不能夸大”。
 
-## 1. 一句话定位
+## 1. 项目叙事总纲
 
-AutoOnCall 是一个面向 OnCall 故障诊断场景的 RAG + AIOps Agent 原型。它把 Alertmanager 告警、结构化 Incident、RAG Runbook、Plan-Execute-Replan、工具取证、证据分析、风险审批、Trace、诊断报告和安全变更记录串成一条可解释、可审计、可评测的诊断闭环。
+### 1.1 一句话定位
 
-面试 30 秒版：
+AutoOnCall 是一个面向 OnCall 故障诊断场景的 RAG + AIOps Agent 系统。它把告警接入、结构化 Incident、RAG Runbook、Plan-Execute-Replan 诊断、工具取证、证据分析、风险审批、Trace、诊断报告和安全变更记录串成一条可解释、可审计、可评测的诊断闭环。
+
+### 1.2 为什么做这个项目
+
+线上故障排查的难点不在于“能不能让模型说出一个原因”，而在于排障信息分散、过程不可复盘、自动化动作有风险：
+
+- 信息分散：指标、日志、Trace、K8s、Redis、MySQL、发布历史、工单和 Runbook 分散在不同系统里。
+- 过程不可复盘：如果诊断只是一段聊天记录，就很难回答“看过哪些证据、为什么这么判断、哪里不确定”。
+- 自动化有风险：如果 Agent 可以直接重启服务、删 Pod、执行 SQL 或修改配置，就可能放大事故。
+
+所以这个项目的设计目标不是做一个“很会聊天的运维助手”，而是把大模型放进一个受控的后端工程系统里：模型负责计划和表达，工具负责取证，Evidence 和 Trace 负责复盘，Risk Controller 和 Approval 负责阻断危险动作，离线评测负责防止核心链路回归。
+
+### 1.3 主链路怎么讲
+
+面试时优先讲这一条链路：
+
+```text
+Alert / Incident
+  -> Planner 拆解排查计划
+  -> Executor 通过 Tool Registry 调用指标、日志、Trace、Redis、MySQL、K8s、Runbook 等工具
+  -> ToolExecutionResult 归一成 Evidence + ToolCallRecord
+  -> Evidence Analyzer 判断证据是否充分、是否冲突、是否缺失
+  -> Replanner 决定继续补查、请求审批、生成报告或升级人工
+  -> Trace + Report + IncidentState 支撑复盘
+```
+
+这条链路要反复强调三个关键词：
+
+- **可解释**：报告不是模型凭空生成，而是基于工具调用和 Evidence。
+- **可审计**：Trace、ToolCallRecord、Approval、Report 和 IncidentState 都能落库查询。
+- **可控风险**：高风险动作进入审批，危险动作直接 forbidden，审批后也不自动执行生产写操作。
+
+### 1.4 面试 30 秒版
 
 > 我做的是一个面向线上故障诊断的 AIOps Incident Agent。外部告警可以通过 Alertmanager webhook 进入系统，系统会标准化告警并创建 Incident；诊断时用 LangGraph 做 Planner、Executor、Replanner，Executor 通过 Tool Registry 调用指标、日志、K8s、Redis、MySQL、Runbook 等工具，把结果归一成 Evidence 和 ToolCallRecord。高风险动作不会自动执行，而是进入审批或 dry-run；全过程会写 Trace、报告和运行态存储，并通过前端工作台和离线评测展示。
+
+### 1.5 面试 3 分钟版
+
+可以按下面这个顺序展开：
+
+1. 我先把 OnCall 故障抽象成 `AlertEvent` 和 `IncidentState`，让系统有稳定的业务对象，而不是只有一段用户输入。
+2. 知识侧用 RAG 管理 Runbook，但我没有让模型无条件回答：检索后会经过 hybrid search、rerank、trust gate 和 citation guard，无可信来源时拒答。
+3. 诊断侧用 LangGraph 做 Plan-Execute-Replan。Planner 生成结构化 `PlanStep`，Executor 通过 Tool Registry 调指标、日志、Trace、Redis、MySQL、K8s 和 Runbook，Replanner 根据证据决定补查、审批或报告。
+4. 工具结果不会直接丢给模型，而是统一转成 `ToolExecutionResult`、`Evidence` 和 `ToolCallRecord`，前端、报告、Trace 和评测都复用这套结构。
+5. 风险控制是项目边界：只读排查自动执行，中高风险动作进入审批，危险 SQL、删 Pod、危险 shell 直接禁止；审批通过后也只进入 pre-check、dry-run、sandbox 或人工记录。
+6. 最后用 pytest、AIOps eval、RAG eval、安全变更 eval 和 hygiene check 做质量门禁。离线评测只代表回归保障，不包装成线上准确率。
 
 ## 2. 当前真实能力边界
 
@@ -47,6 +90,9 @@ app/agent/aiops/
 app/services/
   alert_ingestion_service.py      告警标准化、去重、IncidentState 更新
   aiops_service.py                构建 LangGraph 并输出 SSE
+  aiops_service_helpers.py        AIOps 状态合并、终态映射、Trace 事件附加等纯 helper
+  aiops_resume_reports.py         审批恢复时基于持久化报告补齐报告闭环
+  aiops_diagnosis_tasks.py        默认诊断任务模板
   rag_agent_service.py            RAG 回答、引用兜底、拒答
   rag_retrieval_service.py        hybrid search、rerank、metadata filter
   sqlite_store.py / mysql_store.py 运行态存储
@@ -192,13 +238,13 @@ make sandbox-demo
 
 | 时间 | 操作 | 要讲清楚什么 |
 | --- | --- | --- |
-| 0:00-1:00 | 打开 README 和工作台 | 项目定位：面向 OnCall 的 RAG + AIOps Agent，不是普通聊天 |
+| 0:00-1:00 | 打开 README 和工作台 | 项目定位：不是聊天机器人，而是 OnCall 诊断闭环 |
 | 1:00-2:30 | 在知识问答中问 Runbook 问题 | 展示引用、拒答、RAG 可信边界 |
-| 2:30-4:30 | 选择 Redis maxclients demo 发起诊断 | 展示 Incident 输入、Planner 计划、SSE 过程 |
-| 4:30-6:00 | 打开工具调用和证据链 | 说明 ToolExecutionResult 如何转成 Evidence / ToolCallRecord |
-| 6:00-7:30 | 打开报告和 Trace | 说明结论来自证据，Trace 可复盘 |
-| 7:30-8:30 | 演示 forbidden SQL 或审批场景 | 说明风险动作不会自动执行 |
-| 8:30-10:00 | 展示评测命令或评测面板 | 说明测试/eval 是离线回归，不等于线上准确率 |
+| 2:30-4:30 | 选择 Redis maxclients 或 MySQL slow query demo 发起诊断 | 展示 Incident 输入、Planner 计划、SSE 过程 |
+| 4:30-6:30 | 打开工具调用和证据链 | 说明 ToolExecutionResult 如何转成 Evidence / ToolCallRecord |
+| 6:30-8:00 | 打开报告、Trace 和 Incident 状态 | 说明结论来自证据，诊断过程可回放 |
+| 8:00-9:00 | 演示 forbidden SQL 或审批场景 | 说明风险动作不会自动执行生产写操作 |
+| 9:00-10:00 | 展示评测命令或评测面板 | 说明测试/eval 是离线回归，不等于线上准确率 |
 
 ### 5.3 RAG 问答演示问题
 

@@ -36,7 +36,7 @@ class QueryMetricsTool(AIOpsTool):
     timeout_seconds = 12.0
     data_sources = ["MCP monitor", "Prometheus", "mock"]
     degradation_strategy = (
-        "优先使用 MCP/Prometheus；单项指标失败时保留 partial_errors 并用 mock 指标补齐可解释证据"
+        "优先使用 MCP/Prometheus；MCP 仅返回实际可得指标，mock 只在显式开启时补齐演示证据"
     )
 
     def __init__(
@@ -118,12 +118,19 @@ class QueryMetricsTool(AIOpsTool):
                 cpu=cpu_output or self._mock_cpu(service_name),
                 memory=memory_output or self._mock_memory(service_name),
                 partial_errors=partial_errors,
+                include_synthetic_baseline=source != "mcp_monitor",
                 source_detail={
                     "cpu": "mcp_monitor" if cpu_output else "mock_fallback",
                     "memory": "mcp_monitor" if memory_output else "mock_fallback",
-                    "qps": "synthetic_demo_baseline",
-                    "p95_latency_ms": "synthetic_demo_baseline",
-                    "error_rate": "synthetic_demo_baseline",
+                    "qps": "synthetic_demo_baseline"
+                    if source != "mcp_monitor"
+                    else "unavailable",
+                    "p95_latency_ms": "synthetic_demo_baseline"
+                    if source != "mcp_monitor"
+                    else "unavailable",
+                    "error_rate": "synthetic_demo_baseline"
+                    if source != "mcp_monitor"
+                    else "unavailable",
                 },
             )
             return output
@@ -165,6 +172,7 @@ class QueryMetricsTool(AIOpsTool):
             cpu=self._mock_cpu(service_name),
             memory=self._mock_memory(service_name),
             partial_errors=partial_errors,
+            include_synthetic_baseline=True,
             source_detail={
                 "cpu": "mock",
                 "memory": "mock",
@@ -185,6 +193,7 @@ class QueryMetricsTool(AIOpsTool):
         memory: Any,
         partial_errors: list[dict[str, Any]],
         source_detail: dict[str, str],
+        include_synthetic_baseline: bool,
     ) -> dict[str, Any]:
         """Build the stable metrics payload shared by MCP and mock paths."""
         output = {
@@ -192,24 +201,49 @@ class QueryMetricsTool(AIOpsTool):
             "time_range": time_range,
             "interval": interval,
             "source": source,
-            "qps": {"current": 1280, "baseline": 900, "trend": "up"},
-            "p95_latency_ms": {"current": 3250, "threshold": 1000, "status": "high"},
-            "error_rate": {"current": 0.082, "threshold": 0.01, "status": "high"},
             "cpu": cpu,
             "memory": memory,
             "source_detail": source_detail,
-            "synthetic_fields": [
-                key for key, value in source_detail.items() if value == "synthetic_demo_baseline"
-            ],
         }
+        if include_synthetic_baseline:
+            output.update(
+                {
+                    "qps": {"current": 1280, "baseline": 900, "trend": "up"},
+                    "p95_latency_ms": {"current": 3250, "threshold": 1000, "status": "high"},
+                    "error_rate": {"current": 0.082, "threshold": 0.01, "status": "high"},
+                }
+            )
+        synthetic_fields = [
+            key for key, value in source_detail.items() if value == "synthetic_demo_baseline"
+        ]
+        if synthetic_fields:
+            output["synthetic_fields"] = synthetic_fields
         if partial_errors:
             output["partial_errors"] = partial_errors
-        output["summary"] = (
-            f"{service_name} P95={output['p95_latency_ms']['current']}ms, "
-            f"5xx={output['error_rate']['current'] * 100:.2f}%, "
-            f"metrics_source={output['source']}"
-        )
+        output["summary"] = self._build_metrics_summary(output)
         return output
+
+    @staticmethod
+    def _build_metrics_summary(output: dict[str, Any]) -> str:
+        service_name = str(output.get("service_name") or "unknown-service")
+        source = str(output.get("source") or "unknown")
+        p95 = output.get("p95_latency_ms")
+        error_rate = output.get("error_rate")
+        if isinstance(p95, dict) and isinstance(error_rate, dict):
+            return (
+                f"{service_name} P95={p95.get('current')}ms, "
+                f"5xx={float(error_rate.get('current') or 0) * 100:.2f}%, "
+                f"metrics_source={source}"
+            )
+        available = [
+            name
+            for name in ("cpu", "memory")
+            if isinstance(output.get(name), dict) and output.get(name)
+        ]
+        return (
+            f"{service_name} metrics_source={source}, "
+            f"available_metrics={','.join(available) or 'none'}"
+        )
 
     def _build_partial_mcp_failure_output(
         self,

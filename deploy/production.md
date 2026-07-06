@@ -66,14 +66,14 @@ The endpoint normalizes `alerts[]`, deduplicates by fingerprint, creates or upda
 SQLite stores runtime state by default; MySQL can be enabled with `AIOPS_STORAGE_BACKEND=mysql`. The cleanup script supports both backends:
 
 ```powershell
-.\venv\Scripts\python.exe scripts\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14 --dry-run
-.\venv\Scripts\python.exe scripts\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14
+.\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14 --dry-run
+.\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14
 ```
 
 For the configured backend, omit `--database`:
 
 ```powershell
-.\venv\Scripts\python.exe scripts\cleanup_aiops_store.py --keep-days 14 --dry-run
+.\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --keep-days 14 --dry-run
 ```
 
 The cleanup command deletes old records from `alert_events`, `trace_events`, `approval_requests`, `diagnosis_reports`, `change_executions`, `aiops_sessions`, and `incident_states`.
@@ -81,9 +81,26 @@ The cleanup command deletes old records from `alert_events`, `trace_events`, `ap
 SQLite-to-MySQL migration:
 
 ```powershell
-.\venv\Scripts\python.exe scripts\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db --dry-run
-.\venv\Scripts\python.exe scripts\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db
+.\venv\Scripts\python.exe scripts\maintenance\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db --dry-run
+.\venv\Scripts\python.exe scripts\maintenance\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db
 ```
+
+## Container Image
+
+The repository includes a minimal `Dockerfile` for packaging the FastAPI app and
+static workbench:
+
+```bash
+docker build -t autooncall:local .
+docker run --rm -p 9900:9900 --env-file .env autooncall:local
+```
+
+This image is a delivery wrapper, not a full production platform. It does not
+bundle Milvus, MySQL, Redis, Prometheus, Loki, Kubernetes mocks, or secret
+management. Configure those dependencies through compose, managed services, or
+an internal platform, and keep the safety defaults in this document in place.
+The `.dockerignore` file excludes local virtual environments, logs, uploads,
+SQLite databases, coverage reports, and `.env` files from the image context.
 
 ## Minimal Health Gate
 

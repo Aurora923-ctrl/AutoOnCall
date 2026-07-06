@@ -1,5 +1,7 @@
 """Milvus 客户端工厂模块"""
 
+from threading import RLock
+
 from loguru import logger
 from pymilvus import (
     Collection,
@@ -63,6 +65,7 @@ class MilvusClientManager:
         """初始化 Milvus 客户端管理器"""
         self._client: MilvusClient | None = None
         self._collection: Collection | None = None
+        self._lock = RLock()
 
     def connect(self) -> MilvusClient:
         """
@@ -78,66 +81,71 @@ class MilvusClientManager:
             logger.debug("Milvus 已连接，跳过重复 connect")
             return self._client
 
-        try:
-            _patch_pymilvus_milvus_client_orm_alias()
+        with self._lock:
+            if self._collection is not None and self._client is not None:
+                logger.debug("Milvus 已连接，跳过重复 connect")
+                return self._client
 
-            logger.info(f"正在连接到 Milvus: {config.milvus_host}:{config.milvus_port}")
+            try:
+                _patch_pymilvus_milvus_client_orm_alias()
 
-            connections.connect(
-                alias="default",
-                host=config.milvus_host,
-                port=str(config.milvus_port),
-                timeout=config.milvus_timeout / 1000,  # 转换为秒
-            )
+                logger.info(f"正在连接到 Milvus: {config.milvus_host}:{config.milvus_port}")
 
-            uri = f"http://{config.milvus_host}:{config.milvus_port}"
-            self._client = MilvusClient(uri=uri)
+                connections.connect(
+                    alias="default",
+                    host=config.milvus_host,
+                    port=str(config.milvus_port),
+                    timeout=config.milvus_timeout / 1000,  # 转换为秒
+                )
 
-            logger.info("成功连接到 Milvus")
+                uri = f"http://{config.milvus_host}:{config.milvus_port}"
+                self._client = MilvusClient(uri=uri)
 
-            if not self._collection_exists():
-                logger.info(f"collection '{self.COLLECTION_NAME}' 不存在，正在创建...")
-                self._create_collection()
-                logger.info(f"成功创建 collection '{self.COLLECTION_NAME}'")
-            else:
-                logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
-                self._collection = Collection(self.COLLECTION_NAME)
+                logger.info("成功连接到 Milvus")
 
-                schema = self._collection.schema
-                vector_field = None
-                existing_dim = None
-                for field in schema.fields:
-                    if field.name == "vector":
-                        vector_field = field
-                        break
+                if not self._collection_exists():
+                    logger.info(f"collection '{self.COLLECTION_NAME}' 不存在，正在创建...")
+                    self._create_collection()
+                    logger.info(f"成功创建 collection '{self.COLLECTION_NAME}'")
+                else:
+                    logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
+                    self._collection = Collection(self.COLLECTION_NAME)
 
-                if (
-                    vector_field
-                    and hasattr(vector_field, "params")
-                    and "dim" in vector_field.params
-                ):
-                    existing_dim = int(vector_field.params["dim"])
-                    if existing_dim != self.VECTOR_DIM:
-                        self._handle_vector_dimension_mismatch(existing_dim)
-                    else:
-                        logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+                    schema = self._collection.schema
+                    vector_field = None
+                    existing_dim = None
+                    for field in schema.fields:
+                        if field.name == "vector":
+                            vector_field = field
+                            break
 
-            self._load_collection()
+                    if (
+                        vector_field
+                        and hasattr(vector_field, "params")
+                        and "dim" in vector_field.params
+                    ):
+                        existing_dim = int(vector_field.params["dim"])
+                        if existing_dim != self.VECTOR_DIM:
+                            self._handle_vector_dimension_mismatch(existing_dim)
+                        else:
+                            logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
 
-            return self._client
+                self._load_collection()
 
-        except MilvusException as e:
-            logger.error(f"Milvus 操作失败: {e}")
-            self.close()
-            raise RuntimeError(f"Milvus 操作失败: {e}") from e
-        except ConnectionError as e:
-            logger.error(f"连接 Milvus 失败: {e}")
-            self.close()
-            raise RuntimeError(f"连接 Milvus 失败: {e}") from e
-        except Exception as e:
-            logger.error(f"连接 Milvus 失败: {e}")
-            self.close()
-            raise RuntimeError(f"连接 Milvus 失败: {e}") from e
+                return self._client
+
+            except MilvusException as e:
+                logger.error(f"Milvus 操作失败: {e}")
+                self.close()
+                raise RuntimeError(f"Milvus 操作失败: {e}") from e
+            except ConnectionError as e:
+                logger.error(f"连接 Milvus 失败: {e}")
+                self.close()
+                raise RuntimeError(f"连接 Milvus 失败: {e}") from e
+            except Exception as e:
+                logger.error(f"连接 Milvus 失败: {e}")
+                self.close()
+                raise RuntimeError(f"连接 Milvus 失败: {e}") from e
 
     def _collection_exists(self) -> bool:
         """检查 collection 是否存在"""
@@ -279,40 +287,51 @@ class MilvusClientManager:
             if self._client is None:
                 return False
 
-            _ = connections.list_connections()
+            if not connections.has_connection("default"):
+                self.close()
+                return False
+
+            if not bool(utility.has_collection(self.COLLECTION_NAME)):
+                logger.warning(f"Milvus collection '{self.COLLECTION_NAME}' 不存在")
+                self.close()
+                return False
+
             return True
 
         except (MilvusException, ConnectionError) as e:
             logger.error(f"Milvus 健康检查失败: {e}")
+            self.close()
             return False
         except Exception as e:
             logger.error(f"Milvus 健康检查失败: {e}")
+            self.close()
             return False
 
     def close(self) -> None:
         """关闭连接"""
-        errors = []
+        with self._lock:
+            errors = []
 
-        try:
-            if self._collection is not None:
-                self._collection.release()
-                self._collection = None
-        except Exception as e:
-            errors.append(f"释放 collection 失败: {e}")
+            try:
+                if self._collection is not None:
+                    self._collection.release()
+                    self._collection = None
+            except Exception as e:
+                errors.append(f"释放 collection 失败: {e}")
 
-        try:
-            if connections.has_connection("default"):
-                connections.disconnect("default")
-        except Exception as e:
-            errors.append(f"断开连接失败: {e}")
+            try:
+                if connections.has_connection("default"):
+                    connections.disconnect("default")
+            except Exception as e:
+                errors.append(f"断开连接失败: {e}")
 
-        self._client = None
+            self._client = None
 
-        if errors:
-            error_msg = "; ".join(errors)
-            logger.error(f"关闭 Milvus 连接时出现错误: {error_msg}")
-        else:
-            logger.info("已关闭 Milvus 连接")
+            if errors:
+                error_msg = "; ".join(errors)
+                logger.error(f"关闭 Milvus 连接时出现错误: {error_msg}")
+            else:
+                logger.info("已关闭 Milvus 连接")
 
     def __enter__(self) -> "MilvusClientManager":
         """上下文管理器入口"""

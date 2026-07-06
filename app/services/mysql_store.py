@@ -533,9 +533,11 @@ class AIOpsMySQLStore:
         *,
         incident_id: str | None = None,
         limit: int = 20,
+        offset: int = 0,
     ) -> list[AIOpsSessionSnapshot]:
         """List durable diagnosis session snapshots by recent update time."""
         normalized_limit = max(1, min(int(limit or 20), 100))
+        normalized_offset = max(int(offset or 0), 0)
         clauses = []
         params: list[object] = []
         if incident_id:
@@ -545,8 +547,8 @@ class AIOpsMySQLStore:
         query = "SELECT payload FROM aiops_sessions"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY updated_at DESC, id DESC LIMIT %s"
-        params.append(normalized_limit)
+        query += " ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s"
+        params.extend([normalized_limit, normalized_offset])
 
         with self._connect() as connection:
             with connection.cursor() as cursor:

@@ -8,6 +8,11 @@ class AutoOnCallApp {
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.knowledgeUploadState = this.loadKnowledgeUploadState();
+        this.uploadConstraints = {
+            allowedExtensions: ['.txt', '.md', '.markdown'],
+            maxSizeMb: 10,
+            maxSize: 10 * 1024 * 1024
+        };
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
         this.currentWorkbenchView = 'incidents';
         this.currentIncidentTab = 'overview';
@@ -51,6 +56,7 @@ class AutoOnCallApp {
         this.renderChatHistory();
         this.renderKnowledgeUploadState(this.knowledgeUploadState);
         this.renderAuthTokenState();
+        this.loadUploadConstraints();
         this.setWorkbenchView(this.currentWorkbenchView);
         this.loadAIOpsStatusCatalog();
         this.loadAIOpsDemoIncidents();
@@ -335,7 +341,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
         
         // 点击外部关闭下拉菜单
         document.addEventListener('click', (e) => {
-            if (!this.modeSelectorBtn.contains(e.target) && 
+            if (this.modeSelectorBtn && this.modeDropdown &&
+                !this.modeSelectorBtn.contains(e.target) &&
                 !this.modeDropdown.contains(e.target)) {
                 this.closeModeDropdown();
             }

@@ -122,6 +122,47 @@ def generate_time_series(
     return result_time.strftime(format_str)
 
 
+def parse_interval_minutes(interval: str) -> int:
+    """Parse a positive minute/hour interval for bounded time-series generation."""
+    text = str(interval or "1m").strip().lower()
+    if text.endswith("m"):
+        unit_multiplier = 1
+        amount_text = text[:-1]
+    elif text.endswith("h"):
+        unit_multiplier = 60
+        amount_text = text[:-1]
+    else:
+        raise ValueError("interval must use minutes or hours, for example 1m, 5m, or 1h")
+    try:
+        amount = int(amount_text)
+    except ValueError as exc:
+        raise ValueError("interval amount must be an integer") from exc
+    interval_minutes = amount * unit_multiplier
+    if interval_minutes <= 0:
+        raise ValueError("interval must be greater than 0")
+    return interval_minutes
+
+
+def invalid_metric_interval_payload(
+    *,
+    service_name: str,
+    metric_name: str,
+    interval: str,
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "service_name": service_name,
+        "metric_name": metric_name,
+        "interval": interval,
+        "data_points": [],
+        "statistics": {},
+        "error_type": "invalid_interval",
+        "error_message": str(error),
+        "summary": f"{metric_name} 查询参数无效: {error}",
+    }
+
+
 # ============================================================
 # 监控数据查询工具
 # ============================================================
@@ -197,12 +238,15 @@ def query_cpu_metrics(
     start_dt = parse_time_or_default(start_time, default_offset_hours=-1)
     end_dt = parse_time_or_default(end_time, default_offset_hours=0)
 
-    # 解析间隔时间（interval: 1m, 5m, 1h 等）
-    interval_minutes = 1  # 默认 1 分钟
-    if interval.endswith("m"):
-        interval_minutes = int(interval[:-1])
-    elif interval.endswith("h"):
-        interval_minutes = int(interval[:-1]) * 60
+    try:
+        interval_minutes = parse_interval_minutes(interval)
+    except ValueError as exc:
+        return invalid_metric_interval_payload(
+            service_name=service_name,
+            metric_name="cpu_usage_percent",
+            interval=interval,
+            error=exc,
+        )
 
     # 动态生成 CPU 使用率数据：从低到高逐渐增长
     data_points = []
@@ -347,12 +391,15 @@ def query_memory_metrics(
     start_dt = parse_time_or_default(start_time, default_offset_hours=-1)
     end_dt = parse_time_or_default(end_time, default_offset_hours=0)
 
-    # 解析间隔时间（interval: 1m, 5m, 1h 等）
-    interval_minutes = 1  # 默认 1 分钟
-    if interval.endswith("m"):
-        interval_minutes = int(interval[:-1])
-    elif interval.endswith("h"):
-        interval_minutes = int(interval[:-1]) * 60
+    try:
+        interval_minutes = parse_interval_minutes(interval)
+    except ValueError as exc:
+        return invalid_metric_interval_payload(
+            service_name=service_name,
+            metric_name="memory_usage_percent",
+            interval=interval,
+            error=exc,
+        )
 
     # 动态生成内存使用率数据：从低到高逐渐增长
     data_points = []

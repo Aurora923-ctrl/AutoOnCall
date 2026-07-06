@@ -104,8 +104,11 @@ async def test_query_metrics_uses_mcp_like_tools_when_available() -> None:
     assert result.output["source"] == "mcp_monitor"
     assert result.output["cpu"]["metric_name"] == "cpu_usage_percent"
     assert result.output["memory"]["metric_name"] == "memory_usage_percent"
-    assert result.output["source_detail"]["qps"] == "synthetic_demo_baseline"
-    assert "p95_latency_ms" in result.output["synthetic_fields"]
+    assert result.output["source_detail"]["qps"] == "unavailable"
+    assert "qps" not in result.output
+    assert "p95_latency_ms" not in result.output
+    assert "error_rate" not in result.output
+    assert "synthetic_fields" not in result.output
 
 
 @pytest.mark.asyncio

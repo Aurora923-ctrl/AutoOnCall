@@ -5,7 +5,7 @@
 
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 SESSION_ID_MAX_LENGTH = 128
 CHAT_QUESTION_MAX_LENGTH = 8000
@@ -46,6 +46,12 @@ class ChatRequest(BaseModel):
         validation_alias=AliasChoices("metadataFilter", "MetadataFilter"),
     )
 
+    @field_validator("id", "question", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: Any) -> Any:
+        """Trim required string fields before length validation."""
+        return value.strip() if isinstance(value, str) else value
+
 
 class ClearRequest(BaseModel):
     """清空会话请求"""
@@ -59,3 +65,9 @@ class ClearRequest(BaseModel):
         description="会话 ID",
         alias="sessionId",
     )
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def strip_session_id(cls, value: Any) -> Any:
+        """Trim session IDs before length validation."""
+        return value.strip() if isinstance(value, str) else value

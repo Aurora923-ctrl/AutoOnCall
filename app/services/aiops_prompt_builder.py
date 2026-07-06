@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from app.models.incident import Incident
+from app.services.context_budget import DEFAULT_CONTEXT_BUDGETER, ContextBudgeter
 
 
 def build_incident_diagnosis_input(base_task: str, incident: Incident | None) -> str:
@@ -49,11 +49,14 @@ def build_incident_diagnosis_input(base_task: str, incident: Incident | None) ->
     return "\n".join(lines)
 
 
-def format_raw_alert_for_prompt(raw_alert: dict[str, Any], max_chars: int = 4000) -> str:
+def format_raw_alert_for_prompt(
+    raw_alert: dict[str, Any],
+    max_chars: int | None = None,
+    budgeter: ContextBudgeter | None = None,
+) -> str:
     """Serialize raw alert fields for planning while keeping the prompt bounded."""
     if not raw_alert:
         return ""
-    text = json.dumps(raw_alert, ensure_ascii=False, default=str, indent=2, sort_keys=True)
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}\n...<truncated>"
+    active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
+    limit = max_chars if max_chars is not None else active_budgeter.budget.raw_alert_chars
+    return active_budgeter.json(raw_alert, limit=limit, sort_keys=True)

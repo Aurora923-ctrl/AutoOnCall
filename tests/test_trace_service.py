@@ -120,10 +120,24 @@ async def test_incident_trace_api_returns_events(monkeypatch, tmp_path) -> None:
     )
 
     incidents_api = importlib.import_module("app.api.incidents")
+
+    def fail_store_lookup():
+        raise AssertionError("non-trace stores should not be read")
+
     monkeypatch.setattr(incidents_api, "get_trace_service", lambda: service)
+    monkeypatch.setattr(incidents_api, "get_report_generator", fail_store_lookup)
+    monkeypatch.setattr(incidents_api, "get_approval_service", fail_store_lookup)
+    monkeypatch.setattr(incidents_api, "get_incident_state_store", fail_store_lookup)
+    monkeypatch.setattr(incidents_api, "get_change_execution_service", fail_store_lookup)
 
     result = await incidents_api.get_incident_trace("inc-api")
 
     assert result["incident_id"] == "inc-api"
     assert result["trace_id"] == "trace-api"
     assert result["items"][0]["event_type"] == "node"
+
+    filtered = await incidents_api.get_incident_trace("inc-api", event_type="tool_call")
+
+    assert filtered["incident_id"] == "inc-api"
+    assert filtered["trace_id"] == "trace-api"
+    assert filtered["items"] == []

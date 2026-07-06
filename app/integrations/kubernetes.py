@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -64,10 +65,12 @@ class KubernetesStatusAdapter:
         pods = [self._pod_summary(item) for item in pods_payload.get("items", [])]
         pod_names = {pod["name"] for pod in pods if pod.get("name")}
         window_seconds = parse_duration_seconds(time_range)
+        window_started_at = datetime.now(UTC) - timedelta(seconds=window_seconds)
         events = [
             self._event_summary(item)
             for item in events_payload.get("items", [])
             if item.get("involvedObject", {}).get("name") in pod_names
+            and self._event_within_window(item, window_started_at)
         ]
         restart_count = sum(int(pod.get("restarts", 0)) for pod in pods)
         not_ready_count = sum(1 for pod in pods if not pod.get("ready"))
@@ -122,3 +125,33 @@ class KubernetesStatusAdapter:
             "count": item.get("count", 1),
             "last_timestamp": item.get("lastTimestamp") or item.get("eventTime") or "",
         }
+
+    @classmethod
+    def _event_within_window(
+        cls,
+        item: dict[str, Any],
+        window_started_at: datetime,
+    ) -> bool:
+        event_time = cls._event_observed_at(item)
+        if event_time is None:
+            return True
+        return event_time >= window_started_at
+
+    @staticmethod
+    def _event_observed_at(item: dict[str, Any]) -> datetime | None:
+        timestamp = (
+            item.get("lastTimestamp")
+            or item.get("eventTime")
+            or item.get("series", {}).get("lastObservedTime")
+            or item.get("metadata", {}).get("creationTimestamp")
+            or item.get("firstTimestamp")
+        )
+        if not timestamp:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)

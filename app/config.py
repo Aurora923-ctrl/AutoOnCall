@@ -107,7 +107,15 @@ class Settings(BaseSettings):
     aiops_storage_backend: str = "sqlite"
     aiops_sqlite_path: str = "data/aiops_state.db"
     aiops_mock_fallback_enabled: bool = False
+    aiops_replanner_llm_enabled: bool = False
     service_topology_path: str = "config/service_topology.yaml"
+
+    # ---- A2A 北向协作接口配置 -------------------------------------------------
+    # Disabled by default so existing local demos and production deployments do
+    # not gain a new externally discoverable agent surface until explicitly opted in.
+    a2a_enabled: bool = False
+    a2a_base_path: str = "/a2a/v1"
+    a2a_agent_name: str = "AutoOnCall Diagnosis Agent"
 
     # ---- 生产部署与日志配置 ---------------------------------------------------
     cors_allowed_origins: str = (
@@ -253,6 +261,14 @@ class Settings(BaseSettings):
     def normalized_api_base_url(self) -> str:
         """Return the externally visible API base URL without a trailing slash."""
         return self.api_base_url.rstrip("/")
+
+    @property
+    def normalized_a2a_base_path(self) -> str:
+        """Return the A2A base path with one leading slash and no trailing slash."""
+        path = (self.a2a_base_path or "/a2a/v1").strip() or "/a2a/v1"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return path.rstrip("/") or "/a2a/v1"
 
     @property
     def upload_allowed_extension_list(self) -> list[str]:

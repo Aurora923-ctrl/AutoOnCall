@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app.api import aiops, alerts, approvals, chat, evaluations, file, health, incidents
+from app.api import a2a, aiops, alerts, approvals, chat, evaluations, file, health, incidents
 from app.config import config
 from app.core.milvus_client import milvus_manager
 
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
 
     log_production_exposure_warnings()
 
-    logger.info("🔌 Milvus 将在 RAG 检索或文档索引首次使用时按需连接")
+    logger.info("🔌 Milvus 将在 readiness、RAG 检索或文档索引首次使用时按需连接")
 
     logger.info("=" * 60)
 
@@ -90,6 +90,8 @@ app.include_router(alerts.router, prefix="/api", tags=["AIOps告警接入"])
 app.include_router(approvals.router, prefix="/api", tags=["AIOps人工审批"])
 app.include_router(incidents.router, prefix="/api", tags=["AIOps故障事件"])
 app.include_router(evaluations.router, prefix="/api", tags=["离线评测"])
+app.include_router(a2a.discovery_router, tags=["A2A Agent"])
+app.include_router(a2a.router, prefix=config.normalized_a2a_base_path, tags=["A2A Agent"])
 
 static_dir = "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")

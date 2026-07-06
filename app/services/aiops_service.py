@@ -22,24 +22,27 @@ from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.incident import Incident
 from app.models.report import DiagnosisReport
-from app.models.trace import TraceEvent
+from app.services.aiops_diagnosis_tasks import DEFAULT_AIOPS_DIAGNOSIS_TASK
 from app.services.aiops_event_formatters import (
     format_executor_event,
     format_planner_event,
     format_replanner_event,
 )
-from app.services.aiops_prompt_builder import (
-    build_incident_diagnosis_input,
-    format_raw_alert_for_prompt,
+from app.services.aiops_resume_reports import _build_persisted_resume_report
+from app.services.aiops_service_helpers import (
+    _attach_trace_event,
+    _build_fallback_final_response,
+    _build_incident_diagnosis_input,
+    _extract_incident_id,
+    _format_raw_alert_for_prompt,
+    _incident_status_from_runtime_status,
+    _infer_terminal_report_status,
+    _merge_checkpoint_with_node_output,
+    _snapshot_status_from_event,
+    _terminal_event_status,
 )
 from app.services.aiops_snapshot_service import save_session_snapshot
 from app.services.aiops_store import create_aiops_store
-from app.services.incident_lifecycle import (
-    incident_status_from_runtime_status,
-    infer_terminal_report_status,
-    snapshot_status_from_event,
-    terminal_event_status,
-)
 from app.services.report_generator import report_generator
 from app.services.trace_service import trace_service
 
@@ -47,14 +50,20 @@ NODE_PLANNER = "planner"
 NODE_EXECUTOR = "executor"
 NODE_REPLANNER = "replanner"
 
-ADDITIVE_STATE_FIELDS = {
-    "past_steps",
-    "executed_steps",
-    "tool_call_records",
-    "gathered_evidence",
-    "errors",
-    "warnings",
-}
+__all__ = [
+    "AIOpsService",
+    "aiops_service",
+    "_attach_trace_event",
+    "_build_fallback_final_response",
+    "_build_incident_diagnosis_input",
+    "_extract_incident_id",
+    "_format_raw_alert_for_prompt",
+    "_incident_status_from_runtime_status",
+    "_infer_terminal_report_status",
+    "_merge_checkpoint_with_node_output",
+    "_snapshot_status_from_event",
+    "_terminal_event_status",
+]
 
 
 class AIOpsService:
@@ -316,86 +325,11 @@ class AIOpsService:
         Yields:
             Dict[str, Any]: 诊断过程的流式事件
         """
-        from textwrap import dedent
-
         session_id = session_id or f"session-{uuid4().hex}"
-        aiops_task = dedent(
-            """诊断当前系统是否存在告警，如果存在告警请详细分析告警原因并生成诊断报告，诊断报告输出格式要求：
-                ```
-                # 告警分析报告
-
-                ---
-
-                ## 📋 活跃告警清单
-
-                | 告警名称 | 级别 | 目标服务 | 首次触发时间 | 最新触发时间 | 状态 |
-                |---------|------|----------|-------------|-------------|------|
-                | [告警1名称] | [级别] | [服务名] | [时间] | [时间] | 活跃 |
-                | [告警2名称] | [级别] | [服务名] | [时间] | [时间] | 活跃 |
-
-                ---
-
-                ## 🔍 告警根因分析1 - [告警名称]
-
-                ### 告警详情
-                - **告警级别**: [级别]
-                - **受影响服务**: [服务名]
-                - **持续时间**: [X分钟]
-
-                ### 症状描述
-                [根据监控指标描述症状]
-
-                ### 日志证据
-                [引用查询到的关键日志]
-
-                ### 根因结论
-                [基于证据得出的根本原因]
-
-                ---
-
-                ## 🛠️ 处理方案执行1 - [告警名称]
-
-                ### 已执行的排查步骤
-                1. [步骤1]
-                2. [步骤2]
-
-                ### 处理建议
-                [给出具体的处理建议]
-
-                ### 预期效果
-                [说明预期的效果]
-
-                ---
-
-                ## 🔍 告警根因分析2 - [告警名称]
-                [如果有第2个告警，重复上述格式]
-
-                ---
-
-                ## 📊 结论
-
-                ### 整体评估
-                [总结所有告警的整体情况]
-
-                ### 关键发现
-                - [发现1]
-                - [发现2]
-
-                ### 后续建议
-                1. [建议1]
-                2. [建议2]
-
-                ### 风险评估
-                [评估当前风险等级和影响范围]
-                ```
-
-                **重要提醒**：
-                - 最终输出必须是纯 Markdown 文本，不要包含 JSON 结构
-                - 所有内容必须基于工具查询的真实数据，严禁编造
-                - 如果某个步骤失败，在结论中如实说明，不要跳过"""
+        diagnosis_input = _build_incident_diagnosis_input(
+            DEFAULT_AIOPS_DIAGNOSIS_TASK,
+            incident,
         )
-
-        diagnosis_input = _build_incident_diagnosis_input(aiops_task, incident)
 
         async for event in self.execute(diagnosis_input, session_id, incident=incident):
             if event.get("type") == "complete":
@@ -440,6 +374,7 @@ class AIOpsService:
         *,
         incident_id: str | None = None,
         limit: int = 20,
+        offset: int = 0,
     ) -> list[AIOpsSessionSnapshot]:
         """Return recent durable AIOps session snapshots."""
         return cast(
@@ -447,6 +382,7 @@ class AIOpsService:
             self.state_store.list_aiops_session_snapshots(
                 incident_id=incident_id,
                 limit=limit,
+                offset=offset,
             ),
         )
 
@@ -730,216 +666,3 @@ class AIOpsService:
 
 
 aiops_service = AIOpsService()
-
-
-def _build_persisted_resume_report(
-    *,
-    persisted_report: DiagnosisReport | None,
-    approval: ApprovalRequest,
-    session_id: str,
-) -> DiagnosisReport:
-    """Build an approval-resumed report when the in-memory checkpoint is gone."""
-    if persisted_report is None:
-        raise LookupError(f"No persisted report for incident {approval.incident_id}")
-
-    approval_payload = approval.model_dump(mode="json")
-    risk_summary = dict(persisted_report.risk_summary or {})
-    risk_summary["approval_decision"] = approval_payload
-    approval_decision = dict(persisted_report.approval_decision or {})
-    approval_decision.update(
-        {
-            "approval_id": approval.approval_id,
-            "action": approval.action,
-            "risk_level": approval.risk_level,
-            "status": approval.status,
-            "reason": approval.reason,
-            "tool_name": approval.tool_name,
-            "requested_by": approval.requested_by,
-            "created_at": approval.created_at.isoformat(),
-            "decided_by": approval.decided_by,
-            "decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
-            "decision_reason": approval.decision_reason,
-        }
-    )
-    uncertainties = [
-        item
-        for item in persisted_report.uncertainties
-        if "等待人工审批" not in item and "需要人工审批" not in item
-    ]
-    uncertainties.append(
-        "审批已通过；本次恢复使用持久化报告补齐 Trace 和报告闭环，后续风险操作需进入安全变更流程。"
-    )
-    summary = persisted_report.summary
-    if "审批已通过" not in summary:
-        summary = f"{summary} 审批已通过，已基于持久化报告补齐恢复闭环。"
-
-    markdown = _append_resume_markdown(
-        persisted_report.markdown,
-        approval=approval,
-        session_id=session_id,
-    )
-    return persisted_report.model_copy(
-        update={
-            "status": "approval_resumed",
-            "approval_status": "approved",
-            "approval_decision": approval_decision,
-            "risk_summary": risk_summary,
-            "manual_action_required": True,
-            "summary": summary,
-            "uncertainties": list(dict.fromkeys(uncertainties))[:8],
-            "markdown": markdown,
-        }
-    )
-
-
-def _append_resume_markdown(
-    markdown: str,
-    *,
-    approval: ApprovalRequest,
-    session_id: str,
-) -> str:
-    """Append a stable resume audit section to an existing report markdown."""
-    base = markdown.strip() or f"# {approval.incident_id} AIOps 诊断报告"
-    section = "\n".join(
-        [
-            "",
-            "## 审批恢复记录",
-            f"- 审批ID：{approval.approval_id}",
-            f"- 审批状态：{approval.status}",
-            f"- 审批人：{approval.decided_by or '未记录'}",
-            f"- 审批原因：{approval.decision_reason or approval.reason or '未填写'}",
-            f"- 恢复 session：{session_id}",
-            "- 恢复边界：使用持久化报告补齐 Trace 和报告闭环；"
-            "Agent 不直接执行生产写操作，后续风险操作需进入安全变更流程。",
-        ]
-    )
-    if "## 审批恢复记录" in base:
-        return base
-    return f"{base}\n{section}"
-
-
-def _extract_incident_id(state: dict[str, Any]) -> str:
-    """Extract incident_id from a LangGraph state snapshot."""
-    incident = state.get("incident") or {}
-    if isinstance(incident, dict):
-        return str(incident.get("incident_id") or "incident-unknown")
-    return str(getattr(incident, "incident_id", "incident-unknown"))
-
-
-def _attach_trace_event(event_payload: dict[str, Any], trace_event: TraceEvent) -> dict[str, Any]:
-    """Add trace metadata to an SSE event without changing its original shape."""
-    event_payload["trace_id"] = trace_event.trace_id
-    event_payload["trace_event_id"] = trace_event.event_id
-    event_payload["trace_event"] = trace_event.model_dump(mode="json")
-    return event_payload
-
-
-def _build_fallback_final_response(state: dict[str, Any]) -> str:
-    """Build a non-empty final response when the graph ends without response."""
-    report = state.get("report") or {}
-    if isinstance(report, dict) and report.get("markdown"):
-        return str(report["markdown"])
-
-    incident = state.get("incident") or {}
-    if isinstance(incident, dict):
-        incident_id = incident.get("incident_id") or "unknown"
-        service_name = incident.get("service_name") or "unknown-service"
-        symptom = incident.get("symptom") or state.get("input") or "未提供故障现象"
-    else:
-        incident_id = getattr(incident, "incident_id", "unknown")
-        service_name = getattr(incident, "service_name", "unknown-service")
-        symptom = getattr(incident, "symptom", None) or state.get("input") or "未提供故障现象"
-
-    pending_approval = state.get("pending_approval")
-    past_steps = state.get("past_steps") or []
-    errors = state.get("errors") or []
-    warnings = state.get("warnings") or []
-
-    if pending_approval:
-        return (
-            "# AIOps 诊断已暂停，等待人工审批\n\n"
-            f"- 事件：{incident_id}\n"
-            f"- 服务：{service_name}\n"
-            f"- 现象：{symptom}\n"
-            f"- 已执行步骤数：{len(past_steps)}\n"
-            "- 状态：检测到需要人工审批的动作，自动执行已暂停。\n"
-        )
-
-    error_block = ""
-    if errors:
-        error_preview = "; ".join(str(error) for error in errors[:3])
-        error_block = f"\n- 已记录错误：{error_preview}\n"
-    warning_block = ""
-    if warnings:
-        warning_preview = "; ".join(str(warning) for warning in warnings[:3])
-        warning_block = f"\n- 已记录运行告警：{warning_preview}\n"
-
-    return (
-        "# AIOps 诊断流程已结束\n\n"
-        f"- 事件：{incident_id}\n"
-        f"- 服务：{service_name}\n"
-        f"- 现象：{symptom}\n"
-        f"- 已执行步骤数：{len(past_steps)}\n"
-        "- 状态：流程结束时未生成最终诊断报告，请结合 Trace 和已采集证据继续排查。\n"
-        f"{error_block}"
-        f"{warning_block}"
-    )
-
-
-def _infer_terminal_report_status(state: dict[str, Any]) -> str:
-    """Infer a report status for graph terminal states that missed Replanner finalization."""
-    return infer_terminal_report_status(state)
-
-
-def _snapshot_status_from_event(event: dict[str, Any]) -> str:
-    """Map streamed workflow events to durable session snapshot states."""
-    return snapshot_status_from_event(event)
-
-
-def _incident_status_from_runtime_status(status: str) -> str:
-    """Normalize runtime/report statuses into incident lifecycle statuses."""
-    return incident_status_from_runtime_status(status)
-
-
-def _terminal_event_status(event: dict[str, Any]) -> str:
-    """Derive the legacy terminal status from the structured report contract."""
-    return terminal_event_status(event)
-
-
-def _merge_checkpoint_with_node_output(
-    checkpoint_state: dict[str, Any],
-    node_output: dict[str, Any],
-) -> dict[str, Any]:
-    """Merge LangGraph node deltas into a durable snapshot without losing additive fields."""
-    merged = dict(checkpoint_state or {})
-    for key, value in node_output.items():
-        if key not in ADDITIVE_STATE_FIELDS or not isinstance(value, list):
-            merged[key] = value
-            continue
-
-        existing = merged.get(key)
-        if not isinstance(existing, list):
-            merged[key] = value
-        elif _list_endswith(existing, value):
-            merged[key] = existing
-        else:
-            merged[key] = [*existing, *value]
-    return merged
-
-
-def _list_endswith(values: list[Any], suffix: list[Any]) -> bool:
-    if not suffix:
-        return True
-    if len(suffix) > len(values):
-        return False
-    return values[-len(suffix) :] == suffix
-
-
-def _build_incident_diagnosis_input(base_task: str, incident: Incident | None) -> str:
-    """Render the structured incident into the planner-facing diagnosis request."""
-    return build_incident_diagnosis_input(base_task, incident)
-
-
-def _format_raw_alert_for_prompt(raw_alert: dict[str, Any], max_chars: int = 4000) -> str:
-    """Serialize raw alert fields for planning while keeping the prompt bounded."""
-    return format_raw_alert_for_prompt(raw_alert, max_chars=max_chars)

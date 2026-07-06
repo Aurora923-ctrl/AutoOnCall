@@ -149,11 +149,20 @@ if errorlevel 1 (
     ) else (
         REM 调用 API 上传 aiops-docs 文档到向量数据库
         echo [8/8] 上传文档到向量数据库...
+        set UPLOAD_FAILED=0
         for %%f in (aiops-docs\*.md) do (
             echo   上传: %%~nxf
-            curl -s -X POST http://localhost:9900/api/upload -F "file=@%%f" >nul 2>&1
+            for /f %%c in ('curl -s -o nul -w "%%{http_code}" -X POST http://localhost:9900/api/upload -F "file=@%%f"') do set HTTP_CODE=%%c
+            if not "!HTTP_CODE!"=="200" (
+                echo [错误] %%~nxf 上传或索引失败，HTTP !HTTP_CODE!
+                set UPLOAD_FAILED=1
+            )
         )
-        echo [成功] 文档上传完成
+        if "!UPLOAD_FAILED!"=="1" (
+            echo [警告] 有文档上传或索引失败，请检查 DashScope/Milvus 配置和日志
+        ) else (
+            echo [成功] 文档上传完成
+        )
     )
 )
 

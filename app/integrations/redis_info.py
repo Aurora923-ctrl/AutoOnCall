@@ -31,13 +31,9 @@ class RedisInfoAdapter:
         time_range: str,
     ) -> dict[str, Any]:
         target = self._resolve_target(redis_instance)
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target["host"], target["port"]),
-            timeout=self.timeout_seconds,
-        )
+        reader, writer = await self._open_connection(target)
         try:
-            if target["password"]:
-                await self._send_command(reader, writer, "AUTH", target["password"])
+            await self._authenticate(reader, writer, target)
             info_text = await self._send_command(reader, writer, "INFO")
             info = self._parse_info(info_text)
             maxclients_text, slowlog_len_text, optional_errors = await self._optional_admin_checks(
@@ -110,18 +106,44 @@ class RedisInfoAdapter:
     async def ping(self, redis_instance: str = "") -> dict[str, Any]:
         """Return a lightweight connectivity check for readiness endpoints."""
         target = self._resolve_target(redis_instance)
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target["host"], target["port"]),
-            timeout=self.timeout_seconds,
-        )
+        reader, writer = await self._open_connection(target)
         try:
-            if target["password"]:
-                await self._send_command(reader, writer, "AUTH", target["password"])
+            await self._authenticate(reader, writer, target)
             response = await self._send_command(reader, writer, "PING")
         finally:
             writer.close()
             await writer.wait_closed()
         return {"status": "connected", "message": response or "PONG", "endpoint": target["display"]}
+
+    async def _open_connection(
+        self,
+        target: dict[str, Any],
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Open a Redis TCP connection, enabling TLS for rediss:// URLs."""
+        return await asyncio.wait_for(
+            asyncio.open_connection(
+                target["host"],
+                target["port"],
+                ssl=True if target.get("use_tls") else None,
+            ),
+            timeout=self.timeout_seconds,
+        )
+
+    async def _authenticate(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        target: dict[str, Any],
+    ) -> None:
+        """Authenticate with Redis, including ACL usernames when present."""
+        password = str(target.get("password") or "")
+        if not password:
+            return
+        username = str(target.get("username") or "")
+        if username:
+            await self._send_command(reader, writer, "AUTH", username, password)
+        else:
+            await self._send_command(reader, writer, "AUTH", password)
 
     async def _optional_admin_checks(
         self,
@@ -207,7 +229,9 @@ class RedisInfoAdapter:
         return {
             "host": host,
             "port": parsed.port or 6379,
+            "username": unquote(parsed.username or ""),
             "password": unquote(parsed.password or ""),
+            "use_tls": parsed.scheme == "rediss",
             "display": f"{host}:{parsed.port or 6379}",
         }
 

@@ -89,18 +89,11 @@ class LokiLogAdapter:
     @staticmethod
     def _build_logql(service_name: str, query: str) -> str:
         selector = f'{{service="{_escape_logql_string(service_name)}"}}'
-        keywords = [
-            item.strip()
-            for separator in [" OR ", " or ", "|", ","]
-            for item in (query or "").replace(separator, "|").split("|")
-            if item.strip()
-        ]
+        keywords = _extract_log_keywords(query)
         if not keywords:
             return selector
-        filters = " ".join(
-            f'|~ "{_escape_logql_string(re.escape(keyword))}"' for keyword in keywords
-        )
-        return f"{selector} {filters}"
+        regex = "|".join(re.escape(keyword) for keyword in keywords)
+        return f'{selector} |~ "{_escape_logql_string(regex)}"'
 
     @staticmethod
     def _normalize_streams(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -113,7 +106,10 @@ class LokiLogAdapter:
             values = stream.get("values", []) if isinstance(stream, dict) else []
             if not isinstance(values, list):
                 continue
-            for timestamp_ns, line in values:
+            for value in values:
+                if not isinstance(value, (list, tuple)) or len(value) < 2:
+                    continue
+                timestamp_ns, line = value[0], value[1]
                 logs.append(
                     {
                         "timestamp_ns": str(timestamp_ns),
@@ -127,3 +123,16 @@ class LokiLogAdapter:
 def _escape_logql_string(value: str) -> str:
     """Escape a value for a quoted LogQL string literal."""
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _extract_log_keywords(query: str) -> list[str]:
+    """Split a user query into ordered, de-duplicated log keywords."""
+    seen: set[str] = set()
+    keywords = []
+    for item in re.split(r"\s+OR\s+|\||,", query or "", flags=re.IGNORECASE):
+        keyword = item.strip()
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        keywords.append(keyword)
+    return keywords

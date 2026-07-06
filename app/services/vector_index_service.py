@@ -29,6 +29,7 @@ class IndexingResult:
         self.end_time: datetime | None = None
 
         self.error_message = ""
+        self.error_type = ""
 
         self.failed_files: dict[str, str] = {}
 
@@ -83,6 +84,7 @@ class IndexingResult:
             "fail_count": self.fail_count,
             "duration_ms": self.get_duration_ms(),
             "error_message": self.error_message,
+            "error_type": self.error_type,
             "success_files": self.success_files,
             "failed_files": self.failed_files,
             "empty_count": self.empty_count,
@@ -128,12 +130,24 @@ class SingleFileIndexingResult:
         }
 
 
+class IndexingValidationError(ValueError):
+    """Base error for invalid index targets."""
+
+
+class IndexPathForbiddenError(IndexingValidationError):
+    """Raised when an index target is outside configured allowed roots."""
+
+
+class InvalidIndexDirectoryError(IndexingValidationError):
+    """Raised when a directory target cannot be indexed."""
+
+
 class VectorIndexService:
     """向量索引服务 - 负责读取文件、生成向量、存储到 Milvus"""
 
     def __init__(self) -> None:
         """初始化向量索引服务"""
-        self.upload_path = "./uploads"
+        self.upload_path = config.upload_dir
         logger.info("向量索引服务初始化完成")
 
     def index_directory(self, directory_path: str | None = None) -> IndexingResult:
@@ -156,7 +170,7 @@ class VectorIndexService:
             self._ensure_directory_allowed(dir_path)
 
             if not dir_path.exists() or not dir_path.is_dir():
-                raise ValueError(f"目录不存在或不是有效目录: {target_path}")
+                raise InvalidIndexDirectoryError("目录不存在或不是有效目录")
 
             result.directory_path = str(dir_path)
 
@@ -220,10 +234,25 @@ class VectorIndexService:
 
             return result
 
+        except IndexPathForbiddenError as e:
+            logger.error(f"索引目录被拒绝: {e}")
+            result.success = False
+            result.error_message = str(e)
+            result.error_type = "forbidden_directory"
+            result.end_time = datetime.now()
+            return result
+        except InvalidIndexDirectoryError as e:
+            logger.error(f"索引目录参数无效: {e}")
+            result.success = False
+            result.error_message = str(e)
+            result.error_type = "invalid_directory"
+            result.end_time = datetime.now()
+            return result
         except Exception as e:
             logger.error(f"索引目录失败: {e}")
             result.success = False
             result.error_message = str(e)
+            result.error_type = "indexing_error"
             result.end_time = datetime.now()
             return result
 
@@ -259,11 +288,10 @@ class VectorIndexService:
             logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
             if documents:
-                document_version = str(documents[0].metadata.get("_document_version") or "")
-                vector_store_manager.add_documents(documents)
-                vector_store_manager.delete_by_source_except_version(
+                vector_ids = vector_store_manager.add_documents(documents)
+                vector_store_manager.delete_by_source_except_ids(
                     normalized_path,
-                    document_version,
+                    vector_ids,
                 )
                 lexical_index_service.upsert_source(normalized_path, documents)
                 logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
@@ -274,7 +302,10 @@ class VectorIndexService:
                     message="文件索引完成",
                 ).finish()
             else:
-                vector_deleted = vector_store_manager.delete_by_source(normalized_path)
+                vector_deleted = vector_store_manager.delete_by_source(
+                    normalized_path,
+                    raise_on_error=True,
+                )
                 lexical_deleted = lexical_index_service.delete_source(normalized_path)
                 logger.warning(f"文件内容为空或无法分割: {file_path}")
                 return SingleFileIndexingResult(
@@ -313,7 +344,8 @@ class VectorIndexService:
             except ValueError:
                 continue
         allowed_display = ", ".join(str(root) for root in allowed_roots)
-        raise ValueError(f"{kind}不在允许索引范围内: {path}; allowed_roots={allowed_display}")
+        logger.warning(f"{kind}不在允许索引范围内: {path}; allowed_roots={allowed_display}")
+        raise IndexPathForbiddenError(f"{kind}不在允许索引范围内")
 
     def _allowed_index_roots(self) -> list[Path]:
         raw_roots = [
@@ -323,7 +355,18 @@ class VectorIndexService:
         ]
         if not raw_roots:
             raw_roots = [self.upload_path]
-        return [Path(root).resolve() for root in raw_roots]
+        elif self.upload_path:
+            raw_roots.append(self.upload_path)
+
+        resolved_roots = []
+        seen: set[Path] = set()
+        for root in raw_roots:
+            resolved = Path(root).resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            resolved_roots.append(resolved)
+        return resolved_roots
 
 
 vector_index_service = VectorIndexService()

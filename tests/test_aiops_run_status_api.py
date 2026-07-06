@@ -34,13 +34,14 @@ class FakeAIOpsService:
         *,
         incident_id: str | None = None,
         limit: int = 20,
+        offset: int = 0,
     ) -> list[AIOpsSessionSnapshot]:
         snapshots = [
             snapshot
             for snapshot in self.snapshots
             if incident_id is None or snapshot.incident_id == incident_id
         ]
-        return snapshots[:limit]
+        return snapshots[offset : offset + limit]
 
 
 class FakeTraceService:
@@ -407,6 +408,64 @@ async def test_aiops_run_list_filters_by_status_and_service(monkeypatch) -> None
     assert payload["filters"]["service_name"] == "order"
     assert payload["items"][0]["session_id"] == "run-order-completed"
     assert payload["items"][0]["service_name"] == "order-service"
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_list_filter_scans_beyond_first_page(monkeypatch) -> None:
+    non_matching = [
+        AIOpsSessionSnapshot.from_state(
+            session_id=f"run-payment-{index}",
+            status="running",
+            node_name="workflow",
+            state={
+                "trace_id": f"trace-payment-{index}",
+                "incident": {
+                    "incident_id": f"INC-PAYMENT-{index:03d}",
+                    "title": "payment-service running diagnosis",
+                    "service_name": "payment-service",
+                    "severity": "P2",
+                    "environment": "prod",
+                },
+            },
+        )
+        for index in range(101)
+    ]
+    matching = AIOpsSessionSnapshot.from_state(
+        session_id="run-order-completed-late",
+        status="completed",
+        node_name="workflow",
+        state={
+            "trace_id": "trace-order-late",
+            "incident": {
+                "incident_id": "INC-ORDER-LATE",
+                "title": "order-service completed diagnosis",
+                "service_name": "order-service",
+                "severity": "P1",
+                "environment": "prod",
+            },
+        },
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(
+                matching,
+                snapshots=[*non_matching, matching],
+            ),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/aiops/runs?status=completed&service_name=order")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["session_id"] == "run-order-completed-late"
 
 
 @pytest.mark.asyncio

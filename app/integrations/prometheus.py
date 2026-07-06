@@ -67,27 +67,62 @@ class PrometheusMetricsAdapter:
                 if not has_data:
                     empty_queries.append(name)
 
-        qps = {"current": round(values["qps"], 4)}
-        p95_latency_ms = {
+        if len(empty_queries) == len(queries):
+            message = (
+                f"Prometheus returned no data for {service_name}; "
+                f"empty_queries={', '.join(empty_queries)}"
+            )
+            return {
+                "status": "failed",
+                "source": "prometheus",
+                "error_type": "no_data",
+                "message": message,
+                "error_message": message,
+                "retryable": True,
+                "signals": {},
+                "raw": {"promql_values": values, "empty_queries": empty_queries},
+                "service_name": service_name,
+                "time_range": time_range,
+                "interval": interval,
+                "empty_queries": empty_queries,
+                "summary": f"Prometheus 查询无数据: {message}",
+            }
+
+        qps: dict[str, Any] = {"current": round(values["qps"], 4)}
+        if "qps" in empty_queries:
+            qps["status"] = "missing"
+        p95_latency_ms: dict[str, Any] = {
             "current": round(values["p95_latency_ms"], 2),
             "threshold": 1000,
-            "status": "high" if values["p95_latency_ms"] >= 1000 else "normal",
+            "status": "missing"
+            if "p95_latency_ms" in empty_queries
+            else "high"
+            if values["p95_latency_ms"] >= 1000
+            else "normal",
         }
-        error_rate = {
+        error_rate: dict[str, Any] = {
             "current": round(values["error_rate"], 6),
             "threshold": 0.01,
-            "status": "high" if values["error_rate"] >= 0.01 else "normal",
+            "status": "missing"
+            if "error_rate" in empty_queries
+            else "high"
+            if values["error_rate"] >= 0.01
+            else "normal",
         }
         cpu_current = round(values["cpu_usage_percent"], 2)
         memory_current = round(values["memory_working_set_bytes"], 2)
-        cpu = {
+        cpu: dict[str, Any] = {
             "metric_name": "cpu_usage_percent",
             "statistics": {"current": cpu_current},
         }
-        memory = {
+        if "cpu_usage_percent" in empty_queries:
+            cpu["status"] = "missing"
+        memory: dict[str, Any] = {
             "metric_name": "memory_working_set_bytes",
             "statistics": {"current": memory_current},
         }
+        if "memory_working_set_bytes" in empty_queries:
+            memory["status"] = "missing"
         return adapter_success(
             source="prometheus",
             summary=(
@@ -106,6 +141,7 @@ class PrometheusMetricsAdapter:
             time_range=time_range,
             interval=interval,
             empty_queries=empty_queries,
+            data_quality="partial" if empty_queries else "complete",
             qps=qps,
             p95_latency_ms=p95_latency_ms,
             error_rate=error_rate,

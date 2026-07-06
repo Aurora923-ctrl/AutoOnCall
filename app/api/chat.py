@@ -15,6 +15,9 @@ from app.models.response import ApiResponse, SessionInfoResponse
 from app.services.rag_agent_service import rag_agent_service
 
 router = APIRouter()
+PUBLIC_CHAT_ERROR_MESSAGE = "对话服务暂时不可用，请稍后重试"
+PUBLIC_CHAT_STREAM_ERROR_MESSAGE = "流式对话服务暂时不可用，请稍后重试"
+PUBLIC_SESSION_ERROR_MESSAGE = "会话服务暂时不可用，请稍后重试"
 
 
 @router.post("/chat", dependencies=[Depends(require_scope(READ_SCOPE))])
@@ -62,13 +65,17 @@ async def chat(request: ChatRequest):
         }
 
     except Exception as e:
-        logger.error(f"对话接口错误: {e}")
+        logger.exception(f"对话接口错误: {e}")
         return JSONResponse(
             status_code=500,
             content={
                 "code": 500,
                 "message": "error",
-                "data": {"success": False, "answer": None, "errorMessage": str(e)},
+                "data": {
+                    "success": False,
+                    "answer": None,
+                    "errorMessage": PUBLIC_CHAT_ERROR_MESSAGE,
+                },
             },
         )
 
@@ -132,8 +139,8 @@ async def chat_stream(request: ChatRequest):
             logger.info(f"[会话 {request.id}] 流式对话完成")
 
         except Exception as e:
-            logger.error(f"流式对话接口错误: {e}")
-            yield sse_message({"type": "error", "data": str(e)})
+            logger.exception(f"流式对话接口错误: {e}")
+            yield sse_message({"type": "error", "data": PUBLIC_CHAT_STREAM_ERROR_MESSAGE})
 
     return EventSourceResponse(event_generator())
 
@@ -163,8 +170,8 @@ async def clear_session(request: ClearRequest):
         )
 
     except Exception as e:
-        logger.error(f"清空会话错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception(f"清空会话错误: {e}")
+        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from e
 
 
 @router.get(
@@ -191,5 +198,5 @@ async def get_session_info(
         )
 
     except Exception as e:
-        logger.error(f"获取会话信息错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception(f"获取会话信息错误: {e}")
+        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from e

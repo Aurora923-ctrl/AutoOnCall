@@ -1,6 +1,7 @@
 """Tests for production external adapters wired into AIOps tools."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from app.agent.aiops.executor import _postpone_risky_step_until_read_only_evidence_complete
 from app.agent.aiops.risk_controller import RiskControlDecision
 from app.config import Settings, config
+from app.integrations import redis_info as redis_info_module
 from app.integrations.alertmanager import AlertmanagerAlertAdapter
 from app.integrations.base import (
     ExternalAdapterError,
@@ -27,6 +29,7 @@ from app.integrations.ticketing import TicketingAdapter
 from app.integrations.tracing import TracingAdapter
 from app.models.evidence import normalize_data_source
 from app.models.plan import PlanStep
+from app.tools import context_tool as context_tool_module
 from app.tools.alert_tool import QueryAlertsTool
 from app.tools.context_tool import QueryDeployHistoryTool, QueryServiceContextTool
 from app.tools.logs_tool import QueryLogsTool
@@ -234,6 +237,13 @@ class FakeCMDBAdapter:
         }
 
 
+class FailingCMDBAdapter:
+    configured = True
+
+    async def query_service(self, service_name: str):
+        raise RuntimeError("cmdb unavailable")
+
+
 class FakeDeployHistoryAdapter:
     configured = True
 
@@ -384,7 +394,7 @@ async def test_alertmanager_adapter_filters_and_normalizes_alerts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prometheus_adapter_marks_empty_query_results() -> None:
+async def test_prometheus_adapter_fails_when_all_query_results_are_empty() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/query"
         return httpx.Response(
@@ -399,9 +409,10 @@ async def test_prometheus_adapter_marks_empty_query_results() -> None:
 
     result = await adapter.query_service_metrics("order-service")
 
-    assert result["status"] == "success"
+    assert result["status"] == "failed"
     assert result["source"] == "prometheus"
-    assert result["signals"]["p95_latency_ms"] == 0
+    assert result["error_type"] == "no_data"
+    assert result["signals"] == {}
     assert set(result["empty_queries"]) == {
         "qps",
         "error_rate",
@@ -495,6 +506,9 @@ async def test_loki_adapter_queries_range_and_normalizes_streams() -> None:
 
     assert captured["path"] == "/loki/api/v1/query_range"
     assert '{service="order-service"}' in captured["query"]
+    assert captured["query"].count("|~") == 1
+    assert "ERROR|timeout" in captured["query"]
+    assert "ERROR\\\\ OR\\\\ timeout" not in captured["query"]
     assert captured["limit"] == "1000"
     assert result["source"] == "loki"
     assert result["signals"]["log_count"] == 1
@@ -509,6 +523,35 @@ def test_loki_logql_escapes_regex_without_url_encoding() -> None:
     assert '\\"service' in logql
     assert "timeout" in logql
     assert "timeout\\\\.ms" in logql
+    assert logql.count("|~") == 1
+    assert "OR" not in logql
+
+
+def test_loki_normalize_streams_skips_malformed_values() -> None:
+    logs = LokiLogAdapter._normalize_streams(
+        {
+            "data": {
+                "result": [
+                    {
+                        "stream": {"service": "order-service"},
+                        "values": [
+                            ["1780000000000000000", "ok"],
+                            ["missing-message"],
+                            "bad-value",
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert logs == [
+        {
+            "timestamp_ns": "1780000000000000000",
+            "message": "ok",
+            "labels": {"service": "order-service"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -597,6 +640,25 @@ async def test_tracing_adapter_queries_tempo_when_jaeger_is_unconfigured() -> No
     assert result["signals"]["error_span_count"] == 1
     assert result["signals"]["slowest_duration_us"] == 2500000
     assert result["traces"][0]["services"] == ["order-service"]
+
+
+@pytest.mark.asyncio
+async def test_tracing_adapter_escapes_tempo_traceql_service_name() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["query"] = request.url.params.get("q", "")
+        return httpx.Response(200, json={"traces": []})
+
+    adapter = TracingAdapter(
+        jaeger_url="",
+        tempo_url="https://tempo.example",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await adapter.query_service_traces('order"service\\prod')
+
+    assert captured["query"] == '{ resource.service.name = "order\\"service\\\\prod" }'
 
 
 @pytest.mark.asyncio
@@ -723,6 +785,59 @@ async def test_kubernetes_adapter_returns_pods_events_and_restart_signals(monkey
 
 
 @pytest.mark.asyncio
+async def test_kubernetes_adapter_filters_events_outside_time_window(monkeypatch) -> None:
+    monkeypatch.setattr(config, "kubernetes_api_server", "https://kubernetes.example")
+    now = datetime.now(UTC)
+    recent_timestamp = (now - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
+    stale_timestamp = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pods"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "metadata": {"name": "order-service-1"},
+                            "status": {
+                                "phase": "Running",
+                                "containerStatuses": [{"ready": True, "restartCount": 0}],
+                            },
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith("/events"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "involvedObject": {"name": "order-service-1"},
+                            "type": "Warning",
+                            "reason": "RecentBackOff",
+                            "lastTimestamp": recent_timestamp,
+                        },
+                        {
+                            "involvedObject": {"name": "order-service-1"},
+                            "type": "Warning",
+                            "reason": "StaleBackOff",
+                            "lastTimestamp": stale_timestamp,
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    adapter = KubernetesStatusAdapter(transport=httpx.MockTransport(handler))
+
+    result = await adapter.query_service_status("order-service", "5m")
+
+    assert result["signals"]["warning_event_count"] == 1
+    assert [event["reason"] for event in result["events"]] == ["RecentBackOff"]
+
+
+@pytest.mark.asyncio
 async def test_kubernetes_adapter_rejects_invalid_service_label_before_query(monkeypatch) -> None:
     monkeypatch.setattr(config, "kubernetes_api_server", "https://kubernetes.example")
 
@@ -772,6 +887,7 @@ def test_redis_adapter_resolves_instances_and_compacts_info(monkeypatch) -> None
     target = adapter._resolve_target("redis-cluster-prod")
     assert target["host"] == "127.0.0.1"
     assert target["port"] == 6380
+    assert target["username"] == ""
     assert target["password"] == "secret"
 
     compact = RedisInfoAdapter._compact_info(
@@ -782,6 +898,85 @@ def test_redis_adapter_resolves_instances_and_compacts_info(monkeypatch) -> None
         "db0": "keys=1",
         "_raw_truncated": "true",
     }
+
+
+@pytest.mark.asyncio
+async def test_redis_adapter_enables_tls_for_rediss_urls(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeWriter:
+        def close(self) -> None:
+            captured["closed"] = True
+
+        async def wait_closed(self) -> None:
+            captured["wait_closed"] = True
+
+    async def fake_open_connection(host: str, port: int, **kwargs):
+        captured["host"] = host
+        captured["port"] = port
+        captured["ssl"] = kwargs.get("ssl")
+        return object(), FakeWriter()
+
+    async def fake_send_command(self, reader, writer, *parts: str) -> str:
+        captured["command"] = parts
+        return "PONG"
+
+    monkeypatch.setattr(config, "redis_url", "rediss://:secret@cache.local:6380/0")
+    monkeypatch.setattr(config, "redis_host", "")
+    monkeypatch.setattr(config, "redis_instances", "")
+    monkeypatch.setattr(redis_info_module.asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(RedisInfoAdapter, "_send_command", fake_send_command)
+
+    adapter = RedisInfoAdapter()
+    target = adapter._resolve_target()
+
+    assert target["use_tls"] is True
+    assert target["password"] == "secret"
+
+    result = await adapter.ping()
+
+    assert result["status"] == "connected"
+    assert captured["host"] == "cache.local"
+    assert captured["port"] == 6380
+    assert captured["ssl"] is True
+    assert captured["command"] == ("PING",)
+    assert captured["closed"] is True
+    assert captured["wait_closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_redis_adapter_authenticates_with_acl_username(monkeypatch) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    class FakeWriter:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_open_connection(host: str, port: int, **kwargs):
+        return object(), FakeWriter()
+
+    async def fake_send_command(self, reader, writer, *parts: str) -> str:
+        commands.append(parts)
+        return "PONG"
+
+    monkeypatch.setattr(config, "redis_url", "redis://diag:secret@cache.local:6379/0")
+    monkeypatch.setattr(config, "redis_host", "")
+    monkeypatch.setattr(config, "redis_instances", "")
+    monkeypatch.setattr(redis_info_module.asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(RedisInfoAdapter, "_send_command", fake_send_command)
+
+    adapter = RedisInfoAdapter()
+    target = adapter._resolve_target()
+
+    assert target["username"] == "diag"
+    assert target["password"] == "secret"
+
+    await adapter.ping()
+
+    assert commands == [("AUTH", "diag", "secret"), ("PING",)]
 
 
 def test_redis_contract_marks_missing_required_fields() -> None:
@@ -820,6 +1015,20 @@ def test_mysql_adapter_resolves_instance_dsn_and_compacts_payload(monkeypatch) -
     assert adapter._resolve_dsn("order-mysql").endswith("/autooncall")
     assert adapter._compact_status({"Threads_connected": "3", "Other": "x"}) == {
         "Threads_connected": "3"
+    }
+
+
+def test_mysql_adapter_decodes_percent_encoded_credentials() -> None:
+    kwargs = MySQLStatusAdapter._connection_kwargs(
+        "mysql+pymysql://diag:p%40ss%20word@db.local:3307/autooncall"
+    )
+
+    assert kwargs == {
+        "host": "db.local",
+        "port": 3307,
+        "user": "diag",
+        "password": "p@ss word",
+        "database": "autooncall",
     }
 
 
@@ -954,6 +1163,19 @@ async def test_structured_adapter_failure_marks_tool_result_failed() -> None:
     assert "降级" not in result.output["summary"]
 
 
+def test_synthetic_mcp_metric_fields_are_degraded_data_source() -> None:
+    payload = {
+        "tool_name": "query_metrics",
+        "status": "success",
+        "output": {
+            "source": "mcp_monitor",
+            "synthetic_fields": ["p95_latency_ms", "error_rate"],
+        },
+    }
+
+    assert normalize_data_source("query_metrics", payload) == "mcp_monitor_mixed"
+
+
 @pytest.mark.asyncio
 async def test_redis_and_mysql_failed_results_use_failed_data_source() -> None:
     class MissingFieldRedisAdapter:
@@ -1074,6 +1296,27 @@ async def test_platform_tools_use_real_adapters_when_configured() -> None:
     assert ticket_result.output["signals"]["ticket_count"] == 1
     assert cmdb_result.output["signals"]["dependency_count"] == 2
     assert deploy_result.output["signals"]["deployment_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_service_context_falls_back_to_topology_when_configured_cmdb_fails(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        context_tool_module,
+        "get_service_dependencies",
+        lambda service_name: {"redis": ["redis-cluster-prod"], "mysql": ["order-mysql"]},
+    )
+
+    result = await QueryServiceContextTool(cmdb_adapter=FailingCMDBAdapter()).arun(
+        {"service_name": "order-service"}
+    )
+
+    assert result.status == "success"
+    assert result.output["source"] == "rule_based"
+    assert result.output["dependencies"] == ["redis-cluster-prod", "order-mysql"]
+    assert result.output["partial_errors"][0]["source"] == "cmdb"
+    assert "本地拓扑" in result.output["summary"]
 
 
 @pytest.mark.asyncio

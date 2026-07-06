@@ -469,7 +469,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     async refreshApprovals() {
         try {
-            const data = await this.apiGet(`${this.apiBaseUrl}/approvals/pending`);
+            const data = await this.apiGet(`${this.apiBaseUrl}/approvals/pending?include_approved_actions=true`);
             this.dashboardState.approvals = Array.isArray(data.items) ? data.items : [];
             this.renderApprovals(this.dashboardState.approvals);
         } catch (error) {

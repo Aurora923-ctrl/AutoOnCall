@@ -18,15 +18,20 @@ from app.services.approval_workflow import (
     build_change_plan_from_risk_decision,
     create_approval_request_from_risk_decision,
 )
+from app.services.context_budget import DEFAULT_CONTEXT_BUDGETER, ContextBudgeter
 from app.services.incident_lifecycle import infer_terminal_report_status
 from app.services.report_generator import report_generator
 from app.services.trace_service import trace_service
+from app.tools.registry import create_default_tool_registry
 
 from .evidence_analyzer import EvidenceAnalysis, analyze_evidence, render_analysis_summary
 from .risk_controller import RiskControlDecision, assess_plan_step
 from .state import PlanExecuteState, normalize_plan_state_update
+from .utils import format_tools_description
 
 MAX_STEPS = 8
+LLM_DECISION_SAFE_SKIP_DECISIONS = {"retry_failed_tool", "request_approval"}
+REPLANNER_CONTEXT_CHAR_LIMIT = 3000
 
 
 class Response(BaseModel):
@@ -88,6 +93,9 @@ replanner_prompt = ChatPromptTemplate.from_messages(
                 - 是否存在 failed tool，需要重试或替代？
                 - 剩余步骤是否真的"必需"？
                 - 已执行步骤数是否过多（>= 5）？如果是，优先 generate_report 或 escalate_to_human
+                - 新增步骤只能使用可用工具列表中的只读诊断工具；不得输出会修改生产系统的动作
+                - 如果需要变更、重启、扩容、回滚、执行 SQL 或修改配置，只能选择 request_approval
+                - 不得绕过 Evidence Analyzer 的失败重试、风险控制和审批门禁
 
                 **决策优先级口诀：**
                 "证据足够就报告，证据缺失才补查，失败工具只重试一次"
@@ -151,20 +159,34 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     plan = state.get("plan", [])
     past_steps = state.get("past_steps", [])
     analysis = analyze_evidence(state)
-    decision = _decision_from_analysis(analysis)
-    _record_replanner_decision(state, decision, analysis)
-    logger.info(f"剩余计划步骤: {len(plan)}")
-    logger.info(f"已执行步骤: {len(past_steps)}")
-    logger.info(f"Evidence Analyzer 决策: {analysis.decision} - {analysis.reason}")
-    logger.info(f"Replanner 结构化决策: {decision.decision} - {decision.reason}")
-
+    analysis_decision = _decision_from_analysis(analysis)
     state_update = _analysis_state_update(analysis)
 
     if len(past_steps) >= MAX_STEPS:
+        _record_replanner_decision(
+            state,
+            analysis_decision,
+            analysis,
+            decision_source="max_steps_guard",
+        )
         logger.warning(
             f"已执行 {len(past_steps)} 个步骤，超过最大限制 {MAX_STEPS}，强制生成最终响应"
         )
         return await _generate_response_with_analysis(state, analysis)
+
+    decision, decision_source = await _decide_with_llm_or_analysis(
+        state,
+        analysis,
+        analysis_decision,
+    )
+    _record_replanner_decision(state, decision, analysis, decision_source=decision_source)
+    logger.info(f"剩余计划步骤: {len(plan)}")
+    logger.info(f"已执行步骤: {len(past_steps)}")
+    logger.info(f"Evidence Analyzer 决策: {analysis.decision} - {analysis.reason}")
+    logger.info(
+        f"Replanner 结构化决策: {decision.decision} - {decision.reason} "
+        f"(source={decision_source})"
+    )
 
     if decision.decision == "generate_report":
         risk_gate_update = _approval_state_update(state, decision.reason, force=False)
@@ -232,6 +254,245 @@ def _decision_from_analysis(analysis: EvidenceAnalysis) -> ReplanDecision:
         reason=analysis.reason,
         new_steps=new_steps,
     )
+
+
+async def _decide_with_llm_or_analysis(
+    state: PlanExecuteState,
+    analysis: EvidenceAnalysis,
+    analysis_decision: ReplanDecision,
+) -> tuple[ReplanDecision, str]:
+    """Let an optional structured LLM critic refine the deterministic evidence decision."""
+    if not config.aiops_replanner_llm_enabled:
+        return analysis_decision, "evidence_analyzer"
+
+    if analysis_decision.decision in LLM_DECISION_SAFE_SKIP_DECISIONS:
+        return analysis_decision, "evidence_analyzer_safety_priority"
+
+    try:
+        llm_decision = await _generate_llm_replan_decision(
+            state,
+            analysis,
+            analysis_decision,
+            _create_llm(),
+        )
+        normalized_decision = _normalize_llm_replan_decision(
+            llm_decision,
+            state,
+            analysis,
+            analysis_decision,
+        )
+        if normalized_decision is not None:
+            return normalized_decision, "llm_structured"
+    except Exception as exc:
+        logger.warning(f"Replanner LLM 决策不可用，回退到 Evidence Analyzer: {exc}")
+
+    return analysis_decision, "evidence_analyzer_fallback"
+
+
+async def _generate_llm_replan_decision(
+    state: PlanExecuteState,
+    analysis: EvidenceAnalysis,
+    analysis_decision: ReplanDecision,
+    llm: Any,
+) -> Any:
+    """Invoke the structured Replanner prompt with compact runtime context."""
+    replan_chain = replanner_prompt | llm.with_structured_output(ReplanDecision)
+    return await replan_chain.ainvoke(
+        {
+            "tools_description": _format_replanner_tools_description(),
+            "messages": _build_replanner_messages(state, analysis, analysis_decision),
+        }
+    )
+
+
+def _normalize_llm_replan_decision(
+    decision_obj: Any,
+    state: PlanExecuteState,
+    analysis: EvidenceAnalysis,
+    analysis_decision: ReplanDecision,
+) -> ReplanDecision | None:
+    """Validate LLM output against deterministic evidence and risk gates."""
+    decision = _coerce_replan_decision(decision_obj)
+    if decision is None:
+        logger.warning("Replanner LLM 返回无法解析的结构化决策，已忽略")
+        return None
+
+    reason = (decision.reason or "").strip() or analysis_decision.reason
+
+    if decision.decision == "generate_report" and not analysis.evidence_sufficient:
+        logger.warning("Replanner LLM 试图在证据不足时生成报告，已回退到 Evidence Analyzer")
+        return None
+
+    if decision.decision == "continue_investigation" and not _has_remaining_plan(state):
+        logger.warning("Replanner LLM 选择继续执行但没有剩余计划，已回退到 Evidence Analyzer")
+        return None
+
+    if decision.decision == "retry_failed_tool" and not _has_failed_tool_record(state):
+        logger.warning("Replanner LLM 选择重试但没有可重试失败工具，已回退到 Evidence Analyzer")
+        return None
+
+    if decision.decision in {"add_steps", "retry_failed_tool"}:
+        steps = _coerce_plan_steps(decision.new_steps)
+        if not steps:
+            logger.warning("Replanner LLM 决策需要新步骤但未提供有效 PlanStep，已回退")
+            return None
+        safe_steps = _safe_llm_steps_or_none(
+            steps,
+            state,
+            retry=decision.decision == "retry_failed_tool",
+        )
+        if safe_steps is None:
+            return None
+        return ReplanDecision(decision=decision.decision, reason=reason, new_steps=safe_steps)
+
+    return ReplanDecision(decision=decision.decision, reason=reason, new_steps=[])
+
+
+def _coerce_replan_decision(decision_obj: Any) -> ReplanDecision | None:
+    if isinstance(decision_obj, ReplanDecision):
+        return decision_obj
+    if isinstance(decision_obj, dict):
+        try:
+            return ReplanDecision(**decision_obj)
+        except Exception:
+            return None
+    return None
+
+
+def _coerce_plan_steps(raw_steps: list[Any]) -> list[PlanStep]:
+    steps: list[PlanStep] = []
+    for raw_step in raw_steps:
+        try:
+            step = raw_step if isinstance(raw_step, PlanStep) else PlanStep(**raw_step)
+        except Exception:
+            continue
+        steps.append(step.model_copy(update={"status": "pending"}))
+    return steps
+
+
+def _safe_llm_steps_or_none(
+    steps: list[PlanStep],
+    state: PlanExecuteState,
+    *,
+    retry: bool,
+) -> list[PlanStep] | None:
+    """Accept only registered/read-only steps that risk control allows automatically."""
+    registry = create_default_tool_registry([])
+    safe_steps: list[PlanStep] = []
+    for step in steps:
+        if step.tool_name != "manual_analysis" and registry.get(step.tool_name) is None:
+            logger.warning(f"Replanner LLM 返回未注册工具 {step.tool_name}，已回退")
+            return None
+
+        normalized_step = step.model_copy(
+            update={
+                "status": "pending",
+                "retry_count": max(step.retry_count, 1) if retry else 0,
+            }
+        )
+        risk_decision = assess_plan_step(
+            normalized_step,
+            tool_registry=registry,
+            incident=state.get("incident"),
+        )
+        if risk_decision.policy != "allow":
+            logger.warning(
+                "Replanner LLM 返回风险步骤，已回退: "
+                f"{normalized_step.tool_name} policy={risk_decision.policy}"
+            )
+            return None
+        safe_steps.append(normalized_step)
+    return safe_steps
+
+
+def _has_remaining_plan(state: PlanExecuteState) -> bool:
+    return bool(state.get("current_plan") or state.get("plan"))
+
+
+def _has_failed_tool_record(state: PlanExecuteState) -> bool:
+    for record in state.get("tool_call_records", []):
+        if not isinstance(record, dict):
+            continue
+        status = str(record.get("status") or "").lower()
+        step_id = str(record.get("step_id") or "")
+        if status in {"failed", "error"} and not step_id.endswith("-retry"):
+            return True
+    return False
+
+
+def _format_replanner_tools_description() -> str:
+    registry = create_default_tool_registry([])
+    return format_tools_description(registry.list_contracts())
+
+
+def _build_replanner_messages(
+    state: PlanExecuteState,
+    analysis: EvidenceAnalysis,
+    analysis_decision: ReplanDecision,
+    budgeter: ContextBudgeter | None = None,
+) -> list[tuple[str, str]]:
+    active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
+    return [
+        ("user", f"原始任务: {state.get('input', '')}"),
+        (
+            "user",
+            "Incident:\n"
+            f"{_json_preview(state.get('incident') or {}, budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "剩余结构化计划:\n"
+            f"{_json_preview(state.get('current_plan') or [], budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "兼容计划队列:\n"
+            f"{_json_preview(state.get('plan') or [], budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "执行历史:\n"
+            f"{_text_preview(_format_simple_steps(state.get('past_steps', [])), budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "结构化证据:\n"
+            f"{_text_preview(_format_evidence_for_prompt(state.get('gathered_evidence', [])), budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "工具调用记录:\n"
+            f"{_text_preview(_format_tool_calls_for_prompt(state.get('tool_call_records', [])), budgeter=active_budgeter)}",
+        ),
+        ("user", f"Evidence Analyzer 摘要:\n{render_analysis_summary(analysis)}"),
+        (
+            "user",
+            "Evidence Analyzer 基线决策:\n"
+            f"{_json_preview(analysis_decision.model_dump(mode='json'), budgeter=active_budgeter)}",
+        ),
+        (
+            "user",
+            "请输出 ReplanDecision。若补查，只给低风险只读步骤；若涉及变更，只能请求审批。",
+        ),
+    ]
+
+
+def _json_preview(
+    value: Any,
+    limit: int = REPLANNER_CONTEXT_CHAR_LIMIT,
+    budgeter: ContextBudgeter | None = None,
+) -> str:
+    active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
+    return active_budgeter.json(value, limit=limit)
+
+
+def _text_preview(
+    text: str,
+    limit: int = REPLANNER_CONTEXT_CHAR_LIMIT,
+    budgeter: ContextBudgeter | None = None,
+) -> str:
+    active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
+    return active_budgeter.text(text, limit=limit)
 
 
 def _analysis_state_update(analysis: EvidenceAnalysis) -> dict[str, Any]:
@@ -334,6 +595,8 @@ def _record_replanner_decision(
     state: PlanExecuteState,
     decision: ReplanDecision,
     analysis: EvidenceAnalysis,
+    *,
+    decision_source: str = "evidence_analyzer",
 ) -> None:
     """Write the structured Replanner decision into trace storage."""
     trace_service.create_event(
@@ -347,6 +610,8 @@ def _record_replanner_decision(
         metadata={
             "decision": decision.decision,
             "reason": decision.reason,
+            "decision_source": decision_source,
+            "analysis_decision": analysis.decision,
             "new_steps": [step.model_dump(mode="json") for step in decision.new_steps],
             "evidence_sufficient": analysis.evidence_sufficient,
             "missing_evidence": analysis.missing_evidence,

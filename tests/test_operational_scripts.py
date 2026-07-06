@@ -26,6 +26,27 @@ def test_windows_start_script_checks_live_before_ready_upload() -> None:
     assert live_index < ready_index
     assert "FastAPI 进程可能还未启动" in script
     assert "依赖尚未就绪，跳过文档上传" in script
+    assert 'curl -s -o nul -w "%%{http_code}"' in script
+    assert 'if not "!HTTP_CODE!"=="200"' in script
+
+
+def test_makefile_upload_fails_when_any_document_indexing_fails() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    upload = makefile.split("upload:", maxsplit=1)[1]
+    upload = upload.split("# 列出文档", maxsplit=1)[0]
+
+    assert "failed=$$((failed + 1))" in upload
+    assert "文档上传或索引存在失败" in upload
+    assert "exit 1" in upload
+
+
+def test_production_docs_use_current_maintenance_script_paths() -> None:
+    production = (ROOT / "deploy" / "production.md").read_text(encoding="utf-8")
+
+    assert r"scripts\maintenance\cleanup_aiops_store.py" in production
+    assert r"scripts\maintenance\migrate_aiops_sqlite_to_mysql.py" in production
+    assert r"scripts\cleanup_aiops_store.py" not in production
+    assert r"scripts\migrate_aiops_sqlite_to_mysql.py" not in production
 
 
 def test_production_docs_state_security_boundaries() -> None:
@@ -39,6 +60,33 @@ def test_production_docs_state_security_boundaries() -> None:
     assert "不自动执行重启、删 Pod、执行 SQL 或修改生产配置" in readme
     assert "SSO/OIDC or an internal admin token" in production
     assert "Add RBAC" in production
+
+
+def test_container_delivery_files_exclude_local_runtime_artifacts() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    production = (ROOT / "deploy" / "production.md").read_text(encoding="utf-8")
+
+    assert "FROM python:3.11-slim" in dockerfile
+    assert "python -m pip install ." in dockerfile
+    assert "/health/live" in dockerfile
+    assert "COPY app ./app" in dockerfile
+    assert "COPY static ./static" in dockerfile
+    assert "COPY config ./config" in dockerfile
+
+    for ignored_path in [
+        ".env",
+        "venv",
+        "logs",
+        "uploads",
+        "data/*.db",
+        "htmlcov",
+    ]:
+        assert ignored_path in dockerignore
+
+    assert "容器入口只负责启动 FastAPI" in readme
+    assert "This image is a delivery wrapper" in production
 
 
 def test_logger_uses_central_runtime_config() -> None:
@@ -73,17 +121,27 @@ def test_makefile_exposes_hygiene_check_target() -> None:
     assert "scripts/maintenance/hygiene_check.py" in makefile
 
 
-def test_makefile_check_all_runs_quality_gate_targets() -> None:
+def test_makefile_verify_runs_quality_gate_targets() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
-    check_all = makefile.split("check-all:  ## 运行所有检查", maxsplit=1)[1]
+    verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]
+    verify = verify.split("check-all:", maxsplit=1)[0]
+
+    assert "@$(MAKE) format-check" in verify
+    assert "@$(MAKE) lint" in verify
+    assert "@$(MAKE) type-check" in verify
+    assert "@$(MAKE) security" in verify
+    assert "@$(MAKE) test-quick" in verify
+    assert "@$(MAKE) hygiene-check" in verify
+
+
+def test_makefile_check_all_is_verify_alias() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    check_all = makefile.split("check-all:  ## 兼容入口：等同 make verify", maxsplit=1)[1]
     check_all = check_all.split("pre-commit-install:", maxsplit=1)[0]
 
-    assert "@$(MAKE) lint" in check_all
-    assert "@$(MAKE) type-check" in check_all
-    assert "@$(MAKE) security" in check_all
-    assert "@$(MAKE) test" in check_all
-    assert "@$(MAKE) hygiene-check" in check_all
+    assert "@$(MAKE) verify" in check_all
 
 
 def test_hygiene_check_detects_generated_artifacts(tmp_path) -> None:

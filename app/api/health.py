@@ -44,17 +44,23 @@ async def liveness_check():
 
 @router.get("/health/ready")
 async def readiness_check():
-    """Return dependency readiness for RAG and production traffic."""
+    """Return dependency readiness for all production traffic capabilities."""
     health_data = await _dependency_health_data()
 
-    overall_status = "healthy"
+    unready_capabilities = [
+        name
+        for name, capability in health_data.get("capabilities", {}).items()
+        if not capability.get("ready")
+    ]
     status_code = 200
-    if health_data["checks"]["milvus"]["status"] != "connected":
-        overall_status = "degraded"
+    if unready_capabilities:
         status_code = 503
-        health_data["error"] = "RAG readiness dependency unavailable"
+        health_data["error"] = (
+            "Readiness dependencies unavailable: " + ", ".join(unready_capabilities)
+        )
 
-    health_data["status"] = overall_status
+    health_data["status"] = "healthy" if status_code == 200 else "degraded"
+    health_data["unready_capabilities"] = unready_capabilities
     return JSONResponse(
         status_code=status_code,
         content={
@@ -150,6 +156,16 @@ def _base_health_data() -> dict[str, Any]:
 
 def _check_milvus() -> dict[str, str]:
     try:
+        if not milvus_manager.health_check():
+            try:
+                _ = milvus_manager.connect()
+            except Exception as exc:
+                logger.warning(f"Milvus readiness connection failed: {exc}")
+                return {
+                    "status": "disconnected",
+                    "message": f"Milvus disconnected: {exc}",
+                }
+
         milvus_healthy = milvus_manager.health_check()
         return {
             "status": "connected" if milvus_healthy else "disconnected",

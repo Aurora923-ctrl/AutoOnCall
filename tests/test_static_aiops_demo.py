@@ -319,6 +319,10 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "renderReplayEvaluationMetric" in script
     assert "formatReplayEvaluationValue" in script
     assert "evaluationMetricTone" in script
+    assert "formatReplannerDecisionSource" in script
+    assert "replannerDecisionSourceTone" in script
+    assert "source=${this.escapeHtml(sourceLabel)}" in script
+    assert "baseline=${this.escapeHtml(analysisLabel)}" in script
     assert "未通过指标" in script
     assert "没有匹配当前筛选条件的事件" in script
     assert 'id="reportViewer"' in page
@@ -356,8 +360,10 @@ def test_static_upload_flow_warns_when_indexing_fails() -> None:
     assert "索引耗时" in script
     assert "覆盖已有文件" in script
     assert "showNotification(warningMessage, 'warning')" in script
-    assert "const maxSizeMb = 10" in script
-    assert "maxSizeMb * 1024 * 1024" in script
+    assert "loadUploadConstraints" in script
+    assert "/upload/config" in script
+    assert "data.allowed_extensions" in script
+    assert "data.max_file_size" in script
     assert "文件大小不能超过${maxSizeMb}MB" in script
 
 

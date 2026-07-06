@@ -102,7 +102,7 @@ class TracingAdapter:
     ) -> dict[str, Any]:
         base_url = require_config(self.tempo_url, "TEMPO_BASE_URL")
         bounded_limit = min(max(int(limit), 1), 100)
-        query = f'{{ resource.service.name = "{service_name}" }}'
+        query = f'{{ resource.service.name = "{_escape_traceql_string(service_name)}" }}'
         async with httpx.AsyncClient(
             timeout=self.tempo_timeout_seconds,
             headers=bearer_headers(self.tempo_token),
@@ -236,3 +236,8 @@ def _tempo_span_attributes(span: dict[str, Any]) -> dict[str, Any]:
         if key:
             attributes[key] = item.get("value")
     return attributes
+
+
+def _escape_traceql_string(value: str) -> str:
+    """Escape a value for a quoted TraceQL string literal."""
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')

@@ -35,6 +35,9 @@ def normalize_data_source(source_tool: str, raw_data: dict[str, Any] | None = No
     source = ""
     if isinstance(output, dict):
         source = str(output.get("source") or "")
+        synthetic_fields = output.get("synthetic_fields")
+        if source.strip().lower() == "mcp_monitor" and synthetic_fields:
+            return "mcp_monitor_mixed"
     if not source:
         source = str(payload.get("source") or "")
 

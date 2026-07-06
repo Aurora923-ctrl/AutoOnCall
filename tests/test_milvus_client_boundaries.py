@@ -31,3 +31,36 @@ def test_dimension_mismatch_can_recreate_collection_when_explicitly_enabled(monk
 
     assert dropped == [manager.COLLECTION_NAME]
     assert created == [True]
+
+
+def test_health_check_uses_collection_probe(monkeypatch) -> None:
+    manager = milvus_client.MilvusClientManager()
+    manager._client = object()  # type: ignore[assignment]
+    probed: list[str] = []
+
+    monkeypatch.setattr(milvus_client.connections, "has_connection", lambda alias: alias == "default")
+    monkeypatch.setattr(
+        milvus_client.utility,
+        "has_collection",
+        lambda name: probed.append(name) or True,
+    )
+
+    assert manager.health_check() is True
+    assert probed == [manager.COLLECTION_NAME]
+
+
+def test_health_check_closes_stale_client_when_probe_fails(monkeypatch) -> None:
+    manager = milvus_client.MilvusClientManager()
+    manager._client = object()  # type: ignore[assignment]
+    disconnected: list[str] = []
+
+    def fail_probe(name: str) -> bool:
+        raise RuntimeError(f"{name} unavailable")
+
+    monkeypatch.setattr(milvus_client.connections, "has_connection", lambda alias: alias == "default")
+    monkeypatch.setattr(milvus_client.connections, "disconnect", disconnected.append)
+    monkeypatch.setattr(milvus_client.utility, "has_collection", fail_probe)
+
+    assert manager.health_check() is False
+    assert manager._client is None
+    assert disconnected == ["default"]

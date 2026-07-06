@@ -1,6 +1,7 @@
 """Tests for Replanner decisions based on structured evidence."""
 
 import importlib
+from typing import Any
 
 import pytest
 
@@ -51,6 +52,29 @@ async def fake_generate_response_with_analysis(state, analysis):
     return {"response": f"report: {analysis.decision}"}
 
 
+class FakeStructuredLLM:
+    def with_structured_output(self, _schema: Any) -> "FakeStructuredLLM":
+        return self
+
+
+class FakeReplannerPrompt:
+    def __init__(self, decision: Any) -> None:
+        self.decision = decision
+        self.payload: dict[str, Any] | None = None
+
+    def __or__(self, _structured_llm: Any) -> "FakeReplannerChain":
+        return FakeReplannerChain(self)
+
+
+class FakeReplannerChain:
+    def __init__(self, prompt: FakeReplannerPrompt) -> None:
+        self.prompt = prompt
+
+    async def ainvoke(self, payload: dict[str, Any]) -> Any:
+        self.prompt.payload = payload
+        return self.prompt.decision
+
+
 @pytest.mark.asyncio
 async def test_replanner_adds_missing_evidence_steps_when_plan_is_empty() -> None:
     state = create_initial_aiops_state(
@@ -79,7 +103,13 @@ async def test_replanner_adds_missing_evidence_steps_when_plan_is_empty() -> Non
 
 
 @pytest.mark.asyncio
-async def test_replanner_retries_failed_tool_without_calling_llm() -> None:
+async def test_replanner_retries_failed_tool_without_calling_llm(monkeypatch) -> None:
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", True)
+    monkeypatch.setattr(
+        replanner_module,
+        "_create_llm",
+        lambda: pytest.fail("retry decisions must not call the Replanner LLM"),
+    )
     state = create_initial_aiops_state(
         "order-service Redis connection timeout",
         session_id="replanner-retry",
@@ -102,6 +132,95 @@ async def test_replanner_retries_failed_tool_without_calling_llm() -> None:
     assert update["current_plan"][0]["step_id"] == "s3-retry"
     assert update["current_plan"][0]["retry_count"] == 1
     assert update["plan"][0].startswith("[s3-retry]")
+
+
+@pytest.mark.asyncio
+async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> None:
+    llm_step = PlanStep(
+        step_id="llm-traces",
+        tool_name="query_traces",
+        purpose="补查 order-service 到 Redis 的调用链错误和耗时",
+        input_args={"service_name": "order-service", "time_range": "10m"},
+        expected_evidence="确认 Redis 调用链是否出现超时或错误",
+        risk_level="low",
+    )
+    fake_prompt = FakeReplannerPrompt(
+        replanner_module.ReplanDecision(
+            decision="add_steps",
+            reason="日志已提示 Redis timeout，需要补充调用链证据",
+            new_steps=[llm_step],
+        )
+    )
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", True)
+    monkeypatch.setattr(replanner_module, "_create_llm", lambda: FakeStructuredLLM())
+    monkeypatch.setattr(replanner_module, "replanner_prompt", fake_prompt)
+
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout",
+        session_id="replanner-llm-add-steps",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "Redis connection timeout in logs"},
+            "s1",
+        )
+    ]
+
+    update = await replanner_module.replanner(state)
+
+    assert update["current_plan"][0]["tool_name"] == "query_traces"
+    assert update["current_plan"][0]["step_id"] == "llm-traces"
+    assert update["current_plan"][0]["status"] == "pending"
+    assert update["evidence_analysis"]["decision"] == "add_steps"
+    assert fake_prompt.payload is not None
+    assert "query_traces" in fake_prompt.payload["tools_description"]
+    assert any("Evidence Analyzer 摘要" in content for _, content in fake_prompt.payload["messages"])
+
+
+@pytest.mark.asyncio
+async def test_replanner_rejects_unsafe_llm_steps_and_falls_back(monkeypatch) -> None:
+    fake_prompt = FakeReplannerPrompt(
+        replanner_module.ReplanDecision(
+            decision="add_steps",
+            reason="错误地建议删除 Pod",
+            new_steps=[
+                PlanStep(
+                    step_id="unsafe",
+                    tool_name="delete_pod",
+                    purpose="删除生产 Pod",
+                    input_args={"pod": "order-service-0"},
+                    expected_evidence="Pod 被删除",
+                    risk_level="high",
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", True)
+    monkeypatch.setattr(replanner_module, "_create_llm", lambda: FakeStructuredLLM())
+    monkeypatch.setattr(replanner_module, "replanner_prompt", fake_prompt)
+
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout",
+        session_id="replanner-llm-unsafe-fallback",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["incident"]["environment"] = "prod"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "Redis connection timeout in logs"},
+            "s1",
+        )
+    ]
+
+    update = await replanner_module.replanner(state)
+
+    tool_names = [step["tool_name"] for step in update["current_plan"]]
+    assert "delete_pod" not in tool_names
+    assert "query_metrics" in tool_names
+    assert "query_redis_status" in tool_names
 
 
 @pytest.mark.asyncio

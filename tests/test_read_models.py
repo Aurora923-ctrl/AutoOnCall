@@ -3,7 +3,7 @@
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.report import DiagnosisReport
-from app.services.read_models import effective_run_status
+from app.services.read_models import build_aiops_run_summary, effective_run_status
 
 
 def _snapshot() -> AIOpsSessionSnapshot:
@@ -49,3 +49,40 @@ def test_effective_run_status_preserves_post_approval_change_states() -> None:
         "sandbox_executing"
     )
     assert effective_run_status(_snapshot(), _report("escalated"), approvals) == "escalated"
+
+
+def test_aiops_run_summary_counts_consumed_plan_steps() -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="session-consumed-plan",
+        status="running",
+        state={
+            "trace_id": "trace-consumed-plan",
+            "incident": {
+                "incident_id": "inc-consumed-plan",
+                "title": "Redis timeout",
+            },
+            "current_plan": [
+                {
+                    "step_id": "step-2",
+                    "tool_name": "search_runbook",
+                    "purpose": "查找 Redis 连接耗尽处置手册",
+                }
+            ],
+            "executed_steps": [
+                {
+                    "step_id": "step-1",
+                    "tool_name": "query_redis_status",
+                    "purpose": "检查 Redis 连接数",
+                    "status": "success",
+                }
+            ],
+            "past_steps": [
+                ({"step_id": "step-1", "tool_name": "query_redis_status"}, "ok"),
+            ],
+        },
+    )
+
+    summary = build_aiops_run_summary(snapshot, approvals=[], report=None)
+
+    assert summary["plan_step_count"] == 2
+    assert summary["completed_step_count"] == 1

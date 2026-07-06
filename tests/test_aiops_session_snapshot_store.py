@@ -27,6 +27,13 @@ def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
                     "purpose": "检查 Redis 连接数",
                 }
             ],
+            "executed_steps": [
+                {
+                    "step_id": "step-0",
+                    "tool_name": "query_metrics",
+                    "status": "success",
+                }
+            ],
         },
     )
     store.save_aiops_session_snapshot(first)
@@ -38,9 +45,11 @@ def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
     assert saved.trace_id == "trace-redis"
     assert saved.status == "running"
     assert saved.current_plan[0]["tool_name"] == "query_redis_status"
+    assert saved.executed_steps[0]["tool_name"] == "query_metrics"
     state = saved.to_state()
     assert state["session_id"] == "session-redis"
     assert state["incident"]["incident_id"] == "inc-redis"
+    assert state["executed_steps"][0]["step_id"] == "step-0"
 
     second = AIOpsSessionSnapshot.from_state(
         session_id="session-redis",
@@ -98,6 +107,8 @@ def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
         "session-mysql",
         "session-redis",
     ]
+    paged_snapshots = store.list_aiops_session_snapshots(limit=1, offset=1)
+    assert [snapshot.session_id for snapshot in paged_snapshots] == ["session-redis"]
     redis_snapshots = store.list_aiops_session_snapshots(incident_id="inc-redis", limit=10)
     assert [snapshot.session_id for snapshot in redis_snapshots] == ["session-redis"]
     assert store.list_aiops_session_snapshots(incident_id="missing", limit=10) == []

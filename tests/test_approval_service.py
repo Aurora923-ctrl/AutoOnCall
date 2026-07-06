@@ -68,6 +68,36 @@ def test_approval_service_approves_latest_pending_request(tmp_path) -> None:
     assert service.get_request(first.approval_id).status == "pending"
 
 
+@pytest.mark.asyncio
+async def test_pending_approval_api_can_include_approved_followups(monkeypatch, tmp_path) -> None:
+    approvals_api = importlib.import_module("app.api.approvals")
+    service = ApprovalService(tmp_path / "approvals.db")
+    pending = service.create_request(
+        ApprovalRequest(incident_id="inc-queue", action="新变更", risk_level="high")
+    )
+    approved = service.create_request(
+        ApprovalRequest(incident_id="inc-queue", action="已批准变更", risk_level="medium")
+    )
+    approved = service.decide_request(
+        approved.approval_id,
+        decision="approve",
+        decided_by="sre",
+        reason="窗口已确认",
+    )
+    monkeypatch.setattr(approvals_api, "get_approval_service", lambda: service)
+
+    default_payload = await approvals_api.list_pending_approvals()
+    followup_payload = await approvals_api.list_pending_approvals(
+        include_approved_actions=True,
+    )
+
+    assert [item["approval_id"] for item in default_payload["items"]] == [pending.approval_id]
+    assert [item["approval_id"] for item in followup_payload["items"]] == [
+        pending.approval_id,
+        approved.approval_id,
+    ]
+
+
 def test_approval_workflow_reuses_same_pending_request_by_idempotency_key(tmp_path) -> None:
     service = ApprovalService(tmp_path / "approvals.db")
     state = {

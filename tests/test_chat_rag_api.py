@@ -4,6 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
+from app.api import chat as chat_api
 from app.main import app
 from app.models.request import ChatRequest, ClearRequest
 
@@ -14,7 +15,13 @@ def test_chat_request_models_reject_unbounded_session_and_question_inputs() -> N
     with pytest.raises(ValidationError):
         ChatRequest(Id="session-1", Question="")
     with pytest.raises(ValidationError):
+        ChatRequest(Id="session-1", Question="   ")
+    with pytest.raises(ValidationError):
+        ChatRequest(Id="   ", Question="hello")
+    with pytest.raises(ValidationError):
         ClearRequest(sessionId="s" * 129)
+    with pytest.raises(ValidationError):
+        ClearRequest(sessionId="   ")
 
 
 @pytest.mark.asyncio
@@ -102,7 +109,8 @@ async def test_chat_returns_http_500_when_rag_service_fails(monkeypatch) -> None
     assert response.status_code == 500
     assert payload["code"] == 500
     assert payload["data"]["success"] is False
-    assert payload["data"]["errorMessage"] == "retrieval backend unavailable"
+    assert payload["data"]["errorMessage"] == chat_api.PUBLIC_CHAT_ERROR_MESSAGE
+    assert "retrieval backend unavailable" not in payload["data"]["errorMessage"]
 
 
 @pytest.mark.asyncio
@@ -171,3 +179,33 @@ async def test_chat_stream_emits_search_results_before_done(monkeypatch) -> None
     assert '"type": "content"' in text
     assert '"type": "done"' in text
     assert "refuse_without_trusted_source" in text
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_returns_public_error_when_rag_service_fails(monkeypatch) -> None:
+    async def fail_query_stream_with_retrieval(
+        question: str,
+        session_id: str,
+        metadata_filter: dict | None = None,
+    ):
+        raise RuntimeError("stream backend unavailable")
+        yield
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.query_stream_with_retrieval",
+        fail_query_stream_with_retrieval,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/api/chat_stream",
+            json={"Id": "rag-stream", "Question": "Redis timeout 怎么处理？"},
+        ) as response:
+            body = await response.aread()
+
+    text = body.decode("utf-8")
+
+    assert response.status_code == 200
+    assert chat_api.PUBLIC_CHAT_STREAM_ERROR_MESSAGE in text
+    assert "stream backend unavailable" not in text

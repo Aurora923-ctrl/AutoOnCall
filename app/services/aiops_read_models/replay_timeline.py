@@ -30,6 +30,7 @@ def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
                 "output_summary": event.output_summary,
                 "error_message": event.error_message or "",
                 "data_source": str(event.metadata.get("data_source") or ""),
+                "decision_source": str(event.metadata.get("decision_source") or ""),
                 "latency_ms": event.latency_ms,
                 "created_at": event.created_at.isoformat(),
                 "metadata": event.metadata,
@@ -88,6 +89,8 @@ def build_replay_replanner_decisions(timeline: list[dict[str, Any]]) -> list[dic
             continue
         metadata = _as_mapping(item.get("metadata"))
         decision = str(metadata.get("decision") or _parse_decision_from_summary(item) or "")
+        decision_source = str(metadata.get("decision_source") or "")
+        analysis_decision = str(metadata.get("analysis_decision") or "")
         reason = str(metadata.get("reason") or item.get("summary") or "")
         evidence_profile = _as_mapping(metadata.get("evidence_profile"))
         decisions.append(
@@ -97,6 +100,10 @@ def build_replay_replanner_decisions(timeline: list[dict[str, Any]]) -> list[dic
                 "status": item.get("status", "unknown"),
                 "decision": decision or "unknown",
                 "decision_label": replanner_decision_label(decision),
+                "decision_source": decision_source or "unknown",
+                "decision_source_label": replanner_decision_source_label(decision_source),
+                "analysis_decision": analysis_decision or "unknown",
+                "analysis_decision_label": replanner_decision_label(analysis_decision),
                 "reason": reason,
                 "evidence_sufficient": bool(metadata.get("evidence_sufficient", False)),
                 "missing_evidence": _as_list(metadata.get("missing_evidence")),
@@ -128,6 +135,18 @@ def replanner_decision_label(decision: str) -> str:
         "escalate_to_human": "升级人工",
     }
     return labels.get(decision, decision or "unknown")
+
+
+def replanner_decision_source_label(source: str) -> str:
+    """Return a short display label for a Replanner decision source."""
+    labels = {
+        "llm_structured": "LLM 结构化决策",
+        "evidence_analyzer": "Evidence Analyzer",
+        "evidence_analyzer_fallback": "Evidence Analyzer 兜底",
+        "evidence_analyzer_safety_priority": "安全优先规则",
+        "max_steps_guard": "步数上限保护",
+    }
+    return labels.get(source, source or "unknown")
 
 
 def _parse_decision_from_summary(item: dict[str, Any]) -> str:

@@ -480,6 +480,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
             : [];
         const profile = item.evidence_profile || {};
         const dataSources = profile.by_data_source || {};
+        const sourceTone = this.replannerDecisionSourceTone(item.decision_source);
+        const sourceLabel = item.decision_source_label
+            || this.formatReplannerDecisionSource(item.decision_source);
+        const analysisLabel = item.analysis_decision_label || item.analysis_decision || '';
         return `
             <article class="replanner-decision-card ${tone}">
                 <div class="replay-stage-title">
@@ -489,6 +493,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 <p>${this.escapeHtml(item.reason || item.summary || '暂无决策原因')}</p>
                 <div class="source-strip">
                     <span class="source-pill">${this.escapeHtml(item.decision || 'unknown')}</span>
+                    <span class="source-pill ${sourceTone}">source=${this.escapeHtml(sourceLabel)}</span>
+                    ${analysisLabel ? `<span class="source-pill">baseline=${this.escapeHtml(analysisLabel)}</span>` : ''}
                     <span class="source-pill">${this.escapeHtml(item.source_quality || 'unknown')}</span>
                     <span class="source-pill">avg=${this.formatConfidence(item.average_evidence_confidence)}</span>
                     <span class="source-pill">${this.formatDateTime(item.created_at)}</span>
@@ -510,6 +516,27 @@ Object.assign(window.AutoOnCallApp.prototype, {
         if (['add_steps', 'retry_failed_tool', 'request_approval'].includes(value)) return 'warning';
         if (value === 'escalate_to_human') return 'error';
         return this.statusTone(decision?.status || 'unknown');
+    }
+,
+    replannerDecisionSourceTone(source) {
+        const value = source || '';
+        if (value === 'llm_structured') return 'mixed';
+        if (value === 'evidence_analyzer') return 'real';
+        if (value.includes('fallback') || value.includes('safety') || value.includes('guard')) {
+            return 'warning';
+        }
+        return 'unavailable';
+    }
+,
+    formatReplannerDecisionSource(source) {
+        const labels = {
+            llm_structured: 'LLM 结构化决策',
+            evidence_analyzer: 'Evidence Analyzer',
+            evidence_analyzer_fallback: 'Evidence Analyzer 兜底',
+            evidence_analyzer_safety_priority: '安全优先规则',
+            max_steps_guard: '步数上限保护'
+        };
+        return labels[source] || source || 'unknown';
     }
 ,
     renderReplayMetricGrid(metrics) {

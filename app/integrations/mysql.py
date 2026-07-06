@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from app.config import config
 from app.integrations.base import ExternalAdapterError, adapter_success, require_config
@@ -43,15 +44,8 @@ class MySQLStatusAdapter:
         except ImportError as exc:
             raise ExternalAdapterError("PyMySQL is required for MYSQL_DSN integration") from exc
 
-        from urllib.parse import urlparse
-
-        parsed = urlparse(dsn)
         connection = pymysql.connect(
-            host=parsed.hostname,
-            port=parsed.port or 3306,
-            user=parsed.username,
-            password=parsed.password,
-            database=(parsed.path or "/").lstrip("/") or None,
+            **self._connection_kwargs(dsn),
             connect_timeout=int(self.timeout_seconds),
             read_timeout=int(self.timeout_seconds),
             cursorclass=pymysql.cursors.DictCursor,
@@ -101,7 +95,7 @@ class MySQLStatusAdapter:
             },
             service_name=service_name,
             mysql_instance=mysql_instance,
-            endpoint=f"{parsed.hostname}:{parsed.port or 3306}",
+            endpoint=self._endpoint(dsn),
             slow_queries={"count": slow_queries, "status": "checked"},
             connections={"active": active, "max_used": max_used},
             processlist_sample=process_rows[:10],
@@ -114,15 +108,8 @@ class MySQLStatusAdapter:
         except ImportError as exc:
             raise ExternalAdapterError("PyMySQL is required for MYSQL_DSN integration") from exc
 
-        from urllib.parse import urlparse
-
-        parsed = urlparse(dsn)
         connection = pymysql.connect(
-            host=parsed.hostname,
-            port=parsed.port or 3306,
-            user=parsed.username,
-            password=parsed.password,
-            database=(parsed.path or "/").lstrip("/") or None,
+            **self._connection_kwargs(dsn),
             connect_timeout=int(self.timeout_seconds),
             read_timeout=int(self.timeout_seconds),
             cursorclass=pymysql.cursors.DictCursor,
@@ -136,12 +123,28 @@ class MySQLStatusAdapter:
         return {
             "status": "connected",
             "message": "SELECT 1 succeeded",
-            "endpoint": f"{parsed.hostname}:{parsed.port or 3306}",
+            "endpoint": self._endpoint(dsn),
         }
 
     def _resolve_dsn(self, mysql_instance: str = "") -> str:
         dsn = self.instance_dsns.get(mysql_instance) if mysql_instance else ""
         return require_config(dsn or self.dsn, "MYSQL_DSN, MYSQL_URL, or MYSQL_HOST")
+
+    @staticmethod
+    def _connection_kwargs(dsn: str) -> dict[str, Any]:
+        parsed = urlparse(dsn)
+        return {
+            "host": parsed.hostname,
+            "port": parsed.port or 3306,
+            "user": unquote(parsed.username or ""),
+            "password": unquote(parsed.password or ""),
+            "database": (parsed.path or "/").lstrip("/") or None,
+        }
+
+    @staticmethod
+    def _endpoint(dsn: str) -> str:
+        parsed = urlparse(dsn)
+        return f"{parsed.hostname}:{parsed.port or 3306}"
 
     @classmethod
     def _execute_read_only(cls, cursor: Any, sql: str) -> None:

@@ -85,6 +85,7 @@ class AIOpsStateStore(Protocol):
         *,
         incident_id: str | None = None,
         limit: int = 20,
+        offset: int = 0,
     ) -> list[AIOpsSessionSnapshot]: ...
 
     def save_incident_state(self, state: IncidentState) -> None: ...

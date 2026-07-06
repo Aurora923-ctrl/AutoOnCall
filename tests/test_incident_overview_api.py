@@ -35,6 +35,25 @@ class FakeChangeExecutionService:
         ]
 
 
+def test_incident_state_store_is_reused(monkeypatch, tmp_path) -> None:
+    incidents_api = importlib.import_module("app.api.incidents")
+    stores: list[AIOpsSQLiteStore] = []
+
+    def create_store() -> AIOpsSQLiteStore:
+        store = AIOpsSQLiteStore(tmp_path / f"states-{len(stores)}.db")
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(incidents_api, "_incident_state_store", None)
+    monkeypatch.setattr(incidents_api, "create_aiops_store", create_store)
+
+    first = incidents_api.get_incident_state_store()
+    second = incidents_api.get_incident_state_store()
+
+    assert first is second
+    assert stores == [first]
+
+
 @pytest.mark.asyncio
 async def test_incident_overview_aggregates_report_trace_and_approvals(
     monkeypatch,
@@ -79,7 +98,7 @@ async def test_incident_overview_aggregates_report_trace_and_approvals(
                 "summary": "Jaeger 返回 2 条 trace，error_spans=1",
                 "confidence_reason": "Tracing 后端返回调用链耗时和错误 span 信号",
                 "confidence": 0.82,
-            }
+            },
         ],
         tool_calls=[
             {
@@ -99,7 +118,7 @@ async def test_incident_overview_aggregates_report_trace_and_approvals(
                 "latency_ms": 18.5,
                 "input_summary": '{"service_name": "order-service"}',
                 "output_summary": "Jaeger 返回 2 条 trace，error_spans=1",
-            }
+            },
         ],
         confirmed_facts=["Redis connected_clients=9940/10000；来源=mock"],
         inferred_conclusions=["该证据支持当前根因假设。"],
@@ -274,6 +293,8 @@ async def test_incident_replay_aggregates_diagnosis_artifacts(
         metadata={
             "decision": "request_approval",
             "reason": "恢复动作需要审批",
+            "decision_source": "llm_structured",
+            "analysis_decision": "add_steps",
             "evidence_sufficient": True,
             "missing_evidence": ["query_logs"],
             "new_steps": [
@@ -355,9 +376,7 @@ async def test_incident_replay_aggregates_diagnosis_artifacts(
 
     replay = await incidents_api.get_incident_replay(incident_id)
     stage_by_key = {stage["key"]: stage for stage in replay["stages"]}
-    evaluation_metric_by_key = {
-        metric["key"]: metric for metric in replay["evaluation"]["metrics"]
-    }
+    evaluation_metric_by_key = {metric["key"]: metric for metric in replay["evaluation"]["metrics"]}
 
     assert replay["incident_id"] == incident_id
     assert replay["links"]["replay"] == f"/api/incidents/{incident_id}/replay"
@@ -370,6 +389,10 @@ async def test_incident_replay_aggregates_diagnosis_artifacts(
     assert replay["metrics"]["replanner_decision_count"] == 1
     assert replay["replanner_decisions"][0]["decision"] == "request_approval"
     assert replay["replanner_decisions"][0]["decision_label"] == "请求审批"
+    assert replay["replanner_decisions"][0]["decision_source"] == "llm_structured"
+    assert replay["replanner_decisions"][0]["decision_source_label"] == "LLM 结构化决策"
+    assert replay["replanner_decisions"][0]["analysis_decision"] == "add_steps"
+    assert replay["replanner_decisions"][0]["analysis_decision_label"] == "追加证据"
     assert replay["replanner_decisions"][0]["evidence_sufficient"] is True
     assert replay["replanner_decisions"][0]["missing_evidence"] == ["query_logs"]
     assert replay["replanner_decisions"][0]["new_steps"][0]["tool_name"] == "query_logs"
@@ -489,3 +512,8 @@ async def test_incident_overview_returns_404_for_unknown_incident(monkeypatch, t
         await incidents_api.get_incident_replay("inc-missing")
 
     assert replay_exc_info.value.status_code == 404
+
+    with pytest.raises(HTTPException) as trace_exc_info:
+        await incidents_api.get_incident_trace("inc-missing")
+
+    assert trace_exc_info.value.status_code == 404

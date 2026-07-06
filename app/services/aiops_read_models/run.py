@@ -47,6 +47,7 @@ def build_aiops_run_status(
         "input": snapshot.input,
         "plan": snapshot.plan,
         "current_plan": snapshot.current_plan,
+        "executed_steps": snapshot.executed_steps,
         "past_steps": snapshot.past_steps,
         "tool_call_records": snapshot.tool_call_records,
         "gathered_evidence": snapshot.gathered_evidence,
@@ -119,7 +120,7 @@ def build_aiops_run_summary(
         "has_pending_approval": has_pending_approval,
         "has_report": bool(report_payload or report_id),
         "report_id": report_id or None,
-        "plan_step_count": len(snapshot.plan or snapshot.current_plan),
+        "plan_step_count": planned_step_count(snapshot),
         "completed_step_count": len(snapshot.past_steps),
         "evidence_count": len(snapshot.gathered_evidence),
         "tool_call_count": len(snapshot.tool_call_records),
@@ -148,6 +149,63 @@ def filter_aiops_run_summaries(
             if service_filter in str(item.get("service_name") or "").lower()
         ]
     return filtered
+
+
+def planned_step_count(snapshot: AIOpsSessionSnapshot) -> int:
+    """Infer the original plan size from durable remaining and executed step state."""
+    executed_identity_steps = (
+        [*snapshot.executed_steps, *snapshot.past_steps]
+        if snapshot.executed_steps
+        else snapshot.past_steps
+    )
+    completed_count = len(snapshot.past_steps)
+    executed_count = max(len(snapshot.executed_steps), completed_count)
+
+    if snapshot.current_plan:
+        if _plan_contains_executed_step(snapshot.current_plan, executed_identity_steps):
+            return max(len(snapshot.current_plan), executed_count)
+        return executed_count + len(snapshot.current_plan)
+
+    if snapshot.plan:
+        if _plan_contains_executed_step(snapshot.plan, executed_identity_steps):
+            return max(len(snapshot.plan), executed_count)
+        if executed_count:
+            return executed_count + len(snapshot.plan)
+        return len(snapshot.plan)
+
+    return executed_count
+
+
+def _plan_contains_executed_step(
+    plan: list[dict[str, Any]],
+    executed_steps: list[dict[str, Any]],
+) -> bool:
+    plan_identities = {_step_identity(item) for item in plan}
+    plan_identities.discard("")
+    if not plan_identities:
+        return False
+    return any(_step_identity(item) in plan_identities for item in executed_steps)
+
+
+def _step_identity(step: Any) -> str:
+    if not isinstance(step, dict):
+        return str(step or "")
+
+    if "step" in step and len(step) != 1:
+        return _step_identity(step.get("step"))
+    if "value" in step and len(step) == 1:
+        return _step_identity(step.get("value"))
+
+    step_id = step.get("step_id")
+    if step_id:
+        return f"step_id:{step_id}"
+
+    tool_name = step.get("tool_name")
+    purpose = step.get("purpose") or step.get("action") or step.get("summary")
+    if tool_name or purpose:
+        return f"tool:{tool_name}|purpose:{purpose}"
+
+    return str(step or "")
 
 
 def effective_run_status(

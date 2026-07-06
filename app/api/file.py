@@ -21,6 +21,23 @@ ALLOWED_EXTENSIONS = config.upload_allowed_extension_list
 MAX_FILE_SIZE_MB = config.upload_max_file_size_mb
 MAX_FILE_SIZE = config.upload_max_file_size
 UPLOAD_READ_CHUNK_SIZE = config.upload_read_chunk_size
+PUBLIC_UPLOAD_ERROR_MESSAGE = "文件上传失败，请稍后重试"
+PUBLIC_INDEXING_ERROR_MESSAGE = "向量索引失败，请检查服务端日志"
+PUBLIC_DIRECTORY_INDEX_ERROR_MESSAGE = "索引目录失败，请检查服务端日志"
+
+
+@router.get("/upload/config", dependencies=[Depends(require_scope(KNOWLEDGE_WRITE_SCOPE))])
+async def upload_config():
+    """Return upload constraints used by the frontend before selecting a file."""
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "allowed_extensions": ALLOWED_EXTENSIONS,
+            "max_file_size": MAX_FILE_SIZE,
+            "max_file_size_mb": MAX_FILE_SIZE_MB,
+        },
+    }
 
 
 @router.post("/upload", dependencies=[Depends(require_scope(KNOWLEDGE_WRITE_SCOPE))])
@@ -79,14 +96,14 @@ async def upload_file(file: UploadFile = File(...)):
                 logger.warning(f"上传文件未产生可检索分片: {file_path}")
             else:
                 logger.info(f"向量索引创建成功: {file_path}")
-        except Exception as e:
+        except Exception:
             logger.exception(f"向量索引创建失败: {file_path}")
             indexing_status = {
                 "status": "failed",
                 "chunk_count": 0,
                 "duration_ms": 0,
-                "error_message": str(e),
-                "message": None,
+                "error_message": PUBLIC_INDEXING_ERROR_MESSAGE,
+                "message": "文件已保存，但索引未完成",
             }
             # 注意：即使索引失败，文件上传仍然成功，但响应会暴露索引阶段状态。
 
@@ -113,8 +130,8 @@ async def upload_file(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"文件上传失败: {e}")
-        raise HTTPException(status_code=500, detail=f"文件上传失败: {e}") from e
+        logger.exception(f"文件上传失败: {e}")
+        raise HTTPException(status_code=500, detail=PUBLIC_UPLOAD_ERROR_MESSAGE) from e
 
 
 @router.post(
@@ -139,19 +156,23 @@ async def index_directory(directory_path: str | None = None):
         logger.info(f"开始索引目录: {directory_path or 'uploads'}")
 
         result = vector_index_service.index_directory(directory_path)
+        response_status = _index_directory_response_status(result)
 
         return JSONResponse(
-            status_code=200,
+            status_code=response_status,
             content={
-                "code": 200,
+                "code": response_status,
                 "message": "success" if result.success else "partial_success",
                 "data": result.to_dict(),
             },
         )
 
     except Exception as e:
-        logger.error(f"索引目录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"索引目录失败: {e}") from e
+        logger.exception(f"索引目录失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=PUBLIC_DIRECTORY_INDEX_ERROR_MESSAGE,
+        ) from e
 
 
 def _get_file_extension(filename: str) -> str:
@@ -168,6 +189,18 @@ def _get_file_extension(filename: str) -> str:
     if len(parts) == 2:
         return parts[1].lower()
     return ""
+
+
+def _index_directory_response_status(result: Any) -> int:
+    """Map directory indexing results to HTTP status codes."""
+    if getattr(result, "success", False):
+        return 200
+    error_type = getattr(result, "error_type", "")
+    if error_type == "forbidden_directory":
+        return 403
+    if error_type == "invalid_directory":
+        return 400
+    return 207
 
 
 async def _save_upload_file(file: UploadFile, file_path: Path) -> int:

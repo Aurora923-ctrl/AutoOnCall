@@ -1,5 +1,7 @@
 """向量嵌入服务模块 - 基于 LangChain Embeddings 标准接口"""
 
+from threading import RLock
+
 from langchain_core.embeddings import Embeddings
 from loguru import logger
 from openai import OpenAI
@@ -119,15 +121,18 @@ class LazyDashScopeEmbeddings(Embeddings):
 
     def __init__(self) -> None:
         self._service: DashScopeEmbeddings | None = None
+        self._lock = RLock()
 
     def _get_service(self) -> DashScopeEmbeddings:
         if self._service is None:
-            self._service = DashScopeEmbeddings(
-                api_key=config.dashscope_api_key,
-                model=config.dashscope_embedding_model,
-                dimensions=1024,
-                base_url=config.dashscope_api_base,
-            )
+            with self._lock:
+                if self._service is None:
+                    self._service = DashScopeEmbeddings(
+                        api_key=config.dashscope_api_key,
+                        model=config.dashscope_embedding_model,
+                        dimensions=1024,
+                        base_url=config.dashscope_api_base,
+                    )
         return self._service
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

@@ -30,6 +30,7 @@ from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
 
 router = APIRouter()
+_incident_state_store: AIOpsStateStore | None = None
 
 
 def get_trace_service() -> TraceService:
@@ -49,7 +50,10 @@ def get_approval_service() -> ApprovalService:
 
 def get_incident_state_store() -> AIOpsStateStore:
     """Return the incident lifecycle state store."""
-    return create_aiops_store()
+    global _incident_state_store
+    if _incident_state_store is None:
+        _incident_state_store = create_aiops_store()
+    return _incident_state_store
 
 
 def get_change_execution_service() -> ChangeExecutionService:
@@ -169,8 +173,22 @@ async def get_incident_trace(
 ) -> dict:
     """Return trace events for one incident."""
     event_type = event_type if isinstance(event_type, str) else None
-    events = get_trace_service().list_events(incident_id=incident_id, event_type=event_type)
-    trace_id = events[0].trace_id if events else ""
+    trace_repository = get_trace_service()
+    events = trace_repository.list_events(incident_id=incident_id, event_type=event_type)
+    all_events = (
+        events if event_type is None else trace_repository.list_events(incident_id=incident_id)
+    )
+    report = None
+    if not all_events:
+        report = get_report_generator().get_report(incident_id)
+        approvals = get_approval_service().list_requests(incident_id=incident_id)
+        state = get_incident_state_store().get_incident_state(incident_id)
+        change_executions = get_change_execution_service().list_executions(incident_id=incident_id)
+        if report is None and not approvals and state is None and not change_executions:
+            raise HTTPException(status_code=404, detail="incident not found")
+    trace_id = events[0].trace_id if events else all_events[0].trace_id if all_events else ""
+    if not trace_id and report is not None:
+        trace_id = report.trace_id
     return {
         "incident_id": incident_id,
         "trace_id": trace_id,

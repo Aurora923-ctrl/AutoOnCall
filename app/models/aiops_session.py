@@ -22,6 +22,7 @@ class AIOpsSessionSnapshot(BaseModel):
     incident: dict[str, Any] = Field(default_factory=dict)
     plan: list[dict[str, Any]] = Field(default_factory=list)
     current_plan: list[dict[str, Any]] = Field(default_factory=list)
+    executed_steps: list[dict[str, Any]] = Field(default_factory=list)
     past_steps: list[dict[str, Any]] = Field(default_factory=list)
     tool_call_records: list[dict[str, Any]] = Field(default_factory=list)
     gathered_evidence: list[dict[str, Any]] = Field(default_factory=list)
@@ -72,6 +73,7 @@ class AIOpsSessionSnapshot(BaseModel):
             incident=incident,
             plan=_to_dict_list(state.get("plan")),
             current_plan=_to_dict_list(state.get("current_plan")),
+            executed_steps=_to_dict_list(state.get("executed_steps")),
             past_steps=_normalize_past_steps(state.get("past_steps")),
             tool_call_records=_to_dict_list(state.get("tool_call_records")),
             gathered_evidence=_to_dict_list(state.get("gathered_evidence")),
@@ -97,6 +99,7 @@ class AIOpsSessionSnapshot(BaseModel):
             "trace_id": self.trace_id,
             "plan": list(self.plan),
             "current_plan": list(self.current_plan),
+            "executed_steps": list(self.executed_steps),
             "past_steps": list(self.past_steps),
             "tool_call_records": list(self.tool_call_records),
             "gathered_evidence": list(self.gathered_evidence),

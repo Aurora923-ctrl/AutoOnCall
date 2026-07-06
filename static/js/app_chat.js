@@ -579,7 +579,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         if (file) {
             // 验证文件格式
             if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+                this.showNotification(`只支持上传 ${this.formatAllowedFileTypes()} 格式的文件`, 'error');
                 this.fileInput.value = '';
                 return;
             }
@@ -591,8 +591,43 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = this.uploadConstraints?.allowedExtensions || ['.txt', '.md', '.markdown'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
+    }
+
+,
+    async loadUploadConstraints() {
+        try {
+            const payload = await this.apiGet(`${this.apiBaseUrl}/upload/config`);
+            const data = payload.data || {};
+            const allowedExtensions = Array.isArray(data.allowed_extensions)
+                ? data.allowed_extensions
+                    .map((ext) => String(ext || '').trim().toLowerCase())
+                    .filter(Boolean)
+                    .map((ext) => ext.startsWith('.') ? ext : `.${ext}`)
+                : [];
+            const maxSize = Number(data.max_file_size);
+            const maxSizeMb = Number(data.max_file_size_mb);
+            this.uploadConstraints = {
+                allowedExtensions: allowedExtensions.length
+                    ? allowedExtensions
+                    : this.uploadConstraints.allowedExtensions,
+                maxSize: Number.isFinite(maxSize) && maxSize > 0
+                    ? maxSize
+                    : this.uploadConstraints.maxSize,
+                maxSizeMb: Number.isFinite(maxSizeMb) && maxSizeMb > 0
+                    ? maxSizeMb
+                    : this.uploadConstraints.maxSizeMb
+            };
+        } catch (error) {
+            console.warn('读取上传配置失败，使用本地默认值:', error);
+        }
+    }
+
+,
+    formatAllowedFileTypes() {
+        const allowedExtensions = this.uploadConstraints?.allowedExtensions || ['.txt', '.md', '.markdown'];
+        return allowedExtensions.map((ext) => ext.replace(/^\./, '').toUpperCase()).join('、');
     }
 
     // 上传文件到知识库
@@ -600,13 +635,13 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async uploadFile(file) {
         // 再次验证文件类型（双重保险）
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showNotification(`只支持上传 ${this.formatAllowedFileTypes()} 格式的文件`, 'error');
             return;
         }
 
         // 验证文件大小（与后端 MAX_FILE_SIZE 保持一致）
-        const maxSizeMb = 10;
-        const maxSize = maxSizeMb * 1024 * 1024;
+        const maxSize = this.uploadConstraints?.maxSize || (10 * 1024 * 1024);
+        const maxSizeMb = this.uploadConstraints?.maxSizeMb || Math.ceil(maxSize / 1024 / 1024);
         if (file.size > maxSize) {
             this.showNotification(`文件大小不能超过${maxSizeMb}MB`, 'error');
             return;

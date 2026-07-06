@@ -28,31 +28,30 @@ class QueryServiceContextTool(AIOpsTool):
 
     async def _call(self, input_args: dict[str, Any]) -> dict[str, Any]:
         service_name = input_args.get("service_name") or "unknown-service"
+        cmdb_error: dict[str, Any] | None = None
         if self._cmdb_adapter.configured:
             try:
                 return await self._cmdb_adapter.query_service(service_name)
             except Exception as exc:
-                payload = adapter_failure(
+                cmdb_error = adapter_failure(
                     "cmdb",
                     exc,
                     summary_prefix="CMDB 查询失败",
                     service_name=service_name,
                 )
-                payload.update({"service": {}, "dependencies": []})
-                return payload
 
-        topology = get_service_dependencies(service_name)
-        if topology:
-            dependencies = _flatten_topology_dependencies(topology)
-            return {
-                "status": "success",
-                "source": "rule_based",
-                "service_name": service_name,
-                "service": {"service_name": service_name, "dependencies": dependencies},
-                "dependencies": dependencies,
-                "signals": {"dependency_count": len(dependencies), "topology_configured": True},
-                "summary": f"本地拓扑返回 {service_name} 的 {len(dependencies)} 个依赖",
-            }
+        topology_payload = _topology_context_payload(service_name)
+        if topology_payload:
+            if cmdb_error:
+                topology_payload["partial_errors"] = [_adapter_partial_error(cmdb_error)]
+                topology_payload["summary"] = (
+                    f"{topology_payload['summary']}；CMDB 查询失败，已使用本地拓扑降级"
+                )
+            return topology_payload
+
+        if cmdb_error and not config.aiops_mock_fallback_enabled:
+            cmdb_error.update({"service": {}, "dependencies": []})
+            return cmdb_error
 
         if not config.aiops_mock_fallback_enabled:
             payload = adapter_not_configured(
@@ -64,7 +63,7 @@ class QueryServiceContextTool(AIOpsTool):
             payload.update({"service": {}, "dependencies": []})
             return payload
 
-        return {
+        payload = {
             "status": "success",
             "source": "mock",
             "service_name": service_name,
@@ -78,6 +77,10 @@ class QueryServiceContextTool(AIOpsTool):
             "signals": {"dependency_count": 2, "has_owner": True},
             "summary": f"mock CMDB 返回 {service_name} 的 owner 和依赖关系",
         }
+        if cmdb_error:
+            payload["partial_errors"] = [_adapter_partial_error(cmdb_error)]
+            payload["summary"] = f"{payload['summary']}；CMDB 查询失败，已使用 mock 降级"
+        return payload
 
 
 class QueryDeployHistoryTool(AIOpsTool):
@@ -146,3 +149,27 @@ def _flatten_topology_dependencies(topology: dict[str, Any]) -> list[str]:
         if isinstance(value, list):
             dependencies.extend(str(item) for item in value if item)
     return dependencies
+
+
+def _topology_context_payload(service_name: str) -> dict[str, Any] | None:
+    topology = get_service_dependencies(service_name)
+    if not topology:
+        return None
+    dependencies = _flatten_topology_dependencies(topology)
+    return {
+        "status": "success",
+        "source": "rule_based",
+        "service_name": service_name,
+        "service": {"service_name": service_name, "dependencies": dependencies},
+        "dependencies": dependencies,
+        "signals": {"dependency_count": len(dependencies), "topology_configured": True},
+        "summary": f"本地拓扑返回 {service_name} 的 {len(dependencies)} 个依赖",
+    }
+
+
+def _adapter_partial_error(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": payload.get("source") or "unknown",
+        "error_type": payload.get("error_type") or "adapter_error",
+        "error_message": payload.get("error_message") or payload.get("message") or "unknown error",
+    }

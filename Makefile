@@ -20,8 +20,8 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init bootstrap verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo test test-quick eval eval-rag eval-change format lint fix type-check \
+.PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
+        install install-dev dev run seed-demo demo test test-quick eval eval-rag eval-change eval-replanner format format-check lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -83,6 +83,7 @@ help:
 	@echo ""
 	@echo "$(CYAN)【代码质量】$(NC)"
 	@echo "  $(YELLOW)make format$(NC)       - 🎨 格式化代码"
+	@echo "  $(YELLOW)make format-check$(NC) - 🎨 检查格式（不修改文件）"
 	@echo "  $(YELLOW)make lint$(NC)         - 🔍 代码检查"
 	@echo "  $(YELLOW)make type-check$(NC)   - 🔍 类型检查"
 	@echo "  $(YELLOW)make security$(NC)     - 🔒 安全检查"
@@ -91,7 +92,9 @@ help:
 	@echo "  $(YELLOW)make eval$(NC)         - 🧪 运行 AIOps 离线评测"
 	@echo "  $(YELLOW)make eval-rag$(NC)     - 🧪 运行 RAG 检索离线评测"
 	@echo "  $(YELLOW)make eval-change$(NC)  - 🧪 运行安全变更离线评测"
-	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 运行所有检查"
+	@echo "  $(YELLOW)make eval-replanner$(NC) - 🧪 运行 Replanner LLM 决策评测"
+	@echo "  $(YELLOW)make verify$(NC)       - ✅ 运行只验证门禁（不修改源码）"
+	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 兼容入口，等同 make verify"
 	@echo ""
 	@echo "$(CYAN)【其他】$(NC)"
 	@echo "  $(YELLOW)make clean$(NC)        - 🧹 清理临时文件"
@@ -533,6 +536,8 @@ upload:
 	echo "   $(GREEN)成功: $$success$(NC)"; \
 	if [ $$failed -gt 0 ]; then \
 		echo "   $(RED)失败: $$failed$(NC)"; \
+		echo "$(RED)❌ 文档上传或索引存在失败，请检查 Milvus、DashScope Key 或 server.log$(NC)"; \
+		exit 1; \
 	fi
 
 # 列出文档
@@ -605,6 +610,11 @@ format:  ## 格式化代码
 	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
 	@echo "$(GREEN)✅ 格式化完成$(NC)"
 
+format-check:  ## 检查格式（不修改文件）
+	@echo "$(YELLOW)🎨 检查代码格式（不修改文件）...$(NC)"
+	$(PYTHON) -m ruff format --check app/
+	@echo "$(GREEN)✅ 格式检查通过$(NC)"
+
 lint:  ## 代码检查
 	@echo "$(YELLOW)🔍 代码检查...$(NC)"
 	$(PYTHON) -m ruff check app/
@@ -650,6 +660,10 @@ eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
 
+eval-replanner:  ## 运行 Replanner LLM 决策离线评测
+	@echo "$(YELLOW)🧪 运行 Replanner LLM 决策离线评测...$(NC)"
+	$(PYTHON) scripts/eval/eval_replanner_cases.py --cases eval/replanner_cases.yaml --summary-json logs/replanner_eval_summary.json --summary-md logs/replanner_eval_summary.md
+
 hygiene-check:  ## 检查本地生成产物
 	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"
 	$(PYTHON) scripts/maintenance/hygiene_check.py
@@ -660,20 +674,25 @@ verify-local:  ## 面试前本地快速质量验证
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
 	@$(MAKE) eval-change
+	@$(MAKE) eval-replanner
 	@echo "$(GREEN)✅ 本地快速验证完成$(NC)"
 
-check-all:  ## 运行所有检查
-	@echo "$(YELLOW)🚀 运行所有检查...$(NC)"
-	@$(MAKE) format
+verify:  ## 运行只验证门禁（不修改源码）
+	@echo "$(YELLOW)🚀 运行 AutoOnCall 交付门禁（不修改源码）...$(NC)"
+	@$(MAKE) format-check
 	@$(MAKE) lint
 	@$(MAKE) type-check
 	@$(MAKE) security
-	@$(MAKE) test
+	@$(MAKE) test-quick
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
 	@$(MAKE) eval-change
+	@$(MAKE) eval-replanner
 	@$(MAKE) hygiene-check
-	@echo "$(GREEN)✅ 所有检查通过！$(NC)"
+	@echo "$(GREEN)✅ 交付门禁通过！$(NC)"
+
+check-all:  ## 兼容入口：等同 make verify
+	@$(MAKE) verify
 
 pre-commit-install:  ## 安装 pre-commit hooks
 	@echo "$(YELLOW)🔗 安装 pre-commit hooks...$(NC)"

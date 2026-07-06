@@ -1,5 +1,8 @@
 """向量存储管理器 - 封装 Milvus VectorStore 操作"""
 
+import hashlib
+import time
+from threading import RLock
 from typing import Any, cast
 
 from langchain_core.documents import Document
@@ -19,6 +22,7 @@ class VectorStoreManager:
     def __init__(self) -> None:
         """初始化向量存储管理器"""
         self.vector_store: Milvus | None = None
+        self._lock = RLock()
 
         self.collection_name = COLLECTION_NAME
 
@@ -61,7 +65,9 @@ class VectorStoreManager:
     def _ensure_vector_store(self) -> Milvus:
         """Initialize and return the Milvus VectorStore on demand."""
         if self.vector_store is None:
-            self._initialize_vector_store()
+            with self._lock:
+                if self.vector_store is None:
+                    self._initialize_vector_store()
         if self.vector_store is None:
             raise RuntimeError("VectorStore 初始化失败")
         return self.vector_store
@@ -81,16 +87,23 @@ class VectorStoreManager:
                 logger.info("没有待写入的文档，跳过 VectorStore 写入")
                 return []
 
-            import time
-            import uuid
-
             start_time = time.time()
 
             vector_store = self._ensure_vector_store()
 
-            ids = [str(uuid.uuid4()) for _ in documents]
+            ids = [
+                build_vector_document_id(document, index)
+                for index, document in enumerate(documents, 1)
+            ]
+            for document, document_id in zip(documents, ids, strict=True):
+                document.metadata["_vector_id"] = document_id
 
-            result_ids = vector_store.add_documents(documents, ids=ids)
+            if self._collection_exists(vector_store) and hasattr(vector_store, "upsert"):
+                cast(Any, vector_store).upsert(ids=ids, documents=documents)
+                result_ids = ids
+            else:
+                vector_store.add_documents(documents, ids=ids)
+                result_ids = ids
 
             elapsed = time.time() - start_time
             logger.info(
@@ -102,7 +115,19 @@ class VectorStoreManager:
             logger.error(f"添加文档失败: {e}")
             raise
 
-    def delete_by_source(self, file_path: str) -> int:
+    def _collection_exists(self, vector_store: Milvus) -> bool:
+        """Return whether the backing collection already exists."""
+        client = getattr(vector_store, "client", None)
+        if client is None or not hasattr(client, "has_collection"):
+            return False
+        collection_name = str(getattr(vector_store, "collection_name", self.collection_name))
+        try:
+            return bool(client.has_collection(collection_name))
+        except Exception as exc:
+            logger.warning(f"检查 Milvus collection 是否存在失败，将使用 insert: {exc}")
+            return False
+
+    def delete_by_source(self, file_path: str, *, raise_on_error: bool = False) -> int:
         """
         删除指定文件的所有文档
 
@@ -126,12 +151,20 @@ class VectorStoreManager:
 
         except Exception as e:
             logger.warning(f"删除旧数据失败 (可能是首次索引): {e}")
+            if raise_on_error:
+                raise
             return 0
 
-    def delete_by_source_except_version(self, file_path: str, document_version: str) -> int:
+    def delete_by_source_except_version(
+        self,
+        file_path: str,
+        document_version: str,
+        *,
+        raise_on_error: bool = False,
+    ) -> int:
         """Delete older chunks for one source while preserving the newly indexed version."""
         if not document_version:
-            return self.delete_by_source(file_path)
+            return self.delete_by_source(file_path, raise_on_error=raise_on_error)
         try:
             _ = milvus_manager.connect()
             collection = milvus_manager.get_collection()
@@ -152,7 +185,36 @@ class VectorStoreManager:
 
         except Exception as e:
             logger.warning(f"删除旧版本数据失败，可能短期存在重复 chunk: {e}")
+            if raise_on_error:
+                raise
             return 0
+
+    def delete_by_source_except_ids(self, file_path: str, vector_ids: list[str]) -> int:
+        """Delete chunks for one source that are not part of the latest indexed batch."""
+        unique_ids = sorted({str(item) for item in vector_ids if str(item)})
+        if not unique_ids:
+            return self.delete_by_source(file_path)
+        try:
+            _ = milvus_manager.connect()
+            collection = milvus_manager.get_collection()
+
+            id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
+            expr = (
+                f'metadata["_source"] == {_quote_expr_value(file_path)} and id not in [{id_list}]'
+            )
+
+            result = collection.delete(expr)
+            deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
+
+            logger.info(
+                f"删除文件非当前批次数据: {file_path}, 保留数量={len(unique_ids)}, "
+                f"删除数量: {deleted_count}"
+            )
+            return deleted_count
+
+        except Exception as e:
+            logger.error(f"删除非当前批次数据失败: {e}")
+            raise RuntimeError(f"删除非当前批次向量数据失败: {e}") from e
 
     def get_vector_store(self) -> Milvus:
         """
@@ -205,3 +267,17 @@ def _quote_expr_value(value: Any) -> str:
         return str(value)
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def build_vector_document_id(document: Document, index: int = 1) -> str:
+    """Build a stable Milvus primary key for one document chunk."""
+    metadata = dict(document.metadata or {})
+    identity_parts = [
+        str(metadata.get("_source") or metadata.get("source") or ""),
+        str(metadata.get("_document_hash") or metadata.get("_document_version") or ""),
+        str(metadata.get("_chunk_id") or index),
+        str(metadata.get("_chunk_hash") or ""),
+        str(document.page_content or ""),
+    ]
+    identity = "\x1f".join(identity_parts)
+    return f"vec-{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
