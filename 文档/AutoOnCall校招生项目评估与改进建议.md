@@ -84,15 +84,15 @@ RAG 不是简单向量检索后拼上下文，而是包含：
 
 ### 3.5 测试和评测体系扎实
 
-项目已经有较完整的单元测试、接口测试、工具测试、RAG 评测、AIOps 评测和安全变更评测。我们在对话中验证过：
+项目已经有较完整的单元测试、接口测试、工具测试、RAG 评测、AIOps 评测和安全变更评测。具体通过数量会随着 case 和测试文件增长而变化，面试和简历中应以当前执行结果为准：
 
-- pytest：303 passed, 1 skipped。
-- Ruff：通过。
-- AIOps 离线评测：16/16。
-- RAG 离线评测：22/22。
-- 安全变更评测：9/9。
+- pytest：以 `make test-quick` 或 `make test` 输出为准。
+- Ruff：以 `make lint` 输出为准。
+- AIOps 离线评测：以 `make eval` 和 `logs/eval_summary.*` 为准。
+- RAG 离线评测：以 `make eval-rag` 输出为准。
+- 安全变更评测：以 `make eval-change` 输出为准。
 
-虽然这些评测是 deterministic/offline，并不代表真实生产准确率，但作为校招生作品，已经很强。
+这些评测是 deterministic/offline，并不代表真实生产准确率，但作为校招生作品，已经很强。
 
 ## 4. 当前主要短板
 
