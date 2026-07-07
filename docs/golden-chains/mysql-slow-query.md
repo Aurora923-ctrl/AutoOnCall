@@ -1,62 +1,107 @@
-# MySQL Slow Query Golden Chain
+# MySQL Slow Query Portfolio Report
 
-## 5-Minute Walkthrough
+This is the main MySQL portfolio case for interviews. It demonstrates a live adapter-backed database diagnosis chain: MySQL evidence comes from the local Docker MySQL adapter, symptoms come from Prometheus and Loki, and remediation is explicitly separated from production execution.
 
-MySQL is a live adapter-backed golden chain. The key business story is slow SQL occupying database connections, which causes pool waiting and payment latency.
+## Portfolio Card
 
-1. Start from the Alertmanager payload: `MySQLSlowQueryHigh` for `payment-service`, `mysql_instance=payment-mysql`, severity `critical`.
-2. Incident fields normalize to `service_name=payment-service`, `severity=P1`, `environment=prod`, symptom `MySQL slow query and connection pool waiting`.
-3. Planner checks MySQL first, then Prometheus and Loki symptoms, then Runbook/history ticket context.
-4. Evidence shows `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6`, elevated latency, and payment errors.
-5. Root cause is slow SQL holding connections long enough to create connection-pool waiting.
-6. Diagnosis is read-only; SQL rewrite, index changes, pool/db parameter changes, or database restart require approval.
+| Item | Value |
+| --- | --- |
+| Case ID | `mysql_slow_query_latency` |
+| Service | `payment-service` |
+| Severity | `P1` / `critical` |
+| Main signal | `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` |
+| User impact | Payment latency and checkout degradation |
+| Live sources | `mysql`, `prometheus`, `loki`, `deploy_history`, `ticket_api` |
+| Eval status | PASS, `completed`, confidence `0.72`, risk policy `allow` |
 
-## Fixed Chain Contract
+## Alert Payload
 
-- Alertmanager payload: `eval/cases.yaml#mysql_slow_query_latency`.
-- Incident fields: `payment-service`, `P1`, `prod`, MySQL slow query and latency symptom.
-- Planner expected steps: `query_mysql_status -> query_metrics -> query_logs -> search_runbook -> search_history_ticket`.
-- Actual tool order requirement: MySQL status before metrics/logs.
-- Evidence fields: every evidence item must expose `fact`, `inference`, and `uncertainty`.
-- Root cause: MySQL slow query caused connection pool waiting and request latency.
-- Remediation: identify digest/EXPLAIN, reduce high-cost path, use temporary traffic controls, apply SQL/index/pool changes only through approved change.
-- Approval: diagnosis no; remediation change yes.
-- Report must contain: MySQL evidence chain, slow SQL, active connections, pool waiting, user impact, approval boundary.
-- Eval case: `mysql_slow_query_latency`.
+```json
+{
+  "receiver": "autooncall",
+  "status": "firing",
+  "commonLabels": {"environment": "prod", "cluster": "prod-a"},
+  "alerts": [{
+    "labels": {
+      "alertname": "MySQLSlowQueryLatency",
+      "service": "payment-service",
+      "severity": "critical",
+      "mysql_instance": "payment-mysql"
+    },
+    "annotations": {
+      "summary": "payment-service p95 latency high with MySQL slow query and pool waiting",
+      "description": "slow query avg_ms=920 count=18; active connections=188/200; pool_waiting=6",
+      "runbook": "aiops-docs/mysql_slow_query.md"
+    },
+    "startsAt": "2026-07-06T10:00:00Z"
+  }]
+}
+```
 
-## Evidence Checklist
+## Tool Chain
+
+| Stage | Expected tool | Actual tool | Source | What it proves |
+| --- | --- | --- | --- | --- |
+| 1 | `query_mysql_status` | `query_mysql_status` | `mysql` | Slow queries, active connections, and pool waiting are present in incident evidence |
+| 2 | `query_metrics` | `query_metrics` | `prometheus` | Payment latency and error symptoms increased |
+| 3 | `query_logs` | `query_logs` | `loki` | Application logs show payment timeout / slow SQL symptoms |
+| 4 | `search_runbook` | `search_runbook` | `eval_fixture` | Runbook gives safe SQL investigation steps |
+| 5 | `search_history_ticket` | `search_history_ticket` | `ticket_api` | Similar slow query / pool waiting incident exists |
+| 6 | `suggest_remediation` | `suggest_remediation` | `rule_based` | Produces non-executing remediation guidance |
+
+## Evidence Table
 
 | Evidence | Fact | Inference | Uncertainty |
 | --- | --- | --- | --- |
-| MySQL incident table | `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` | Slow SQL is consuming connection capacity and backing up the pool | Runtime `Slow_queries` counter can be 0; incident evidence carries the outage window |
-| Prometheus | Payment P95/error signals elevated | Users are seeing latency and failed payments | Metrics do not identify SQL digest alone |
-| Loki/payment event | Payment timeout or checkout degradation logs | Application impact aligns with DB wait | Logs can be sampled |
-| History ticket | Similar slow query / pool wait incident | Prior remediation informs next action | Historical match is advisory |
+| MySQL incident table | `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` | Slow SQL occupied database connections and backed up the application pool | Current `SHOW GLOBAL STATUS` counters can differ from the replay window |
+| Prometheus | Payment P95/error signals elevated | Users saw latency and failed payment attempts | Metrics identify impact, not the SQL digest alone |
+| Loki / payment event | Payment timeout and checkout degradation logs | Application impact aligns with DB wait | Logs can be sampled and may not include every timeout |
+| Deploy history | Recent release context exists | Release timing helps judge whether a query path changed | Deployment correlation is supporting context |
+| Historical ticket | Similar slow query / pool wait incident | Prior remediation informs the next safe action | Historical match is advisory, not proof |
 
-## Eval Alignment
+## Runtime Vs Incident Window
 
-- `tool_sequence_hit`: `query_mysql_status -> query_metrics -> query_logs`.
-- `required_live_sources_hit`: `query_mysql_status=mysql`, `query_metrics=prometheus`, `query_logs=loki`, `search_history_ticket=ticket_api`.
-- `evidence_sufficiency_hit`: completed requires MySQL domain evidence, metrics/logs symptom evidence, and Runbook or ticket reference.
-- `runtime_vs_incident_boundary_hit`: report must explain `live_status` as current runtime and `incident_evidence` as outage-window facts.
-- `approval_boundary_hit`: read-only diagnosis can finish; SQL/index/pool changes require approval.
+- `live_status` is the current Docker MySQL runtime. It proves the adapter can query the real container.
+- `incident_evidence` / payment event rows preserve the outage-window facts: `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6`.
+- The report must not claim the current MySQL process still has 18 active slow queries if runtime counters are normal.
+- The RCA is based on the incident-window business evidence, with current runtime used as adapter proof and health context.
 
-## Report Excerpt To Show
+## Root Cause
 
-```text
-## 3. 初步根因
-- 判断：MySQL 慢查询、连接池等待或锁等待放大接口延迟
-- 证据回链：evd-...
-- 置信度：...
+The strongest hypothesis is a slow SQL path in `payment-service` holding MySQL connections long enough to create connection-pool waiting. This explains the observed payment latency and checkout degradation better than generic CPU, memory, disk, or K8s explanations.
 
-## 4. 关键证据
-| Evidence | Tool | Source | Stance | Fact | Inference | Uncertainty |
-| ... | query_mysql_status | mysql | supporting | slow_query_count=18, active_connections=188/200, pool_waiting=6 | Slow SQL occupied connections and caused pool waiting | current runtime counter may be normal |
+## Remediation Approval Boundary
 
-## 8. 回滚 / 观察指标
-- 观察 payment P95、5xx、active connections、pool waiting、慢 SQL 数量。
+Read-only diagnosis can complete without approval. The following actions require human approval and a change window:
+
+- Add or change MySQL indexes.
+- Rewrite SQL or change ORM query behavior.
+- Change database or application connection-pool parameters.
+- Restart MySQL or payment service instances.
+- Run data-changing SQL or operational scripts.
+
+Safe immediate guidance is to capture the SQL digest and `EXPLAIN`, reduce the expensive payment path behind a flag if available, verify lock waits and pool settings, and prepare an approved SQL/index/pool change.
+
+## Eval Summary
+
+Latest verified command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval\eval_cases.py --cases eval\cases.yaml --env-file deploy\sandbox.env --report-path logs\eval_reports.db --summary-json logs\eval_summary.json --summary-md logs\eval_summary.md
 ```
 
-## Negative Boundary
+Portfolio metrics to show:
 
-If MySQL status or business incident evidence is unavailable, metrics/logs alone can prove payment latency but not the database RCA. The report should downgrade, list missing MySQL domain evidence, and ask an operator to check slow SQL digest, EXPLAIN, locks, and connection-pool state.
+| Metric | Result |
+| --- | --- |
+| Overall eval | `41/41` passed |
+| AIOps eval | `16/16` passed |
+| RAG eval | `25/25` passed |
+| `required_live_sources_hit` | PASS |
+| `evidence_sufficiency_hit` | PASS |
+| `runtime_vs_incident_boundary_hit` | PASS |
+| `approval_boundary_hit` | PASS |
+
+## Interview Talk Track
+
+Start with the alert payload, then show how MySQL evidence comes before generic metrics/logs. The key sentence is: "The Agent can explain why MySQL is the likely cause, but it cannot execute SQL, add indexes, or change pool parameters without a human-approved change path."

@@ -1,62 +1,106 @@
-# Redis Maxclients Golden Chain
+# Redis Maxclients Portfolio Report
 
-## 5-Minute Walkthrough
+This is the main Redis portfolio case for interviews. It demonstrates a live adapter-backed AIOps chain: Redis evidence comes from the local Docker Redis adapter, symptoms come from Prometheus and Loki, and remediation is bounded by approval policy.
 
-Redis is a live adapter-backed golden chain. The current container runtime proves the adapter is connected; the outage-window facts come from the Redis key `autooncall:incident:order-service:redis-maxclients`.
+## Portfolio Card
 
-1. Start from the Alertmanager payload: `RedisMaxClientsHigh` for `order-service`, `redis_instance=redis-cluster-prod`, severity `critical`.
-2. Incident fields normalize to `service_name=order-service`, `severity=P1`, `environment=prod`, symptom `Redis connection timeout and 5xx spike`.
-3. Planner first checks Redis state, then symptoms through Prometheus and Loki, then Runbook/history for remediation context.
-4. Evidence shows `connected_clients=9940/maxclients=10000` in incident evidence, elevated 5xx/P95 metrics, timeout logs, and a related historical ticket.
-5. Root cause is Redis connection exhaustion causing application connection-pool wait and request timeouts.
-6. Diagnosis is read-only and does not need approval; changing Redis maxclients, restarting Redis, or changing app pool settings requires approval.
+| Item | Value |
+| --- | --- |
+| Case ID | `redis_maxclients_timeout` |
+| Service | `order-service` |
+| Severity | `P1` / `critical` |
+| Main signal | `connected_clients=9940/10000`, `blocked_clients=37` |
+| User impact | 5xx spike and P95 latency elevation |
+| Live sources | `redis_info`, `prometheus`, `loki`, `ticket_api` |
+| Eval status | PASS, `completed`, confidence `0.72`, risk policy `allow` |
 
-## Fixed Chain Contract
+## Alert Payload
 
-- Alertmanager payload: `eval/cases.yaml#redis_maxclients_timeout`.
-- Incident fields: `order-service`, `P1`, `prod`, Redis timeout and 5xx symptom.
-- Planner expected steps: `query_redis_status -> query_metrics -> query_logs -> search_runbook -> search_history_ticket`.
-- Actual tool order requirement: Redis status before metrics/logs.
-- Evidence fields: every evidence item must expose `fact`, `inference`, and `uncertainty`.
-- Root cause: Redis connected clients reached maxclients and application connection pool timed out.
-- Remediation: reduce traffic/retries, inspect hot keys, tune connection pools, increase Redis capacity or maxclients only through approved change.
-- Approval: diagnosis no; remediation change yes.
-- Report must contain: Redis evidence timeline, runtime vs incident boundary, connected clients/maxclients, metrics/log symptom evidence, approval boundary.
-- Eval case: `redis_maxclients_timeout`.
+```json
+{
+  "receiver": "autooncall",
+  "status": "firing",
+  "commonLabels": {"environment": "prod", "cluster": "prod-a"},
+  "alerts": [{
+    "labels": {
+      "alertname": "RedisMaxClientsNearLimit",
+      "service": "order-service",
+      "severity": "critical",
+      "redis_instance": "redis-cluster-prod"
+    },
+    "annotations": {
+      "summary": "order-service Redis connected_clients is above 99% of maxclients",
+      "description": "Redis connection timeout and 5xx spike; connected_clients=9940 maxclients=10000 blocked_clients=37",
+      "runbook": "aiops-docs/redis_maxclients.md"
+    },
+    "startsAt": "2026-07-06T10:00:00Z"
+  }]
+}
+```
 
-## Evidence Checklist
+## Tool Chain
+
+| Stage | Expected tool | Actual tool | Source | What it proves |
+| --- | --- | --- | --- | --- |
+| 1 | `query_redis_status` | `query_redis_status` | `redis_info` | Redis incident-window evidence shows near-maxclient saturation |
+| 2 | `query_metrics` | `query_metrics` | `prometheus` | 5xx and P95 latency increased during the incident window |
+| 3 | `query_logs` | `query_logs` | `loki` | Application logs contain Redis timeout / pool wait symptoms |
+| 4 | `search_runbook` | `search_runbook` | `eval_fixture` | Runbook gives safe diagnosis and remediation checks |
+| 5 | `search_history_ticket` | `search_history_ticket` | `ticket_api` | Similar Redis maxclients incident exists |
+| 6 | `suggest_remediation` | `suggest_remediation` | `rule_based` | Produces non-executing remediation guidance |
+
+## Evidence Table
 
 | Evidence | Fact | Inference | Uncertainty |
 | --- | --- | --- | --- |
-| Redis incident key | `connected_clients=9940/maxclients=10000` | Redis accepted connections were near the configured ceiling | Current `live_info` may be idle; this is replay-window evidence |
-| Prometheus | 5xx and P95 latency elevated for `order-service` | User-facing failures align with dependency exhaustion | Metrics prove symptom, not Redis alone |
-| Loki | Redis timeout / pool wait logs | Application requests waited on Redis connections | Log sampling may miss every failed request |
-| History ticket | Similar Redis maxclients incident exists | Remediation can reuse known playbook | Prior ticket is context, not proof |
+| Redis incident key | `connected_clients=9940/maxclients=10000`, `blocked_clients=37` | Redis accepted connections reached the configured ceiling and clients began waiting/timeouting | This is incident-window replay evidence, not necessarily the current runtime state |
+| Prometheus | `order-service` 5xx and P95 increased | User-facing errors align with Redis dependency saturation | Metrics prove impact and timing, not Redis root cause alone |
+| Loki | Redis timeout and pool-wait logs | Application requests waited on Redis connections | Log sampling may miss some failed requests |
+| Historical ticket | Similar Redis maxclients incident | Prior ticket supports the remediation playbook | Historical similarity is advisory, not proof |
+| Runbook | Maxclients investigation checklist | Gives a safe operator workflow | Eval fixture is deterministic offline content |
 
-## Eval Alignment
+## Runtime Vs Incident Window
 
-- `tool_sequence_hit`: `query_redis_status -> query_metrics -> query_logs`.
-- `required_live_sources_hit`: `query_redis_status=redis_info`, `query_metrics=prometheus`, `query_logs=loki`.
-- `evidence_sufficiency_hit`: completed requires Redis domain evidence, metrics/logs symptom evidence, and Runbook or ticket reference.
-- `runtime_vs_incident_boundary_hit`: report must explain `live_info` as current runtime and `incident_evidence` as replay outage-window facts.
-- `approval_boundary_hit`: diagnosis is read-only; remediation changes require approval.
+- `live_info` is the current Docker Redis runtime. It proves the adapter is connected to the real container.
+- `incident_evidence` is the outage-window record stored in Redis key `autooncall:incident:order-service:redis-maxclients`.
+- The report must not claim the current container is still saturated if current `live_info.connected_clients` is low.
+- The RCA is based on the incident-window fact `connected_clients=9940/10000`; current runtime is used only as adapter proof.
 
-## Report Excerpt To Show
+## Root Cause
 
-```text
-## 3. 初步根因
-- 判断：Redis 连接数接近 maxclients，导致 order-service 连接超时
-- 证据回链：evd-...
-- 置信度：...
+Redis client capacity was exhausted during the incident window. `order-service` hit Redis connection timeouts while service 5xx and P95 latency increased. The strongest hypothesis is Redis maxclients / application connection-pool exhaustion rather than CPU, memory, disk, or K8s failure.
 
-## 4. 关键证据
-| Evidence | Tool | Source | Stance | Fact | Inference | Uncertainty |
-| ... | query_redis_status | redis_info | supporting | connected_clients=9940/10000 | Redis client capacity was exhausted | replay-window evidence |
+## Remediation Approval Boundary
 
-## 6. 风险动作判断
-- 当前诊断阶段不需要审批；后续如涉及生产写操作需重新审批。
+Read-only diagnosis can complete without approval. The following actions require human approval and a change window:
+
+- Increase Redis `maxclients` or resize Redis capacity.
+- Restart Redis or related application pods.
+- Change application Redis pool size, timeout, or retry policy.
+- Apply traffic throttling that affects production users.
+
+Safe immediate guidance is to reduce retry storms, inspect hot keys and idle clients, confirm client pool usage, and prepare an approved capacity/configuration change.
+
+## Eval Summary
+
+Latest verified command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval\eval_cases.py --cases eval\cases.yaml --env-file deploy\sandbox.env --report-path logs\eval_reports.db --summary-json logs\eval_summary.json --summary-md logs\eval_summary.md
 ```
 
-## Negative Boundary
+Portfolio metrics to show:
 
-If Redis evidence is missing and only generic 5xx metrics remain, the report must not stay `completed`. It should become `incomplete` or `needs_human`, list the missing Redis domain evidence, cap confidence, and recommend checking Redis INFO / connection pool / incident key before making an RCA claim.
+| Metric | Result |
+| --- | --- |
+| Overall eval | `41/41` passed |
+| AIOps eval | `16/16` passed |
+| RAG eval | `25/25` passed |
+| `required_live_sources_hit` | PASS |
+| `evidence_sufficiency_hit` | PASS |
+| `runtime_vs_incident_boundary_hit` | PASS |
+| `approval_boundary_hit` | PASS |
+
+## Interview Talk Track
+
+Start with the alert payload, then show the tool chain in order. The key sentence is: "The current Redis container proves live adapter connectivity; the seeded Redis incident key preserves the outage-window facts. I keep those two evidence scopes separate so the Agent does not overclaim."
