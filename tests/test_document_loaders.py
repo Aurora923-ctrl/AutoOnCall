@@ -13,6 +13,7 @@ from app.services.document_loaders.registry import document_loader_registry
 from app.services.document_loaders.table_loader import TableDocumentLoader
 from app.services.rag_answer_policy import ensure_citation_block
 from app.services.rag_read_models import compact_retrieval_chunk
+from scripts.data.generate_demo_rag_assets import main as generate_demo_rag_assets
 
 
 def test_loader_registry_supports_enterprise_knowledge_formats() -> None:
@@ -198,3 +199,22 @@ def test_compact_retrieval_chunk_exposes_source_specific_locators() -> None:
     assert compact["sheet_name"] == "incidents"
     assert compact["row_number"] == 12
     assert compact["primary_key"] == "ticket_id=INC-REDIS-001"
+
+
+def test_generated_demo_rag_assets_are_loader_readable() -> None:
+    generate_demo_rag_assets()
+
+    expected = {
+        "redis_postmortem.pdf": "pdf",
+        "payment_wiki.html": "html",
+        "tickets.csv": "table",
+        "tickets.xlsx": "table",
+    }
+    for file_name, loader_type in expected.items():
+        path = Path("aiops-docs") / file_name
+        loader = document_loader_registry.get_loader(path)
+        docs, report = loader.load(path)
+
+        assert loader.loader_type == loader_type
+        assert docs
+        assert report.indexed_units >= 1

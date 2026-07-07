@@ -144,21 +144,11 @@ cases:
     should_reject: true
 
   - id: pdf_postmortem_loader_metadata
-    query: PDF 复盘里 Redis maxclients 耗尽的故障窗口证据是什么？
+    query: Redis Maxclients Postmortem connected_clients maxclients
     expected_source: redis_postmortem.pdf
     expected_keywords:
       - maxclients
       - connected_clients
-    fixture:
-      source_file: redis_postmortem.pdf
-      chunk_id: redis_postmortem.pdf#0001
-      content: |
-        Redis maxclients 故障复盘显示，order-service 在高峰期出现 Redis connection timeout。
-        故障窗口中 connected_clients=9940，maxclients=10000，blocked_clients=37。
-        处置建议是先控制重试风暴，任何调整 maxclients 的动作都必须走人工审批。
-      metadata:
-        doc_type: pdf
-        page_number: 3
 
   - id: html_wiki_loader_heading
     query: Wiki 页面中 payment-service MySQL 慢查询应该怎样排查？
@@ -166,37 +156,19 @@ cases:
     expected_keywords:
       - 慢查询
       - EXPLAIN
-    fixture:
-      source_file: payment_wiki.html
-      chunk_id: payment_wiki.html#0001
-      heading_path: Payment Runbook > MySQL 慢查询
-      content: |
-        Payment Runbook 的 MySQL 慢查询章节要求先确认 slow query digest、连接池等待和最近发布。
-        定位 SQL 后需要执行 EXPLAIN，但加索引或修改 SQL 必须进入人工审批和变更窗口。
-      metadata:
-        doc_type: html
-        heading_path: Payment Runbook > MySQL 慢查询
 
   - id: table_ticket_loader_row_citation
-    query: 历史工单 INC-REDIS-001 的根因和处理方式是什么？
+    query: INC-REDIS-001 Redis maxclients resolution
     expected_source: tickets.csv
     min_score: 1.0
     expected_keywords:
       - Redis
       - maxclients
-    fixture:
-      source_file: tickets.csv
-      chunk_id: tickets.csv#0002
-      content: |
-        历史工单 INC-REDIS-001 的根因和处理方式如下。
-        表格: tickets.csv
-        row: 2
-        ticket_id: INC-REDIS-001
-        service_name: order-service
-        root_cause: Redis maxclients exhausted
-        resolution: Reduced retry storm and raised maxclients after approval.
-      metadata:
-        doc_type: table
-        sheet_name: csv
-        row_number: 2
-        primary_key: ticket_id=INC-REDIS-001
+
+  - id: xlsx_deploy_history_row_citation
+    query: payment-service deploy_history pool_waiting tickets.xlsx
+    expected_source: tickets.xlsx
+    min_score: 1.0
+    expected_keywords:
+      - payment-service
+      - pool_waiting

@@ -171,21 +171,76 @@ class EvalRunbookTool(AIOpsTool):
                 "summary": "未找到可信知识来源，已触发 Runbook 无答案拒答",
             }
 
+        retrieval_results = _eval_runbook_sources(query)
         return {
             "query": query,
             "source": "eval_fixture",
-            "content": f"Runbook fixture for: {query}",
-            "retrieval_results": [
-                {
-                    "source_file": "eval_runbook.md",
-                    "heading_path": "AIOps Eval Fixture",
-                    "chunk_id": "eval-runbook-001",
-                    "score": 1.0,
-                }
-            ],
+            "content": _eval_runbook_content(query, retrieval_results),
+            "retrieval_results": retrieval_results,
             "no_answer_rejected": False,
             "summary": "离线 Runbook fixture 命中",
         }
+
+
+def _eval_runbook_sources(query: str) -> list[dict[str, Any]]:
+    lowered = query.lower()
+    if "redis" in lowered or "maxclients" in lowered:
+        return [
+            {
+                "source_file": "redis_postmortem.pdf",
+                "heading_path": "Redis Maxclients Postmortem",
+                "chunk_id": "redis_postmortem.pdf#page-1",
+                "score": 1.0,
+                "metadata": {"doc_type": "pdf", "page_number": 1},
+            },
+            {
+                "source_file": "tickets.csv",
+                "heading_path": "tickets.csv row ticket_id=INC-REDIS-001",
+                "chunk_id": "tickets.csv#row-2",
+                "score": 0.95,
+                "metadata": {
+                    "doc_type": "table",
+                    "sheet_name": "csv",
+                    "row_number": 2,
+                    "primary_key": "ticket_id=INC-REDIS-001",
+                },
+            },
+        ]
+    if "mysql" in lowered or "slow query" in lowered or "payment" in lowered:
+        return [
+            {
+                "source_file": "payment_wiki.html",
+                "heading_path": "Payment Runbook > MySQL 慢查询",
+                "chunk_id": "payment_wiki.html#mysql-slow-query",
+                "score": 1.0,
+                "metadata": {"doc_type": "html"},
+            },
+            {
+                "source_file": "tickets.xlsx",
+                "heading_path": "tickets.xlsx deploy_history row payment-service",
+                "chunk_id": "tickets.xlsx#deploy_history-row-2",
+                "score": 0.94,
+                "metadata": {
+                    "doc_type": "table",
+                    "sheet_name": "deploy_history",
+                    "row_number": 2,
+                    "primary_key": "service_name=payment-service",
+                },
+            },
+        ]
+    return [
+        {
+            "source_file": "eval_runbook.md",
+            "heading_path": "AIOps Eval Fixture",
+            "chunk_id": "eval-runbook-001",
+            "score": 1.0,
+        }
+    ]
+
+
+def _eval_runbook_content(query: str, retrieval_results: list[dict[str, Any]]) -> str:
+    sources = ", ".join(str(item.get("source_file")) for item in retrieval_results)
+    return f"Runbook fixture for: {query}; cited_sources={sources}"
 
 
 class EvalFailureTool(AIOpsTool):
@@ -748,7 +803,9 @@ def evidence_fields_hit(evidence: list[Evidence], golden: dict[str, Any]) -> boo
 def golden_signal_hit(tool_calls: list[ToolCallRecord], golden: dict[str, Any]) -> bool:
     if not golden:
         return True
-    by_tool = {record.tool_name: record.output for record in tool_calls if record.status == "success"}
+    by_tool = {
+        record.tool_name: record.output for record in tool_calls if record.status == "success"
+    }
     for tool_name, requirements in dict(golden.get("required_output_signals") or {}).items():
         output = by_tool.get(tool_name)
         if not isinstance(output, dict):
@@ -770,7 +827,9 @@ def required_live_sources_hit(
     requirements = dict(golden.get("required_live_sources") or {})
     if not requirements:
         return True
-    by_tool = {record.tool_name: record.output for record in tool_calls if record.status == "success"}
+    by_tool = {
+        record.tool_name: record.output for record in tool_calls if record.status == "success"
+    }
     for tool_name, expected_source in requirements.items():
         output = by_tool.get(tool_name)
         if not isinstance(output, dict):
@@ -792,7 +851,10 @@ def output_satisfies(output: dict[str, Any], requirements: dict[str, Any]) -> bo
                 isinstance(value, int | float) and value <= float(expected["lte"])
             ):
                 return False
-            if "contains" in expected and str(expected["contains"]).lower() not in str(value).lower():
+            if (
+                "contains" in expected
+                and str(expected["contains"]).lower() not in str(value).lower()
+            ):
                 return False
             if "equals" in expected and value != expected["equals"]:
                 return False
@@ -907,10 +969,7 @@ def approval_boundary_hit(report: Any, golden: dict[str, Any], risk_policy: str)
         else risk_policy == "allow" and str(report.approval_status or "") == "not_required"
     )
     remediation_boundary_ok = (
-        not remediation_requires_approval
-        or "approval" in text
-        or "审批" in text
-        or "人工" in text
+        not remediation_requires_approval or "approval" in text or "审批" in text or "人工" in text
     )
     return diagnosis_boundary_ok and remediation_boundary_ok
 
@@ -978,7 +1037,11 @@ def live_golden_tools(case: dict[str, Any]) -> set[str]:
 
 
 def live_redis_configured() -> bool:
-    return bool(os.environ.get("REDIS_URL") or os.environ.get("REDIS_INSTANCES") or os.environ.get("REDIS_HOST"))
+    return bool(
+        os.environ.get("REDIS_URL")
+        or os.environ.get("REDIS_INSTANCES")
+        or os.environ.get("REDIS_HOST")
+    )
 
 
 def live_mysql_configured() -> bool:
@@ -1126,7 +1189,13 @@ def _eval_mysql_output(service_name: str, text: str) -> dict[str, Any]:
         "service_name": service_name,
         "source": "eval_fixture",
         "slow_queries": (
-            [{"sql_digest": "select * from orders where user_id=?", "avg_ms": 920, "count": slow_query_count}]
+            [
+                {
+                    "sql_digest": "select * from orders where user_id=?",
+                    "avg_ms": 920,
+                    "count": slow_query_count,
+                }
+            ]
             if active
             else []
         ),
@@ -1471,9 +1540,7 @@ def build_resume_metrics(
         "diagnostic_root_cause_hit": categories["diagnostic_chain"]["root_cause_hit"],
         "diagnostic_evidence_support_rate": categories["diagnostic_chain"]["evidence_support_rate"],
         "diagnostic_trace_completeness": categories["diagnostic_chain"]["trace_completeness"],
-        "diagnostic_evidence_sufficiency": categories["diagnostic_chain"][
-            "evidence_sufficiency"
-        ],
+        "diagnostic_evidence_sufficiency": categories["diagnostic_chain"]["evidence_sufficiency"],
         "diagnostic_runtime_vs_incident_boundary": categories["diagnostic_chain"][
             "runtime_vs_incident_boundary"
         ],

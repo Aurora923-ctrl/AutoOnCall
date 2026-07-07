@@ -11,7 +11,7 @@ This is the main MySQL portfolio case for interviews. It demonstrates a live ada
 | Severity | `P1` / `critical` |
 | Main signal | `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` |
 | User impact | Payment latency and checkout degradation |
-| Live sources | `mysql`, `prometheus`, `loki`, `deploy_history`, `ticket_api` |
+| Live sources | `mysql`, `prometheus`, `loki`, `deploy_history`, `ticket_api`, multi-source RAG |
 | Eval status | PASS, `completed`, confidence `0.72`, risk policy `allow` |
 
 ## Alert Payload
@@ -45,7 +45,7 @@ This is the main MySQL portfolio case for interviews. It demonstrates a live ada
 | 1 | `query_mysql_status` | `query_mysql_status` | `mysql` | Slow queries, active connections, and pool waiting are present in incident evidence |
 | 2 | `query_metrics` | `query_metrics` | `prometheus` | Payment latency and error symptoms increased |
 | 3 | `query_logs` | `query_logs` | `loki` | Application logs show payment timeout / slow SQL symptoms |
-| 4 | `search_runbook` | `search_runbook` | `eval_fixture` | Runbook gives safe SQL investigation steps |
+| 4 | `search_runbook` | `search_runbook` | `payment_wiki.html`, `tickets.xlsx` | Wiki guidance and table history join the RCA evidence chain |
 | 5 | `search_history_ticket` | `search_history_ticket` | `ticket_api` | Similar slow query / pool waiting incident exists |
 | 6 | `suggest_remediation` | `suggest_remediation` | `rule_based` | Produces non-executing remediation guidance |
 
@@ -56,8 +56,10 @@ This is the main MySQL portfolio case for interviews. It demonstrates a live ada
 | MySQL incident table | `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` | Slow SQL occupied database connections and backed up the application pool | Current `SHOW GLOBAL STATUS` counters can differ from the replay window |
 | Prometheus | Payment P95/error signals elevated | Users saw latency and failed payment attempts | Metrics identify impact, not the SQL digest alone |
 | Loki / payment event | Payment timeout and checkout degradation logs | Application impact aligns with DB wait | Logs can be sampled and may not include every timeout |
+| HTML Wiki | `payment_wiki.html` describes slow query digest, `EXPLAIN`, pool waiting, and approval boundary | Knowledge evidence grounds the diagnostic workflow | Wiki guidance can be stale and must be paired with live MySQL evidence |
 | Deploy history | Recent release context exists | Release timing helps judge whether a query path changed | Deployment correlation is supporting context |
 | Historical ticket | Similar slow query / pool wait incident | Prior remediation informs the next safe action | Historical match is advisory, not proof |
+| XLSX history table | `tickets.xlsx` includes payment deploy history and MySQL slow-query ticket rows | Historical experience links release context to pool waiting remediation | Spreadsheet rows support but do not prove root cause alone |
 
 ## Runtime Vs Incident Window
 
@@ -94,9 +96,9 @@ Portfolio metrics to show:
 
 | Metric | Result |
 | --- | --- |
-| Overall eval | `41/41` passed |
+| Overall eval | `42/42` passed |
 | AIOps eval | `16/16` passed |
-| RAG eval | `25/25` passed |
+| RAG eval | `26/26` passed |
 | `required_live_sources_hit` | PASS |
 | `evidence_sufficiency_hit` | PASS |
 | `runtime_vs_incident_boundary_hit` | PASS |

@@ -173,7 +173,7 @@ def _render_interview_snapshot(report: DiagnosisReport) -> str:
     return "\n".join(lines)
 
 
-def _render_root_cause_with_evidence(report: DiagnosisReport) -> str:
+def _render_root_cause_with_evidence_legacy(report: DiagnosisReport) -> str:
     root = report.root_cause or "暂未形成明确根因。"
     evidence_ids = _selected_root_cause_evidence_ids(report)
     lines = [f"- 判断：{root}"]
@@ -627,7 +627,7 @@ def _render_chain_items(items: list[Any]) -> list[str]:
     return lines or ["- 无"]
 
 
-def _render_evidence_matrix(report: DiagnosisReport) -> str:
+def _render_evidence_matrix_legacy(report: DiagnosisReport) -> str:
     groups = {
         "支持证据": _evidence_by_stance(report.evidence, "supporting"),
         "反驳证据": _evidence_by_stance(report.evidence, "refuting"),
@@ -659,7 +659,7 @@ def _unknown_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return items
 
 
-def _render_evidence_matrix_item(item: dict[str, Any]) -> str:
+def _render_evidence_matrix_item_legacy(item: dict[str, Any]) -> str:
     raw_data = _as_dict(item.get("raw_data"))
     status = raw_data.get("status") or "unknown"
     summary = (
@@ -773,3 +773,245 @@ def _dedupe_inline(items: list[str]) -> list[str]:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+# Interview-oriented evidence rendering. These definitions intentionally live
+# after the legacy helpers so the report keeps the old sections while upgrading
+# the matrix that interviewers inspect first.
+LIVE_EVIDENCE_SOURCES = {
+    "redis_info",
+    "mysql",
+    "prometheus",
+    "loki",
+}
+LIVE_EVIDENCE_TOOLS = {
+    "query_redis_status",
+    "query_mysql_status",
+    "query_metrics",
+    "query_logs",
+}
+LIVE_EVIDENCE_TYPES = {
+    "redis",
+    "mysql",
+    "metric",
+    "log",
+}
+KNOWLEDGE_EVIDENCE_TOOLS = {
+    "search_runbook",
+    "retrieve_runbook",
+    "retrieve_knowledge",
+}
+KNOWLEDGE_EVIDENCE_TYPES = {
+    "runbook",
+    "knowledge",
+}
+KNOWLEDGE_DOC_SUFFIXES = (
+    ".md",
+    ".markdown",
+    ".pdf",
+    ".html",
+    ".htm",
+)
+HISTORY_EVIDENCE_SOURCES = {
+    "ticket_api",
+    "deploy_history",
+}
+HISTORY_EVIDENCE_TOOLS = {
+    "search_history_ticket",
+    "query_deploy_history",
+}
+HISTORY_EVIDENCE_TYPES = {
+    "ticket",
+    "deploy_history",
+}
+HISTORY_DOC_SUFFIXES = (
+    ".csv",
+    ".xlsx",
+)
+
+
+def _render_root_cause_with_evidence(report: DiagnosisReport) -> str:
+    root = report.root_cause or "unknown root cause"
+    evidence_ids = _selected_root_cause_evidence_ids(report)
+    lines = [f"- Root cause: {root}"]
+    if evidence_ids:
+        lines.append(f"- Evidence back-links: {', '.join(evidence_ids)}")
+    else:
+        lines.append(
+            "- Evidence back-links: no stable evidence_id recorded; review key evidence below."
+        )
+    lines.extend(_root_cause_minimum_evidence_links(report, evidence_ids))
+    lines.append(
+        f"- Confidence: {report.confidence:.2f}; "
+        f"reason: {report.confidence_reason or 'not recorded'}"
+    )
+    return "\n".join(lines)
+
+
+def _root_cause_minimum_evidence_links(
+    report: DiagnosisReport, evidence_ids: list[str]
+) -> list[str]:
+    evidence_id_set = set(evidence_ids)
+    linked = [
+        item
+        for item in report.evidence
+        if not evidence_id_set or str(item.get("evidence_id") or "") in evidence_id_set
+    ]
+    if not linked:
+        linked = list(report.evidence)
+
+    live = _first_layer_evidence(linked, "live") or _first_layer_evidence(report.evidence, "live")
+    knowledge = _first_layer_evidence(linked, "knowledge") or _first_layer_evidence(
+        report.evidence, "knowledge"
+    )
+    history = _first_layer_evidence(linked, "history") or _first_layer_evidence(
+        report.evidence, "history"
+    )
+    reference = knowledge or history
+    reference_kind = "knowledge" if knowledge else "history"
+
+    lines = ["- Root-cause evidence closure:"]
+    if live:
+        lines.append(f"  - live evidence: {_evidence_short_ref(live)}")
+    else:
+        lines.append("  - live evidence: missing")
+    if reference:
+        lines.append(f"  - {reference_kind} basis: {_evidence_short_ref(reference)}")
+    else:
+        lines.append("  - knowledge/history basis: missing")
+    if live and reference:
+        lines.append("  - closure: satisfied (live + knowledge/history)")
+    else:
+        lines.append("  - closure: incomplete; root-cause claim needs more backing")
+    return lines
+
+
+def _render_evidence_matrix(report: DiagnosisReport) -> str:
+    groups = [
+        ("Live Evidence", _evidence_by_interview_layer(report.evidence, "live")),
+        ("Knowledge Basis", _evidence_by_interview_layer(report.evidence, "knowledge")),
+        ("Historical Experience", _evidence_by_interview_layer(report.evidence, "history")),
+        ("Other / Uncertain Evidence", _uncategorized_evidence(report.evidence)),
+    ]
+    lines = [
+        "- Matrix rule: every root-cause conclusion should link to at least "
+        "one live evidence item plus one knowledge or historical basis.",
+    ]
+    for title, items in groups:
+        lines.append(f"### {title}")
+        if not items:
+            lines.append("- none")
+            continue
+        for item in items[:8]:
+            lines.append(_render_evidence_matrix_item(item))
+    return "\n".join(lines)
+
+
+def _evidence_by_interview_layer(
+    evidence: list[dict[str, Any]], layer: str
+) -> list[dict[str, Any]]:
+    return [item for item in evidence if _evidence_layer(item) == layer]
+
+
+def _uncategorized_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in evidence if _evidence_layer(item) == "other"]
+
+
+def _first_layer_evidence(evidence: list[dict[str, Any]], layer: str) -> dict[str, Any] | None:
+    for item in evidence:
+        if _evidence_layer(item) == layer and str(item.get("stance") or "") == "supporting":
+            return item
+    for item in evidence:
+        if _evidence_layer(item) == layer:
+            return item
+    return None
+
+
+def _evidence_layer(item: dict[str, Any]) -> str:
+    source = str(item.get("data_source") or "").lower()
+    tool = str(item.get("source_tool") or "").lower()
+    evidence_type = str(item.get("evidence_type") or "").lower()
+    source_files = _evidence_source_files(item)
+
+    if (
+        source in LIVE_EVIDENCE_SOURCES
+        or tool in LIVE_EVIDENCE_TOOLS
+        or evidence_type in LIVE_EVIDENCE_TYPES
+    ):
+        return "live"
+    if (
+        source in HISTORY_EVIDENCE_SOURCES
+        or tool in HISTORY_EVIDENCE_TOOLS
+        or evidence_type in HISTORY_EVIDENCE_TYPES
+        or any(_has_suffix(path, HISTORY_DOC_SUFFIXES) for path in source_files)
+    ):
+        return "history"
+    if (
+        tool in KNOWLEDGE_EVIDENCE_TOOLS
+        or evidence_type in KNOWLEDGE_EVIDENCE_TYPES
+        or any(_has_suffix(path, KNOWLEDGE_DOC_SUFFIXES) for path in source_files)
+    ):
+        return "knowledge"
+    return "other"
+
+
+def _evidence_source_files(item: dict[str, Any]) -> list[str]:
+    files: list[str] = []
+    output = _evidence_output(item)
+    for key in ("source_file", "source_path", "file_name", "path"):
+        value = output.get(key)
+        if value:
+            files.append(str(value))
+    for payload in _candidate_retrieval_payloads(item):
+        for result in payload.get("retrieval_results", []) or []:
+            if not isinstance(result, dict):
+                continue
+            for key in ("source_file", "source_path", "file_name", "path"):
+                value = result.get(key)
+                if value:
+                    files.append(str(value))
+            metadata = _as_dict(result.get("metadata"))
+            for key in ("source_file", "source_path", "_source"):
+                value = metadata.get(key)
+                if value:
+                    files.append(str(value))
+    return files
+
+
+def _has_suffix(value: str, suffixes: tuple[str, ...]) -> bool:
+    return value.lower().strip().endswith(suffixes)
+
+
+def _render_evidence_matrix_item(item: dict[str, Any]) -> str:
+    raw_data = _as_dict(item.get("raw_data"))
+    status = raw_data.get("status") or "unknown"
+    summary = (
+        str(item.get("fact") or "").strip()
+        or str(item.get("summary") or "").strip()
+        or str(item.get("uncertainty") or "").strip()
+        or "no summary"
+    )
+    return (
+        "- "
+        f"id={item.get('evidence_id', 'unknown')} "
+        f"layer={_evidence_layer(item)} "
+        f"tool={item.get('source_tool', 'unknown')} "
+        f"source={item.get('data_source', 'unknown')} "
+        f"type={item.get('evidence_type', 'unknown')} "
+        f"stance={item.get('stance', 'neutral')} "
+        f"status={status} "
+        f"confidence={float(item.get('confidence') or 0.0):.2f} "
+        f"summary={summary}"
+    )
+
+
+def _evidence_short_ref(item: dict[str, Any]) -> str:
+    evidence_id = str(item.get("evidence_id") or "unknown")
+    tool = str(item.get("source_tool") or "unknown")
+    source = str(item.get("data_source") or "unknown")
+    fact = (
+        str(item.get("fact") or "").strip()
+        or str(item.get("summary") or "").strip()
+        or str(item.get("inference") or "").strip()
+    )
+    return f"{evidence_id} ({tool}/{source}) {fact}".strip()

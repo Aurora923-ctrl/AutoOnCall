@@ -1,0 +1,46 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 661 >>
+stream
+BT
+/F1 11 Tf
+50 780 Td
+14 TL
+(Redis Maxclients Postmortem) Tj
+T* (Incident: order-service Redis connection timeout and 5xx spike.) Tj
+T* (Incident window: 2026-07-06 10:00-10:18 UTC.) Tj
+T* (Evidence: connected_clients=9940, maxclients=10000, blocked_clients=37.) Tj
+T* (Prometheus showed 5xx and P95 latency rising during the same window.) Tj
+T* (Loki logs showed Redis timeout and connection-pool wait messages.) Tj
+T* (Root cause: Redis client capacity was exhausted by retry amplification.) Tj
+T* (Remediation boundary: increasing maxclients, restarting Redis, or changing pool) Tj
+T* (settings requires human approval and a production change window.) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000317 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1029
+%%EOF

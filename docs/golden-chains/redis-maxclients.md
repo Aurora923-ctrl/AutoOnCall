@@ -11,7 +11,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | Severity | `P1` / `critical` |
 | Main signal | `connected_clients=9940/10000`, `blocked_clients=37` |
 | User impact | 5xx spike and P95 latency elevation |
-| Live sources | `redis_info`, `prometheus`, `loki`, `ticket_api` |
+| Live sources | `redis_info`, `prometheus`, `loki`, `ticket_api`, multi-source RAG |
 | Eval status | PASS, `completed`, confidence `0.72`, risk policy `allow` |
 
 ## Alert Payload
@@ -45,7 +45,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | 1 | `query_redis_status` | `query_redis_status` | `redis_info` | Redis incident-window evidence shows near-maxclient saturation |
 | 2 | `query_metrics` | `query_metrics` | `prometheus` | 5xx and P95 latency increased during the incident window |
 | 3 | `query_logs` | `query_logs` | `loki` | Application logs contain Redis timeout / pool wait symptoms |
-| 4 | `search_runbook` | `search_runbook` | `eval_fixture` | Runbook gives safe diagnosis and remediation checks |
+| 4 | `search_runbook` | `search_runbook` | `redis_postmortem.pdf`, `tickets.csv` | PDF postmortem and historical ticket table join the RCA evidence chain |
 | 5 | `search_history_ticket` | `search_history_ticket` | `ticket_api` | Similar Redis maxclients incident exists |
 | 6 | `suggest_remediation` | `suggest_remediation` | `rule_based` | Produces non-executing remediation guidance |
 
@@ -56,7 +56,9 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | Redis incident key | `connected_clients=9940/maxclients=10000`, `blocked_clients=37` | Redis accepted connections reached the configured ceiling and clients began waiting/timeouting | This is incident-window replay evidence, not necessarily the current runtime state |
 | Prometheus | `order-service` 5xx and P95 increased | User-facing errors align with Redis dependency saturation | Metrics prove impact and timing, not Redis root cause alone |
 | Loki | Redis timeout and pool-wait logs | Application requests waited on Redis connections | Log sampling may miss some failed requests |
+| PDF postmortem | `redis_postmortem.pdf` records `connected_clients=9940`, `maxclients=10000`, `blocked_clients=37` | Knowledge evidence confirms the outage-window interpretation and approval boundary | Postmortem is retrospective evidence and must be paired with live signals |
 | Historical ticket | Similar Redis maxclients incident | Prior ticket supports the remediation playbook | Historical similarity is advisory, not proof |
+| CSV ticket table | `tickets.csv` row `ticket_id=INC-REDIS-001` links root cause and approved resolution | Historical experience supports the chosen remediation path | Table rows are historical context, not live proof |
 | Runbook | Maxclients investigation checklist | Gives a safe operator workflow | Eval fixture is deterministic offline content |
 
 ## Runtime Vs Incident Window
@@ -93,9 +95,9 @@ Portfolio metrics to show:
 
 | Metric | Result |
 | --- | --- |
-| Overall eval | `41/41` passed |
+| Overall eval | `42/42` passed |
 | AIOps eval | `16/16` passed |
-| RAG eval | `25/25` passed |
+| RAG eval | `26/26` passed |
 | `required_live_sources_hit` | PASS |
 | `evidence_sufficiency_hit` | PASS |
 | `runtime_vs_incident_boundary_hit` | PASS |

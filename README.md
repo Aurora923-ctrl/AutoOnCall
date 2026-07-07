@@ -57,7 +57,7 @@ Alert / Incident
 ```mermaid
 flowchart LR
   Alert["Alertmanager / 手工 Incident"] --> API["FastAPI API 层"]
-  Docs["Runbook Markdown / 文件上传"] --> RAG["RAG 索引<br/>Splitter + Embedding + Milvus + Lexical"]
+  Docs["Runbook Markdown / PDF / HTML / CSV / XLSX"] --> RAG["RAG 索引<br/>Splitter + Embedding + Milvus + Lexical"]
   API --> Planner["Planner"]
   Planner --> Executor["Executor + Tool Registry"]
   Executor --> Tools["只读工具适配器<br/>Prometheus / Logs / Trace / K8s / Redis / MySQL / Ticket"]
@@ -142,7 +142,7 @@ Incident 诊断输入
 
 ## 核心能力
 
-- RAG 知识库问答：支持 Markdown / 文本上传、结构化切分、DashScope Embedding、Milvus 向量检索、本地词法索引、hybrid search、rerank、引用补齐和无可信来源拒答。
+- RAG 知识库问答：支持 Markdown / PDF / HTML Wiki / CSV / XLSX 上传、结构化切分、DashScope Embedding、Milvus 向量检索、本地词法索引、hybrid search、rerank、引用补齐和无可信来源拒答。
 - 告警自动接入：支持 Alertmanager webhook，按 fingerprint 去重，创建或更新 Incident，并保留 firing / resolved 状态。
 - AIOps 诊断 Agent：基于 LangGraph 的 `planner -> executor -> replanner` 流程，结合指标、日志、Trace、K8s、Redis、MySQL、消息队列、CMDB、发布历史、工单和 Runbook 等工具取证。
 - 风险控制与人工审批：只读诊断自动执行，中高风险动作进入审批，危险动作直接禁止。
@@ -160,7 +160,7 @@ Incident 诊断输入
 文档入库
   -> POST /api/upload 或 make upload
   -> 文件名 / 扩展名 / 大小校验
-  -> Markdown 结构化切分
+  -> Markdown/PDF/HTML/CSV/XLSX 结构化切分
   -> DashScope Embedding
   -> Milvus 向量索引
   -> 本地 LexicalIndex 词法索引
@@ -426,7 +426,7 @@ app/
   models/           Pydantic 请求、告警、事件、证据、审批、报告和变更模型
   services/         RAG、索引、AIOps 编排、存储、Trace、审批、报告、告警接入和读模型服务
   tools/            Agent 工具抽象、工具注册表和本地工具
-aiops-docs/         写入向量库的运维 Runbook Markdown
+aiops-docs/         写入向量库的 Runbook、PDF 复盘、Wiki、历史工单表格
 config/             服务拓扑等本地配置
 deploy/             生产配置说明和本地 full-stack sandbox
 eval/               AIOps、RAG、安全变更、Replanner 离线评测用例

@@ -275,9 +275,14 @@ def http_ok(url: str) -> bool:
 
 
 def upload_docs() -> None:
-    docs = sorted((ROOT / "aiops-docs").glob("*.md"))
+    supported_suffixes = {".md", ".markdown", ".pdf", ".html", ".htm", ".csv", ".xlsx"}
+    docs = sorted(
+        path
+        for path in (ROOT / "aiops-docs").iterdir()
+        if path.is_file() and path.suffix.lower() in supported_suffixes
+    )
     if not docs:
-        print("[WARN] No aiops-docs/*.md files found.")
+        print("[WARN] No supported aiops-docs files found.")
         return
     print(f"[RUN] Uploading {len(docs)} aiops-docs files")
     for path in docs:

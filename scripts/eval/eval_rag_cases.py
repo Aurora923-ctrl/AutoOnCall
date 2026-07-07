@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app.services.document_loaders import document_loader_registry
 from app.services.document_splitter_service import document_splitter_service
 from app.services.rag_retrieval_service import document_to_retrieval_chunk
 from scripts.eval.eval_environment import collect_eval_environment
@@ -195,8 +196,8 @@ def evaluate_cases(
             "ended_at": datetime.now(UTC).isoformat(),
             "duration_ms": round((time.perf_counter() - started_timer) * 1000, 2),
             "evaluation_scope": (
-                "offline deterministic RAG retrieval regression; local Markdown runbooks "
-                "and lexical scoring are used, not live LLM or Milvus"
+                "offline deterministic RAG retrieval regression; local multi-source docs "
+                "(Markdown/PDF/HTML/CSV/XLSX) and lexical scoring are used, not live LLM or Milvus"
             ),
             "cases_path": str(Path(cases_path)),
             "docs_dir": str(Path(docs_dir)),
@@ -289,12 +290,16 @@ def evaluate_case(
 
 
 def build_offline_index(docs_dir: str | Path = DEFAULT_DOCS_DIR) -> list[dict[str, Any]]:
-    """Build a local chunk index from Markdown runbooks without Milvus or embeddings."""
+    """Build a local chunk index from supported docs without Milvus or embeddings."""
     root = Path(docs_dir)
     chunks: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.md")):
-        content = path.read_text(encoding="utf-8")
-        docs = document_splitter_service.split_document(content, path.as_posix())
+    for path in _iter_supported_docs(root):
+        loader = document_loader_registry.get_loader(path)
+        loaded_documents, _report = loader.load(path)
+        docs = document_splitter_service.split_loaded_documents(
+            loaded_documents,
+            path.resolve().as_posix(),
+        )
         for rank, document in enumerate(docs, 1):
             chunk = document_to_retrieval_chunk(document, score=None, rank=rank)
             searchable_text = " ".join(
@@ -307,8 +312,20 @@ def build_offline_index(docs_dir: str | Path = DEFAULT_DOCS_DIR) -> list[dict[st
             chunk["offline_terms"] = extract_terms(searchable_text)
             chunks.append(chunk)
     if not chunks:
-        raise ValueError(f"No Markdown runbooks found in {root}")
+        supported = ", ".join(sorted(document_loader_registry.supported_extensions))
+        raise ValueError(f"No supported RAG docs found in {root}; supported={supported}")
     return chunks
+
+
+def _iter_supported_docs(root: Path) -> list[Path]:
+    supported_suffixes = {
+        f".{extension}" for extension in document_loader_registry.supported_extensions
+    }
+    return sorted(
+        path
+        for path in root.iterdir()
+        if path.is_file() and path.suffix.lower() in supported_suffixes
+    )
 
 
 def _index_with_case_fixture(

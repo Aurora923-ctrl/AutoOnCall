@@ -9,6 +9,7 @@ UPLOAD_API = $(SERVER_URL)/api/upload
 HEALTH_LIVE_API = $(SERVER_URL)/health/live
 HEALTH_READY_API = $(SERVER_URL)/health/ready
 DOCS_DIR = aiops-docs
+DOCS_GLOBS = $(DOCS_DIR)/*.md $(DOCS_DIR)/*.markdown $(DOCS_DIR)/*.pdf $(DOCS_DIR)/*.html $(DOCS_DIR)/*.htm $(DOCS_DIR)/*.csv $(DOCS_DIR)/*.xlsx
 MILVUS_CONTAINER = milvus-standalone
 ifeq ($(OS),Windows_NT)
 PYTHON ?= .venv/Scripts/python.exe
@@ -514,7 +515,7 @@ upload:
 	@count=0; \
 	success=0; \
 	failed=0; \
-	for file in $(DOCS_DIR)/*.md; do \
+	for file in $(DOCS_GLOBS); do \
 		if [ -f "$$file" ]; then \
 			count=$$((count + 1)); \
 			filename=$$(basename "$$file"); \
@@ -556,7 +557,7 @@ upload:
 list-docs:
 	@echo "$(YELLOW)📚 $(DOCS_DIR) 目录下的文档:$(NC)"
 	@if [ -d "$(DOCS_DIR)" ]; then \
-		ls -lh $(DOCS_DIR)/*.md 2>/dev/null || echo "$(RED)没有找到 .md 文件$(NC)"; \
+		ls -lh $(DOCS_GLOBS) 2>/dev/null || echo "$(RED)没有找到可上传文件$(NC)"; \
 	else \
 		echo "$(RED)目录 $(DOCS_DIR) 不存在$(NC)"; \
 	fi
@@ -564,7 +565,7 @@ list-docs:
 # 测试上传单个文件
 test-upload:
 	@echo "$(YELLOW)🧪 测试上传单个文件...$(NC)"
-	@first_file=$$(ls $(DOCS_DIR)/*.md 2>/dev/null | head -n1); \
+	@first_file=$$(ls $(DOCS_GLOBS) 2>/dev/null | head -n1); \
 	if [ -n "$$first_file" ]; then \
 		echo "$(YELLOW)上传文件: $$first_file$(NC)"; \
 		curl -X POST $(UPLOAD_API) \

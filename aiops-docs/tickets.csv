@@ -1,0 +1,3 @@
+﻿ticket_id,service_name,incident_type,root_cause,resolution,evidence
+INC-REDIS-001,order-service,redis_maxclients,Redis maxclients exhausted by retry storm,Reduced retry amplification and raised maxclients after approval,connected_clients=9940 maxclients=10000 blocked_clients=37
+INC-MYSQL-014,payment-service,mysql_slow_query,Slow SQL held MySQL connections and caused pool waiting,"Captured digest, added index after approval, observed P95 recovery",slow_queries=18 active_connections=188/200 pool_waiting=6

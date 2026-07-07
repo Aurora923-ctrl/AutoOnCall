@@ -80,6 +80,10 @@ cases:
     report_must_contain:
       - Redis
       - connected_clients
+      - redis_postmortem.pdf
+      - tickets.csv
+      - redis_postmortem.pdf
+      - tickets.csv
       - 工具调用
 
   - id: mysql_slow_query_latency
@@ -163,6 +167,10 @@ cases:
     min_confidence: 0.5
     report_must_contain:
       - MySQL
+      - payment_wiki.html
+      - tickets.xlsx
+      - payment_wiki.html
+      - tickets.xlsx
       - 慢查询
       - 工具调用
 

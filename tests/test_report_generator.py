@@ -67,6 +67,32 @@ def _state_with_redis_evidence() -> dict:
             },
             confidence=0.66,
         ).model_dump(mode="json"),
+        Evidence(
+            source_tool="search_runbook",
+            step_id="s4",
+            summary="Runbook confirms Redis maxclients timeout investigation steps",
+            evidence_type="runbook",
+            data_source="rag",
+            stance="supporting",
+            confidence_reason="Runbook retrieval matched Redis maxclients guidance.",
+            raw_data={
+                "status": "success",
+                "output": {
+                    "summary": "Redis maxclients runbook",
+                    "retrieval_results": [
+                        {
+                            "source_file": "redis_postmortem.pdf",
+                            "chunk_id": "redis-postmortem-001",
+                        },
+                        {
+                            "source_file": "payment_wiki.html",
+                            "chunk_id": "payment-wiki-001",
+                        },
+                    ],
+                },
+            },
+            confidence=0.7,
+        ).model_dump(mode="json"),
     ]
     state["tool_call_records"] = [
         ToolCallRecord(
@@ -100,6 +126,20 @@ def _state_with_redis_evidence() -> dict:
             output={"summary": "similar Redis maxclients incident", "source": "ticket_api"},
             data_source="ticket_api",
             latency_ms=15.0,
+            status="success",
+        ).model_dump(mode="json"),
+        ToolCallRecord(
+            trace_id=state["trace_id"],
+            incident_id=state["incident"]["incident_id"],
+            step_id="s4",
+            tool_name="search_runbook",
+            input_args={"query": "Redis maxclients timeout"},
+            output={
+                "summary": "Redis maxclients runbook",
+                "retrieval_results": [{"source_file": "redis_postmortem.pdf"}],
+            },
+            data_source="rag",
+            latency_ms=16.0,
             status="success",
         ).model_dump(mode="json"),
     ]
@@ -137,7 +177,7 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "### Tool Call Table" in report.markdown
     assert "### Evidence Quick View" in report.markdown
     assert "| Tool | Source | Status | Latency ms | Summary |" in report.markdown
-    assert "| supporting | 3 |" in report.markdown
+    assert "| supporting | 4 |" in report.markdown
     assert "## 1. 故障摘要" in report.markdown
     assert "## 2. 影响范围" in report.markdown
     assert "## 3. 初步根因" in report.markdown
@@ -147,7 +187,7 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "## 7. 建议处置" in report.markdown
     assert "## 8. 回滚 / 观察指标" in report.markdown
     assert "## 9. 未确认事项" in report.markdown
-    assert "证据回链" in report.markdown
+    assert "Evidence back-links" in report.markdown
     assert "未记录到明确 evidence_id" not in report.markdown
     assert report.hypothesis_ranking[0]["supporting_evidence_ids"]
     assert "Risk boundary: policy=allow" in report.markdown
@@ -162,7 +202,14 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "### 数据源边界" in report.markdown
     assert "### 诊断链路证据" in report.markdown
     assert "### 证据矩阵" in report.markdown
-    assert "### 支持证据" in report.markdown
+    assert "Root-cause evidence closure" in report.markdown
+    assert "closure: satisfied (live + knowledge/history)" in report.markdown
+    assert "### Live Evidence" in report.markdown
+    assert "### Knowledge Basis" in report.markdown
+    assert "### Historical Experience" in report.markdown
+    assert "layer=live" in report.markdown
+    assert "layer=knowledge" in report.markdown
+    assert "layer=history" in report.markdown
     assert "数据源分布" in report.markdown
     assert "失败工具" in report.markdown
     assert "## 运行告警" in report.markdown
@@ -387,6 +434,7 @@ def test_report_generator_omits_advanced_dependency_signals(tmp_path) -> None:
     )
 
     assert report.dependency_signals == []
+
 
 def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> None:
     state = _state_with_redis_evidence()
@@ -626,7 +674,7 @@ def test_report_generator_keeps_graceful_degradation_confidence_floor(tmp_path) 
     )
 
     assert report.confidence == 0.5
-    assert "### 不确定证据" in report.markdown
+    assert "### Other / Uncertain Evidence" in report.markdown
     assert "query_k8s_status" in report.markdown
 
 
