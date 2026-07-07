@@ -1,0 +1,834 @@
+{
+  "run": {
+    "started_at": "2026-07-07T12:38:47.632488+00:00",
+    "ended_at": "2026-07-07T12:38:47.720897+00:00",
+    "duration_ms": 88.1,
+    "evaluation_scope": "offline deterministic RAG retrieval regression; local multi-source docs (Markdown/PDF/HTML/CSV/XLSX) and lexical scoring are used, not live LLM or Milvus",
+    "cases_path": "eval\\rag_cases.yaml",
+    "docs_dir": "aiops-docs",
+    "top_k": 3,
+    "min_score": 2.0,
+    "case_ids": [
+      "cpu_high_usage_alert",
+      "cpu_dead_loop",
+      "cpu_slow_sql_relation",
+      "cpu_high_but_root_cause_slow_query",
+      "memory_oom",
+      "memory_jvm_gc",
+      "disk_no_space",
+      "disk_docker_images",
+      "disk_high_but_container_logs",
+      "disk_inode_and_large_files",
+      "service_503_unavailable",
+      "service_dependency_redis_down",
+      "service_503_but_dependency_timeout",
+      "service_config_error",
+      "slow_response_sql",
+      "slow_response_external_api",
+      "slow_response_cache_penetration",
+      "reject_resume_question",
+      "reject_reimbursement_policy",
+      "reject_frontend_color",
+      "reject_stock_investment",
+      "reject_meeting_room_booking",
+      "pdf_postmortem_loader_metadata",
+      "html_wiki_loader_heading",
+      "table_ticket_loader_row_citation",
+      "xlsx_deploy_history_row_citation",
+      "redis_capacity_wiki_runtime_boundary",
+      "mysql_pdf_postmortem_pool_waiting",
+      "redis_ticket_retry_loop_history",
+      "mysql_xlsx_rc4_remediation_history"
+    ],
+    "environment": {
+      "suite": "rag",
+      "git_commit": "1ba4c75244c78c6f3cf5edc632960bf65bdf5b90",
+      "git_branch": "codex/interview-stable-version",
+      "python_version": "3.11.3",
+      "python_executable": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\.venv\\Scripts\\python.exe",
+      "platform": "Windows-10-10.0.26200-SP0",
+      "app_version": "1.2.1",
+      "rag_model": "qwen-max",
+      "embedding_model": "text-embedding-v4",
+      "rag_top_k": 3,
+      "rag_hybrid_search_enabled": true,
+      "rag_rerank_enabled": true,
+      "rag_max_l2_distance": 2.0,
+      "rag_min_lexical_trust_score": 0.2,
+      "aiops_mock_fallback_enabled": false,
+      "aiops_replanner_llm_enabled": false,
+      "api_auth_enabled": false
+    },
+    "artifacts": {
+      "summary_json": "logs\\rag_eval_summary_current.json",
+      "summary_md": "logs\\rag_eval_summary_current.md"
+    }
+  },
+  "summary": {
+    "case_count": 30,
+    "passed_count": 30,
+    "pass_rate": 1.0,
+    "recall_at_1": 1.0,
+    "recall_at_k": 1.0,
+    "strict_recall_at_k": 1.0,
+    "top_k": 3,
+    "mrr": 1.0,
+    "keyword_hit_rate": 1.0,
+    "citation_coverage_rate": 1.0,
+    "no_answer_rejection_rate": 1.0,
+    "confusion_case_pass_rate": 1.0,
+    "non_reject_case_count": 25,
+    "reject_case_count": 5,
+    "citation_case_count": 25,
+    "confusion_case_count": 5,
+    "evaluated_metrics": [
+      "recall_at_1",
+      "recall_at_k",
+      "strict_recall_at_k",
+      "mrr",
+      "keyword_hit_rate",
+      "citation_coverage_rate",
+      "no_answer_rejection_rate",
+      "confusion_case_pass_rate"
+    ],
+    "failed_cases": []
+  },
+  "cases": [
+    {
+      "id": "cpu_high_usage_alert",
+      "query": "billing-service CPU 使用率持续 95%，负载快速飙升，应该参考哪个处理方案？",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "cpu_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "cpu_high_usage.md",
+        "cpu_high_usage.md",
+        "cpu_high_usage.md"
+      ],
+      "top_score": 2.7775
+    },
+    {
+      "id": "cpu_dead_loop",
+      "query": "单个进程 CPU 接近 100%，怀疑代码死循环或无限递归",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "cpu_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "cpu_high_usage.md"
+      ],
+      "top_score": 5.0709
+    },
+    {
+      "id": "cpu_slow_sql_relation",
+      "query": "应用 CPU 高，同时日志里出现慢 SQL，如何排查？",
+      "case_type": "confusion",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "cpu_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "cpu_high_usage.md",
+        "slow_response.md"
+      ],
+      "top_score": 2.7854
+    },
+    {
+      "id": "cpu_high_but_root_cause_slow_query",
+      "query": "接口变慢且 CPU 高，但火焰图没有明显热点，MySQL 慢查询和连接池等待上升，根因更像数据库慢查询",
+      "case_type": "confusion",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md",
+        "cpu_high_usage.md",
+        "slow_response.md"
+      ],
+      "top_score": 4.9845
+    },
+    {
+      "id": "memory_oom",
+      "query": "recommendation-service 内存使用率 96%，Pod 出现 OOMKilled",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "memory_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "memory_high_usage.md",
+        "memory_high_usage.md",
+        "memory_high_usage.md"
+      ],
+      "top_score": 4.0
+    },
+    {
+      "id": "memory_jvm_gc",
+      "query": "Java 服务频繁 Full GC，怀疑 JVM 参数或堆内存配置不合理",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "memory_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "memory_high_usage.md",
+        "memory_high_usage.md",
+        "memory_high_usage.md"
+      ],
+      "top_score": 5.578
+    },
+    {
+      "id": "disk_no_space",
+      "query": "report-service 写文件失败，日志提示 no space left on device，磁盘空间满",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "disk_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "disk_high_usage.md",
+        "service_unavailable.md",
+        "disk_high_usage.md"
+      ],
+      "top_score": 2.6941
+    },
+    {
+      "id": "disk_docker_images",
+      "query": "节点磁盘占用过高，Docker 镜像和容器日志占用了大量空间",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "disk_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "disk_high_usage.md",
+        "disk_high_usage.md",
+        "disk_high_usage.md"
+      ],
+      "top_score": 5.092
+    },
+    {
+      "id": "disk_high_but_container_logs",
+      "query": "磁盘使用率高但不是业务数据增长，Docker 容器日志占满磁盘，应该如何处理？",
+      "case_type": "confusion",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "disk_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "disk_high_usage.md",
+        "disk_high_usage.md",
+        "disk_high_usage.md"
+      ],
+      "top_score": 5.0332
+    },
+    {
+      "id": "disk_inode_and_large_files",
+      "query": "服务器 inode 使用率异常，需要查找大文件和目录占用",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "disk_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "disk_high_usage.md",
+        "disk_high_usage.md"
+      ],
+      "top_score": 3.8933
+    },
+    {
+      "id": "service_503_unavailable",
+      "query": "checkout-service 大量 503 和 5xx，用户无法下单，服务不可用",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md",
+        "service_unavailable.md",
+        "service_unavailable.md"
+      ],
+      "top_score": 4.6424
+    },
+    {
+      "id": "service_dependency_redis_down",
+      "query": "order-service 依赖 Redis 或 MQ 不可用，导致接口失败",
+      "case_type": "confusion",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md",
+        "service_unavailable.md"
+      ],
+      "top_score": 4.0
+    },
+    {
+      "id": "service_503_but_dependency_timeout",
+      "query": "服务出现 503，但应用没有崩溃日志，Redis 和 MQ 依赖超时导致接口失败",
+      "case_type": "confusion",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md",
+        "service_unavailable.md",
+        "disk_high_usage.md"
+      ],
+      "top_score": 3.8571
+    },
+    {
+      "id": "service_config_error",
+      "query": "服务启动失败，怀疑配置文件错误或环境变量缺失",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md"
+      ],
+      "top_score": 4.3235
+    },
+    {
+      "id": "slow_response_sql",
+      "query": "payment-service 接口响应慢，数据库慢查询数量增加，连接池等待",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md",
+        "slow_response.md",
+        "cpu_high_usage.md"
+      ],
+      "top_score": 5.5155
+    },
+    {
+      "id": "slow_response_external_api",
+      "query": "profile-service P95 超过 4 秒，下游外部 API 调用 timeout",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md",
+        "mysql_slow_query_postmortem.pdf",
+        "redis_postmortem.pdf"
+      ],
+      "top_score": 3.4412
+    },
+    {
+      "id": "slow_response_cache_penetration",
+      "query": "查询接口突然变慢，怀疑缓存失效或缓存穿透",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md"
+      ],
+      "top_score": 5.3333
+    },
+    {
+      "id": "reject_resume_question",
+      "query": "秋招简历里的项目经历应该怎么包装更好？",
+      "case_type": "negative",
+      "should_reject": true,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": true,
+      "citation_required": false,
+      "citation_hit": true,
+      "recall_at_1": false,
+      "recall_at_k": false,
+      "reciprocal_rank": 0.0,
+      "keyword_hit": true,
+      "expected_sources": [],
+      "retrieved_sources": [],
+      "top_score": 0.0
+    },
+    {
+      "id": "reject_reimbursement_policy",
+      "query": "公司差旅报销和年假申请流程是什么？",
+      "case_type": "negative",
+      "should_reject": true,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": true,
+      "citation_required": false,
+      "citation_hit": true,
+      "recall_at_1": false,
+      "recall_at_k": false,
+      "reciprocal_rank": 0.0,
+      "keyword_hit": true,
+      "expected_sources": [],
+      "retrieved_sources": [],
+      "top_score": 0.0
+    },
+    {
+      "id": "reject_frontend_color",
+      "query": "前端按钮颜色和页面圆角应该怎么设计？",
+      "case_type": "negative",
+      "should_reject": true,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": true,
+      "citation_required": false,
+      "citation_hit": true,
+      "recall_at_1": false,
+      "recall_at_k": false,
+      "reciprocal_rank": 0.0,
+      "keyword_hit": true,
+      "expected_sources": [],
+      "retrieved_sources": [],
+      "top_score": 0.0
+    },
+    {
+      "id": "reject_stock_investment",
+      "query": "最近股票和基金应该怎么买，帮我给一个投资组合",
+      "case_type": "negative",
+      "should_reject": true,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": true,
+      "citation_required": false,
+      "citation_hit": true,
+      "recall_at_1": false,
+      "recall_at_k": false,
+      "reciprocal_rank": 0.0,
+      "keyword_hit": true,
+      "expected_sources": [],
+      "retrieved_sources": [],
+      "top_score": 0.0
+    },
+    {
+      "id": "reject_meeting_room_booking",
+      "query": "公司会议室预订、团建预算和行政采购流程是什么？",
+      "case_type": "negative",
+      "should_reject": true,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": true,
+      "citation_required": false,
+      "citation_hit": true,
+      "recall_at_1": false,
+      "recall_at_k": false,
+      "reciprocal_rank": 0.0,
+      "keyword_hit": true,
+      "expected_sources": [],
+      "retrieved_sources": [],
+      "top_score": 0.0
+    },
+    {
+      "id": "pdf_postmortem_loader_metadata",
+      "query": "Redis Maxclients Postmortem connected_clients maxclients",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "redis_postmortem.pdf"
+      ],
+      "retrieved_sources": [
+        "redis_postmortem.pdf",
+        "redis_capacity_wiki.html",
+        "tickets.csv"
+      ],
+      "top_score": 4.0
+    },
+    {
+      "id": "html_wiki_loader_heading",
+      "query": "Payment Runbook MySQL slow query EXPLAIN active_connections pool_waiting",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "payment_wiki.html"
+      ],
+      "retrieved_sources": [
+        "payment_wiki.html",
+        "mysql_slow_query_postmortem.pdf",
+        "tickets.csv"
+      ],
+      "top_score": 5.6667
+    },
+    {
+      "id": "table_ticket_loader_row_citation",
+      "query": "INC-REDIS-001 Redis maxclients resolution",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "tickets.csv"
+      ],
+      "retrieved_sources": [
+        "tickets.csv",
+        "tickets.xlsx",
+        "redis_capacity_wiki.html"
+      ],
+      "top_score": 3.5
+    },
+    {
+      "id": "xlsx_deploy_history_row_citation",
+      "query": "payment-service deploy_history pool_waiting tickets.xlsx",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "tickets.xlsx"
+      ],
+      "retrieved_sources": [
+        "tickets.xlsx",
+        "tickets.xlsx",
+        "tickets.xlsx"
+      ],
+      "top_score": 2.0
+    },
+    {
+      "id": "redis_capacity_wiki_runtime_boundary",
+      "query": "Redis Capacity Wiki live_info incident-window evidence maxclients approval boundary",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "redis_capacity_wiki.html"
+      ],
+      "retrieved_sources": [
+        "redis_capacity_wiki.html",
+        "redis_capacity_wiki.html",
+        "redis_postmortem.pdf"
+      ],
+      "top_score": 3.3333
+    },
+    {
+      "id": "mysql_pdf_postmortem_pool_waiting",
+      "query": "MySQL Slow Query Postmortem payment-service active_connections pool_waiting rc3",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "mysql_slow_query_postmortem.pdf"
+      ],
+      "retrieved_sources": [
+        "mysql_slow_query_postmortem.pdf",
+        "payment_wiki.html",
+        "tickets.csv"
+      ],
+      "top_score": 5.3333
+    },
+    {
+      "id": "redis_ticket_retry_loop_history",
+      "query": "INC-REDIS-009 promotion lookup retry loop maxclients",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "tickets.csv"
+      ],
+      "retrieved_sources": [
+        "tickets.csv",
+        "tickets.xlsx",
+        "tickets.xlsx"
+      ],
+      "top_score": 4.1576
+    },
+    {
+      "id": "mysql_xlsx_rc4_remediation_history",
+      "query": "payment-api-2026.07.06-rc4 Disabled checkout report feature flag prepared index change",
+      "case_type": "positive",
+      "should_reject": false,
+      "passed": true,
+      "failed_metrics": [],
+      "failure_reasons": {},
+      "rejection_hit": false,
+      "citation_required": true,
+      "citation_hit": true,
+      "recall_at_1": true,
+      "recall_at_k": true,
+      "strict_recall_at_k": true,
+      "reciprocal_rank": 1.0,
+      "keyword_hit": true,
+      "expected_sources": [
+        "tickets.xlsx"
+      ],
+      "retrieved_sources": [
+        "tickets.xlsx",
+        "mysql_slow_query_postmortem.pdf",
+        "payment_wiki.html"
+      ],
+      "top_score": 4.4272
+    }
+  ]
+}

@@ -42,8 +42,8 @@ def test_rag_cases_cover_core_runbook_types_and_rejection() -> None:
 def test_rag_eval_cases_all_pass_offline() -> None:
     payload = evaluate_cases("eval/rag_cases.yaml", docs_dir="aiops-docs")
 
-    assert payload["summary"]["case_count"] == 26
-    assert payload["summary"]["passed_count"] == 26
+    assert payload["summary"]["case_count"] == 30
+    assert payload["summary"]["passed_count"] == 30
     assert payload["summary"]["pass_rate"] == 1.0
     assert payload["summary"]["recall_at_k"] == 1.0
     assert payload["summary"]["citation_coverage_rate"] == 1.0
@@ -54,7 +54,7 @@ def test_rag_eval_cases_all_pass_offline() -> None:
     assert payload["summary"]["mrr"] >= 0.9
 
     summary_text = render_summary(payload)
-    assert "RAG eval: 26/26 cases passed" in summary_text
+    assert "RAG eval: 30/30 cases passed" in summary_text
     assert "recall@3=100%" in summary_text
     assert "cite=100%" in summary_text
     assert "confusion=100%" in summary_text

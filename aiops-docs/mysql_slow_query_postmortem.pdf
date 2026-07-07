@@ -1,0 +1,46 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 678 >>
+stream
+BT
+/F1 11 Tf
+50 780 Td
+14 TL
+(MySQL Slow Query Postmortem) Tj
+T* (Incident: payment-service checkout latency and payment timeout spike.) Tj
+T* (Incident window: 2026-07-06 10:05-10:24 UTC.) Tj
+T* (Evidence: slow_queries=18, active_connections=188/200, pool_waiting=6.) Tj
+T* (Deploy context: payment-api-2026.07.06-rc3 changed checkout query loading.) Tj
+T* (Loki logs showed checkout timeout and slow SQL digest payment_report_join_v3.) Tj
+T* (Root cause: slow SQL held MySQL connections and created application pool waiting.) Tj
+T* (Remediation boundary: SQL rewrite, index change, pool config, or restart requires) Tj
+T* (human approval and a production change window.) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f
+0000000015 00000 n
+0000000064 00000 n
+0000000121 00000 n
+0000000247 00000 n
+0000000317 00000 n
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1046
+%%EOF

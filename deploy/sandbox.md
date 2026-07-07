@@ -51,6 +51,9 @@ make sandbox-verify
   --docs-dir aiops-docs `
   --summary-json logs\rag_eval_summary_current.json `
   --summary-md logs\rag_eval_summary_current.md
+.\.venv\Scripts\python.exe scripts\eval\verify_milvus_multisource_rag.py `
+  --summary-json logs\milvus_multisource_verification.json `
+  --summary-md logs\milvus_multisource_verification.md
 .venv\Scripts\python.exe scripts\eval\build_interview_summary.py `
   --summary-json logs\interview_eval_summary.json `
   --summary-md logs\interview_eval_summary.md
@@ -61,6 +64,14 @@ The verification writes a structured proof artifact to:
 ```text
 logs/full_stack_adapter_verification.json
 ```
+
+The Milvus multi-source proof is written to:
+
+```text
+logs/milvus_multisource_verification.md
+```
+
+It verifies that Redis/MySQL PDF postmortems, HTML Wiki pages, CSV tickets, and XLSX deploy history are inserted into a real Milvus collection and can be retrieved by source-targeted probes.
 
 The `data_sources` section should include live adapter sources such as `prometheus`, `loki`, `redis_info`, `mysql`, `cmdb`, `deploy_history`, and `ticket_api`. In the interview stack, `cmdb`, `deploy_history`, and `ticket_api` are backed by MySQL seed tables rather than HTTP mock containers. Failed scenarios, such as stopping Redis or MySQL, should appear as structured `failed` tool calls instead of crashing the Agent.
 

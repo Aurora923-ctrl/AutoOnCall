@@ -27,6 +27,27 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
                     "runtime_vs_incident_boundary_hit": True,
                     "approval_boundary_hit": True,
                 },
+                "conclusion_alignment": {
+                    "fields": {
+                        "root_cause": {
+                            "aligned": True,
+                            "evidence_ids": ["ev-redis"],
+                            "citations": [],
+                        },
+                        "key_findings": [
+                            {
+                                "aligned": True,
+                                "evidence_ids": ["ev-redis", "ev-metrics"],
+                                "citations": [],
+                            }
+                        ],
+                        "remediation_suggestion": {
+                            "aligned": True,
+                            "evidence_ids": ["ev-runbook"],
+                            "citations": [{"source_file": "redis_postmortem.pdf"}],
+                        },
+                    }
+                },
             },
             {
                 "id": "mysql_slow_query_latency",
@@ -50,8 +71,8 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
     }
     rag_payload = {
         "summary": {
-            "case_count": 26,
-            "passed_count": 26,
+            "case_count": 30,
+            "passed_count": 30,
             "pass_rate": 1.0,
             "top_k": 3,
             "recall_at_k": 1.0,
@@ -70,18 +91,39 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
         "missing_sources": [],
         "failed_tools": [],
     }
+    milvus_payload = {
+        "summary": {
+            "status": "passed",
+            "inserted_chunks": 18,
+            "probe_count": 6,
+            "passed_probe_count": 6,
+            "pass_rate": 1.0,
+            "source_counts": {
+                "redis_postmortem.pdf": 1,
+                "payment_wiki.html": 2,
+                "tickets.xlsx": 8,
+            },
+            "doc_type_counts": {"pdf": 2, "html": 4, "table": 12},
+        }
+    }
 
     payload = build_summary(
         live_payload=live_payload,
         rag_payload=rag_payload,
         adapter_payload=adapter_payload,
+        milvus_payload=milvus_payload,
     )
     markdown = render_markdown(payload)
 
     assert payload["summary"]["status"] == "passed"
-    assert payload["summary"]["rag_metrics"]["passed_count"] == 26
+    assert payload["summary"]["rag_metrics"]["passed_count"] == 30
+    assert payload["summary"]["milvus_multisource"]["inserted_chunks"] == 18
+    assert payload["summary"]["conclusion_alignment"]["aligned_count"] == 3
     assert payload["summary"]["adapter_sources"]["mock_fallback_detected"] is False
-    assert "RAG eval: `26/26 passed`" in markdown
+    assert "RAG eval: `30/30 passed`" in markdown
+    assert "conclusion_alignment_rate: `3/3 (100%)`" in markdown
+    assert "Milvus Multi-Source Snapshot" in markdown
+    assert "Probe pass rate: `6/6`" in markdown
     assert "K8s CrashLoop/OOMKilled" in markdown
     assert "Conclusion alignment is conclusion-level grounding" in markdown
 
@@ -101,6 +143,7 @@ def test_interview_docs_keep_single_rollup_and_grounding_boundaries() -> None:
     assert "logs/interview_eval_summary.md" in demo_doc
     assert "logs/interview_eval_summary.md" in sandbox
     assert "logs/rag_eval_summary_current.md" in readme
+    assert "logs/milvus_multisource_verification.md" in readme
     assert "--skip-rag" in demo_doc
     assert "K8s CrashLoop/OOMKilled is currently an offline golden regression case" in demo_doc
     assert "Conclusion Alignment" in redis_doc

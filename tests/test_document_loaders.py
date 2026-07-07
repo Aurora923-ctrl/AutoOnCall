@@ -206,6 +206,8 @@ def test_generated_demo_rag_assets_are_loader_readable() -> None:
 
     expected = {
         "redis_postmortem.pdf": "pdf",
+        "mysql_slow_query_postmortem.pdf": "pdf",
+        "redis_capacity_wiki.html": "html",
         "payment_wiki.html": "html",
         "tickets.csv": "table",
         "tickets.xlsx": "table",

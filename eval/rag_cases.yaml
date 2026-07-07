@@ -151,10 +151,10 @@ cases:
       - connected_clients
 
   - id: html_wiki_loader_heading
-    query: Wiki 页面中 payment-service MySQL 慢查询应该怎样排查？
+    query: Payment Runbook MySQL slow query EXPLAIN active_connections pool_waiting
     expected_source: payment_wiki.html
     expected_keywords:
-      - 慢查询
+      - slow query
       - EXPLAIN
 
   - id: table_ticket_loader_row_citation
@@ -172,3 +172,35 @@ cases:
     expected_keywords:
       - payment-service
       - pool_waiting
+
+  - id: redis_capacity_wiki_runtime_boundary
+    query: Redis Capacity Wiki live_info incident-window evidence maxclients approval boundary
+    expected_source: redis_capacity_wiki.html
+    min_score: 1.0
+    expected_keywords:
+      - incident-window
+      - maxclients
+
+  - id: mysql_pdf_postmortem_pool_waiting
+    query: MySQL Slow Query Postmortem payment-service active_connections pool_waiting rc3
+    expected_source: mysql_slow_query_postmortem.pdf
+    min_score: 1.0
+    expected_keywords:
+      - pool_waiting
+      - active_connections
+
+  - id: redis_ticket_retry_loop_history
+    query: INC-REDIS-009 promotion lookup retry loop maxclients
+    expected_source: tickets.csv
+    min_score: 1.0
+    expected_keywords:
+      - INC-REDIS-009
+      - retry
+
+  - id: mysql_xlsx_rc4_remediation_history
+    query: payment-api-2026.07.06-rc4 Disabled checkout report feature flag prepared index change
+    expected_source: tickets.xlsx
+    min_score: 1.0
+    expected_keywords:
+      - rc4
+      - approval

@@ -38,6 +38,9 @@ make sandbox-verify
   --docs-dir aiops-docs `
   --summary-json logs\rag_eval_summary_current.json `
   --summary-md logs\rag_eval_summary_current.md
+.\.venv\Scripts\python.exe scripts\eval\verify_milvus_multisource_rag.py `
+  --summary-json logs\milvus_multisource_verification.json `
+  --summary-md logs\milvus_multisource_verification.md
 .venv\Scripts\python.exe scripts\eval\build_interview_summary.py `
   --summary-json logs\interview_eval_summary.json `
   --summary-md logs\interview_eval_summary.md
@@ -48,6 +51,7 @@ Then open:
 - `logs/interview_eval_summary.md`
 - `logs/live_golden_eval_summary_current.md` only when the interviewer asks for AIOps details
 - `logs/rag_eval_summary_current.md` only when the interviewer asks for RAG details
+- `logs/milvus_multisource_verification.md` only when the interviewer asks whether PDF/HTML/CSV/XLSX entered Milvus
 - one Redis or MySQL report from the generated report database or web UI
 - `docs/negative-boundary-cases.md` if the interviewer asks how the system behaves when evidence is incomplete
 

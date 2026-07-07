@@ -1,0 +1,142 @@
+{
+  "status": "passed",
+  "duration_ms": 494.84,
+  "data_sources": [
+    "cmdb",
+    "deploy_history",
+    "loki",
+    "mysql",
+    "prometheus",
+    "redis_info",
+    "ticket_api"
+  ],
+  "missing_sources": [],
+  "failed_tools": [],
+  "not_integrated": [],
+  "mock_fallback_detected": false,
+  "checks": [
+    {
+      "tool_name": "query_metrics",
+      "status": "success",
+      "passed": true,
+      "expected_source": "prometheus",
+      "observed_source": "prometheus",
+      "latency_ms": 83.94,
+      "summary": "order-service prometheus P95=3250.00ms, 5xx=8.20%, empty=0",
+      "error_message": "",
+      "signals": {
+        "qps": 1480.0,
+        "p95_latency_ms": 3250.0,
+        "error_rate": 0.082,
+        "cpu_usage_percent": 74.2,
+        "memory_working_set_bytes": 635000000.0
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "query_logs",
+      "status": "success",
+      "passed": true,
+      "expected_source": "loki",
+      "observed_source": "loki",
+      "latency_ms": 29.37,
+      "summary": "Loki 返回 20 条 order-service 日志",
+      "error_message": "",
+      "signals": {
+        "log_count": 20,
+        "stream_count": 2
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "query_service_context",
+      "status": "success",
+      "passed": true,
+      "expected_source": "cmdb",
+      "observed_source": "cmdb",
+      "latency_ms": 150.8,
+      "summary": "CMDB 返回 order-service 的 owner、namespace、tier=critical 和 2 个依赖",
+      "error_message": "",
+      "signals": {
+        "dependency_count": 2,
+        "has_owner": true,
+        "has_business_context": true,
+        "critical_endpoint_count": 2
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "query_deploy_history",
+      "status": "success",
+      "passed": true,
+      "expected_source": "deploy_history",
+      "observed_source": "deploy_history",
+      "latency_ms": 53.09,
+      "summary": "发布历史返回 order-service 最近 2 条变更，latest_status=succeeded",
+      "error_message": "",
+      "signals": {
+        "deployment_count": 2,
+        "latest_status": "succeeded",
+        "high_risk_change_count": 0
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "query_redis_status",
+      "status": "success",
+      "passed": true,
+      "expected_source": "redis_info",
+      "observed_source": "redis_info",
+      "latency_ms": 11.04,
+      "summary": "incident_evidence=redis-cluster-prod connected_clients=9940/10000 from replay window Redis key autooncall:incident:order-service:redis-maxclients; live_info=current_runtime connected_clients=1/10000",
+      "error_message": "",
+      "signals": {
+        "connected_clients": 9940,
+        "maxclients": 10000,
+        "client_usage_ratio": 0.994,
+        "blocked_clients": 37,
+        "slowlog_len": 40,
+        "memory_usage_ratio": 0.0,
+        "live_connected_clients": 1,
+        "live_maxclients": 10000
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "query_mysql_status",
+      "status": "success",
+      "passed": true,
+      "expected_source": "mysql",
+      "observed_source": "mysql",
+      "latency_ms": 82.77,
+      "summary": "payment-service MySQL active_connections=188/200, slow_query_count=18, pool_waiting=6 from MySQL live incident evidence (live-mysql-seed)",
+      "error_message": "",
+      "signals": {
+        "active_connections": 188,
+        "max_connections": 200,
+        "max_used_connections": 2,
+        "slow_queries": 0,
+        "slow_query_count": 18,
+        "pool_waiting": 6,
+        "lock_waits": 0,
+        "live_threads_connected": 1
+      },
+      "signal_failures": []
+    },
+    {
+      "tool_name": "search_history_ticket",
+      "status": "success",
+      "passed": true,
+      "expected_source": "ticket_api",
+      "observed_source": "ticket_api",
+      "latency_ms": 83.74,
+      "summary": "工单系统返回 1 条 order-service 相似故障",
+      "error_message": "",
+      "signals": {
+        "ticket_count": 1
+      },
+      "signal_failures": []
+    }
+  ],
+  "summary": "All configured interview adapters returned real data sources."
+}

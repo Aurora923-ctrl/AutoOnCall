@@ -23,22 +23,59 @@ REDIS_PDF_LINES = [
     "settings requires human approval and a production change window.",
 ]
 
+MYSQL_PDF_LINES = [
+    "MySQL Slow Query Postmortem",
+    "Incident: payment-service checkout latency and payment timeout spike.",
+    "Incident window: 2026-07-06 10:05-10:24 UTC.",
+    "Evidence: slow_queries=18, active_connections=188/200, pool_waiting=6.",
+    "Deploy context: payment-api-2026.07.06-rc3 changed checkout query loading.",
+    "Loki logs showed checkout timeout and slow SQL digest payment_report_join_v3.",
+    "Root cause: slow SQL held MySQL connections and created application pool waiting.",
+    "Remediation boundary: SQL rewrite, index change, pool config, or restart requires",
+    "human approval and a production change window.",
+]
+
+REDIS_CAPACITY_WIKI_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Redis Capacity Wiki - Maxclients</title>
+</head>
+<body>
+  <nav>Home Search Owner</nav>
+  <h1>Redis Capacity Wiki</h1>
+  <h2>Maxclients exhaustion</h2>
+  <p>For order-service, the interview golden incident uses connected_clients=9940,
+  maxclients=10000, blocked_clients=37, and Redis timeout logs.</p>
+  <p>The diagnosis must separate current live_info from incident-window evidence. A
+  healthy current Redis container proves adapter connectivity, not that the outage is
+  still happening.</p>
+  <h2>Approval boundary</h2>
+  <p>Increasing maxclients, resizing Redis capacity, restarting Redis, or changing
+  application pool limits requires human approval and a change window.</p>
+</body>
+</html>
+"""
+
 PAYMENT_WIKI_HTML = """<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Payment Runbook - MySQL Slow Query</title>
 </head>
 <body>
   <h1>Payment Runbook</h1>
-  <h2>MySQL 慢查询</h2>
-  <p>payment-service 出现 checkout latency 时，先确认 slow query digest、active
-  connections、pool_waiting 和最近发布记录。</p>
-  <p>当前 golden case 的关键事实是 slow_queries=18、active_connections=188/200、
-  pool_waiting=6，说明慢 SQL 持有连接并放大连接池等待。</p>
-  <p>定位 SQL 后需要执行 EXPLAIN；新增索引、修改 SQL、调整连接池或重启服务都必须进入人工审批和变更窗口。</p>
-  <h2>Redis 依赖超时</h2>
-  <p>如果支付链路依赖 Redis，也要交叉检查 Redis timeout 日志，避免把下游缓存耗尽误判成数据库根因。</p>
+  <h2>MySQL slow query</h2>
+  <p>When payment-service has checkout latency, first confirm the slow query digest,
+  active_connections, pool_waiting, and recent deploy history.</p>
+  <p>The golden case facts are slow_queries=18, active_connections=188/200, and
+  pool_waiting=6. They indicate slow SQL held connections and amplified pool wait.</p>
+  <p>After locating the SQL digest, run EXPLAIN in a read-only path. Adding an index,
+  rewriting SQL, changing connection-pool settings, or restarting services requires
+  human approval and a change window.</p>
+  <h2>Deploy correlation</h2>
+  <p>payment-api-2026.07.06-rc3 changed checkout query loading and must be checked as
+  historical context, not as proof without MySQL evidence.</p>
 </body>
 </html>
 """
@@ -53,6 +90,14 @@ TICKET_ROWS = [
         "evidence": "connected_clients=9940 maxclients=10000 blocked_clients=37",
     },
     {
+        "ticket_id": "INC-REDIS-009",
+        "service_name": "order-service",
+        "incident_type": "redis_maxclients",
+        "root_cause": "Promotion lookup retry loop exhausted Redis client slots",
+        "resolution": "Reduced retry burst and capped idle Redis pool after approval",
+        "evidence": "Loki redis timeout Prometheus 5xx connected_clients near maxclients",
+    },
+    {
         "ticket_id": "INC-MYSQL-014",
         "service_name": "payment-service",
         "incident_type": "mysql_slow_query",
@@ -60,12 +105,24 @@ TICKET_ROWS = [
         "resolution": "Captured digest, added index after approval, observed P95 recovery",
         "evidence": "slow_queries=18 active_connections=188/200 pool_waiting=6",
     },
+    {
+        "ticket_id": "INC-MYSQL-021",
+        "service_name": "payment-service",
+        "incident_type": "mysql_pool_waiting",
+        "root_cause": "Checkout report query caused MySQL pool_waiting after release rc3",
+        "resolution": "Disabled report flag, reviewed EXPLAIN, then added covering index",
+        "evidence": "deploy rc3 slow query digest payment_report_join_v3 pool_waiting=6",
+    },
 ]
 
 
 def main() -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     write_text_pdf(DOCS_DIR / "redis_postmortem.pdf", REDIS_PDF_LINES)
+    write_text_pdf(DOCS_DIR / "mysql_slow_query_postmortem.pdf", MYSQL_PDF_LINES)
+    (DOCS_DIR / "redis_capacity_wiki.html").write_text(
+        REDIS_CAPACITY_WIKI_HTML, encoding="utf-8"
+    )
     (DOCS_DIR / "payment_wiki.html").write_text(PAYMENT_WIKI_HTML, encoding="utf-8")
     write_tickets_csv(DOCS_DIR / "tickets.csv")
     write_tickets_xlsx(DOCS_DIR / "tickets.xlsx")
@@ -109,11 +166,29 @@ def write_tickets_xlsx(path: Path) -> None:
     )
     deploys.append(
         [
+            "payment-service",
+            "payment-api-2026.07.06-rc4",
+            "2026-07-06T10:32:00Z",
+            "Disabled checkout report feature flag and prepared index change",
+            "Remediation after approval; not an automatically executed Agent action",
+        ]
+    )
+    deploys.append(
+        [
             "order-service",
             "order-api-2026.07.06-rc1",
             "2026-07-06T09:10:00Z",
             "Raised Redis retry count in promotion lookup path",
             "Can amplify Redis maxclients pressure",
+        ]
+    )
+    deploys.append(
+        [
+            "order-service",
+            "order-api-2026.07.06-rc2",
+            "2026-07-06T10:28:00Z",
+            "Reduced Redis retry count and idle pool retention",
+            "Remediation after approval for maxclients pressure",
         ]
     )
     workbook.save(path)
@@ -149,9 +224,9 @@ def write_text_pdf(path: Path, lines: list[str]) -> None:
         payload.extend(b"\nendobj\n")
     xref_offset = len(payload)
     payload.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    payload.extend(b"0000000000 65535 f \n")
+    payload.extend(b"0000000000 65535 f\n")
     for offset in offsets[1:]:
-        payload.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+        payload.extend(f"{offset:010d} 00000 n\n".encode("ascii"))
     payload.extend(
         (
             f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"

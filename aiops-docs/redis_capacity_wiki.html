@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Redis Capacity Wiki - Maxclients</title>
+</head>
+<body>
+  <nav>Home Search Owner</nav>
+  <h1>Redis Capacity Wiki</h1>
+  <h2>Maxclients exhaustion</h2>
+  <p>For order-service, the interview golden incident uses connected_clients=9940,
+  maxclients=10000, blocked_clients=37, and Redis timeout logs.</p>
+  <p>The diagnosis must separate current live_info from incident-window evidence. A
+  healthy current Redis container proves adapter connectivity, not that the outage is
+  still happening.</p>
+  <h2>Approval boundary</h2>
+  <p>Increasing maxclients, resizing Redis capacity, restarting Redis, or changing
+  application pool limits requires human approval and a change window.</p>
+</body>
+</html>

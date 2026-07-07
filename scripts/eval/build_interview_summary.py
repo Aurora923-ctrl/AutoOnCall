@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LIVE_SUMMARY = REPO_ROOT / "logs" / "live_golden_eval_summary_current.json"
 DEFAULT_RAG_SUMMARY = REPO_ROOT / "logs" / "rag_eval_summary_current.json"
 DEFAULT_ADAPTER_SUMMARY = REPO_ROOT / "logs" / "full_stack_adapter_verification.json"
+DEFAULT_MILVUS_SUMMARY = REPO_ROOT / "logs" / "milvus_multisource_verification.json"
 DEFAULT_CHANGE_SUMMARY = REPO_ROOT / "logs" / "change_eval_summary.json"
 DEFAULT_REPLANNER_SUMMARY = REPO_ROOT / "logs" / "replanner_eval_summary.json"
 DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "interview_eval_summary.json"
@@ -91,6 +92,7 @@ def build_summary(
     live_payload: dict[str, Any] | None,
     rag_payload: dict[str, Any] | None,
     adapter_payload: dict[str, Any] | None,
+    milvus_payload: dict[str, Any] | None = None,
     change_payload: dict[str, Any] | None = None,
     replanner_payload: dict[str, Any] | None = None,
     source_artifacts: dict[str, str] | None = None,
@@ -126,6 +128,7 @@ def build_summary(
                 "live_aiops": str(DEFAULT_LIVE_SUMMARY.relative_to(REPO_ROOT)),
                 "rag": str(DEFAULT_RAG_SUMMARY.relative_to(REPO_ROOT)),
                 "adapter_verification": str(DEFAULT_ADAPTER_SUMMARY.relative_to(REPO_ROOT)),
+                "milvus_multisource": str(DEFAULT_MILVUS_SUMMARY.relative_to(REPO_ROOT)),
                 "safe_change": str(DEFAULT_CHANGE_SUMMARY.relative_to(REPO_ROOT)),
                 "replanner": str(DEFAULT_REPLANNER_SUMMARY.relative_to(REPO_ROOT)),
             }
@@ -149,7 +152,9 @@ def build_summary(
                     ),
                 },
             },
+            "conclusion_alignment": _conclusion_alignment_summary([redis, mysql]),
             "rag_metrics": _rag_metrics(rag_payload),
+            "milvus_multisource": _milvus_summary(milvus_payload),
             "adapter_sources": {
                 "status": (adapter_payload or {}).get("status", "missing"),
                 "data_sources": (adapter_payload or {}).get("data_sources", []),
@@ -203,11 +208,94 @@ def _rag_metrics(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _conclusion_alignment_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        if not case:
+            continue
+        alignment = case.get("conclusion_alignment") or {}
+        fields = alignment.get("fields") if isinstance(alignment, dict) else {}
+        rows.extend(
+            _alignment_rows(
+                str(case.get("id") or "unknown"),
+                fields if isinstance(fields, dict) else {},
+            )
+        )
+
+    aligned_count = sum(1 for row in rows if row["aligned"])
+    total_count = len(rows)
+    return {
+        "aligned_count": aligned_count,
+        "total_count": total_count,
+        "rate": aligned_count / total_count if total_count else 0.0,
+        "fields": rows,
+    }
+
+
+def _alignment_rows(case_id: str, fields: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    root_cause = fields.get("root_cause")
+    if isinstance(root_cause, dict):
+        rows.append(_alignment_row(case_id, "root_cause", root_cause))
+
+    key_findings = fields.get("key_findings")
+    if isinstance(key_findings, list) and key_findings:
+        evidence_ids: list[str] = []
+        citation_count = 0
+        aligned = True
+        for item in key_findings:
+            if not isinstance(item, dict):
+                aligned = False
+                continue
+            aligned = aligned and bool(item.get("aligned"))
+            evidence_ids.extend(str(value) for value in item.get("evidence_ids") or [])
+            citation_count += len(item.get("citations") or [])
+        rows.append(
+            {
+                "case_id": case_id,
+                "field": "key_findings",
+                "aligned": aligned,
+                "evidence_ids": sorted(set(evidence_ids)),
+                "citation_count": citation_count,
+            }
+        )
+
+    remediation = fields.get("remediation_suggestion")
+    if isinstance(remediation, dict):
+        rows.append(_alignment_row(case_id, "remediation_suggestion", remediation))
+    return rows
+
+
+def _alignment_row(case_id: str, field_name: str, item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "field": field_name,
+        "aligned": bool(item.get("aligned")),
+        "evidence_ids": [str(value) for value in item.get("evidence_ids") or []],
+        "citation_count": len(item.get("citations") or []),
+    }
+
+
+def _milvus_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    summary = (payload or {}).get("summary", {})
+    return {
+        "status": str(summary.get("status") or "missing"),
+        "inserted_chunks": int(summary.get("inserted_chunks", 0) or 0),
+        "probe_count": int(summary.get("probe_count", 0) or 0),
+        "passed_probe_count": int(summary.get("passed_probe_count", 0) or 0),
+        "pass_rate": float(summary.get("pass_rate", 0.0) or 0.0),
+        "source_counts": summary.get("source_counts", {}),
+        "doc_type_counts": summary.get("doc_type_counts", {}),
+    }
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     modules = summary["modules"]
     chains = summary["portfolio_chains"]
     rag = summary["rag_metrics"]
+    alignment = summary["conclusion_alignment"]
+    milvus = summary["milvus_multisource"]
     adapter = summary["adapter_sources"]
 
     lines = [
@@ -264,6 +352,25 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- no-answer rejection: `{_ratio_percent(rag['no_answer_rejection_rate'])}`",
             f"- confusion case pass: `{_ratio_percent(rag['confusion_case_pass_rate'])}`",
             "",
+            "## Conclusion Alignment",
+            "",
+            f"- conclusion_alignment_rate: "
+            f"`{alignment['aligned_count']}/{alignment['total_count']} "
+            f"({_ratio_percent(alignment['rate'])})`",
+            "- Scope: Redis/MySQL main chains; fields are `root_cause`, "
+            "`key_findings`, and `remediation_suggestion`.",
+            "",
+            "| Case | Field | Status | Evidence links | Citation count |",
+            "| --- | --- | --- | --- | ---: |",
+            *_alignment_markdown_rows(alignment["fields"]),
+            "",
+            "## Milvus Multi-Source Snapshot",
+            "",
+            f"- Status: `{milvus['status']}`",
+            f"- Inserted chunks: `{milvus['inserted_chunks']}`",
+            f"- Probe pass rate: `{milvus['passed_probe_count']}/{milvus['probe_count']}`",
+            f"- Source files: `{', '.join(milvus['source_counts'].keys()) or 'missing'}`",
+            "",
             "## Adapter Snapshot",
             "",
             f"- Adapter verification: `{adapter['status']}`",
@@ -284,6 +391,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "",
             "- `logs/live_golden_eval_summary_current.md`: live AIOps run; usually uses `--skip-rag`.",
             "- `logs/rag_eval_summary_current.md`: standalone RAG retrieval result.",
+            "- `logs/milvus_multisource_verification.md`: Milvus storage proof for PDF/HTML/CSV/XLSX chunks.",
             "- `logs/full_stack_adapter_verification.json`: real adapter source proof.",
             "",
         ]
@@ -304,6 +412,26 @@ def _module_notes(
             f"citation={_ratio_percent(rag['citation_coverage_rate'])}"
         )
     return item["status"]
+
+
+def _alignment_markdown_rows(rows: list[dict[str, Any]]) -> list[str]:
+    rendered = []
+    for row in rows:
+        evidence_links = _compact_evidence_links(row["evidence_ids"])
+        status = "aligned" if row["aligned"] else "needs_human"
+        rendered.append(
+            f"| `{row['case_id']}` | `{row['field']}` | `{status}` | "
+            f"{evidence_links} | {row['citation_count']} |"
+        )
+    return rendered or ["| `missing` | `missing` | `needs_human` | - | 0 |"]
+
+
+def _compact_evidence_links(evidence_ids: list[str]) -> str:
+    if not evidence_ids:
+        return "-"
+    visible = evidence_ids[:2]
+    suffix = f" (+{len(evidence_ids) - len(visible)} more)" if len(evidence_ids) > 2 else ""
+    return ", ".join(visible) + suffix
 
 
 def _chain_row(label: str, chain: dict[str, Any]) -> str:
@@ -331,6 +459,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--live-summary", default=str(DEFAULT_LIVE_SUMMARY))
     parser.add_argument("--rag-summary", default=str(DEFAULT_RAG_SUMMARY))
     parser.add_argument("--adapter-summary", default=str(DEFAULT_ADAPTER_SUMMARY))
+    parser.add_argument("--milvus-summary", default=str(DEFAULT_MILVUS_SUMMARY))
     parser.add_argument("--change-summary", default=str(DEFAULT_CHANGE_SUMMARY))
     parser.add_argument("--replanner-summary", default=str(DEFAULT_REPLANNER_SUMMARY))
     parser.add_argument("--summary-json", default=str(DEFAULT_OUTPUT_JSON))
@@ -345,12 +474,14 @@ def main(argv: list[str] | None = None) -> int:
         live_payload=load_json(Path(args.live_summary)),
         rag_payload=load_json(Path(args.rag_summary)),
         adapter_payload=load_json(Path(args.adapter_summary)),
+        milvus_payload=load_json(Path(args.milvus_summary)),
         change_payload=load_json(Path(args.change_summary)),
         replanner_payload=load_json(Path(args.replanner_summary)),
         source_artifacts={
             "live_aiops": args.live_summary,
             "rag": args.rag_summary,
             "adapter_verification": args.adapter_summary,
+            "milvus_multisource": args.milvus_summary,
             "safe_change": args.change_summary,
             "replanner": args.replanner_summary,
         },

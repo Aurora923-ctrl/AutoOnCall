@@ -117,9 +117,11 @@ Portfolio metrics to show:
 
 | Metric | Result |
 | --- | --- |
-| Overall eval | `42/42` passed |
+| Overall eval | `46/46` passed |
 | AIOps eval | `16/16` passed |
-| RAG eval | `26/26` passed |
+| RAG eval | `30/30` passed |
+| Milvus multi-source probes | `6/6` passed |
+| conclusion_alignment_rate | `6/6` aligned |
 | `required_live_sources_hit` | PASS |
 | `evidence_sufficiency_hit` | PASS |
 | `runtime_vs_incident_boundary_hit` | PASS |

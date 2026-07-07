@@ -572,6 +572,7 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
         "unnecessary_tool_rate": unexpected_tool_rate,
         "report_id": report.report_id,
         "confidence": report.confidence,
+        "conclusion_alignment": report.conclusion_alignment,
         "runbook_rejected": observed_runbook_rejection,
         "runbook_should_reject": expected_runbook_rejection,
         "tool_latency_ms": [record.latency_ms for record in tool_calls],

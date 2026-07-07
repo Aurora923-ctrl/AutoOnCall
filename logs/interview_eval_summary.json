@@ -1,0 +1,230 @@
+{
+  "run": {
+    "generated_at": "2026-07-07T12:39:15.735366+00:00",
+    "summary_scope": "interview-facing rollup; live AIOps and RAG evals remain separate source artifacts to avoid treating --skip-rag as a RAG result",
+    "source_artifacts": {
+      "live_aiops": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\live_golden_eval_summary_current.json",
+      "rag": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\rag_eval_summary_current.json",
+      "adapter_verification": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\full_stack_adapter_verification.json",
+      "milvus_multisource": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\milvus_multisource_verification.json",
+      "safe_change": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\change_eval_summary.json",
+      "replanner": "E:\\Document\\Develop\\Project\\Python\\AutoOnCall\\logs\\replanner_eval_summary.json"
+    }
+  },
+  "summary": {
+    "status": "passed",
+    "core_modules_passed": true,
+    "modules": {
+      "adapter_verification": {
+        "name": "adapter_verification",
+        "status": "passed",
+        "passed": true,
+        "case_count": 7,
+        "passed_count": 7,
+        "pass_rate": 1.0
+      },
+      "live_aiops_eval": {
+        "name": "live_aiops_eval",
+        "status": "passed",
+        "passed": true,
+        "case_count": 16,
+        "passed_count": 16,
+        "pass_rate": 1.0
+      },
+      "rag_eval": {
+        "name": "rag_eval",
+        "status": "passed",
+        "passed": true,
+        "case_count": 30,
+        "passed_count": 30,
+        "pass_rate": 1.0
+      },
+      "safe_change_eval": {
+        "name": "safe_change_eval",
+        "status": "passed",
+        "passed": true,
+        "case_count": 9,
+        "passed_count": 9,
+        "pass_rate": 1.0
+      },
+      "replanner_eval": {
+        "name": "replanner_eval",
+        "status": "passed",
+        "passed": true,
+        "case_count": 4,
+        "passed_count": 4,
+        "pass_rate": 1.0
+      }
+    },
+    "portfolio_chains": {
+      "redis_maxclients_timeout": {
+        "passed": true,
+        "evidence_mode": "live_adapter",
+        "tool_sources": {
+          "query_redis_status": "redis_info",
+          "query_metrics": "prometheus",
+          "query_logs": "loki",
+          "search_runbook": "eval_fixture",
+          "search_history_ticket": "ticket_api",
+          "suggest_remediation": "rule_based"
+        },
+        "required_live_sources_hit": true,
+        "evidence_sufficiency_hit": true,
+        "runtime_vs_incident_boundary_hit": true,
+        "approval_boundary_hit": true
+      },
+      "mysql_slow_query_latency": {
+        "passed": true,
+        "evidence_mode": "live_adapter",
+        "tool_sources": {
+          "query_mysql_status": "mysql",
+          "query_metrics": "prometheus",
+          "query_logs": "loki",
+          "search_runbook": "eval_fixture",
+          "search_history_ticket": "ticket_api",
+          "suggest_remediation": "rule_based"
+        },
+        "required_live_sources_hit": true,
+        "evidence_sufficiency_hit": true,
+        "runtime_vs_incident_boundary_hit": true,
+        "approval_boundary_hit": true
+      },
+      "pod_crashloop": {
+        "status": "offline_regression_only",
+        "passed": true,
+        "evidence_mode": "offline_fixture",
+        "source_boundary": "K8s CrashLoop/OOMKilled is an offline golden regression case in the default interview stack, not live container-backed evidence."
+      }
+    },
+    "conclusion_alignment": {
+      "aligned_count": 6,
+      "total_count": 6,
+      "rate": 1.0,
+      "fields": [
+        {
+          "case_id": "redis_maxclients_timeout",
+          "field": "root_cause",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-e63e5466471c466dba24d145454a2ab0",
+            "evd-3013606a40d040b6a38d3d12b39331ec",
+            "evd-44136d169ad6456b88769b9717779575",
+            "evd-4e50e785cec440308db04ee529e4d1a1",
+            "evd-ec9d5f160df749cf9e6a0770eea49468"
+          ],
+          "citation_count": 2
+        },
+        {
+          "case_id": "redis_maxclients_timeout",
+          "field": "key_findings",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-3013606a40d040b6a38d3d12b39331ec",
+            "evd-44136d169ad6456b88769b9717779575",
+            "evd-4e50e785cec440308db04ee529e4d1a1",
+            "evd-e63e5466471c466dba24d145454a2ab0"
+          ],
+          "citation_count": 2
+        },
+        {
+          "case_id": "redis_maxclients_timeout",
+          "field": "remediation_suggestion",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-4e50e785cec440308db04ee529e4d1a1",
+            "evd-ec9d5f160df749cf9e6a0770eea49468"
+          ],
+          "citation_count": 2
+        },
+        {
+          "case_id": "mysql_slow_query_latency",
+          "field": "root_cause",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-a4f792e1c3154f54a3fcb990d657bb74",
+            "evd-31b48c6b16a0483291a57c5cd2e050c3",
+            "evd-c351f0f0bf6446b3affe6d342088db26",
+            "evd-a7fd3e9201364042b4142911c331d7a1",
+            "evd-5b3d6e46dcdd43fea59a5b0306d32590"
+          ],
+          "citation_count": 2
+        },
+        {
+          "case_id": "mysql_slow_query_latency",
+          "field": "key_findings",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-31b48c6b16a0483291a57c5cd2e050c3",
+            "evd-a4f792e1c3154f54a3fcb990d657bb74",
+            "evd-a7fd3e9201364042b4142911c331d7a1",
+            "evd-c351f0f0bf6446b3affe6d342088db26",
+            "evd-c3633ef7437a44a3bf6beebb8d077a23"
+          ],
+          "citation_count": 2
+        },
+        {
+          "case_id": "mysql_slow_query_latency",
+          "field": "remediation_suggestion",
+          "aligned": true,
+          "evidence_ids": [
+            "evd-a7fd3e9201364042b4142911c331d7a1",
+            "evd-5b3d6e46dcdd43fea59a5b0306d32590"
+          ],
+          "citation_count": 2
+        }
+      ]
+    },
+    "rag_metrics": {
+      "case_count": 30,
+      "passed_count": 30,
+      "top_k": 3,
+      "recall_at_k": 1.0,
+      "strict_recall_at_k": 1.0,
+      "mrr": 1.0,
+      "citation_coverage_rate": 1.0,
+      "no_answer_rejection_rate": 1.0,
+      "confusion_case_pass_rate": 1.0
+    },
+    "milvus_multisource": {
+      "status": "passed",
+      "inserted_chunks": 18,
+      "probe_count": 6,
+      "passed_probe_count": 6,
+      "pass_rate": 1.0,
+      "source_counts": {
+        "mysql_slow_query_postmortem.pdf": 1,
+        "payment_wiki.html": 2,
+        "redis_capacity_wiki.html": 2,
+        "redis_postmortem.pdf": 1,
+        "tickets.csv": 4,
+        "tickets.xlsx": 8
+      },
+      "doc_type_counts": {
+        "html": 4,
+        "pdf": 2,
+        "table": 12
+      }
+    },
+    "adapter_sources": {
+      "status": "passed",
+      "data_sources": [
+        "cmdb",
+        "deploy_history",
+        "loki",
+        "mysql",
+        "prometheus",
+        "redis_info",
+        "ticket_api"
+      ],
+      "mock_fallback_detected": false,
+      "missing_sources": [],
+      "failed_tools": []
+    },
+    "interview_boundaries": [
+      "Redis/MySQL are live adapter golden chains backed by the local Docker stack.",
+      "RAG eval is shown from its own retrieval summary, not from the --skip-rag AIOps run.",
+      "K8s CrashLoop/OOMKilled is an offline golden regression case in the default interview.",
+      "Conclusion alignment is conclusion-level grounding, not full-sentence fact checking."
+    ]
+  }
+}
