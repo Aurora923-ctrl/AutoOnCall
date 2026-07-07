@@ -47,6 +47,8 @@ def build_citations(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
     """Return one citation/search result for API and frontend display."""
+    raw_metadata = item.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     return {
         "rank": item.get("rank"),
         "doc_id": item.get("doc_id", ""),
@@ -54,6 +56,12 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
         "source_path": public_source_path(item.get("source_path") or item.get("source_file")),
         "heading_path": item.get("heading_path", ""),
         "chunk_id": item.get("chunk_id", ""),
+        "doc_type": metadata.get("doc_type", ""),
+        "page_number": metadata.get("page_number"),
+        "sheet_name": metadata.get("sheet_name", ""),
+        "row_number": metadata.get("row_number"),
+        "table_name": metadata.get("table_name", ""),
+        "primary_key": metadata.get("primary_key", ""),
         "score": item.get("score"),
         "lexical_score": item.get("lexical_score"),
         "vector_score": item.get("vector_score"),

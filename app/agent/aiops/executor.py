@@ -637,10 +637,6 @@ def _compact_external_payload(output: dict[str, Any]) -> dict[str, Any]:
         "kubernetes",
         "mysql",
         "ticket_api",
-        "alertmanager",
-        "jaeger",
-        "tempo",
-        "redpanda",
     }:
         return output
     compact = dict(output)
@@ -843,10 +839,6 @@ def _evidence_confidence(result: ToolExecutionResult, data_source: str) -> float
         "kubernetes",
         "mysql",
         "ticket_api",
-        "alertmanager",
-        "jaeger",
-        "tempo",
-        "redpanda",
     }:
         return 0.82
     if data_source in {"mcp_monitor", "mcp_cls", "rag"}:
@@ -866,6 +858,8 @@ def _build_evidence_fact(result: ToolExecutionResult, data_source: str) -> str:
     """Separate directly observed data from later diagnostic inference."""
     if result.status == "failed":
         return f"{result.tool_name} 未返回可用数据，来源={data_source}"
+    if isinstance(result.output, dict) and result.output.get("fact"):
+        return str(result.output["fact"])
     summary = _summarize_tool_result(result)
     return f"{summary}；来源={data_source}"
 
@@ -874,6 +868,8 @@ def _build_evidence_inference(result: ToolExecutionResult, stance: str) -> str:
     """Summarize what this evidence does to the active hypothesis."""
     if result.status == "failed":
         return "该步骤不能支持根因判断，只能作为证据缺口记录。"
+    if isinstance(result.output, dict) and result.output.get("inference"):
+        return str(result.output["inference"])
     if stance == "supporting":
         return "该证据支持当前根因假设。"
     if stance == "refuting":
@@ -885,6 +881,12 @@ def _build_evidence_inference(result: ToolExecutionResult, stance: str) -> str:
 
 def _build_evidence_uncertainty(result: ToolExecutionResult, data_source: str) -> str:
     """Make mock, fallback, and failure boundaries explicit."""
+    if (
+        result.status != "failed"
+        and isinstance(result.output, dict)
+        and result.output.get("uncertainty")
+    ):
+        return str(result.output["uncertainty"])
     if data_source == "not_configured":
         return "真实适配器未配置且 Mock 回退关闭，不能生成真实系统证据。"
     if data_source == "failed":
@@ -895,7 +897,7 @@ def _build_evidence_uncertainty(result: ToolExecutionResult, data_source: str) -
         return "该结果来自规则或人工/LLM 兜底路径，需要结合真实工具证据复核。"
     if result.status == "failed":
         return result.error_message or "工具调用失败，证据不完整。"
-    return ""
+    return "该证据来自当前配置的数据源，仍需结合时间窗口、采样完整性和其他工具交叉验证。"
 
 
 def _build_evidence_next_step(

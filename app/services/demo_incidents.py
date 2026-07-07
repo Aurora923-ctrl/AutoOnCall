@@ -10,7 +10,6 @@ DEMO_INCIDENT_ORDER = [
     "redis_maxclients",
     "mysql_slow_query",
     "pod_crashloop",
-    "redpanda_lag",
     "forbidden_sql",
 ]
 
@@ -24,7 +23,6 @@ DEMO_INCIDENT_LABELS = {
     "redis_maxclients": "Redis maxclients",
     "mysql_slow_query": "MySQL slow query",
     "pod_crashloop": "Pod CrashLoop",
-    "redpanda_lag": "Redpanda lag",
     "forbidden_sql": "Forbidden SQL",
 }
 
@@ -69,21 +67,6 @@ DEMO_INCIDENTS: dict[str, dict[str, Any]] = {
             "namespace": "inventory",
             "pod": "inventory-service-7f8d9c-abc12",
             "restarts": 12,
-        },
-    },
-    "redpanda_lag": {
-        "incident_id": "INC-RP-001",
-        "title": "checkout-service Redpanda consumer lag",
-        "service_name": "checkout-service",
-        "severity": "P2",
-        "symptom": "checkout-service 响应慢，订单消息积压，怀疑 Redpanda/Kafka topic 或 partition 异常",
-        "environment": "prod",
-        "raw_alert": {
-            "alertname": "RedpandaConsumerLagHigh",
-            "topic": "redpanda-checkout",
-            "consumer_group": "checkout-service",
-            "consumer_lag": 128400,
-            "max_partition_lag": 79000,
         },
     },
     "forbidden_sql": {

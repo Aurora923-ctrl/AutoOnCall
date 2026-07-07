@@ -184,8 +184,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     logger.info(f"已执行步骤: {len(past_steps)}")
     logger.info(f"Evidence Analyzer 决策: {analysis.decision} - {analysis.reason}")
     logger.info(
-        f"Replanner 结构化决策: {decision.decision} - {decision.reason} "
-        f"(source={decision_source})"
+        f"Replanner 结构化决策: {decision.decision} - {decision.reason} (source={decision_source})"
     )
 
     if decision.decision == "generate_report":
@@ -436,8 +435,7 @@ def _build_replanner_messages(
         ("user", f"原始任务: {state.get('input', '')}"),
         (
             "user",
-            "Incident:\n"
-            f"{_json_preview(state.get('incident') or {}, budgeter=active_budgeter)}",
+            f"Incident:\n{_json_preview(state.get('incident') or {}, budgeter=active_budgeter)}",
         ),
         (
             "user",
@@ -446,8 +444,7 @@ def _build_replanner_messages(
         ),
         (
             "user",
-            "兼容计划队列:\n"
-            f"{_json_preview(state.get('plan') or [], budgeter=active_budgeter)}",
+            f"兼容计划队列:\n{_json_preview(state.get('plan') or [], budgeter=active_budgeter)}",
         ),
         (
             "user",

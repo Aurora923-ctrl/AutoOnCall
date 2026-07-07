@@ -23,8 +23,11 @@ async def test_liveness_does_not_check_milvus(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
-    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
+    async def external_ready():
+        return {"status": "configured", "mock_fallback_enabled": False}
+
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+    monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
 
     def fail_connect():
         raise RuntimeError("milvus down")
@@ -39,16 +42,13 @@ async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
     assert payload["data"]["checks"]["milvus"]["status"] == "disconnected"
     assert payload["data"]["capabilities"]["rag"]["ready"] is False
     assert "aiops" in payload["data"]["capabilities"]
-    assert payload["data"]["checks"]["external_systems"]["status"] in {
-        "configured",
-        "mock_fallback",
-    }
+    assert payload["data"]["checks"]["external_systems"]["status"] == "configured"
 
 
 @pytest.mark.asyncio
 async def test_readiness_attempts_lazy_milvus_connection(monkeypatch) -> None:
     async def external_ready():
-        return {"status": "mock_fallback", "mock_fallback_enabled": True}
+        return {"status": "configured", "mock_fallback_enabled": False}
 
     class LazyMilvus:
         connected = False
@@ -91,8 +91,11 @@ async def test_readiness_reports_aiops_dependency_failure(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_capability_readiness_splits_aiops_from_rag(monkeypatch) -> None:
-    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
+    async def external_ready():
+        return {"status": "configured", "mock_fallback_enabled": False}
+
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+    monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
 
     def fail_connect():
         raise RuntimeError("milvus down")
@@ -129,7 +132,7 @@ async def test_rag_readiness_uses_rag_dependency_status(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
     async def external_ready():
-        return {"status": "mock_fallback", "mock_fallback_enabled": True}
+        return {"status": "configured", "mock_fallback_enabled": False}
 
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
@@ -143,7 +146,6 @@ async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> None:
-    monkeypatch.setattr(health_api.config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
 
     class ConnectedRedis:
@@ -165,18 +167,17 @@ async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> N
     payload = json.loads(response.body.decode("utf-8"))
     external = payload["data"]["checks"]["external_systems"]
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert external["status"] == "degraded"
     assert external["checks"]["redis"]["status"] == "connected"
     assert external["checks"]["mysql"]["status"] == "failed"
-    assert payload["data"]["capabilities"]["aiops"]["status"] == "degraded_with_fallback"
+    assert payload["data"]["capabilities"]["aiops"]["status"] == "degraded"
 
 
-def test_external_overall_status_respects_mock_fallback_flag() -> None:
+def test_external_overall_status_does_not_promote_unconfigured_sources() -> None:
     statuses = {"alertmanager": "not_configured", "prometheus": "not_configured"}
 
-    assert health_api._external_overall_status(statuses, True) == "mock_fallback"
-    assert health_api._external_overall_status(statuses, False) == "not_configured"
+    assert health_api._external_overall_status(statuses) == "not_configured"
 
 
 def test_failed_readiness_hides_raw_exception_detail() -> None:

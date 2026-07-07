@@ -11,6 +11,8 @@ from loguru import logger
 
 from app.config import config
 from app.core.auth import KNOWLEDGE_WRITE_SCOPE, READ_SCOPE, require_scope
+from app.models.api_contracts import KnowledgeIndexingReportsResponse
+from app.services.indexing_quality_service import indexing_quality_service
 from app.services.vector_index_service import vector_index_service
 
 router = APIRouter()
@@ -104,6 +106,12 @@ async def upload_file(file: UploadFile = File(...)):
                 indexing_status = indexing_result.to_dict()
             elif isinstance(indexing_result, dict):
                 indexing_status = indexing_result
+            if hasattr(indexing_result, "cleaning_report"):
+                indexing_quality_service.record_single_file_result(
+                    indexing_result,
+                    operation="upload",
+                    source_path=str(file_path),
+                )
 
             if indexing_status.get("status") == "empty":
                 logger.warning(f"上传文件未产生可检索分片: {file_path}")
@@ -117,7 +125,13 @@ async def upload_file(file: UploadFile = File(...)):
                 "duration_ms": 0,
                 "error_message": PUBLIC_INDEXING_ERROR_MESSAGE,
                 "message": "文件已保存，但索引未完成",
+                "cleaning": {},
             }
+            indexing_quality_service.record_failed_file(
+                source_path=str(file_path),
+                operation="upload",
+                error_message=PUBLIC_INDEXING_ERROR_MESSAGE,
+            )
             # 注意：即使索引失败，文件上传仍然成功，但响应会暴露索引阶段状态。
 
         indexing_ready = indexing_status.get("status") == "success"
@@ -169,6 +183,7 @@ async def index_directory(directory_path: str | None = None):
         logger.info(f"开始索引目录: {directory_path or 'uploads'}")
 
         result = await asyncio.to_thread(vector_index_service.index_directory, directory_path)
+        indexing_quality_service.record_directory_result(result, operation="directory")
         response_status = _index_directory_response_status(result)
 
         return JSONResponse(
@@ -186,6 +201,27 @@ async def index_directory(directory_path: str | None = None):
             status_code=500,
             detail=PUBLIC_DIRECTORY_INDEX_ERROR_MESSAGE,
         ) from e
+
+
+@router.get(
+    "/knowledge/indexing/reports",
+    response_model=KnowledgeIndexingReportsResponse,
+    dependencies=[Depends(require_scope(READ_SCOPE))],
+)
+async def knowledge_indexing_reports(
+    doc_type: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Return persisted loader cleaning quality reports and doc_type aggregates."""
+    safe_limit = max(1, min(int(limit), 500))
+    return {
+        "code": 200,
+        "message": "success",
+        "data": indexing_quality_service.build_report(
+            doc_type=doc_type,
+            limit=safe_limit,
+        ),
+    }
 
 
 def _get_file_extension(filename: str) -> str:

@@ -1,8 +1,8 @@
-# AIOps Full-Stack Sandbox
+# AIOps Local Docker Stacks
 
-This sandbox gives AutoOnCall a reproducible live-data environment for AIOps demos. It runs Redis, MySQL, Prometheus, Alertmanager, Grafana, Loki, a read-only Kubernetes API mock, Tempo, Jaeger, OpenTelemetry Collector, Redpanda, and small mock services for CMDB, ticketing, and deployment history.
+This sandbox gives AutoOnCall a reproducible live-data environment for AIOps demos. The default interview stack runs Redis, MySQL, metrics-exporter, Prometheus, Loki, and loki-log-emitter. Service catalog, deployment history, and historical tickets are seeded into the real MySQL container instead of HTTP mock services. Milvus/RAG remains a bonus path via `make up && make upload`; it is not part of the default live AIOps stack. The interview stack intentionally omits advanced adapters such as Grafana, Alertmanager, tracing backends, OpenTelemetry Collector, Redpanda, and local Kubernetes mocks.
 
-For a 10-minute campus-recruiting interview demo, use the main path in `README.md` first. This sandbox is the advanced path for proving that the same Tool Registry can consume adapter-backed evidence such as `redis_info`, `mysql`, `prometheus`, and `loki` instead of built-in mock output.
+For a 5-minute campus-recruiting interview demo, use `make interview-up`. Advanced observability/message-queue services are intentionally not part of this stack.
 
 It is intentionally local-only demo infrastructure. Do not reuse the demo passwords in production.
 
@@ -17,25 +17,19 @@ D:\AppDataStorage\DockerData\autooncall-full
 | Service | Container | Host port | Purpose |
 | --- | --- | ---: | --- |
 | Redis | `autooncall-full-redis` | `16379` | Real `INFO`, `CONFIG GET maxclients`, Redis Stream timeline, and incident evidence keys |
-| MySQL | `autooncall-full-mysql` | `13306` | Real `SHOW GLOBAL STATUS`, demo incident tables, SLO snapshots, and change correlation data |
+| MySQL | `autooncall-full-mysql` | `13306` | Real `SHOW GLOBAL STATUS`, live incident evidence tables, SLO snapshots, service catalog, deploy history, and ticket data |
 | Metrics exporter | `autooncall-full-metrics-exporter` | `19108` | Deterministic service metrics in Prometheus text format |
 | Prometheus | `autooncall-full-prometheus` | `19090` | Real HTTP API queried by `PrometheusMetricsAdapter` |
-| Alertmanager | `autooncall-full-alertmanager` | `19093` | Local alert routing demo |
-| Grafana | `autooncall-full-grafana` | `13000` | Dashboards and datasource exploration (`admin` / `admin`) |
-| Loki | `autooncall-full-loki` | `13100` | Queryable incident logs for Redis/MySQL/K8s scenarios |
-| Kubernetes mock | `autooncall-full-kubernetes-mock` | `18085` | Read-only Pod and Event API for `query_k8s_status` |
-| Tempo | `autooncall-full-tempo` | `13200` | Trace backend for OpenTelemetry demos |
-| Jaeger | `autooncall-full-jaeger` | `16686` | Trace UI for interview walkthroughs |
-| Redpanda | `autooncall-full-redpanda` | `19092` | Kafka-compatible incident, deploy, and order event topics |
-| CMDB mock | `autooncall-full-cmdb-mock` | `18081` | Service ownership and dependency fixtures |
-| Ticketing mock | `autooncall-full-ticketing-mock` | `18083` | Historical incident fixtures |
-| Deploy history mock | `autooncall-full-deploy-history-mock` | `18084` | Release/change correlation fixtures |
+| Loki | `autooncall-full-loki` | `13100` | Queryable incident logs for Redis/MySQL scenarios |
+| Loki log emitter | `autooncall-full-loki-log-emitter` | - | Periodically pushes deterministic incident logs into Loki |
+
+Seed data is not kept as a long-running or one-shot Compose service in the default interview stack. `make interview-up` starts only the six core services above, then runs `scripts/sandbox/seed_live_incident_evidence.py` to idempotently write service catalog, deployment history, historical tickets, and incident-window evidence into the real MySQL and Redis containers.
 
 ## Quick Start
 
 Interview quick path:
 
-1. Start the sandbox and seed demo data.
+1. Start the interview stack.
 2. Load `deploy/sandbox.env` before starting FastAPI.
 3. Run `redis_maxclients` or `mysql_slow_query` from the web UI.
 4. Confirm the report/trace shows adapter-backed data sources such as `redis_info`, `mysql`, `prometheus`, or `loki`, not `mock`.
@@ -43,20 +37,78 @@ Interview quick path:
 Full command path:
 
 ```powershell
-make sandbox-up
-powershell -ExecutionPolicy Bypass -File deploy\full-stack\seed-demo-data.ps1
-make sandbox-demo
+make interview-up
+make sandbox-verify
+.venv\Scripts\python.exe scripts\eval\eval_cases.py `
+  --cases eval\cases.yaml `
+  --env-file deploy\sandbox.env `
+  --report-path logs\live_golden_eval_reports.db `
+  --summary-json logs\live_golden_eval_summary.json `
+  --summary-md logs\live_golden_eval_summary.md `
+  --skip-rag
 ```
 
-The demo writes a structured proof artifact to:
+The verification writes a structured proof artifact to:
 
 ```text
-logs/sandbox_aiops_simulation.json
+logs/full_stack_adapter_verification.json
 ```
 
-The `data_sources` section should include live adapter sources such as `prometheus`, `redis_info`, and `mysql`. Failed scenarios, such as stopping Redis or MySQL, should appear as structured `failed` tool calls instead of crashing the Agent.
+The `data_sources` section should include live adapter sources such as `prometheus`, `loki`, `redis_info`, `mysql`, `cmdb`, `deploy_history`, and `ticket_api`. In the interview stack, `cmdb`, `deploy_history`, and `ticket_api` are backed by MySQL seed tables rather than HTTP mock containers. Failed scenarios, such as stopping Redis or MySQL, should appear as structured `failed` tool calls instead of crashing the Agent.
 
-## Run FastAPI Against The Sandbox
+## Golden Redis/MySQL Live Chains
+
+The interview stack is also the reference environment for the two highest-value live golden chains:
+
+| Chain | Alertmanager label | Required live sources | Expected first tools |
+| --- | --- | --- | --- |
+| Redis maxclients exhausted | `redis_instance=redis-cluster-prod` | `query_redis_status=redis_info`, `query_metrics=prometheus`, `query_logs=loki`, `search_history_ticket=ticket_api` | `query_redis_status -> query_metrics -> query_logs` |
+| MySQL slow query latency | `mysql_instance=payment-mysql` | `query_mysql_status=mysql`, `query_metrics=prometheus`, `query_logs=loki`, `search_history_ticket=ticket_api` | `query_mysql_status -> query_metrics -> query_logs` |
+
+These chains are intentionally not allowed to fall back to mock data when the sandbox environment is loaded. `search_runbook` can still use the deterministic eval fixture in offline evaluation, because the live container proof is about Redis, MySQL, Prometheus, Loki, and ticket data sources.
+
+K8s CrashLoop/OOMKilled is intentionally treated as an offline golden regression case for the default interview. Do not claim it is live container-backed unless a real Kubernetes API or a deliberately scoped lightweight fixture is added.
+
+Run the live golden evaluation against the Docker containers:
+
+```powershell
+.venv\Scripts\python.exe scripts\eval\eval_cases.py `
+  --cases eval\cases.yaml `
+  --env-file deploy\sandbox.env `
+  --report-path logs\live_golden_eval_reports.db `
+  --summary-json logs\live_golden_eval_summary.json `
+  --summary-md logs\live_golden_eval_summary.md `
+  --skip-rag
+```
+
+The expected result is `16/16 cases passed`. For Redis and MySQL, `logs/live_golden_eval_summary.json` should show:
+
+- `passed=true` and `failed_metrics=[]`.
+- `required_live_sources_hit=true`.
+- `tool_sources` matching the required live sources above.
+- `golden_chain.trace_completeness_basis` with `trace_id`, tool-call count, evidence count, and all tool-call statuses.
+- `approval.diagnosis_needs_approval=false` and `approval.remediation_change_requires_approval=true`.
+- `logs/full_stack_adapter_verification.json` with `status=passed`, `missing_sources=[]`, `failed_tools=[]`, and `mock_fallback_detected=false`.
+
+MySQL remediation must state the operational boundary clearly: diagnosis is read-only; executing SQL rewrites, adding indexes, changing connection-pool or database parameters, or restarting the database requires human approval and a change window.
+
+For the Redis chain, keep this wording explicit during the interview:
+
+- `live_info` is the current Redis container runtime state. It proves the adapter is connected to the real container and shows what Redis looks like now.
+- `incident_evidence` is the replay incident-window evidence stored in the real Redis key `autooncall:incident:order-service:redis-maxclients`. It is the evidence used to explain the simulated outage window, for example `connected_clients=9940/maxclients=10000`.
+- Do not claim the current Redis container is still saturated if `live_info.connected_clients` is low; say the current runtime is healthy/idle while the seeded incident key preserves the outage-window facts.
+
+The Prometheus demo alerts are loaded from `deploy/full-stack/alert-rules.yml` through `rule_files` in `deploy/full-stack/prometheus.yml`. The rule expressions intentionally match the exporter metrics: `autooncall_http_5xx_rate` and `autooncall_p95_latency_ms`.
+
+To avoid Windows PowerShell code-page mojibake during interviews, present generated UTF-8 artifacts or the web UI instead of raw terminal Chinese output. Prefer:
+
+- `logs/live_golden_eval_summary.md` and `logs/live_golden_eval_summary.json`.
+- `logs/sandbox_aiops_simulation.json`.
+- The AIOps web UI report/trace view.
+
+If you must inspect files in PowerShell, use `Get-Content <path> -Encoding utf8` or switch the console to UTF-8 first.
+
+## Run FastAPI Against The Interview Stack
 
 Copy or load the settings in `deploy/sandbox.env` before starting FastAPI. The important switch is:
 
@@ -69,7 +121,7 @@ This forces missing or broken adapters to return explicit structured failures in
 For an interactive run:
 
 ```powershell
-make sandbox-up
+make interview-up
 Get-Content deploy\sandbox.env | ForEach-Object {
   if ($_ -and -not $_.StartsWith("#") -and $_.Contains("=")) {
     $name, $value = $_.Split("=", 2)
@@ -81,49 +133,29 @@ make dev
 
 Then choose the Redis or MySQL AIOps scenarios in the web UI. The report and trace should mark adapter-backed evidence as `redis_info`, `mysql`, or `prometheus`, not `mock`.
 
-## Ingest A Local Alertmanager Webhook
-
-AutoOnCall also accepts Alertmanager-compatible webhook payloads through the normal API:
-
-```powershell
-curl.exe -X POST "http://127.0.0.1:9900/api/alerts/alertmanager" `
-  -H "Content-Type: application/json" `
-  -d "{\"receiver\":\"autooncall\",\"status\":\"firing\",\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"RedisMaxClientsHigh\",\"service\":\"order-service\",\"environment\":\"prod\",\"severity\":\"critical\"},\"annotations\":{\"summary\":\"order-service Redis clients are near maxclients\"},\"startsAt\":\"2026-06-30T10:00:00Z\",\"fingerprint\":\"sandbox-redis-maxclients\"}]}"
-```
-
-The alert should appear in `GET /api/alerts` and create or update an `inc-alert-*` Incident visible through `GET /api/incidents`. Repeating the same fingerprint deduplicates the alert; sending `status=resolved` updates alert state without overwriting deeper Incident lifecycle states such as approval or change execution.
-
-For an interview-friendly end-to-end demo, fetch a ready-made case and run it through the normal SSE workflow:
-
-```powershell
-curl.exe http://127.0.0.1:9900/api/aiops/demo/incidents/redis-maxclients
-curl.exe -N -X POST http://127.0.0.1:9900/api/aiops/demo/incidents/redis-maxclients/run -H "Content-Type: application/json" -d "{}"
-```
-
-The Redis demo should collect evidence from `cmdb`, `redis_info`, `prometheus`, `loki`, `deploy_history`, `ticket_api`, and RAG runbooks when the knowledge base has been indexed. The K8s demo at `/api/aiops/demo/incidents/k8s-crashloop/run` should collect `kubernetes` evidence from the mock API rather than built-in mock tool data.
-
 ## Useful Checks
 
 ```powershell
-docker compose -f deploy/compose/full-stack-compose.yml ps
+docker compose -f deploy/compose/interview-stack.yml ps
 curl http://127.0.0.1:19108/metrics
 curl "http://127.0.0.1:19090/api/v1/query?query=autooncall_p95_latency_ms%7Bservice%3D%22order-service%22%7D"
 curl "http://127.0.0.1:13100/loki/api/v1/labels"
-curl "http://127.0.0.1:18085/api/v1/namespaces/default/pods?labelSelector=app=inventory-service"
 docker exec autooncall-full-redis redis-cli INFO clients
-docker exec autooncall-full-mysql mysql -uautooncall -pautooncall123 -D autooncall -e "SELECT case_id, expected_root_cause FROM incident_demo_cases;"
-docker exec autooncall-full-redpanda rpk topic list
+docker exec autooncall-full-mysql mysql -uautooncall -pautooncall123 -D autooncall -e "SELECT incident_key, source, expected_root_cause FROM aiops_incident_evidence;"
+docker exec autooncall-full-mysql mysql -uautooncall -pautooncall123 -D autooncall -e "SELECT service_name, business_domain FROM aiops_service_catalog;"
+docker exec autooncall-full-mysql mysql -uautooncall -pautooncall123 -D autooncall -e "SELECT ticket_id, service_name, severity FROM aiops_history_tickets;"
 ```
 
 ## Reset
 
 ```powershell
-make sandbox-down
-make sandbox-up
+make interview-down
+make interview-up
 ```
 
-The full-stack sandbox uses persistent bind mounts. To reset or refresh the interview demo evidence, rerun:
+The interview stack uses persistent bind mounts. To reset the containers, run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy\full-stack\seed-demo-data.ps1
+make interview-down
+make interview-up
 ```

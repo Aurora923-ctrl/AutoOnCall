@@ -1,16 +1,14 @@
-"""AIOps Tool Registry for local, MCP, and mock tools."""
+"""AIOps Tool Registry for local, MCP, and adapter-backed tools."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.tools.alert_tool import QueryAlertsTool
 from app.tools.base import AIOpsTool, ToolContract, ToolExecutionResult
 from app.tools.context_tool import QueryDeployHistoryTool, QueryServiceContextTool
 from app.tools.logs_tool import QueryLogsTool
-from app.tools.message_queue_tool import QueryMessageQueueStatusTool
 from app.tools.metrics_tool import QueryMetricsTool
-from app.tools.mock_ops_tool import (
+from app.tools.ops_tool import (
     QueryK8sStatusTool,
     QueryMySQLStatusTool,
     SearchHistoryTicketTool,
@@ -18,7 +16,6 @@ from app.tools.mock_ops_tool import (
 )
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.runbook_tool import SearchRunbookTool
-from app.tools.tracing_tool import QueryTracesTool
 
 
 class ToolRegistry:
@@ -59,15 +56,12 @@ class ToolRegistry:
 
 
 def create_default_tool_registry(langchain_tools: list[Any] | None = None) -> ToolRegistry:
-    """Build the default registry from MCP/LangChain tools and local mock tools."""
+    """Build the default registry from live adapters and MCP/LangChain tools."""
     registry = ToolRegistry()
-    registry.register(QueryAlertsTool())
     registry.register(QueryMetricsTool(langchain_tools))
     registry.register(QueryLogsTool(langchain_tools))
-    registry.register(QueryTracesTool())
     registry.register(QueryServiceContextTool())
     registry.register(QueryDeployHistoryTool())
-    registry.register(QueryMessageQueueStatusTool())
     registry.register(QueryRedisStatusTool())
     registry.register(QueryK8sStatusTool())
     registry.register(QueryMySQLStatusTool())

@@ -8,6 +8,7 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharac
 from loguru import logger
 
 from app.config import config
+from app.services.document_loaders.base import LoadedDocument
 
 
 class DocumentSplitterService:
@@ -132,6 +133,52 @@ class DocumentSplitterService:
             return self.split_markdown(content, file_path)
         else:
             return self.split_text(content, file_path)
+
+    def split_loaded_documents(
+        self,
+        loaded_documents: list[LoadedDocument],
+        file_path: str = "",
+    ) -> list[Document]:
+        """Split loader outputs while preserving source-specific citation metadata."""
+        if not loaded_documents:
+            return []
+
+        all_docs: list[Document] = []
+        full_content = "\n\n".join(document.content for document in loaded_documents)
+        extension = Path(file_path).suffix.lower()
+
+        for loaded in loaded_documents:
+            metadata = dict(loaded.metadata or {})
+            content = loaded.content
+            if extension in {".md", ".markdown"}:
+                split_docs = self.markdown_splitter.split_text(content)
+                split_docs = self.text_splitter.split_documents(split_docs)
+                split_docs = self._merge_small_chunks(split_docs, min_size=300)
+                for doc in split_docs:
+                    doc.metadata = {**metadata, **doc.metadata}
+            else:
+                split_docs = list(
+                    self.text_splitter.create_documents(
+                        texts=[content],
+                        metadatas=[metadata],
+                    )
+                )
+            all_docs.extend(split_docs)
+
+        final_docs = []
+        for index, doc in enumerate(all_docs, 1):
+            metadata = dict(doc.metadata or {})
+            metadata.setdefault("_source", file_path)
+            metadata.setdefault("_extension", extension)
+            metadata.setdefault("_file_name", Path(file_path).name)
+            metadata.setdefault("_doc_id", file_path)
+            metadata["_chunk_id"] = _build_chunk_id(file_path, index)
+            metadata.update(build_version_metadata(file_path, full_content, doc.page_content))
+            doc.metadata = metadata
+            final_docs.append(doc)
+
+        logger.info(f"加载文档分割完成: {file_path} -> {len(final_docs)} 个分片")
+        return final_docs
 
     def _merge_small_chunks(self, documents: list[Document], min_size: int = 300) -> list[Document]:
         """

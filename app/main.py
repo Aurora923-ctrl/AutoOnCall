@@ -12,7 +12,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app.api import a2a, aiops, alerts, approvals, chat, evaluations, file, health, incidents
+from app.api import (
+    a2a,
+    aiops,
+    alerts,
+    approvals,
+    chat,
+    evaluations,
+    feedback,
+    file,
+    health,
+    incidents,
+)
 from app.config import config
 from app.core.milvus_client import milvus_manager
 
@@ -33,8 +44,6 @@ def production_exposure_warnings() -> list[str]:
         warnings.append("API auth is disabled while binding to a non-local host")
     if "*" in config.cors_origins:
         warnings.append("CORS allows all origins while binding to a non-local host")
-    if config.aiops_mock_fallback_enabled:
-        warnings.append("AIOps mock fallback is enabled while binding to a non-local host")
     return warnings
 
 
@@ -96,6 +105,7 @@ app.include_router(alerts.router, prefix="/api", tags=["AIOps告警接入"])
 app.include_router(approvals.router, prefix="/api", tags=["AIOps人工审批"])
 app.include_router(incidents.router, prefix="/api", tags=["AIOps故障事件"])
 app.include_router(evaluations.router, prefix="/api", tags=["离线评测"])
+app.include_router(feedback.router, prefix="/api", tags=["反馈闭环"])
 app.include_router(a2a.discovery_router, tags=["A2A Agent"])
 app.include_router(a2a.router, prefix=config.normalized_a2a_base_path, tags=["A2A Agent"])
 

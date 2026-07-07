@@ -16,7 +16,6 @@ DEFAULT_DATA_SOURCE_BY_TOOL = {
     "query_redis_status": "redis_info",
     "query_mysql_status": "mysql",
     "query_k8s_status": "kubernetes",
-    "query_message_queue_status": "redpanda",
 }
 
 
@@ -153,79 +152,6 @@ def test_analyzer_caps_unknown_successful_evidence_sources() -> None:
     assert analysis.evidence_profile["source_quality"] == "fallback_only"
     assert analysis.evidence_profile["degraded_source_count"] == 3
     assert any("未知来源" in reason for reason in analysis.confidence_reasons)
-
-
-def test_analyzer_marks_redpanda_lag_evidence_as_report_ready() -> None:
-    state = create_initial_aiops_state(
-        "checkout-service 响应慢，订单消息积压，怀疑 Redpanda consumer lag",
-        session_id="analysis-redpanda",
-    )
-    state["incident"]["service_name"] = "checkout-service"
-    state["incident"]["symptom"] = "Redpanda/Kafka topic 积压，consumer lag 快速升高"
-    state["gathered_evidence"] = [
-        evidence_from_tool(
-            "query_metrics",
-            {
-                "summary": "P95=2300ms, 5xx=2.50%",
-                "p95_latency_ms": {"status": "high"},
-                "error_rate": {"status": "high"},
-            },
-            "s1",
-        ),
-        evidence_from_tool(
-            "query_logs",
-            {"summary": "checkout-service publish timeout and downstream slow processing"},
-            "s2",
-        ),
-        evidence_from_tool(
-            "query_message_queue_status",
-            {
-                "summary": "mock Redpanda 返回 redpanda-checkout consumer lag 高",
-                "source": "mock",
-                "signals": {
-                    "ready": True,
-                    "consumer_lag": 128400,
-                    "max_partition_lag": 79000,
-                    "under_replicated_partitions": 0,
-                },
-            },
-            "s3",
-        ),
-    ]
-
-    analysis = analyze_evidence(state)
-
-    assert analysis.decision == "generate_report"
-    assert analysis.evidence_sufficient is False
-    assert analysis.confidence <= 0.72
-    assert analysis.evidence_profile["source_quality"] == "mixed_with_fallback"
-    assert analysis.evidence_profile["fallback_source_count"] == 1
-    assert any(item.category == "message_queue_lag" for item in analysis.hypothesis_ranking)
-    assert "query_message_queue_status" not in analysis.missing_evidence
-    assert any("Mock 回退证据" in reason for reason in analysis.confidence_reasons)
-    assert any("置信度封顶" in reason for reason in analysis.confidence_reasons)
-
-
-def test_message_queue_normal_state_refutes_lag_hypothesis() -> None:
-    stance = infer_evidence_stance(
-        source_tool="query_message_queue_status",
-        raw_data={
-            "status": "success",
-            "output": {
-                "source": "mock",
-                "summary": "mock Redpanda 返回 topic 正常，无 consumer lag 积压",
-                "signals": {
-                    "ready": True,
-                    "consumer_lag": 0,
-                    "max_partition_lag": 0,
-                    "under_replicated_partitions": 0,
-                },
-            },
-        },
-        summary="mock Redpanda 返回 topic 正常，无 consumer lag 积压",
-    )
-
-    assert stance == "refuting"
 
 
 def test_analyzer_recommends_missing_redis_evidence_when_plan_is_empty() -> None:

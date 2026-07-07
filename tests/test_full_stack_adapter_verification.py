@@ -27,7 +27,12 @@ class FakeRegistry:
         output = {
             "source": source,
             "summary": f"{name} returned {source}",
-            "signals": {"fixture": 1},
+            "signals": {
+                "fixture": 1,
+                "slow_query_count": 18,
+                "pool_waiting": 6,
+                "active_connections": 188,
+            },
         }
         if source == "failed":
             output.update({"status": "failed", "error_message": "adapter down"})
@@ -44,14 +49,10 @@ class FakeRegistry:
 async def test_verify_adapters_passes_when_all_real_sources_match() -> None:
     registry = FakeRegistry(
         {
-            "query_alerts": "alertmanager",
             "query_metrics": "prometheus",
             "query_logs": "loki",
-            "query_k8s_status": "kubernetes",
-            "query_traces": "jaeger",
             "query_service_context": "cmdb",
             "query_deploy_history": "deploy_history",
-            "query_message_queue_status": "redpanda",
             "query_redis_status": "redis_info",
             "query_mysql_status": "mysql",
             "search_history_ticket": "ticket_api",
@@ -70,14 +71,10 @@ async def test_verify_adapters_passes_when_all_real_sources_match() -> None:
 async def test_verify_adapters_fails_when_mock_fallback_is_used() -> None:
     registry = FakeRegistry(
         {
-            "query_alerts": "alertmanager",
             "query_metrics": "mock",
             "query_logs": "loki",
-            "query_k8s_status": "kubernetes",
-            "query_traces": "jaeger",
             "query_service_context": "cmdb",
             "query_deploy_history": "deploy_history",
-            "query_message_queue_status": "redpanda",
             "query_redis_status": "redis_info",
             "query_mysql_status": "mysql",
             "search_history_ticket": "ticket_api",

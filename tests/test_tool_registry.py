@@ -1,7 +1,10 @@
 """Tests for the AIOps Tool Registry."""
 
+from __future__ import annotations
+
 import pytest
 
+from app.config import config
 from app.tools.base import AIOpsTool
 from app.tools.registry import create_default_tool_registry
 
@@ -43,13 +46,10 @@ def test_registry_registers_standard_aiops_tools() -> None:
     registry = create_default_tool_registry([])
     names = {item["name"] for item in registry.list_tools()}
 
-    assert "query_alerts" in names
     assert "query_metrics" in names
     assert "query_logs" in names
-    assert "query_traces" in names
     assert "query_service_context" in names
     assert "query_deploy_history" in names
-    assert "query_message_queue_status" in names
     assert "query_redis_status" in names
     assert "search_runbook" in names
     assert "suggest_remediation" in names
@@ -60,8 +60,8 @@ def test_registry_exposes_auditable_tool_contracts() -> None:
     contracts = {item["name"]: item for item in registry.list_tools()}
 
     redis_contract = contracts["query_redis_status"]
+    metrics_contract = contracts["query_metrics"]
     remediation_contract = contracts["suggest_remediation"]
-    queue_contract = contracts["query_message_queue_status"]
 
     assert redis_contract["input_schema"]["properties"]["service_name"]["type"] == "string"
     assert redis_contract["read_only"] is True
@@ -70,12 +70,12 @@ def test_registry_exposes_auditable_tool_contracts() -> None:
     assert "structured unavailable payload" in redis_contract["degradation_strategy"]
     assert redis_contract["retry_policy"]["max_attempts"] == 1
 
+    assert "mock" not in {source.lower() for source in metrics_contract["data_sources"]}
+    assert "synthesizing metric evidence" in metrics_contract["degradation_strategy"]
+
     assert remediation_contract["risk_level"] == "medium"
     assert remediation_contract["read_only"] is True
     assert "diagnosis evidence" in remediation_contract["data_sources"]
-
-    assert "Redpanda Admin API" in queue_contract["data_sources"]
-    assert "Kafka metadata" not in queue_contract["data_sources"]
 
 
 @pytest.mark.asyncio
@@ -112,12 +112,7 @@ async def test_query_metrics_uses_mcp_like_tools_when_available() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_metrics_marks_partial_mcp_failures_without_failed_evidence(
-    monkeypatch,
-) -> None:
-    from app.config import config
-
-    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
+async def test_query_metrics_fails_partial_mcp_without_synthetic_backfill() -> None:
     registry = create_default_tool_registry(
         [
             FailingAsyncTool("query_cpu_metrics"),
@@ -133,13 +128,13 @@ async def test_query_metrics_marks_partial_mcp_failures_without_failed_evidence(
         {"service_name": "order-service", "time_range": "10m", "interval": "1m"},
     )
 
-    assert result.status == "success"
+    assert result.status == "failed"
     assert result.output["source"] == "mcp_monitor_mixed"
-    assert result.output["source_detail"]["cpu"] == "mock_fallback"
+    assert result.output["source_detail"]["cpu"] == "unavailable"
     assert result.output["source_detail"]["memory"] == "mcp_monitor"
-    assert result.output["cpu"]["metric_name"] == "cpu_usage_percent"
-    assert result.output["memory"]["metric_name"] == "memory_usage_percent"
+    assert result.output["available_metrics"]["memory"]["metric_name"] == "memory_usage_percent"
     assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
+    assert "synthetic backfill is disabled" in result.output["summary"]
 
 
 @pytest.mark.asyncio
@@ -154,48 +149,10 @@ async def test_query_tools_clamp_unbounded_inputs() -> None:
         "query_logs",
         {"service_name": "order-service", "time_range": "999h", "limit": 99999},
     )
-    traces = await registry.arun(
-        "query_traces",
-        {"service_name": "order-service", "lookback": "999d", "limit": 99999},
-    )
-
     assert metrics.input_args["time_range"] == "1h"
     assert metrics.input_args["interval"] == "5m"
     assert logs.input_args["time_range"] == "1h"
     assert logs.input_args["limit"] == 200
-    assert traces.input_args["lookback"] == "1d"
-    assert traces.input_args["limit"] == 50
-
-
-@pytest.mark.asyncio
-async def test_query_metrics_does_not_mock_partial_mcp_when_fallback_disabled(
-    monkeypatch,
-) -> None:
-    from app.config import config
-
-    monkeypatch.setattr(config, "aiops_mock_fallback_enabled", False)
-    registry = create_default_tool_registry(
-        [
-            FakeAsyncTool(
-                "query_memory_metrics",
-                {"metric_name": "memory_usage_percent", "statistics": {"max": 76}},
-            ),
-        ]
-    )
-
-    result = await registry.arun(
-        "query_metrics",
-        {"service_name": "order-service", "time_range": "10m", "interval": "1m"},
-    )
-
-    assert result.status == "failed"
-    assert result.output["source"] == "mcp_monitor_mixed"
-    assert "mock fallback 已关闭" in result.output["summary"]
-    assert result.output["available_metrics"]["memory"]["metric_name"] == "memory_usage_percent"
-    assert result.output["source_detail"]["cpu"] == "unavailable"
-    assert result.output["source_detail"]["memory"] == "mcp_monitor"
-    assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
-    assert "synthetic_fields" not in result.output
 
 
 def test_tool_contract_defaults_are_isolated_per_instance() -> None:
@@ -214,10 +171,11 @@ def test_tool_contract_defaults_are_isolated_per_instance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_redis_status_returns_structured_mock_output(monkeypatch) -> None:
-    from app.config import config
-
+async def test_query_redis_status_does_not_mock_when_unconfigured(monkeypatch) -> None:
     monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
+    monkeypatch.setattr(config, "redis_url", "")
+    monkeypatch.setattr(config, "redis_host", "")
+    monkeypatch.setattr(config, "redis_instances", "")
     registry = create_default_tool_registry([])
 
     result = await registry.arun(
@@ -225,7 +183,8 @@ async def test_query_redis_status_returns_structured_mock_output(monkeypatch) ->
         {"service_name": "order-service", "time_range": "10m"},
     )
 
-    assert result.status == "success"
+    assert result.status == "failed"
     assert result.tool_name == "query_redis_status"
-    assert result.output["connected_clients"] <= result.output["maxclients"]
+    assert result.output["source"] == "redis_info"
+    assert result.output["error_type"] == "not_configured"
     assert "summary" in result.output

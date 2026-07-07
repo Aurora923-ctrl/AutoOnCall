@@ -19,15 +19,13 @@ def test_redis_timeout_fallback_plan_contains_expected_tools() -> None:
 
     tool_names = [step.tool_name for step in steps]
 
-    assert tool_names[:5] == [
-        "query_alerts",
+    assert tool_names[:4] == [
         "query_service_context",
         "query_redis_status",
         "query_metrics",
         "query_logs",
     ]
     assert "query_deploy_history" in tool_names
-    assert "query_traces" in tool_names
     assert "search_runbook" in tool_names
     assert "search_history_ticket" in tool_names
     assert steps[-1].risk_level == "medium"
@@ -41,32 +39,26 @@ def test_mysql_slow_query_fallback_plan_contains_mysql_step() -> None:
         incident=None,
     )
 
-    assert steps[0].tool_name == "query_alerts"
     assert steps[0].input_args["service_name"] == "billing-service"
     assert any(step.tool_name == "query_mysql_status" for step in steps)
-    assert any(step.tool_name == "query_traces" for step in steps)
-    assert any(step.tool_name == "query_message_queue_status" for step in steps)
+    assert any(step.tool_name == "search_history_ticket" for step in steps)
     assert any("MySQL" in step.purpose for step in steps)
 
 
-def test_slow_response_fallback_plan_collects_tracing_and_redpanda_evidence() -> None:
+def test_slow_response_fallback_plan_uses_core_evidence() -> None:
     steps = build_fallback_plan(
-        input_text="checkout-service 响应慢，P95 升高并出现 timeout",
+        input_text="checkout-service ????P95 ????? timeout",
         incident={
             "service_name": "checkout-service",
-            "symptom": "响应慢 P95 timeout，怀疑下游依赖或消息积压",
+            "symptom": "??? P95 timeout?????????",
         },
     )
 
-    queue_steps = [step for step in steps if step.tool_name == "query_message_queue_status"]
+    tool_names = [step.tool_name for step in steps]
 
-    assert any(step.tool_name == "query_traces" for step in steps)
-    assert queue_steps
-    assert queue_steps[0].input_args == {
-        "service_name": "checkout-service",
-        "topic": "redpanda-checkout",
-    }
-
+    assert "query_metrics" in tool_names
+    assert "query_logs" in tool_names
+    assert "query_deploy_history" in tool_names
 
 def test_topology_prioritizes_mysql_for_order_service_sql_timeout() -> None:
     steps = build_fallback_plan(
@@ -77,13 +69,12 @@ def test_topology_prioritizes_mysql_for_order_service_sql_timeout() -> None:
         },
     )
 
-    assert steps[0].tool_name == "query_alerts"
     assert steps[1].tool_name == "query_service_context"
     assert steps[2].tool_name == "query_mysql_status"
     assert "服务拓扑" in steps[2].purpose
 
 
-def test_raw_alert_requested_action_is_appended_for_risk_control() -> None:
+def test_raw_alert_requested_action_is_prioritized_for_risk_control() -> None:
     incident = {
         "service_name": "order-service",
         "environment": "prod",
@@ -99,7 +90,7 @@ def test_raw_alert_requested_action_is_appended_for_risk_control() -> None:
         input_text="order-service forbidden unaudited SQL",
         incident=incident,
     )
-    requested_action_step = steps[-1]
+    requested_action_step = steps[0]
     decision = assess_plan_step(requested_action_step, incident=incident)
 
     assert requested_action_step.tool_name == "execute_sql"

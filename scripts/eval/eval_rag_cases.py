@@ -9,6 +9,8 @@ import json
 import math
 import re
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +22,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.services.document_splitter_service import document_splitter_service
 from app.services.rag_retrieval_service import document_to_retrieval_chunk
+from scripts.eval.eval_environment import collect_eval_environment
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
 DEFAULT_DOCS_DIR = REPO_ROOT / "aiops-docs"
+DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "rag_eval_summary.json"
+DEFAULT_SUMMARY_MD_PATH = REPO_ROOT / "logs" / "rag_eval_summary.md"
 DEFAULT_TOP_K = 3
 DEFAULT_MIN_SCORE = 2.0
 
@@ -100,6 +105,8 @@ def evaluate_cases(
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> dict[str, Any]:
     """Evaluate all offline RAG retrieval cases."""
+    started_at = datetime.now(UTC)
+    started_timer = time.perf_counter()
     cases = load_cases(cases_path)
     index = build_offline_index(docs_dir)
     results = [evaluate_case(case, index, top_k=top_k, min_score=min_score) for case in cases]
@@ -182,7 +189,25 @@ def evaluate_cases(
             if not result["passed"]
         ],
     }
-    return {"summary": summary, "cases": results}
+    return {
+        "run": {
+            "started_at": started_at.isoformat(),
+            "ended_at": datetime.now(UTC).isoformat(),
+            "duration_ms": round((time.perf_counter() - started_timer) * 1000, 2),
+            "evaluation_scope": (
+                "offline deterministic RAG retrieval regression; local Markdown runbooks "
+                "and lexical scoring are used, not live LLM or Milvus"
+            ),
+            "cases_path": str(Path(cases_path)),
+            "docs_dir": str(Path(docs_dir)),
+            "top_k": top_k,
+            "min_score": min_score,
+            "case_ids": [str(case.get("id", "")) for case in cases],
+            "environment": collect_eval_environment(suite="rag"),
+        },
+        "summary": summary,
+        "cases": results,
+    }
 
 
 def evaluate_case(
@@ -197,7 +222,8 @@ def evaluate_case(
     should_reject = bool(case.get("should_reject", False))
     case_type = str(case.get("case_type") or "").strip()
     threshold = float(case.get("min_score", min_score))
-    retrieved = search_offline(index, query, top_k=top_k, min_score=threshold)
+    case_index = _index_with_case_fixture(index, case)
+    retrieved = search_offline(case_index, query, top_k=top_k, min_score=threshold)
     expected_sources = _expected_sources(case)
 
     if should_reject:
@@ -285,6 +311,45 @@ def build_offline_index(docs_dir: str | Path = DEFAULT_DOCS_DIR) -> list[dict[st
     return chunks
 
 
+def _index_with_case_fixture(
+    index: list[dict[str, Any]],
+    case: dict[str, Any],
+) -> list[dict[str, Any]]:
+    fixture_chunk = _fixture_to_chunk(case)
+    if fixture_chunk is None:
+        return index
+    return [fixture_chunk, *index]
+
+
+def _fixture_to_chunk(case: dict[str, Any]) -> dict[str, Any] | None:
+    fixture = case.get("fixture")
+    if not isinstance(fixture, dict):
+        return None
+    metadata = dict(fixture.get("metadata") or {})
+    metadata.setdefault("_file_name", fixture.get("source_file", "fixture"))
+    metadata.setdefault("_chunk_id", fixture.get("chunk_id", "fixture#0001"))
+    metadata.setdefault("_source", fixture.get("source_file", "fixture"))
+    document = type(
+        "OfflineFixtureDocument",
+        (),
+        {
+            "page_content": str(fixture.get("content") or ""),
+            "metadata": metadata,
+        },
+    )()
+    chunk = document_to_retrieval_chunk(document, score=None, rank=1)
+    chunk["heading_path"] = str(fixture.get("heading_path") or chunk.get("heading_path") or "")
+    searchable_text = " ".join(
+        [
+            str(chunk.get("source_file") or ""),
+            str(chunk.get("heading_path") or ""),
+            str(chunk.get("content") or ""),
+        ]
+    )
+    chunk["offline_terms"] = extract_terms(searchable_text)
+    return chunk
+
+
 def search_offline(
     index: list[dict[str, Any]],
     query: str,
@@ -362,6 +427,96 @@ def render_summary(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_markdown_summary(payload: dict[str, Any]) -> str:
+    """Render a reproducible Markdown RAG eval summary."""
+    run = payload["run"]
+    summary = payload["summary"]
+    failed_cases = summary["failed_cases"]
+    environment = run.get("environment", {})
+    lines = [
+        "# AutoOnCall RAG 离线评测摘要",
+        "",
+        "## 运行记录",
+        f"- 生成时间：{run.get('ended_at', '')}",
+        f"- case 文件：`{run.get('cases_path', '')}`",
+        f"- 文档目录：`{run.get('docs_dir', '')}`",
+        f"- 总耗时：{run.get('duration_ms', 0.0):.2f} ms",
+        f"- 评测边界：{run.get('evaluation_scope', '')}",
+        f"- Git commit：`{environment.get('git_commit', '')}`",
+        f"- Python：`{environment.get('python_version', '')}`",
+        f"- RAG top_k：{run.get('top_k', summary.get('top_k', 0))}",
+        "",
+        "## 核心指标",
+        f"- RAG case：{summary['passed_count']}/{summary['case_count']} ({summary['pass_rate']:.0%})",
+        f"- recall@1：{summary['recall_at_1']:.0%}",
+        f"- recall@{summary['top_k']}：{summary['recall_at_k']:.0%}",
+        f"- strict recall@{summary['top_k']}：{summary['strict_recall_at_k']:.0%}",
+        f"- MRR：{summary['mrr']:.2f}",
+        f"- citation coverage：{summary['citation_coverage_rate']:.0%}",
+        f"- confusion case pass：{summary['confusion_case_pass_rate']:.0%}",
+        f"- no-answer rejection：{summary['no_answer_rejection_rate']:.0%}",
+        "",
+        "> 以上指标只代表离线固定 case 的检索回归结果，不代表线上问答准确率。",
+        "",
+        "## 失败定位",
+    ]
+    if failed_cases:
+        for item in failed_cases:
+            lines.append(
+                f"- {item['id']}：{', '.join(item['failed_metrics'])}；"
+                f"期望来源：{', '.join(item.get('expected_sources', [])) or '-'}；"
+                f"实际来源：{', '.join(item.get('retrieved_sources', [])) or '-'}"
+            )
+    else:
+        lines.append("- 无失败 case。")
+
+    lines.extend(
+        [
+            "",
+            "## Case 明细",
+            "| Case | 类型 | 结果 | 期望来源 | 实际来源 | Top score | 失败指标 |",
+            "| --- | --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for result in payload["cases"]:
+        lines.append(
+            "| "
+            f"{result['id']} | "
+            f"{result['case_type']} | "
+            f"{'PASS' if result['passed'] else 'FAIL'} | "
+            f"{', '.join(result.get('expected_sources', [])) or '-'} | "
+            f"{', '.join(result.get('retrieved_sources', [])) or '-'} | "
+            f"{result.get('top_score', 0.0):.2f} | "
+            f"{', '.join(result.get('failed_metrics', [])) or '-'} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_eval_artifacts(
+    payload: dict[str, Any],
+    *,
+    summary_json_path: str | Path | None,
+    summary_md_path: str | Path | None,
+) -> dict[str, str]:
+    """Write JSON and Markdown RAG eval summaries."""
+    written: dict[str, str] = {}
+    if summary_json_path:
+        written["summary_json"] = str(Path(summary_json_path))
+    if summary_md_path:
+        written["summary_md"] = str(Path(summary_md_path))
+    payload["run"]["artifacts"] = written
+
+    if summary_json_path:
+        path = Path(summary_json_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if summary_md_path:
+        path = Path(summary_md_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_markdown_summary(payload), encoding="utf-8")
+    return written
+
+
 def failure_reasons(failed_metrics: list[str]) -> dict[str, str]:
     """Map failed RAG metric names to human-readable reasons."""
     return {metric: RAG_METRIC_FAILURE_REASONS.get(metric, metric) for metric in failed_metrics}
@@ -420,6 +575,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docs-dir", default=str(DEFAULT_DOCS_DIR))
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    parser.add_argument("--summary-json", default=str(DEFAULT_SUMMARY_JSON_PATH))
+    parser.add_argument("--summary-md", default=str(DEFAULT_SUMMARY_MD_PATH))
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     return parser.parse_args()
 
@@ -433,10 +590,17 @@ def main() -> int:
         top_k=args.top_k,
         min_score=args.min_score,
     )
+    written = write_eval_artifacts(
+        payload,
+        summary_json_path=args.summary_json,
+        summary_md_path=args.summary_md,
+    )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(render_summary(payload))
+        if written:
+            print("Artifacts: " + ", ".join(f"{key}={value}" for key, value in written.items()))
     return 0 if payload["summary"]["passed_count"] == payload["summary"]["case_count"] else 1
 
 

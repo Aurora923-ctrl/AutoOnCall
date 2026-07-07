@@ -1,6 +1,6 @@
 cases:
   - id: llm_adds_read_only_trace_step
-    title: Replanner LLM accepts safe read-only follow-up
+    title: Replanner falls back when trace tool is not registered
     input: order-service Redis connection timeout，需要补查调用链
     incident:
       service_name: order-service
@@ -25,15 +25,16 @@ cases:
           expected_evidence: 确认 Redis 调用链是否出现超时或错误
           risk_level: low
     expected_decision: add_steps
-    expected_decision_source: llm_structured
+    expected_decision_source: evidence_analyzer_fallback
     expected_plan_tools:
-      - query_traces
+      - query_metrics
+      - query_redis_status
     forbidden_plan_tools:
       - delete_pod
       - restart_service
       - execute_sql
     expected_llm_call_count: 1
-    expected_first_step_id: llm-traces
+    expected_first_step_id: replan-metrics
 
   - id: llm_generate_report_blocked_when_evidence_insufficient
     title: LLM cannot generate report before evidence is sufficient

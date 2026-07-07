@@ -20,7 +20,7 @@ services:
       - "127.0.0.1:13306:3306"
     volumes:
       - D:/AppDataStorage/DockerData/autooncall-full/mysql8/data:/var/lib/mysql
-      - ./sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ../sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
     networks:
       - autooncall-full-net
     healthcheck:
@@ -28,6 +28,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+
+  mysql-business-seed:
+    image: mysql:8.0
+    container_name: autooncall-full-mysql-business-seed
+    command:
+      [
+        "sh",
+        "-c",
+        "mysql -hmysql -uroot -p123456 autooncall < /seed/001_init.sql",
+      ]
+    volumes:
+      - ../sandbox/mysql-init:/seed:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - autooncall-full-net
 
   redis:
     image: redis:7-alpine
@@ -54,6 +71,21 @@ services:
       timeout: 3s
       retries: 30
 
+  redis-business-seed:
+    image: redis:7-alpine
+    container_name: autooncall-full-redis-business-seed
+    command:
+      [
+        "sh",
+        "-c",
+        "redis-cli -h redis HSET autooncall:incident:order-service:redis-maxclients service order-service severity P1 symptom 'Redis connection timeout and 5xx spike' dependency redis-cluster-prod connected_clients 9940 maxclients 10000 blocked_clients 37 slowlog_len 40 used_memory_human 12.4G maxmemory_human 16G root_cause 'Redis connected_clients reached maxclients and application connection pool timed out' approval_required true source live-redis-seed updated_at 2026-07-06T10:00:00Z && redis-cli -h redis ZADD autooncall:hotkeys:local-dev 100 order:detail:10001 80 user:session:10001",
+      ]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - autooncall-full-net
+
   metrics-exporter:
     image: python:3.11-alpine
     container_name: autooncall-full-metrics-exporter
@@ -61,7 +93,7 @@ services:
     ports:
       - "127.0.0.1:19108:9108"
     volumes:
-      - ./sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
+      - ../sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
     networks:
       - autooncall-full-net
     healthcheck:
@@ -85,14 +117,12 @@ services:
     ports:
       - "127.0.0.1:19090:9090"
     volumes:
-      - ./full-stack/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./full-stack/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - ${PROMETHEUS_CONFIG_FILE:-../full-stack/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
+      - ../full-stack/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
       - D:/AppDataStorage/DockerData/autooncall-full/prometheus:/prometheus
     depends_on:
       metrics-exporter:
         condition: service_healthy
-      alertmanager:
-        condition: service_started
     networks:
       - autooncall-full-net
     healthcheck:
@@ -105,51 +135,6 @@ services:
       timeout: 3s
       retries: 30
 
-  alertmanager:
-    image: prom/alertmanager:v0.27.0
-    container_name: autooncall-full-alertmanager
-    command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
-      - --storage.path=/alertmanager
-    ports:
-      - "127.0.0.1:19093:9093"
-    volumes:
-      - ./full-stack/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/alertmanager:/alertmanager
-    networks:
-      - autooncall-full-net
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 30
-
-  grafana:
-    image: grafana/grafana:11.2.0
-    container_name: autooncall-full-grafana
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    ports:
-      - "127.0.0.1:13000:3000"
-    volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/grafana:/var/lib/grafana
-      - ./full-stack/grafana/provisioning:/etc/grafana/provisioning:ro
-    depends_on:
-      prometheus:
-        condition: service_started
-      loki:
-        condition: service_started
-      tempo:
-        condition: service_started
-    networks:
-      - autooncall-full-net
-
   loki:
     image: grafana/loki:2.9.10
     container_name: autooncall-full-loki
@@ -157,143 +142,22 @@ services:
     ports:
       - "127.0.0.1:13100:3100"
     volumes:
-      - ./full-stack/loki-config.yml:/etc/loki/local-config.yml:ro
+      - ../full-stack/loki-config.yml:/etc/loki/local-config.yml:ro
       - D:/AppDataStorage/DockerData/autooncall-full/loki:/loki
     networks:
       - autooncall-full-net
 
-  kubernetes-mock:
+  loki-log-emitter:
     image: python:3.11-alpine
-    container_name: autooncall-full-kubernetes-mock
-    command: ["python", "/mock/server.py"]
-    ports:
-      - "127.0.0.1:18085:8080"
-    volumes:
-      - ./full-stack/mock-kubernetes:/mock:ro
-    networks:
-      - autooncall-full-net
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2).read()\"",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 30
-
-  tempo:
-    image: grafana/tempo:2.6.1
-    container_name: autooncall-full-tempo
-    command: ["-config.file=/etc/tempo.yml"]
-    ports:
-      - "127.0.0.1:13200:3200"
-    volumes:
-      - ./full-stack/tempo.yml:/etc/tempo.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/tempo:/var/tempo
-    networks:
-      - autooncall-full-net
-
-  jaeger:
-    image: jaegertracing/all-in-one:1.60
-    container_name: autooncall-full-jaeger
+    container_name: autooncall-full-loki-log-emitter
+    command: ["python", "/app/loki_log_emitter.py"]
     environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-      SPAN_STORAGE_TYPE: badger
-      BADGER_EPHEMERAL: "false"
-      BADGER_DIRECTORY_KEY: /badger/key
-      BADGER_DIRECTORY_VALUE: /badger/data
-    ports:
-      - "127.0.0.1:16686:16686"
-      - "127.0.0.1:14320:4317"
-      - "127.0.0.1:14321:4318"
+      LOKI_PUSH_URL: "http://loki:3100/loki/api/v1/push"
+      LOKI_PUSH_INTERVAL_SECONDS: "30"
     volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/jaeger:/badger
-    networks:
-      - autooncall-full-net
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.111.0
-    container_name: autooncall-full-otel-collector
-    command: ["--config=/etc/otelcol/config.yml"]
-    ports:
-      - "127.0.0.1:14317:4317"
-      - "127.0.0.1:14318:4318"
-      - "127.0.0.1:18888:8888"
-      - "127.0.0.1:18889:8889"
-    volumes:
-      - ./full-stack/otel-collector.yml:/etc/otelcol/config.yml:ro
+      - ../full-stack/loki_log_emitter.py:/app/loki_log_emitter.py:ro
     depends_on:
-      tempo:
-        condition: service_started
-    networks:
-      - autooncall-full-net
-
-  redpanda:
-    image: redpandadata/redpanda:v24.2.8
-    container_name: autooncall-full-redpanda
-    command:
-      - redpanda
-      - start
-      - --mode
-      - dev-container
-      - --overprovisioned
-      - --smp
-      - "1"
-      - --memory
-      - 512M
-      - --reserve-memory
-      - 0M
-      - --node-id
-      - "0"
-      - --check=false
-      - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
-      - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:9092,OUTSIDE://127.0.0.1:19092
-      - --pandaproxy-addr
-      - 0.0.0.0:8082
-      - --advertise-pandaproxy-addr
-      - 127.0.0.1:18082
-    ports:
-      - "127.0.0.1:19092:19092"
-      - "127.0.0.1:18082:8082"
-      - "127.0.0.1:19644:9644"
-    volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/redpanda:/var/lib/redpanda/data
-    networks:
-      - autooncall-full-net
-
-  cmdb-mock:
-    image: python:3.11-alpine
-    container_name: autooncall-full-cmdb-mock
-    command: ["python", "-m", "http.server", "8080", "--directory", "/mock"]
-    ports:
-      - "127.0.0.1:18081:8080"
-    volumes:
-      - ./full-stack/mock-cmdb:/mock:ro
-    networks:
-      - autooncall-full-net
-
-  ticketing-mock:
-    image: python:3.11-alpine
-    container_name: autooncall-full-ticketing-mock
-    command: ["python", "-m", "http.server", "8080", "--directory", "/mock"]
-    ports:
-      - "127.0.0.1:18083:8080"
-    volumes:
-      - ./full-stack/mock-ticketing:/mock:ro
-    networks:
-      - autooncall-full-net
-
-  deploy-history-mock:
-    image: python:3.11-alpine
-    container_name: autooncall-full-deploy-history-mock
-    command: ["python", "-m", "http.server", "8080", "--directory", "/mock"]
-    ports:
-      - "127.0.0.1:18084:8080"
-    volumes:
-      - ./full-stack/mock-deploy-history:/mock:ro
+      - loki
     networks:
       - autooncall-full-net
 

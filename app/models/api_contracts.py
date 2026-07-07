@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.models.approval import ApprovalRequest
+from app.models.feedback import BadCaseFeedback, DiagnosisFeedback
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 
@@ -103,3 +104,36 @@ class IncidentReportResponse(BaseModel):
     report_id: str = ""
     report: DiagnosisReport | None = None
     markdown: str = ""
+
+
+class IncidentFeedbackResponse(BaseModel):
+    """Response after an operator submits report feedback."""
+
+    feedback: DiagnosisFeedback
+
+
+class IncidentFeedbackListResponse(BaseModel):
+    """Feedback items scoped to one incident."""
+
+    incident_id: str
+    items: list[DiagnosisFeedback] = Field(default_factory=list)
+
+
+class BadCaseFeedbackResponse(BaseModel):
+    """Response after thumb feedback is captured."""
+
+    feedback: BadCaseFeedback
+
+
+class BadCaseFeedbackListResponse(BaseModel):
+    """List response for captured bad cases."""
+
+    items: list[BadCaseFeedback] = Field(default_factory=list)
+
+
+class KnowledgeIndexingReportsResponse(BaseModel):
+    """Knowledge indexing quality report response."""
+
+    code: int = 200
+    message: str = "success"
+    data: dict[str, Any] = Field(default_factory=dict)

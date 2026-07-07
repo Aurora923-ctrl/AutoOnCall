@@ -39,6 +39,7 @@ AnalyzerDecision = Literal[
     "escalate_to_human",
 ]
 
+
 class EvidenceAnalysis(BaseModel):
     """Structured analysis derived from collected evidence and tool calls."""
 
@@ -522,17 +523,6 @@ def _build_recommended_steps(missing_tools: list[str], service_name: str) -> lis
             expected_evidence="判断 Pod 是否 CrashLoopBackOff、频繁重启或版本异常",
             risk_level="low",
         ),
-        "query_message_queue_status": lambda: PlanStep(
-            step_id="replan-message-queue",
-            tool_name="query_message_queue_status",
-            purpose=f"补充查询 {service_name} 关联 Redpanda/Kafka topic、partition 和 consumer lag",
-            input_args={
-                "service_name": service_name,
-                "topic": f"redpanda-{service_name.removesuffix('-service')}",
-            },
-            expected_evidence="判断消息队列是否存在消费积压、分区异常或 rebalance",
-            risk_level="low",
-        ),
     }
     return [builders[tool_name]() for tool_name in missing_tools if tool_name in builders]
 
@@ -568,11 +558,6 @@ def _judge_sufficiency(
     has_metrics = "query_metrics" in successful_tools
     has_logs = "query_logs" in successful_tools
     has_redis = "query_redis_status" in successful_tools
-    has_message_queue_root_cause = any(
-        ("Redpanda" in item or "Kafka" in item) and ("积压" in item or "分区" in item)
-        for item in hypotheses
-    )
-    has_message_queue = "query_message_queue_status" in successful_tools
 
     confidence_penalty = 0.0
     if conflicts:
@@ -585,13 +570,6 @@ def _judge_sufficiency(
             not conflicts,
             _bounded_confidence(0.86 - confidence_penalty),
             "Redis 关键证据已覆盖，且具备指标或日志侧旁证，可以生成报告",
-        )
-
-    if has_message_queue_root_cause and has_message_queue and (has_metrics or has_logs):
-        return (
-            not conflicts,
-            _bounded_confidence(0.82 - confidence_penalty),
-            "消息队列积压关键证据已覆盖，且具备指标或日志侧旁证，可以生成报告",
         )
 
     if len(successful_tools) >= 3 and hypotheses:
@@ -682,6 +660,7 @@ def _build_confidence_reasons(
     if "unknown" in sources:
         reasons.append("存在未知来源证据，需要可信生产数据源复核")
     return dedupe_strings(reasons)
+
 
 def _detect_conflicts(
     evidence_items: list[Any],

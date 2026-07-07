@@ -28,6 +28,7 @@ from app.services.change_execution_service import ChangeExecutionService
 from app.services.change_plan_builder import build_change_plan
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
+from scripts.eval.eval_environment import collect_eval_environment
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "change_cases.yaml"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "change_eval_summary.json"
@@ -84,6 +85,7 @@ async def evaluate_cases(cases_path: str | Path = DEFAULT_CASES_PATH) -> dict[st
             ),
             "cases_path": str(Path(cases_path)),
             "case_ids": [str(case.get("id", "")) for case in cases],
+            "environment": collect_eval_environment(suite="safe_change"),
         },
         "summary": summary,
         "cases": results,
@@ -382,7 +384,10 @@ def _create_approval(
             risk_level=plan.risk_level,
             reason="safe change eval approval",
             change_plan=plan,
-            metadata={"trace_id": plan_metadata["trace_id"], "change_plan": plan.model_dump(mode="json")},
+            metadata={
+                "trace_id": plan_metadata["trace_id"],
+                "change_plan": plan.model_dump(mode="json"),
+            },
         )
     )
     approval_status = str(case.get("approval_status") or "approved")
@@ -434,9 +439,8 @@ def _safe_change_metrics(
     dryrun_status_ok = True if not expected_dry_run else dry_run.get("status") == expected_dry_run
     execution_event_index = _first_index(event_types, "change_execution")
     dry_run_event_index = _first_index(event_types, "change_dry_run")
-    dryrun_before_execute = (
-        execution_event_index == -1
-        or (dry_run_event_index != -1 and dry_run_event_index < execution_event_index)
+    dryrun_before_execute = execution_event_index == -1 or (
+        dry_run_event_index != -1 and dry_run_event_index < execution_event_index
     )
     if dry_run.get("status") == "failed":
         dryrun_before_execute = dryrun_before_execute and execution_event_index == -1

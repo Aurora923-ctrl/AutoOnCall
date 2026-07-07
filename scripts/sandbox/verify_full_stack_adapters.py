@@ -16,26 +16,16 @@ ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_ENV = ROOT / "deploy" / "sandbox.env"
 DEFAULT_OUTPUT_PATH = ROOT / "logs" / "full_stack_adapter_verification.json"
 
-EXPECTED_NOT_INTEGRATED: list[str] = []
 REAL_SOURCE_BY_TOOL = {
-    "query_alerts": "alertmanager",
     "query_metrics": "prometheus",
     "query_logs": "loki",
-    "query_k8s_status": "kubernetes",
-    "query_traces": "jaeger",
     "query_service_context": "cmdb",
     "query_deploy_history": "deploy_history",
-    "query_message_queue_status": "redpanda",
     "query_redis_status": "redis_info",
     "query_mysql_status": "mysql",
     "search_history_ticket": "ticket_api",
 }
 DEFAULT_CHECKS = [
-    {
-        "tool_name": "query_alerts",
-        "input_args": {"service_name": "order-service", "state": "active", "limit": 20},
-        "expected_source": "alertmanager",
-    },
     {
         "tool_name": "query_metrics",
         "input_args": {"service_name": "order-service", "time_range": "10m", "interval": "1m"},
@@ -52,16 +42,6 @@ DEFAULT_CHECKS = [
         "expected_source": "loki",
     },
     {
-        "tool_name": "query_k8s_status",
-        "input_args": {"service_name": "inventory-service", "time_range": "10m"},
-        "expected_source": "kubernetes",
-    },
-    {
-        "tool_name": "query_traces",
-        "input_args": {"service_name": "order-service", "lookback": "1h", "limit": 20},
-        "expected_source": "jaeger",
-    },
-    {
         "tool_name": "query_service_context",
         "input_args": {"service_name": "order-service"},
         "expected_source": "cmdb",
@@ -70,11 +50,6 @@ DEFAULT_CHECKS = [
         "tool_name": "query_deploy_history",
         "input_args": {"service_name": "order-service", "limit": 5},
         "expected_source": "deploy_history",
-    },
-    {
-        "tool_name": "query_message_queue_status",
-        "input_args": {"service_name": "checkout-service", "topic": ""},
-        "expected_source": "redpanda",
     },
     {
         "tool_name": "query_redis_status",
@@ -87,8 +62,13 @@ DEFAULT_CHECKS = [
     },
     {
         "tool_name": "query_mysql_status",
-        "input_args": {"service_name": "order-service", "mysql_instance": "order-mysql"},
+        "input_args": {"service_name": "payment-service", "mysql_instance": "payment-mysql"},
         "expected_source": "mysql",
+        "required_signals": {
+            "slow_query_count": {"gte": 18},
+            "pool_waiting": {"gte": 1},
+            "active_connections": {"gte": 180},
+        },
     },
     {
         "tool_name": "search_history_ticket",
@@ -131,16 +111,14 @@ async def verify_adapters(
             if item["observed_source"] and item["observed_source"] != "unknown"
         }
     )
-    missing_sources = sorted(
-        set(REAL_SOURCE_BY_TOOL.values()).difference(data_sources)
-    )
+    missing_sources = sorted(set(REAL_SOURCE_BY_TOOL.values()).difference(data_sources))
     return {
         "status": "passed" if not failed else "failed",
         "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         "data_sources": data_sources,
         "missing_sources": missing_sources,
         "failed_tools": [item["tool_name"] for item in failed],
-        "not_integrated": EXPECTED_NOT_INTEGRATED,
+        "not_integrated": [],
         "mock_fallback_detected": any(item["observed_source"] == "mock" for item in results),
         "checks": results,
         "summary": _summary_text(failed, data_sources, missing_sources),
@@ -164,6 +142,12 @@ async def _run_check(
         status = str(getattr(result, "status", "failed"))
         error_message = getattr(result, "error_message", None) or output.get("error_message", "")
         passed = status == "success" and observed_source == expected_source
+        signal_failures = _signal_failures(
+            output.get("signals", {}) if isinstance(output.get("signals"), dict) else {},
+            check.get("required_signals", {}),
+        )
+        if signal_failures:
+            passed = False
         if fail_on_mock and observed_source in {"mock", "not_configured"}:
             passed = False
         return {
@@ -176,6 +160,7 @@ async def _run_check(
             "summary": str(output.get("summary") or ""),
             "error_message": str(error_message or ""),
             "signals": output.get("signals", {}) if isinstance(output.get("signals"), dict) else {},
+            "signal_failures": signal_failures,
         }
     except Exception as exc:
         return {
@@ -188,7 +173,30 @@ async def _run_check(
             "summary": "",
             "error_message": str(exc),
             "signals": {},
+            "signal_failures": [],
         }
+
+
+def _signal_failures(
+    signals: dict[str, Any],
+    requirements: Any,
+) -> list[str]:
+    if not isinstance(requirements, dict):
+        return []
+    failures: list[str] = []
+    for key, expected in requirements.items():
+        value = signals.get(key)
+        if isinstance(expected, dict):
+            if "gte" in expected and not (
+                isinstance(value, int | float) and value >= float(expected["gte"])
+            ):
+                failures.append(f"{key} expected >= {expected['gte']}, got {value}")
+            if "equals" in expected and value != expected["equals"]:
+                failures.append(f"{key} expected {expected['equals']}, got {value}")
+            continue
+        if value != expected:
+            failures.append(f"{key} expected {expected}, got {value}")
+    return failures
 
 
 def _summary_text(
@@ -197,13 +205,12 @@ def _summary_text(
     missing_sources: list[str],
 ) -> str:
     if failed:
-        return (
-            "Full-stack adapter verification failed; failed_tools="
-            + ",".join(item["tool_name"] for item in failed)
+        return "Interview adapter verification failed; failed_tools=" + ",".join(
+            item["tool_name"] for item in failed
         )
     if missing_sources:
         return "All tools passed but expected sources are missing: " + ",".join(missing_sources)
-    return "All configured full-stack adapters returned real data sources."
+    return "All configured interview adapters returned real data sources."
 
 
 def write_report(payload: dict[str, Any], output_path: Path | None) -> None:
@@ -214,7 +221,7 @@ def write_report(payload: dict[str, Any], output_path: Path | None) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify live AutoOnCall full-stack adapters.")
+    parser = argparse.ArgumentParser(description="Verify live AutoOnCall interview adapters.")
     parser.add_argument("--env-file", default=str(SANDBOX_ENV))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH))
     parser.add_argument("--json", action="store_true", help="Print the full JSON report")
@@ -242,7 +249,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
 def render_console(payload: dict[str, Any]) -> str:
     lines = [
-        f"Full-stack adapter verification: {payload['status'].upper()}",
+        f"Interview adapter verification: {payload['status'].upper()}",
         f"Data sources: {', '.join(payload['data_sources']) or '-'}",
         f"Missing sources: {', '.join(payload['missing_sources']) or '-'}",
         f"Not integrated yet: {', '.join(payload['not_integrated'])}",

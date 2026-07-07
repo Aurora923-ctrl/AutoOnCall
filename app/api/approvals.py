@@ -39,9 +39,7 @@ async def list_pending_approvals(
     """List the operator approval queue."""
     incident_id = incident_id if isinstance(incident_id, str) else None
     include_approved_actions = (
-        include_approved_actions
-        if isinstance(include_approved_actions, bool)
-        else False
+        include_approved_actions if isinstance(include_approved_actions, bool) else False
     )
     service = get_approval_service()
     requests = service.list_pending(incident_id=incident_id)
@@ -49,11 +47,7 @@ async def list_pending_approvals(
         approved_requests = service.list_requests(incident_id=incident_id, status="approved")
         requests = [
             *requests,
-            *[
-                request
-                for request in approved_requests
-                if _approval_has_next_action(request)
-            ],
+            *[request for request in approved_requests if _approval_has_next_action(request)],
         ]
     return {"items": [request.model_dump(mode="json") for request in requests]}
 

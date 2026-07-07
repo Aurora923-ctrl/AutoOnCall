@@ -166,8 +166,8 @@ async def test_replanner_retries_failed_tool_without_calling_llm(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> None:
     llm_step = PlanStep(
-        step_id="llm-traces",
-        tool_name="query_traces",
+        step_id="llm-redis",
+        tool_name="query_redis_status",
         purpose="补查 order-service 到 Redis 的调用链错误和耗时",
         input_args={"service_name": "order-service", "time_range": "10m"},
         expected_evidence="确认 Redis 调用链是否出现超时或错误",
@@ -199,12 +199,12 @@ async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> No
 
     update = await replanner_module.replanner(state)
 
-    assert update["current_plan"][0]["tool_name"] == "query_traces"
-    assert update["current_plan"][0]["step_id"] == "llm-traces"
+    assert update["current_plan"][0]["tool_name"] == "query_redis_status"
+    assert update["current_plan"][0]["step_id"] == "llm-redis"
     assert update["current_plan"][0]["status"] == "pending"
     assert update["evidence_analysis"]["decision"] == "add_steps"
     assert fake_prompt.payload is not None
-    assert "query_traces" in fake_prompt.payload["tools_description"]
+    assert "query_redis_status" in fake_prompt.payload["tools_description"]
     assert any("Evidence Analyzer 摘要" in content for _, content in fake_prompt.payload["messages"])
 
 

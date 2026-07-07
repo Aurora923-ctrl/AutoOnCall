@@ -117,20 +117,12 @@ Object.assign(window.AutoOnCallApp.prototype, {
         `).join('');
     }
 ,
-    extractDependencySignalsFromToolCalls(toolCalls) {
-        return (Array.isArray(toolCalls) ? toolCalls : [])
-            .filter((call) => ['query_traces', 'query_message_queue_status'].includes(call.tool_name))
-            .map((call) => ({
-                ...call,
-                domain: call.tool_name === 'query_traces' ? 'tracing' : 'message_queue',
-                backend: call.data_source || (call.tool_name === 'query_traces' ? 'jaeger/tempo' : 'redpanda/kafka'),
-                summary: call.output_summary || call.error_message || ''
-            }));
+    extractDependencySignalsFromToolCalls() {
+        return [];
     }
 ,
     formatDependencySignalTitle(signal) {
-        const domain = signal.domain === 'message_queue' ? 'Redpanda / Kafka' : 'Jaeger / Tempo';
-        return `${domain} · ${signal.tool_name || 'dependency signal'}`;
+        return signal.tool_name || 'dependency signal';
     }
 ,
     renderEvidenceCards(evidence) {

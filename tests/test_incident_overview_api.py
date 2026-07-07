@@ -91,12 +91,12 @@ async def test_incident_overview_aggregates_report_trace_and_approvals(
             },
             {
                 "step_id": "s2",
-                "source_tool": "query_traces",
-                "data_source": "jaeger",
-                "evidence_type": "trace",
+                "source_tool": "query_logs",
+                "data_source": "loki",
+                "evidence_type": "log",
                 "stance": "supporting",
-                "summary": "Jaeger 返回 2 条 trace，error_spans=1",
-                "confidence_reason": "Tracing 后端返回调用链耗时和错误 span 信号",
+                "summary": "ERROR logs returned 2 entries",
+                "confidence_reason": "日志后端返回错误信号",
                 "confidence": 0.82,
             },
         ],
@@ -112,12 +112,12 @@ async def test_incident_overview_aggregates_report_trace_and_approvals(
             },
             {
                 "step_id": "s2",
-                "tool_name": "query_traces",
-                "data_source": "jaeger",
+                "tool_name": "query_logs",
+                "data_source": "loki",
                 "status": "success",
                 "latency_ms": 18.5,
                 "input_summary": '{"service_name": "order-service"}',
-                "output_summary": "Jaeger 返回 2 条 trace，error_spans=1",
+                "output_summary": "ERROR logs returned 2 entries",
             },
         ],
         confirmed_facts=["Redis connected_clients=9940/10000；来源=mock"],
@@ -167,8 +167,7 @@ async def test_incident_overview_aggregates_report_trace_and_approvals(
     assert overview["trace_summary"]["event_count"] == 1
     assert overview["approval_summary"]["by_status"]["pending"] == 1
     assert overview["diagnosis_chain"]["tool_calls"][0]["data_source"] == "mock"
-    assert overview["diagnosis_chain"]["dependency_signals"][0]["backend"] == "jaeger"
-    assert overview["diagnosis_chain"]["dependency_signals"][0]["domain"] == "tracing"
+    assert overview["diagnosis_chain"]["dependency_signals"] == []
     assert overview["diagnosis_chain"]["data_sources"]["has_mock"] is True
     assert overview["diagnosis_chain"]["confirmed_facts"]
     assert overview["diagnosis_chain"]["next_steps"]

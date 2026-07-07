@@ -144,27 +144,26 @@ def test_incident_diagnosis_input_includes_structured_context() -> None:
 
 def test_planner_retrieval_query_focuses_on_incident_not_report_template() -> None:
     query = _build_planner_retrieval_query(
-        "生成包含摘要、根因、风险、修复建议的 Markdown 诊断报告",
+        "?????????????????? Markdown ????",
         {
-            "title": "checkout-service Redpanda consumer lag",
-            "service_name": "checkout-service",
-            "severity": "P2",
-            "symptom": "订单消息积压，怀疑 Redpanda/Kafka topic 或 partition 异常",
+            "title": "order-service Redis maxclients exhausted",
+            "service_name": "order-service",
+            "severity": "P1",
+            "symptom": "Redis connection timeout and 5xx spike",
             "environment": "prod",
             "raw_alert": {
-                "alertname": "RedpandaConsumerLagHigh",
-                "topic": "redpanda-checkout",
-                "consumer_lag": 128400,
+                "alertname": "RedisMaxClientsNearLimit",
+                "dependency": "redis-order-cache",
+                "connected_clients": 9940,
             },
         },
     )
 
-    assert "checkout-service" in query
-    assert "RedpandaConsumerLagHigh" in query
-    assert "redpanda-checkout" in query
-    assert "consumer_lag=128400" in query
-    assert "Markdown 诊断报告" not in query
-
+    assert "order-service" in query
+    assert "RedisMaxClientsNearLimit" in query
+    assert "redis-order-cache" in query
+    assert "connected_clients=9940" in query
+    assert "Markdown ????" not in query
 
 def test_aiops_domain_models_are_json_dumpable() -> None:
     incident = Incident(service_name="order-service", symptom="high 5xx")

@@ -31,6 +31,7 @@ from app.models.evidence import (
 from app.models.incident import Incident
 from app.models.plan import PlanStep
 from app.tools.base import ToolExecutionResult
+from scripts.eval.eval_environment import collect_eval_environment
 
 replanner_module = importlib.import_module("app.agent.aiops.replanner")
 
@@ -138,6 +139,7 @@ async def evaluate_cases(cases_path: str | Path = DEFAULT_CASES_PATH) -> dict[st
             ),
             "cases_path": str(Path(cases_path)),
             "case_ids": [str(case.get("id", "")) for case in cases],
+            "environment": collect_eval_environment(suite="replanner"),
         },
         "summary": summary,
         "cases": results,
@@ -172,7 +174,9 @@ async def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     replan_event = trace_service.latest_replan_event() or {}
     metadata = dict(replan_event.get("metadata") or {})
     current_plan = list(update.get("current_plan") or [])
-    plan_tools = [str(step.get("tool_name") or "") for step in current_plan if isinstance(step, dict)]
+    plan_tools = [
+        str(step.get("tool_name") or "") for step in current_plan if isinstance(step, dict)
+    ]
     first_step_id = str(current_plan[0].get("step_id") or "") if current_plan else ""
     actual_decision = str(metadata.get("decision") or "")
     actual_source = str(metadata.get("decision_source") or "")
@@ -181,8 +185,11 @@ async def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         "decision_hit": actual_decision == str(case.get("expected_decision") or ""),
         "decision_source_hit": actual_source == str(case.get("expected_decision_source") or ""),
         "plan_tool_hit": _contains_all(plan_tools, case.get("expected_plan_tools", [])),
-        "forbidden_tools_avoided": _has_no_overlap(plan_tools, case.get("forbidden_plan_tools", [])),
-        "llm_call_policy_hit": fake_prompt.call_count == int(case.get("expected_llm_call_count", 0)),
+        "forbidden_tools_avoided": _has_no_overlap(
+            plan_tools, case.get("forbidden_plan_tools", [])
+        ),
+        "llm_call_policy_hit": fake_prompt.call_count
+        == int(case.get("expected_llm_call_count", 0)),
         "blocked_decision_guardrail": _blocked_decision_guardrail_hit(case, actual_decision),
         "first_step_hit": _first_step_hit(case, first_step_id),
         "trace_decision_recorded": bool(actual_decision and actual_source),

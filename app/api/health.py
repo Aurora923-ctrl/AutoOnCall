@@ -57,8 +57,8 @@ async def readiness_check():
     status_code = 200
     if unready_capabilities:
         status_code = 503
-        health_data["error"] = (
-            "Readiness dependencies unavailable: " + ", ".join(unready_capabilities)
+        health_data["error"] = "Readiness dependencies unavailable: " + ", ".join(
+            unready_capabilities
         )
 
     health_data["status"] = "healthy" if status_code == 200 else "degraded"
@@ -101,7 +101,7 @@ async def rag_readiness_check():
 
 @router.get("/health/ready/aiops")
 async def aiops_readiness_check():
-    """Return readiness for Alertmanager-driven AIOps diagnosis."""
+    """Return readiness for AIOps diagnosis."""
     health_data = await _dependency_health_data()
     aiops_ready = bool(health_data["capabilities"]["aiops"]["ready"])
     status_code = 200 if aiops_ready else 503
@@ -126,13 +126,6 @@ async def _dependency_health_data() -> dict[str, Any]:
     health_data = _base_health_data()
     milvus = _check_milvus()
     external_systems = await _external_system_readiness()
-    if (
-        milvus["status"] != "connected"
-        and external_systems.get("status") == "degraded"
-        and config.aiops_mock_fallback_enabled
-    ):
-        external_systems = dict(external_systems)
-        external_systems["status"] = "mock_fallback"
     health_data["checks"] = {
         "process": {
             "status": "alive",
@@ -152,7 +145,7 @@ def _base_health_data() -> dict[str, Any]:
         "service": config.app_name,
         "version": config.app_version,
         "status": "healthy",
-        "mode": "mock-compatible" if _mock_mode_available() else "production",
+        "mode": "production",
     }
 
 
@@ -185,12 +178,6 @@ def _check_milvus() -> dict[str, str]:
 
 async def _external_system_readiness() -> dict[str, Any]:
     checks = {
-        "alertmanager": await _http_get_readiness(
-            base_url=config.alertmanager_base_url,
-            path="/-/ready",
-            token=config.alertmanager_bearer_token,
-            timeout_seconds=config.alertmanager_timeout_seconds,
-        ),
         "prometheus": await _http_get_readiness(
             base_url=config.prometheus_base_url,
             path="/-/ready",
@@ -198,24 +185,6 @@ async def _external_system_readiness() -> dict[str, Any]:
             timeout_seconds=config.prometheus_timeout_seconds,
         ),
         "log_gateway": _configured_only_check(bool(config.log_gateway_url)),
-        "jaeger": await _http_get_readiness(
-            base_url=config.jaeger_base_url,
-            path="/api/services",
-            token=config.jaeger_bearer_token,
-            timeout_seconds=config.jaeger_timeout_seconds,
-        ),
-        "tempo": await _http_get_readiness(
-            base_url=config.tempo_base_url,
-            path="/ready",
-            token=config.tempo_bearer_token,
-            timeout_seconds=config.tempo_timeout_seconds,
-        ),
-        "redpanda": await _http_get_readiness(
-            base_url=config.redpanda_admin_url,
-            path="/v1/status/ready",
-            token=config.redpanda_bearer_token,
-            timeout_seconds=config.redpanda_timeout_seconds,
-        ),
         "kubernetes": await _http_get_readiness(
             base_url=config.kubernetes_api_server,
             path="/version",
@@ -225,20 +194,16 @@ async def _external_system_readiness() -> dict[str, Any]:
         ),
         "redis": await _redis_readiness(),
         "mysql": await _mysql_readiness(),
-        "ticket": _configured_only_check(bool(config.ticket_api_url)),
+        "ticket": _configured_only_check(bool(config.ticket_api_url or config.resolved_mysql_dsn)),
     }
     statuses = {name: payload["status"] for name, payload in checks.items()}
     configured = {name: status != "not_configured" for name, status in statuses.items()}
     return {
-        "status": _external_overall_status(statuses, config.aiops_mock_fallback_enabled),
+        "status": _external_overall_status(statuses),
         "checks": checks,
         "configured": configured,
-        "mock_fallback_enabled": config.aiops_mock_fallback_enabled,
-        "message": (
-            "External systems without configuration can still use mock/offline AIOps fallback"
-            if config.aiops_mock_fallback_enabled
-            else "Unconfigured external systems will return structured failures"
-        ),
+        "mock_fallback_enabled": False,
+        "message": "Unconfigured external systems will return structured failures",
     }
 
 
@@ -312,12 +277,12 @@ def _failed_readiness(exc: Exception) -> dict[str, Any]:
     }
 
 
-def _external_overall_status(statuses: dict[str, str], mock_fallback_enabled: bool) -> str:
+def _external_overall_status(statuses: dict[str, str]) -> str:
     if any(status == "failed" for status in statuses.values()):
         return "degraded"
     if any(status in {"connected", "configured"} for status in statuses.values()):
         return "configured"
-    return "mock_fallback" if mock_fallback_enabled else "not_configured"
+    return "not_configured"
 
 
 def _capability_readiness(
@@ -326,12 +291,8 @@ def _capability_readiness(
 ) -> dict[str, Any]:
     rag_ready = milvus.get("status") == "connected"
     external_status = str(external_systems.get("status") or "unknown")
-    mock_enabled = bool(external_systems.get("mock_fallback_enabled"))
-    if external_status in {"configured", "mock_fallback"}:
+    if external_status == "configured":
         aiops_status = external_status
-        aiops_ready = True
-    elif external_status == "degraded" and mock_enabled:
-        aiops_status = "degraded_with_fallback"
         aiops_ready = True
     else:
         aiops_status = external_status
@@ -351,28 +312,11 @@ def _capability_readiness(
         "aiops": {
             "ready": aiops_ready,
             "status": aiops_status,
-            "mock_fallback_enabled": mock_enabled,
+            "mock_fallback_enabled": False,
             "message": (
-                "AIOps diagnosis can use configured adapters or mock fallback"
+                "AIOps diagnosis can use configured adapters"
                 if aiops_ready
-                else "AIOps diagnosis has no configured adapters and mock fallback is disabled"
+                else "AIOps diagnosis has no configured adapters"
             ),
         },
     }
-
-
-def _mock_mode_available() -> bool:
-    return config.aiops_mock_fallback_enabled and not any(
-        [
-            config.prometheus_base_url,
-            config.alertmanager_base_url,
-            config.log_gateway_url,
-            config.jaeger_base_url,
-            config.tempo_base_url,
-            config.redpanda_admin_url,
-            config.kubernetes_api_server,
-            config.resolved_redis_url,
-            config.resolved_mysql_dsn,
-            config.ticket_api_url,
-        ]
-    )

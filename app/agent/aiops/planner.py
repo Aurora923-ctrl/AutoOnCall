@@ -78,8 +78,9 @@ planner_prompt = ChatPromptTemplate.from_messages(
                 - **如果有相关经验文档，请参考其中的方法和步骤制定计划**
                 - 如果经验文档包含 symptoms、diagnosis_steps、risk_actions 等结构化字段，
                   优先把 diagnosis_steps 转为只读排查步骤；risk_actions 只能作为建议或审批候选，不能自动执行。
-                - 对服务不可用、慢响应、timeout、下游依赖异常、消息积压类事件，优先加入
-                  query_traces 和 query_message_queue_status 作为只读依赖证据采集步骤。
+                - 对服务不可用、慢响应、timeout、下游依赖异常类事件，优先使用
+                  query_metrics、query_logs、query_service_context、query_deploy_history
+                  以及 Redis/MySQL/Kubernetes 状态工具采集证据。
 
                 标准工具名优先使用：
                 {standard_tool_names}
@@ -334,13 +335,6 @@ def _infer_runbook_step_tool(text: str) -> str:
         return "query_k8s_status"
     if "log" in lowered or "日志" in lowered:
         return "query_logs"
-    if any(
-        keyword in lowered
-        for keyword in ["kafka", "redpanda", "mq", "queue", "topic", "消息", "积压"]
-    ):
-        return "query_message_queue_status"
-    if any(keyword in lowered for keyword in ["trace", "span", "调用链", "链路"]):
-        return "query_traces"
     if "metric" in lowered or "指标" in lowered or "p95" in lowered:
         return "query_metrics"
     return "manual_analysis"

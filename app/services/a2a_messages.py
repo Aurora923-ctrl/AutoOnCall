@@ -29,13 +29,16 @@ class A2AEnvelope:
 
 def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
     """Accept A2A HTTP+JSON and simple JSON-RPC-like payloads."""
-    params = payload.get("params") if isinstance(payload.get("params"), dict) else payload
-    message = params.get("message") if isinstance(params.get("message"), dict) else params
-    parts = message.get("parts") if isinstance(message.get("parts"), list) else []
-    data = {}
+    raw_params = payload.get("params")
+    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else payload
+    raw_message = params.get("message")
+    message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else params
+    raw_parts = message.get("parts")
+    parts: list[Any] = raw_parts if isinstance(raw_parts, list) else []
+    data: dict[str, Any] = {}
     data.update(_mapping(params.get("data")))
     data.update(_data_from_parts(parts))
-    metadata = {}
+    metadata: dict[str, Any] = {}
     metadata.update(_mapping(params.get("metadata")))
     metadata.update(_mapping(message.get("metadata")))
     metadata.update(_mapping(data.get("metadata")))

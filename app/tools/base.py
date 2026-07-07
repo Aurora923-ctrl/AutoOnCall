@@ -58,7 +58,7 @@ class ToolExecutionResult(BaseModel):
 
 
 class AIOpsTool:
-    """Uniform interface for local, MCP, and mock AIOps tools."""
+    """Uniform interface for local, MCP, and external-adapter AIOps tools."""
 
     name: str = ""
     description: str = ""

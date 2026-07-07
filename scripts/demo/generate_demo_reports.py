@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.models.report import DiagnosisReport  # noqa: E402
 from app.services.report_generator import ReportGenerator  # noqa: E402
-from scripts.eval.eval_cases import DEFAULT_CASES_PATH, evaluate_case, load_cases  # noqa: E402
+from scripts.eval.eval_cases import DEFAULT_CASES_PATH, evaluate_case, load_cases, load_env_file  # noqa: E402
 
 DEFAULT_DEMO_CASE_IDS = (
     "redis_maxclients_timeout",
@@ -25,6 +25,7 @@ DEFAULT_DEMO_CASE_IDS = (
 )
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "logs" / "demo_reports"
 DEFAULT_REPORT_DB = REPO_ROOT / "logs" / "demo_reports.db"
+DEFAULT_SANDBOX_ENV = REPO_ROOT / "deploy" / "sandbox.env"
 
 
 async def generate_demo_reports(
@@ -36,6 +37,7 @@ async def generate_demo_reports(
 ) -> dict[str, Any]:
     """Generate Markdown demo reports and return a machine-readable summary."""
     selected_cases = select_cases(load_cases(cases_path), case_ids)
+    load_env_file(DEFAULT_SANDBOX_ENV)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     generator = ReportGenerator(report_db_path)

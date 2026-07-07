@@ -2,7 +2,7 @@ groups:
   - name: autooncall-full-stack
     rules:
       - alert: AutoOnCallHighErrorRateDemo
-        expr: autooncall_http_error_rate > 0.05
+        expr: autooncall_http_5xx_rate{service="order-service"} > 0.05
         for: 30s
         labels:
           severity: warning
@@ -13,7 +13,7 @@ groups:
           description: "Sandbox demo alert used by AutoOnCall AIOps."
 
       - alert: AutoOnCallHighLatencyDemo
-        expr: autooncall_http_p95_latency_ms > 1000
+        expr: autooncall_p95_latency_ms{service="order-service"} > 1000
         for: 30s
         labels:
           severity: critical

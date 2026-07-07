@@ -62,10 +62,10 @@ def task_status(
         state=state,
         timestamp=timestamp or datetime.now(UTC),
         message=A2AMessage(
-            message_id=f"{task_id}-{state}",
+            messageId=f"{task_id}-{state}",
             role="ROLE_AGENT",
-            task_id=task_id,
-            context_id=context_id,
+            taskId=task_id,
+            contextId=context_id,
             parts=[text_part(text)],
             metadata={"state": state},
         ),
@@ -175,7 +175,7 @@ def mixed_artifact(
         parts.append(text_part(text))
     parts.append(data_part(data))
     return A2AArtifact(
-        artifact_id=artifact_id,
+        artifactId=artifact_id,
         name=name,
         description=description,
         parts=parts,
@@ -191,7 +191,7 @@ def data_artifact(
 ) -> A2AArtifact:
     """Build a structured data artifact."""
     return A2AArtifact(
-        artifact_id=artifact_id,
+        artifactId=artifact_id,
         name=name,
         description=description,
         parts=[data_part(data)],

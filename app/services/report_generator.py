@@ -74,7 +74,20 @@ class ReportGenerator:
         evidence_analysis = _as_dict(state.get("evidence_analysis"))
         errors = [str(error) for error in state.get("errors", []) if error]
         warnings = [str(warning) for warning in state.get("warnings", []) if warning]
-        hypothesis_ranking = _build_hypothesis_ranking(hypotheses, evidence_analysis)
+        evidence_profile = _build_evidence_profile(evidence, evidence_analysis)
+        status, sufficiency_warnings = _apply_evidence_sufficiency_gate(
+            requested_status=status,
+            evidence_profile=evidence_profile,
+            tool_calls=tool_calls,
+            errors=errors,
+        )
+        evidence_analysis = {
+            **evidence_analysis,
+            "evidence_profile": evidence_profile,
+            "report_status": status,
+        }
+        warnings = _dedupe_strings([*warnings, *sufficiency_warnings])
+        hypothesis_ranking = _build_hypothesis_ranking(hypotheses, evidence_analysis, evidence)
         selected_root_cause_id = _selected_root_cause_id(hypothesis_ranking)
         selected_root_cause = _selected_root_cause_text(hypothesis_ranking)
 
@@ -127,7 +140,8 @@ class ReportGenerator:
             trace_summary=_build_trace_summary(events),
             errors=errors,
             warnings=warnings,
-            evidence_profile=_build_evidence_profile(evidence, evidence_analysis),
+            evidence_profile=evidence_profile,
+            evidence_sufficiency=_as_dict(evidence_profile.get("sufficiency")),
             confidence_reason=_build_confidence_reason(evidence, evidence_analysis, errors),
             uncertainties=_build_uncertainties(
                 evidence_analysis,
@@ -321,6 +335,42 @@ def _manual_action_required_from_change_execution(status: str, *, fallback: bool
     return manual_action_required_from_change_execution(status, fallback=fallback)
 
 
+def _apply_evidence_sufficiency_gate(
+    *,
+    requested_status: str,
+    evidence_profile: dict[str, Any],
+    tool_calls: list[dict[str, Any]],
+    errors: list[str],
+) -> tuple[str, list[str]]:
+    """Downgrade overconfident reports when the evidence set is incomplete."""
+    if requested_status != "completed":
+        return requested_status, []
+    sufficiency = _as_dict(evidence_profile.get("sufficiency"))
+    if not sufficiency:
+        return requested_status, []
+    if sufficiency.get("complete"):
+        return requested_status, []
+
+    missing = [str(item) for item in sufficiency.get("missing_evidence", []) if str(item).strip()]
+    failed_tools = [str(item) for item in sufficiency.get("failed_tools", []) if str(item).strip()]
+    if errors or failed_tools:
+        status = "degraded"
+    elif not sufficiency.get("has_primary_domain_evidence") or not sufficiency.get(
+        "has_symptom_evidence"
+    ):
+        status = "incomplete"
+    else:
+        status = "needs_human"
+
+    details = []
+    if missing:
+        details.append("缺失证据：" + "、".join(missing))
+    if failed_tools:
+        details.append("失败工具：" + "、".join(failed_tools))
+    detail_text = "；".join(details) or "证据充分性门槛未满足"
+    return status, [f"报告由 completed 降级为 {status}：{detail_text}。"]
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -347,27 +397,66 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
 def _build_hypothesis_ranking(
     hypotheses: list[str],
     evidence_analysis: dict[str, Any],
+    evidence: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     raw_ranking = evidence_analysis.get("hypothesis_ranking")
     if isinstance(raw_ranking, list) and raw_ranking:
-        return [dict(item) for item in raw_ranking if isinstance(item, dict)]
+        ranking = [dict(item) for item in raw_ranking if isinstance(item, dict)]
+        return _ensure_hypothesis_evidence_links(ranking, evidence or [])
 
-    ranking: list[dict[str, Any]] = []
+    fallback_ranking: list[dict[str, Any]] = []
+    fallback_ids = _supporting_evidence_ids(evidence or [])
     for index, item in enumerate(hypotheses, 1):
-        ranking.append(
+        fallback_ranking.append(
             {
                 "hypothesis_id": f"hyp-fallback-{index}",
                 "title": item,
                 "description": item,
                 "category": "unknown",
-                "supporting_evidence_ids": [],
+                "supporting_evidence_ids": fallback_ids,
                 "refuting_evidence_ids": [],
                 "missing_evidence": [],
                 "confidence": 0.45,
-                "confidence_reason": "兼容旧版 hypotheses 字段生成，缺少证据矩阵明细。",
+                "confidence_reason": (
+                    "兼容旧版 hypotheses 字段生成，已回链当前支持性 evidence_id。"
+                    if fallback_ids
+                    else "兼容旧版 hypotheses 字段生成，缺少证据矩阵明细。"
+                ),
             }
         )
-    return ranking
+    return fallback_ranking
+
+
+def _ensure_hypothesis_evidence_links(
+    ranking: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ensure root-cause hypotheses can be traced back to stable Evidence IDs."""
+    fallback_ids = _supporting_evidence_ids(evidence)
+    if not fallback_ids:
+        return ranking
+    updated: list[dict[str, Any]] = []
+    for item in ranking:
+        copy = dict(item)
+        raw_ids = copy.get("supporting_evidence_ids")
+        if not isinstance(raw_ids, list) or not [value for value in raw_ids if value]:
+            copy["supporting_evidence_ids"] = fallback_ids
+            reason = str(copy.get("confidence_reason") or "").strip()
+            copy["confidence_reason"] = (
+                f"{reason}；已补充 evidence_id 回链。" if reason else "已补充 evidence_id 回链。"
+            )
+        updated.append(copy)
+    return updated
+
+
+def _supporting_evidence_ids(evidence: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(item.get("evidence_id"))
+        for item in evidence
+        if item.get("evidence_id")
+        and str(item.get("stance") or "") == "supporting"
+        and str(item.get("evidence_type") or "") != "risk"
+    ][:5]
 
 
 def _selected_root_cause_id(hypothesis_ranking: list[dict[str, Any]]) -> str:
@@ -592,6 +681,13 @@ def _build_remediation(
     )
     if "Redis" in summaries or "redis" in summaries:
         return "优先检查 Redis 连接池、maxclients、慢查询和上游重试策略，并按变更流程处理容量或配置问题。"
+    if any(
+        token in summaries for token in ["MySQL", "mysql", "SQL", "slow query", "慢查询", "连接池"]
+    ):
+        return (
+            "诊断阶段保持只读：先确认慢 SQL digest、EXPLAIN、连接池等待、活跃连接和锁等待，并关联最近发布。"
+            "短期可限流或降级高成本查询路径；执行 SQL 改写、加索引、调整连接池/数据库参数或重启数据库前必须走人工审批和变更窗口。"
+        )
     if evidence:
         return "基于已采集证据按 Runbook 继续处置，先验证影响面，再执行低风险缓解动作。"
     return "继续补充指标、日志和依赖状态证据，在证据不足时升级人工处理。"
@@ -756,52 +852,8 @@ def _build_dependency_signals(
     evidence: list[dict[str, Any]],
     tool_calls: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Collect Jaeger/Tempo and Redpanda/Kafka evidence for UI/report display."""
-    evidence_by_step_tool = {
-        (str(item.get("step_id") or ""), str(item.get("source_tool") or "")): item
-        for item in evidence
-        if str(item.get("evidence_type") or "") in {"trace", "message_queue"}
-    }
-    signals: list[dict[str, Any]] = []
-    for call in tool_calls:
-        tool_name = str(call.get("tool_name") or "")
-        if tool_name not in {"query_traces", "query_message_queue_status"}:
-            continue
-        evidence_item = evidence_by_step_tool.get((str(call.get("step_id") or ""), tool_name), {})
-        signals.append(
-            {
-                "step_id": call.get("step_id", ""),
-                "tool_name": tool_name,
-                "domain": "tracing" if tool_name == "query_traces" else "message_queue",
-                "backend": _dependency_backend(call, evidence_item),
-                "status": call.get("status", "unknown"),
-                "data_source": call.get("data_source", "unknown"),
-                "latency_ms": call.get("latency_ms", 0.0),
-                "summary": call.get("output_summary")
-                or evidence_item.get("summary")
-                or call.get("error_message")
-                or "",
-                "stance": evidence_item.get("stance", "neutral"),
-                "confidence": evidence_item.get("confidence", 0.0),
-                "confidence_reason": evidence_item.get("confidence_reason", ""),
-                "fact": evidence_item.get("fact", ""),
-                "next_step": evidence_item.get("next_step", ""),
-                "input_summary": call.get("input_summary", ""),
-            }
-        )
-    return signals
-
-
-def _dependency_backend(call: dict[str, Any], evidence_item: dict[str, Any]) -> str:
-    data_source = str(call.get("data_source") or evidence_item.get("data_source") or "")
-    if data_source in {"jaeger", "tempo", "redpanda"}:
-        return data_source
-    tool_name = str(call.get("tool_name") or "")
-    if tool_name == "query_traces":
-        return "jaeger/tempo"
-    if tool_name == "query_message_queue_status":
-        return "redpanda/kafka"
-    return data_source or "unknown"
+    """Advanced dependency panels were removed from the campus-recruiting mainline."""
+    return []
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:

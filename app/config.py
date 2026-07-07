@@ -19,20 +19,14 @@ LOCAL_FULL_STACK_ENV = {
     "PORT": str(LOCAL_DEMO_PORT),
     "MILVUS_HOST": LOCAL_DEMO_HOST,
     "MILVUS_PORT": "19530",
-    "AIOPS_MOCK_FALLBACK_ENABLED": "true",
-    "ALERTMANAGER_BASE_URL": "http://127.0.0.1:19093",
+    "AIOPS_MOCK_FALLBACK_ENABLED": "false",
     "PROMETHEUS_BASE_URL": "http://127.0.0.1:19090",
     "LOG_GATEWAY_URL": "http://127.0.0.1:13100",
     "LOKI_BASE_URL": "http://127.0.0.1:13100",
-    "GRAFANA_URL": "http://127.0.0.1:13000",
-    "JAEGER_BASE_URL": "http://127.0.0.1:16686",
-    "TEMPO_BASE_URL": "http://127.0.0.1:13200",
-    "REDPANDA_ADMIN_URL": "http://127.0.0.1:19644",
-    "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:19092",
-    "CMDB_API_URL": "http://127.0.0.1:18081",
-    "DEPLOY_HISTORY_API_URL": "http://127.0.0.1:18084",
-    "TICKET_API_URL": "http://127.0.0.1:18083/tickets.json",
-    "KUBERNETES_API_SERVER": "http://127.0.0.1:18085",
+    "CMDB_API_URL": "",
+    "DEPLOY_HISTORY_API_URL": "",
+    "TICKET_API_URL": "",
+    "KUBERNETES_API_SERVER": "",
     "KUBERNETES_NAMESPACE": "default",
     "KUBERNETES_VERIFY_SSL": "false",
     "REDIS_URL": "redis://127.0.0.1:16379/0",
@@ -69,7 +63,7 @@ class Settings(BaseSettings):
 
     # ---- 文件上传与运行产物路径配置 ------------------------------------------
     upload_dir: str = "uploads"
-    upload_allowed_extensions: str = "txt,md,markdown"
+    upload_allowed_extensions: str = "txt,md,markdown,pdf,html,htm,csv,xlsx"
     upload_max_file_size_mb: int = 10
     upload_read_chunk_size: int = 1024 * 1024
     eval_summary_path: str = "logs/eval_summary.json"
@@ -103,12 +97,14 @@ class Settings(BaseSettings):
     chunk_overlap: int = 100
     index_allowed_roots: str = "uploads,aiops-docs"
     rag_lexical_index_path: str = "data/rag_lexical_index.json"
+    knowledge_indexing_report_path: str = "data/knowledge_indexing_reports.jsonl"
 
     # ---- AIOps 运行态配置 -----------------------------------------------------
     # Trace、Approval、Report 默认写入 SQLite；设置 AIOPS_STORAGE_BACKEND=mysql
     # 时使用 MYSQL_DSN / MYSQL_HOST 等配置。
     aiops_storage_backend: str = "sqlite"
     aiops_sqlite_path: str = "data/aiops_state.db"
+    aiops_feedback_path: str = "data/aiops_feedback.jsonl"
     aiops_mock_fallback_enabled: bool = False
     aiops_replanner_llm_enabled: bool = False
     service_topology_path: str = "config/service_topology.yaml"
@@ -137,11 +133,6 @@ class Settings(BaseSettings):
     api_approver_token: str = ""
     api_admin_token: str = ""
 
-    # ---- Alertmanager 适配器配置 ---------------------------------------------
-    alertmanager_base_url: str = ""
-    alertmanager_bearer_token: str = ""
-    alertmanager_timeout_seconds: float = 5.0
-
     # ---- Prometheus 适配器配置 ------------------------------------------------
     prometheus_base_url: str = ""
     prometheus_bearer_token: str = ""
@@ -169,19 +160,6 @@ class Settings(BaseSettings):
     loki_base_url: str = ""
     loki_bearer_token: str = ""
     loki_timeout_seconds: float = 8.0
-
-    jaeger_base_url: str = ""
-    jaeger_bearer_token: str = ""
-    jaeger_timeout_seconds: float = 8.0
-    tempo_base_url: str = ""
-    tempo_bearer_token: str = ""
-    tempo_timeout_seconds: float = 8.0
-
-    # ---- 消息队列适配器配置 ---------------------------------------------------
-    redpanda_admin_url: str = ""
-    redpanda_bearer_token: str = ""
-    redpanda_timeout_seconds: float = 8.0
-    kafka_bootstrap_servers: str = ""
 
     # ---- CMDB / 发布历史适配器配置 -------------------------------------------
     cmdb_api_url: str = ""

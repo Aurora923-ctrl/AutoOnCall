@@ -130,6 +130,19 @@ def test_makefile_exposes_demo_reports_target() -> None:
     assert "scripts/demo/generate_demo_reports.py" in makefile
 
 
+def test_readme_points_to_five_minute_interview_demo_and_core_stack() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    demo_doc = (ROOT / "docs" / "interview-5-minute-demo.md").read_text(encoding="utf-8")
+
+    assert "docs/interview-5-minute-demo.md" in readme
+    assert "Redis/MySQL 是 live adapter golden chain" in readme
+    assert "K8s CrashLoop/OOMKilled 是 offline golden regression case" in readme
+    assert "Milvus/RAG is a bonus path" in demo_doc
+    assert "make interview-up" in demo_doc
+    assert "make sandbox-verify" in demo_doc
+    assert "--env-file deploy\\sandbox.env" in demo_doc
+
+
 def test_makefile_verify_runs_quality_gate_targets() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 

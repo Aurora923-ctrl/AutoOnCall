@@ -480,21 +480,6 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     restarts: 12
                 }
             },
-            redpanda_lag: {
-                incident_id: 'INC-RP-001',
-                title: 'checkout-service Redpanda consumer lag',
-                service_name: 'checkout-service',
-                severity: 'P2',
-                symptom: 'checkout-service 响应慢，订单消息积压，怀疑 Redpanda/Kafka topic 或 partition 异常',
-                environment: 'prod',
-                raw_alert: {
-                    alertname: 'RedpandaConsumerLagHigh',
-                    topic: 'redpanda-checkout',
-                    consumer_group: 'checkout-service',
-                    consumer_lag: 128400,
-                    max_partition_lag: 79000
-                }
-            },
             forbidden_sql: {
                 incident_id: 'INC-SQL-001',
                 title: 'order-service forbidden unaudited SQL',

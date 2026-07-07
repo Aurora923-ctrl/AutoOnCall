@@ -28,7 +28,7 @@ def main() -> int:
     stop_app_processes()
     if args.containers:
         compose_down(ROOT / "deploy" / "compose" / "vector-database.yml")
-        compose_down(ROOT / "deploy" / "compose" / "full-stack-compose.yml")
+        compose_down(ROOT / "deploy" / "compose" / "interview-stack.yml")
     print("[DONE] Stop command completed.")
     return 0
 

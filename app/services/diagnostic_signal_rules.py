@@ -93,8 +93,6 @@ def infer_evidence_type(source_tool: str) -> str:
         return "alert"
     if "trace" in tool_name or "span" in tool_name:
         return "trace"
-    if "queue" in tool_name or "kafka" in tool_name or "redpanda" in tool_name:
-        return "message_queue"
     if "context" in tool_name or "cmdb" in tool_name:
         return "service_context"
     if "risk" in tool_name or "approval" in tool_name:
@@ -173,25 +171,6 @@ def infer_evidence_stance(
             if mentions_any(text, ["error_span", "slow", "慢", "错误", "timeout"])
             else "neutral"
         )
-    if evidence_type == "message_queue":
-        if is_message_queue_healthy(output) or mentions_any(
-            text,
-            ["无 consumer lag", "topic 正常", "正常"],
-        ):
-            return "refuting"
-        if is_message_queue_abnormal(output) or mentions_any(
-            text,
-            [
-                "consumer lag 高",
-                "max_partition_lag",
-                "lagging",
-                "积压",
-                "rebalance",
-                "under_replicated",
-            ],
-        ):
-            return "supporting"
-        return "neutral"
     if evidence_type in {"runbook", "ticket", "risk"}:
         return "supporting" if text.strip() else "neutral"
     return "unknown"
@@ -235,8 +214,6 @@ def build_confidence_reason(
         return "告警平台返回当前 Incident 上下文"
     if evidence_type == "trace":
         return "Tracing 后端返回调用链耗时和错误 span 信号"
-    if evidence_type == "message_queue":
-        return "消息队列后端返回 topic/partition 状态"
     if evidence_type == "service_context":
         return "服务依赖和责任人上下文已确认"
     if evidence_type == "change":
@@ -295,8 +272,6 @@ def build_signal_hypotheses(evidence_items: list[Any], input_text: str, incident
         hypotheses.append("MySQL 慢查询或连接池等待可能参与放大请求延迟。")
     if has_k8s_signal(evidence_items, joined_text):
         hypotheses.append("Kubernetes Pod 状态异常可能导致服务实例容量或稳定性下降。")
-    if has_message_queue_lag_signal(evidence_items, joined_text):
-        hypotheses.append("Redpanda/Kafka 消费积压或分区异常可能放大请求延迟和下游处理延迟。")
     return dedupe_strings(hypotheses)
 
 
@@ -360,42 +335,6 @@ def is_redis_abnormal(output: Any) -> bool:
     if isinstance(connected, int | float) and isinstance(maxclients, int | float) and maxclients:
         return connected / maxclients >= 0.9
     return alert_triggered(output)
-
-
-def is_message_queue_abnormal(output: Any) -> bool:
-    if not isinstance(output, dict):
-        return False
-    signals = output.get("signals") or {}
-    if not isinstance(signals, dict):
-        return False
-    lag_values = [
-        signals.get("consumer_lag"),
-        signals.get("max_partition_lag"),
-        signals.get("lag"),
-    ]
-    if any(isinstance(value, int | float) and value > 0 for value in lag_values):
-        return True
-    under_replicated = signals.get("under_replicated_partitions")
-    if isinstance(under_replicated, int | float) and under_replicated > 0:
-        return True
-    return signals.get("ready") is False
-
-
-def is_message_queue_healthy(output: Any) -> bool:
-    if not isinstance(output, dict):
-        return False
-    signals = output.get("signals") or {}
-    if not isinstance(signals, dict):
-        return False
-    lag_values = [
-        signals.get("consumer_lag"),
-        signals.get("max_partition_lag"),
-        signals.get("lag"),
-    ]
-    lag_clear = all(not isinstance(value, int | float) or value <= 0 for value in lag_values)
-    under_replicated = signals.get("under_replicated_partitions")
-    replicas_clear = not isinstance(under_replicated, int | float) or under_replicated <= 0
-    return signals.get("ready") is True and lag_clear and replicas_clear
 
 
 def has_redis_exhaustion_signal(evidence_items: list[Any], joined_text: str) -> bool:
@@ -464,21 +403,6 @@ def has_k8s_oom_signal(evidence_items: list[Any], context: str) -> bool:
         and mentions_any(str(evidence_output(item)).lower(), ["oom", "oomkilled"])
         for item in evidence_items
         if isinstance(item, dict)
-    )
-
-
-def has_message_queue_lag_signal(evidence_items: list[Any], joined_text: str) -> bool:
-    for evidence in evidence_items:
-        output = evidence_output(evidence)
-        if not isinstance(output, dict):
-            continue
-        if is_message_queue_abnormal(output):
-            return True
-        if mentions_any(str(output).lower(), ["lagging", "consumer lag 高", "消息积压"]):
-            return True
-    return mentions_any(
-        joined_text,
-        ["redpanda", "kafka", "consumer lag", "max_partition_lag", "消息积压"],
     )
 
 

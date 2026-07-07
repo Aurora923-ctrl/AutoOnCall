@@ -225,37 +225,5 @@ def extract_dependency_signals(
     evidence: list[Any],
     tool_calls: list[Any],
 ) -> list[dict[str, Any]]:
-    """Build dependency-signal cards from trace and message-queue tool calls."""
-    evidence_by_step_tool = {
-        (str(item.get("step_id") or ""), str(item.get("source_tool") or "")): item
-        for item in evidence
-        if isinstance(item, dict)
-        and str(item.get("evidence_type") or "") in {"trace", "message_queue"}
-    }
-    signals: list[dict[str, Any]] = []
-    for call in tool_calls:
-        if not isinstance(call, dict):
-            continue
-        tool_name = str(call.get("tool_name") or "")
-        if tool_name not in {"query_traces", "query_message_queue_status"}:
-            continue
-        evidence_item = evidence_by_step_tool.get((str(call.get("step_id") or ""), tool_name), {})
-        signals.append(
-            {
-                "step_id": call.get("step_id", ""),
-                "tool_name": tool_name,
-                "domain": "tracing" if tool_name == "query_traces" else "message_queue",
-                "backend": call.get("data_source") or evidence_item.get("data_source") or "unknown",
-                "status": call.get("status", "unknown"),
-                "data_source": call.get("data_source", "unknown"),
-                "latency_ms": call.get("latency_ms", 0.0),
-                "summary": call.get("output_summary")
-                or evidence_item.get("summary")
-                or call.get("error_message")
-                or "",
-                "stance": evidence_item.get("stance", "neutral"),
-                "confidence": evidence_item.get("confidence", 0.0),
-                "confidence_reason": evidence_item.get("confidence_reason", ""),
-            }
-        )
-    return signals
+    """Advanced trace/message-queue dependency cards are not part of the mainline."""
+    return []

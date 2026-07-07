@@ -23,6 +23,9 @@ CHANGE_LIFECYCLE_STATUSES = {
 
 REPORT_ONLY_STATUSES = {
     "completed",
+    "incomplete",
+    "degraded",
+    "needs_human",
     "waiting_approval",
     "approval_approved",
     "approval_rejected",

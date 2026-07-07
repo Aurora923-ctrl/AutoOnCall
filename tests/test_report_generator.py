@@ -38,7 +38,35 @@ def _state_with_redis_evidence() -> dict:
                 "output": {"summary": "connected_clients=9940/10000"},
             },
             confidence=0.82,
-        ).model_dump(mode="json")
+        ).model_dump(mode="json"),
+        Evidence(
+            source_tool="query_metrics",
+            step_id="s2",
+            summary="order-service P95=3250ms，5xx=8.2%",
+            evidence_type="metric",
+            data_source="prometheus",
+            stance="supporting",
+            confidence_reason="Prometheus 显示用户侧错误率和延迟升高",
+            raw_data={
+                "status": "success",
+                "output": {"summary": "P95=3250ms, 5xx=8.2%", "source": "prometheus"},
+            },
+            confidence=0.82,
+        ).model_dump(mode="json"),
+        Evidence(
+            source_tool="search_history_ticket",
+            step_id="s3",
+            summary="历史工单 INC-REDIS-001 命中 Redis maxclients 相似故障",
+            evidence_type="ticket",
+            data_source="ticket_api",
+            stance="supporting",
+            confidence_reason="历史工单可作为处置参考",
+            raw_data={
+                "status": "success",
+                "output": {"summary": "similar Redis maxclients incident", "source": "ticket_api"},
+            },
+            confidence=0.66,
+        ).model_dump(mode="json"),
     ]
     state["tool_call_records"] = [
         ToolCallRecord(
@@ -51,7 +79,29 @@ def _state_with_redis_evidence() -> dict:
             data_source="redis_info",
             latency_ms=18.5,
             status="success",
-        ).model_dump(mode="json")
+        ).model_dump(mode="json"),
+        ToolCallRecord(
+            trace_id=state["trace_id"],
+            incident_id=state["incident"]["incident_id"],
+            step_id="s2",
+            tool_name="query_metrics",
+            input_args={"service_name": "order-service"},
+            output={"summary": "P95=3250ms, 5xx=8.2%", "source": "prometheus"},
+            data_source="prometheus",
+            latency_ms=20.0,
+            status="success",
+        ).model_dump(mode="json"),
+        ToolCallRecord(
+            trace_id=state["trace_id"],
+            incident_id=state["incident"]["incident_id"],
+            step_id="s3",
+            tool_name="search_history_ticket",
+            input_args={"service_name": "order-service"},
+            output={"summary": "similar Redis maxclients incident", "source": "ticket_api"},
+            data_source="ticket_api",
+            latency_ms=15.0,
+            status="success",
+        ).model_dump(mode="json"),
     ]
     return state
 
@@ -83,20 +133,35 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert report.confirmed_facts
     assert report.inferred_conclusions
     assert report.next_steps
-    assert "## 面试速览" in report.markdown
+    assert "## 附录 A. 面试速览" in report.markdown
     assert "### Tool Call Table" in report.markdown
     assert "### Evidence Quick View" in report.markdown
     assert "| Tool | Source | Status | Latency ms | Summary |" in report.markdown
-    assert "| supporting | 1 |" in report.markdown
+    assert "| supporting | 3 |" in report.markdown
+    assert "## 1. 故障摘要" in report.markdown
+    assert "## 2. 影响范围" in report.markdown
+    assert "## 3. 初步根因" in report.markdown
+    assert "## 4. 关键证据" in report.markdown
+    assert "## 5. 排查过程" in report.markdown
+    assert "## 6. 风险动作判断" in report.markdown
+    assert "## 7. 建议处置" in report.markdown
+    assert "## 8. 回滚 / 观察指标" in report.markdown
+    assert "## 9. 未确认事项" in report.markdown
+    assert "证据回链" in report.markdown
+    assert "未记录到明确 evidence_id" not in report.markdown
+    assert report.hypothesis_ranking[0]["supporting_evidence_ids"]
     assert "Risk boundary: policy=allow" in report.markdown
     assert "does not directly perform production write actions" in report.markdown
     assert "关键证据" in report.markdown
-    assert "## 已确认事实" in report.markdown
-    assert "## 推断结论" in report.markdown
-    assert "## 根因假设矩阵" in report.markdown
-    assert "## 下一步建议" in report.markdown
-    assert "## 证据质量" in report.markdown
-    assert "## 证据矩阵" in report.markdown
+    assert "## 附录 B. 证据审计" in report.markdown
+    assert "### 已确认事实" in report.markdown
+    assert "### 推断结论" in report.markdown
+    assert "### 根因假设矩阵" in report.markdown
+    assert "### 下一步建议" in report.markdown
+    assert "### 证据质量" in report.markdown
+    assert "### 数据源边界" in report.markdown
+    assert "### 诊断链路证据" in report.markdown
+    assert "### 证据矩阵" in report.markdown
     assert "### 支持证据" in report.markdown
     assert "数据源分布" in report.markdown
     assert "失败工具" in report.markdown
@@ -107,9 +172,139 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "source=" in report.markdown
     assert "置信度原因" in report.markdown
     assert report.confidence > 0.7
+    assert report.status == "completed"
+    assert report.evidence_sufficiency["complete"] is True
 
     reloaded = ReportGenerator(tmp_path / "reports.db")
     assert reloaded.get_report(report.incident_id).report_id == report.report_id
+
+
+def test_report_generator_downgrades_completed_when_evidence_is_insufficient(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"] = state["gathered_evidence"][:1]
+    state["tool_call_records"] = state["tool_call_records"][:1]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status in {"incomplete", "needs_human", "degraded"}
+    assert report.status == "incomplete"
+    assert report.confidence <= 0.55
+    assert report.evidence_sufficiency["complete"] is False
+    missing_text = " ".join(report.evidence_sufficiency["missing_evidence"])
+    assert "现象侧证据" in missing_text
+    assert "处置参考" in missing_text
+    assert "报告由 completed 降级为 incomplete" in report.markdown
+    assert "当前置信度上限：0.55" in report.markdown
+
+
+def test_report_generator_explains_redis_live_info_vs_incident_evidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"][0]["raw_data"]["output"].update(
+        {
+            "source": "redis_info",
+            "summary": (
+                "incident_evidence=redis-cluster-prod connected_clients=9940/10000 "
+                "from replay window Redis key autooncall:incident:order-service:redis-maxclients; "
+                "live_info=current_runtime connected_clients=1/10000"
+            ),
+            "incident_evidence": {
+                "_key": "autooncall:incident:order-service:redis-maxclients",
+                "connected_clients": "9940",
+                "maxclients": "10000",
+                "source": "live-redis-seed",
+            },
+            "live_info": {
+                "connected_clients": 1,
+                "maxclients": 10000,
+                "scope": "current container runtime state",
+            },
+            "evidence_window_note": (
+                "live_info is current container runtime state; incident_evidence is replay "
+                "incident-window evidence stored in Redis keys."
+            ),
+            "evidence_timeline": [
+                {
+                    "stage": "incident_evidence",
+                    "fact": "Redis evidence key reports connected_clients=9940/maxclients=10000.",
+                    "inference": "Redis client capacity was exhausted.",
+                    "uncertainty": "Evidence is replay-window data.",
+                }
+            ],
+        }
+    )
+    state["tool_call_records"][0]["output"] = state["gathered_evidence"][0]["raw_data"]["output"]
+    state["tool_call_records"][0]["output_summary"] = state["gathered_evidence"][0]["summary"]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert "## 数据源边界" in report.markdown
+    assert "live_info 是当前容器运行态" in report.markdown
+    assert "incident_evidence 是回放事故窗口证据" in report.markdown
+    assert "connected_clients=1/maxclients=10000" in report.markdown
+    assert "connected_clients=9940/maxclients=10000" in report.markdown
+    assert "不声称当前 Redis 仍处于连接打满状态" in report.markdown
+    assert "### Redis Evidence Timeline" in report.markdown
+    assert "stage=incident_evidence" in report.markdown
+
+
+def test_report_generator_explains_mysql_runtime_vs_incident_evidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["incident"]["service_name"] = "payment-service"
+    state["incident"]["title"] = "payment-service MySQLSlowQueryLatency"
+    state["hypotheses"] = ["MySQL 慢查询、连接池等待或锁等待放大接口延迟。"]
+    state["gathered_evidence"][0].update(
+        {
+            "source_tool": "query_mysql_status",
+            "summary": "MySQL incident evidence shows slow_query_count=18, active_connections=188/200, pool_waiting=6.",
+            "evidence_type": "mysql",
+            "data_source": "mysql",
+            "fact": "slow_query_count=18, active_connections=188/200, pool_waiting=6",
+            "inference": "Slow SQL occupied connections and caused pool waiting.",
+            "uncertainty": "Current Slow_queries runtime counter is 0; incident evidence carries the outage window.",
+            "raw_data": {
+                "status": "success",
+                "output": {
+                    "source": "mysql",
+                    "incident_evidence": {
+                        "observed_value": "slow_queries=18,pool_waiting=6,active_connections=188/200",
+                    },
+                    "live_status": {
+                        "Slow_queries": 0,
+                        "Threads_connected": 2,
+                    },
+                    "summary": "slow_queries=18, pool_waiting=6",
+                },
+            },
+        }
+    )
+    state["tool_call_records"][0].update(
+        {
+            "tool_name": "query_mysql_status",
+            "data_source": "mysql",
+            "output": state["gathered_evidence"][0]["raw_data"]["output"],
+        }
+    )
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert "## 数据源边界" in report.markdown
+    assert "MySQL：live_status 是当前容器运行态" in report.markdown
+    assert "incident_evidence 是事故窗口证据" in report.markdown
+    assert "Slow_queries=0" in report.markdown
+    assert "pool_waiting=6" in report.markdown
+    assert "不声称当前 Slow_queries runtime counter 仍在增长" in report.markdown
 
 
 def test_report_generator_records_report_generated_trace(monkeypatch, tmp_path) -> None:
@@ -173,87 +368,25 @@ def test_report_generator_renders_runbook_references(tmp_path) -> None:
         status="completed",
     )
 
-    assert "## Runbook 引用" in report.markdown
+    assert "## 附录 C. 工具、Trace 与 Runbook" in report.markdown
+    assert "### Runbook 引用" in report.markdown
     assert "cpu_high_usage.md" in report.markdown
     assert "chunk=cpu_high_usage.md#0001" in report.markdown
     assert "score=0.2000" in report.markdown
 
 
-def test_report_generator_exposes_tracing_and_redpanda_dependency_signals(tmp_path) -> None:
-    state = _state_with_redis_evidence()
-    state["gathered_evidence"].extend(
-        [
-            Evidence(
-                source_tool="query_traces",
-                step_id="s2",
-                summary="Jaeger 返回 order-service 最近 3 条 trace，error_spans=1, slowest_us=3200000",
-                evidence_type="trace",
-                data_source="jaeger",
-                stance="supporting",
-                confidence_reason="Tracing 后端返回调用链耗时和错误 span 信号",
-                fact="trace_count=3 error_span_count=1",
-                raw_data={"status": "success", "output": {"source": "jaeger"}},
-                confidence=0.82,
-            ).model_dump(mode="json"),
-            Evidence(
-                source_tool="query_message_queue_status",
-                step_id="s3",
-                summary="Redpanda ready，topics=2, matched_partitions=1",
-                evidence_type="message_queue",
-                data_source="redpanda",
-                stance="supporting",
-                confidence_reason="消息队列后端返回 topic/partition 状态",
-                fact="topic_count=2 matched_partition_count=1",
-                raw_data={"status": "success", "output": {"source": "redpanda"}},
-                confidence=0.82,
-            ).model_dump(mode="json"),
-        ]
-    )
-    state["tool_call_records"].extend(
-        [
-            ToolCallRecord(
-                trace_id=state["trace_id"],
-                incident_id=state["incident"]["incident_id"],
-                step_id="s2",
-                tool_name="query_traces",
-                input_args={"service_name": "order-service", "lookback": "1h", "limit": 20},
-                output={"summary": "Jaeger 返回 order-service 最近 3 条 trace"},
-                output_summary="Jaeger 返回 order-service 最近 3 条 trace，error_spans=1",
-                data_source="jaeger",
-                latency_ms=21,
-                status="success",
-            ).model_dump(mode="json"),
-            ToolCallRecord(
-                trace_id=state["trace_id"],
-                incident_id=state["incident"]["incident_id"],
-                step_id="s3",
-                tool_name="query_message_queue_status",
-                input_args={"service_name": "order-service", "topic": "redpanda-order"},
-                output={"summary": "Redpanda ready，topics=2, matched_partitions=1"},
-                output_summary="Redpanda ready，topics=2, matched_partitions=1",
-                data_source="redpanda",
-                latency_ms=19,
-                status="success",
-            ).model_dump(mode="json"),
-        ]
+def test_report_generator_omits_advanced_dependency_signals(tmp_path) -> None:
+    generator = ReportGenerator(storage_path=tmp_path / "reports.db")
+    report = generator.generate_from_state(
+        {
+            "incident": {"incident_id": "INC-001", "service_name": "order-service"},
+            "trace_id": "trace-1",
+            "gathered_evidence": [],
+            "tool_call_records": [],
+        }
     )
 
-    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
-        state,
-        trace_events=[],
-        status="completed",
-    )
-
-    assert [item["domain"] for item in report.dependency_signals] == [
-        "tracing",
-        "message_queue",
-    ]
-    assert report.dependency_signals[0]["backend"] == "jaeger"
-    assert report.dependency_signals[1]["backend"] == "redpanda"
-    assert "## Tracing 与消息队列证据" in report.markdown
-    assert "backend=jaeger" in report.markdown
-    assert "backend=redpanda" in report.markdown
-
+    assert report.dependency_signals == []
 
 def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> None:
     state = _state_with_redis_evidence()
@@ -297,8 +430,8 @@ def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> N
     assert "manual_action_required=true" in report.markdown
     assert "等待人工审批" in report.markdown
     assert "审批动作：调整 Redis maxclients 配置" in report.markdown
-    assert "## 人工动作与回滚边界" in report.markdown
-    assert "## 变更计划草案" in report.markdown
+    assert "### 人工动作与回滚边界" in report.markdown
+    assert "### 变更计划草案" in report.markdown
     assert "人工调整配置" in report.markdown
     assert "Agent 只输出诊断和处置建议" in report.markdown
     assert "回滚方案" in report.markdown

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, UploadFile
+from openpyxl import Workbook
 
 from app.api import file as file_api
 from app.services import vector_index_service as vector_index_module
@@ -64,9 +65,36 @@ async def test_upload_file_reports_indexing_failure_without_failing_upload(
         "duration_ms": 0,
         "error_message": file_api.PUBLIC_INDEXING_ERROR_MESSAGE,
         "message": "文件已保存，但索引未完成",
+        "cleaning": {},
     }
     assert (tmp_path / "runbook.md").read_bytes() == b"# runbook\n"
     assert called_paths == [str(tmp_path / "runbook.md")]
+
+
+@pytest.mark.asyncio
+async def test_upload_corrupt_pdf_reports_public_safe_partial_success(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
+
+    def fail_index(path: str) -> None:
+        raise RuntimeError(f"PDF parse failed at {path}: xref table missing")
+
+    monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fail_index)
+
+    upload = UploadFile(file=io.BytesIO(b"%PDF corrupt"), filename="broken.pdf")
+    response = await file_api.upload_file(upload)
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 207
+    assert payload["message"] == "partial_success"
+    assert payload["data"]["filename"] == "broken.pdf"
+    assert payload["data"]["file_path"] == "broken.pdf"
+    assert payload["data"]["indexing_ready"] is False
+    assert payload["data"]["indexing"]["status"] == "failed"
+    assert payload["data"]["indexing"]["error_message"] == file_api.PUBLIC_INDEXING_ERROR_MESSAGE
+    assert str(tmp_path) not in json.dumps(payload, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -297,7 +325,13 @@ def test_index_single_file_rejects_paths_outside_allowed_roots(monkeypatch, tmp_
 def test_index_directory_includes_markdown_extension(monkeypatch, tmp_path) -> None:
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
-    for filename in ["guide.txt", "runbook.md", "postmortem.markdown"]:
+    for filename in [
+        "guide.txt",
+        "runbook.md",
+        "postmortem.markdown",
+        "wiki.html",
+        "tickets.csv",
+    ]:
         (docs_dir / filename).write_text("content", encoding="utf-8")
     indexed_files: list[str] = []
     service = VectorIndexService()
@@ -311,12 +345,14 @@ def test_index_directory_includes_markdown_extension(monkeypatch, tmp_path) -> N
 
     result = service.index_directory(str(docs_dir))
 
-    assert result.total_files == 3
-    assert result.success_count == 3
+    assert result.total_files == 5
+    assert result.success_count == 5
     assert {Path(path).name for path in indexed_files} == {
         "guide.txt",
         "runbook.md",
         "postmortem.markdown",
+        "wiki.html",
+        "tickets.csv",
     }
 
 
@@ -612,3 +648,136 @@ def test_index_single_file_empty_content_marks_source_stale_when_vector_delete_f
     normalized_path = runbook.resolve().as_posix()
     assert fake_lexical.deleted_sources == []
     assert fake_lexical.stale_sources == [(normalized_path, "delete unavailable")]
+
+
+def test_index_single_file_preserves_multi_source_loader_metadata(monkeypatch, tmp_path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    html_file = docs_dir / "wiki.html"
+    html_file.write_text(
+        "<h1>Payment Runbook</h1><h2>MySQL 慢查询</h2>"
+        "<p>使用 EXPLAIN 排查 slow query digest。</p>",
+        encoding="utf-8",
+    )
+    csv_file = docs_dir / "tickets.csv"
+    csv_file.write_text(
+        "ticket_id,service_name,root_cause\n"
+        "INC-REDIS-001,order-service,Redis maxclients exhausted\n",
+        encoding="utf-8",
+    )
+    xlsx_file = docs_dir / "catalog.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "services"
+    sheet.append(["service_name", "dependency"])
+    sheet.append(["payment-service", "mysql-payments"])
+    workbook.save(xlsx_file)
+    pdf_file = docs_dir / "postmortem.pdf"
+    pdf_file.write_bytes(b"%PDF fake")
+
+    class FakePage:
+        def extract_text(self) -> str:
+            return "Redis maxclients 故障复盘，connected_clients 达到 9940。"
+
+    def fake_reader(_path: str):
+        return type("FakeReader", (), {"pages": [FakePage()]})()
+
+    class RecordingVectorStoreManager:
+        def __init__(self) -> None:
+            self.added_batches = []
+
+        def add_documents(self, documents):
+            self.added_batches.append(list(documents))
+            return [f"vec-{index}" for index, _ in enumerate(documents, 1)]
+
+        def delete_by_source_except_ids(self, source: str, vector_ids: list[str]) -> int:
+            return 0
+
+        def delete_by_source(self, source: str, *, raise_on_error: bool = False) -> int:
+            return 0
+
+    class RecordingLexicalIndex:
+        def __init__(self) -> None:
+            self.upserted_batches = []
+
+        def upsert_source(self, source: str, documents) -> None:
+            self.upserted_batches.append((source, list(documents)))
+
+        def mark_source_stale(self, source: str, reason: str) -> None:
+            raise AssertionError(reason)
+
+    fake_vector = RecordingVectorStoreManager()
+    fake_lexical = RecordingLexicalIndex()
+    service = VectorIndexService()
+
+    monkeypatch.setattr(vector_index_module.config, "index_allowed_roots", str(tmp_path))
+    monkeypatch.setattr(vector_index_module, "vector_store_manager", fake_vector)
+    monkeypatch.setattr(vector_index_module, "lexical_index_service", fake_lexical)
+    monkeypatch.setattr("app.services.document_loaders.pdf_loader.PdfReader", fake_reader)
+
+    for path in [pdf_file, html_file, csv_file, xlsx_file]:
+        result = service.index_single_file(str(path))
+        assert result.status == "success"
+        assert result.cleaning_report["indexed_units"] >= 1
+
+    metadata_by_name = {
+        Path(batch[0].metadata["_file_name"]).name: batch[0].metadata
+        for batch in fake_vector.added_batches
+    }
+    assert metadata_by_name["postmortem.pdf"]["page_number"] == 1
+    assert metadata_by_name["wiki.html"]["heading_path"] == "Payment Runbook > MySQL 慢查询"
+    assert metadata_by_name["tickets.csv"]["row_number"] == 2
+    assert metadata_by_name["tickets.csv"]["primary_key"] == "ticket_id=INC-REDIS-001"
+    assert metadata_by_name["catalog.xlsx"]["sheet_name"] == "services"
+    assert metadata_by_name["catalog.xlsx"]["primary_key"] == "service_name=payment-service"
+
+
+def test_index_single_file_empty_pdf_clears_existing_indexes(monkeypatch, tmp_path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    pdf_file = docs_dir / "scanned.pdf"
+    pdf_file.write_bytes(b"%PDF fake")
+    service = VectorIndexService()
+
+    class EmptyPage:
+        def extract_text(self) -> str:
+            return ""
+
+    def fake_reader(_path: str):
+        return type("FakeReader", (), {"pages": [EmptyPage()]})()
+
+    class RecordingVectorStoreManager:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+
+        def delete_by_source(self, source: str, *, raise_on_error: bool = False) -> int:
+            self.deleted_sources.append(source)
+            return 1
+
+    class RecordingLexicalIndex:
+        def __init__(self) -> None:
+            self.deleted_sources: list[str] = []
+
+        def delete_source(self, source: str) -> int:
+            self.deleted_sources.append(source)
+            return 1
+
+        def mark_source_stale(self, source: str, reason: str) -> None:
+            raise AssertionError(reason)
+
+    fake_vector = RecordingVectorStoreManager()
+    fake_lexical = RecordingLexicalIndex()
+
+    monkeypatch.setattr(vector_index_module.config, "index_allowed_roots", str(tmp_path))
+    monkeypatch.setattr(vector_index_module, "vector_store_manager", fake_vector)
+    monkeypatch.setattr(vector_index_module, "lexical_index_service", fake_lexical)
+    monkeypatch.setattr("app.services.document_loaders.pdf_loader.PdfReader", fake_reader)
+
+    result = service.index_single_file(str(pdf_file))
+    normalized_path = pdf_file.resolve().as_posix()
+
+    assert result.status == "empty"
+    assert result.cleaning_report["empty_units"] == 1
+    assert "扫描件需要 OCR" in " ".join(result.cleaning_report["warnings"])
+    assert fake_vector.deleted_sources == [normalized_path]
+    assert fake_lexical.deleted_sources == [normalized_path]

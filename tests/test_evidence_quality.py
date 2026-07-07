@@ -53,3 +53,79 @@ def test_evidence_data_source_normalizes_raw_output_when_label_is_unknown() -> N
 
     assert evidence_data_source(item) == "prometheus"
     assert source_quality_confidence_cap([item], {}) is None
+
+
+def test_evidence_sufficiency_requires_domain_symptom_and_reference() -> None:
+    profile = build_evidence_quality_profile(
+        [
+            _evidence("redis_info", data_source="redis_info", evidence_type="redis"),
+            _evidence("prometheus", data_source="prometheus", evidence_type="metric"),
+        ]
+    )
+
+    sufficiency = profile["sufficiency"]
+    assert sufficiency["complete"] is False
+    assert sufficiency["status"] == "degraded"
+    assert sufficiency["has_primary_domain_evidence"] is True
+    assert sufficiency["has_symptom_evidence"] is True
+    assert sufficiency["has_reference_evidence"] is False
+    assert "处置参考（Runbook 或历史工单）" in sufficiency["missing_evidence"]
+
+
+def test_evidence_sufficiency_complete_with_history_ticket() -> None:
+    profile = build_evidence_quality_profile(
+        [
+            _evidence("mysql", data_source="mysql", evidence_type="mysql"),
+            _evidence("loki", data_source="loki", evidence_type="log"),
+            _evidence("ticket_api", data_source="ticket_api", evidence_type="ticket"),
+        ]
+    )
+
+    assert profile["sufficiency"]["complete"] is True
+    assert profile["sufficiency"]["status"] == "complete"
+
+
+def test_runbook_no_answer_rejection_does_not_count_as_reference() -> None:
+    profile = build_evidence_quality_profile(
+        [
+            _evidence("prometheus", data_source="prometheus", evidence_type="metric"),
+            _evidence("loki", data_source="loki", evidence_type="log"),
+            {
+                "source_tool": "search_runbook",
+                "evidence_type": "runbook",
+                "data_source": "eval_fixture",
+                "stance": "supporting",
+                "raw_data": {
+                    "status": "success",
+                    "output": {"no_answer_rejected": True, "summary": "no trusted runbook"},
+                },
+            },
+        ]
+    )
+
+    sufficiency = profile["sufficiency"]
+    assert sufficiency["complete"] is False
+    assert sufficiency["has_reference_evidence"] is False
+    assert "可信 Runbook / 历史工单处置参考" in sufficiency["missing_evidence"]
+
+
+def test_failed_k8s_domain_tool_blocks_metric_only_primary_substitution() -> None:
+    profile = build_evidence_quality_profile(
+        [
+            {
+                "source_tool": "query_k8s_status",
+                "evidence_type": "k8s",
+                "data_source": "unknown",
+                "stance": "neutral",
+                "raw_data": {"status": "failed", "error_message": "RBAC denied"},
+            },
+            _evidence("prometheus", data_source="prometheus", evidence_type="metric"),
+            _evidence("loki", data_source="loki", evidence_type="log"),
+            _evidence("ticket_api", data_source="ticket_api", evidence_type="ticket"),
+        ]
+    )
+
+    sufficiency = profile["sufficiency"]
+    assert sufficiency["complete"] is False
+    assert sufficiency["has_primary_domain_evidence"] is False
+    assert "query_k8s_status" in sufficiency["failed_tools"]

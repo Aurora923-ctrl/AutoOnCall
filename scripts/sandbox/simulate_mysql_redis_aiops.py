@@ -16,12 +16,14 @@ import httpx
 from fastapi import FastAPI
 
 ROOT = Path(__file__).resolve().parents[2]
-SANDBOX_COMPOSE = ROOT / "deploy" / "compose" / "full-stack-compose.yml"
+SANDBOX_COMPOSE = ROOT / "deploy" / "compose" / "interview-stack.yml"
 SANDBOX_ENV = ROOT / "deploy" / "sandbox.env"
 SANDBOX_REDIS_CONTAINER = "autooncall-full-redis"
 SANDBOX_MYSQL_CONTAINER = "autooncall-full-mysql"
 SANDBOX_PROMETHEUS_CONTAINER = "autooncall-full-prometheus"
 SANDBOX_EXPORTER_CONTAINER = "autooncall-full-metrics-exporter"
+SANDBOX_LOKI_CONTAINER = "autooncall-full-loki"
+SANDBOX_LOKI_EMITTER_CONTAINER = "autooncall-full-loki-log-emitter"
 
 
 class EmptyMCPClient:
@@ -503,11 +505,18 @@ async def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "sandbox_services": [
-            SANDBOX_REDIS_CONTAINER,
             SANDBOX_MYSQL_CONTAINER,
-            SANDBOX_PROMETHEUS_CONTAINER,
+            SANDBOX_REDIS_CONTAINER,
             SANDBOX_EXPORTER_CONTAINER,
+            SANDBOX_PROMETHEUS_CONTAINER,
+            SANDBOX_LOKI_CONTAINER,
+            SANDBOX_LOKI_EMITTER_CONTAINER,
         ],
+        "default_stack_boundary": (
+            "Default interview stack contains only MySQL, Redis, metrics-exporter, "
+            "Prometheus, Loki, and loki-log-emitter; Milvus/RAG is optional and K8s is "
+            "offline golden regression coverage."
+        ),
         "data_sources": collect_data_sources(results),
         "results": results,
     }

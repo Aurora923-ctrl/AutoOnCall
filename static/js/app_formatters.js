@@ -69,11 +69,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
     sourceMetadata(source) {
         const value = String(source || 'unknown').trim().toLowerCase();
         const realSources = new Set([
-            'alertmanager',
             'cmdb',
             'deploy_history',
-            'jaeger',
-            'kafka',
             'kubernetes',
             'log_gateway',
             'loki',
@@ -84,9 +81,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             'prometheus',
             'rag',
             'redis',
-            'redpanda',
             'session_snapshot',
-            'tempo',
             'ticket_api',
             'trace_store'
         ]);

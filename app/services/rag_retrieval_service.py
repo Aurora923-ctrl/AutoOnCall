@@ -413,6 +413,7 @@ def format_retrieval_results(results: list[dict[str, Any]]) -> str:
         source = str(item.get("source_file") or "未知来源")
         chunk_id = str(item.get("chunk_id") or "")
         content = str(item.get("content") or item.get("content_preview") or "").strip()
+        metadata = dict(item.get("metadata") or {})
 
         lines = [
             f"【可信知识 {item.get('rank', len(parts) + 1)}】",
@@ -420,6 +421,14 @@ def format_retrieval_results(results: list[dict[str, Any]]) -> str:
             f"chunk_id: {chunk_id}",
             f"score: {score_text}",
         ]
+        if metadata.get("page_number"):
+            lines.append(f"page_number: {metadata.get('page_number')}")
+        if metadata.get("sheet_name"):
+            lines.append(f"sheet_name: {metadata.get('sheet_name')}")
+        if metadata.get("row_number"):
+            lines.append(f"row_number: {metadata.get('row_number')}")
+        if metadata.get("primary_key"):
+            lines.append(f"primary_key: {metadata.get('primary_key')}")
         if heading:
             lines.append(f"标题路径: {heading}")
         lines.extend(["内容:", content])

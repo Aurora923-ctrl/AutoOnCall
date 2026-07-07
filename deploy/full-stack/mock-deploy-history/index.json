@@ -1,8 +1,0 @@
-{
-  "service": "mock-deploy-history",
-  "description": "Static deployment history fixture service for AutoOnCall sandbox",
-  "endpoints": [
-    "/deployments.json",
-    "/deployments/order-service.json"
-  ]
-}

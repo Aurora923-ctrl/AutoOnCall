@@ -7,6 +7,7 @@ from typing import Any
 from loguru import logger
 
 from app.config import config
+from app.services.document_loaders import document_loader_registry
 from app.services.document_splitter_service import document_splitter_service
 from app.services.lexical_index_service import lexical_index_service
 from app.services.vector_store_manager import vector_store_manager
@@ -35,6 +36,7 @@ class IndexingResult:
 
         self.empty_count = 0
         self.empty_files: dict[str, str] = {}
+        self.cleaning_reports: dict[str, dict[str, Any]] = {}
 
     def increment_success_count(self) -> None:
         """增加成功计数"""
@@ -68,6 +70,10 @@ class IndexingResult:
         """添加未产生 chunk 的文件"""
         self.empty_files[file_path] = message
 
+    def add_cleaning_report(self, file_path: str, report: dict[str, Any]) -> None:
+        """Attach loader-level cleaning details for one indexed file."""
+        self.cleaning_reports[file_path] = report
+
     def get_duration_ms(self) -> int:
         """获取耗时（毫秒）"""
         if self.start_time and self.end_time:
@@ -89,6 +95,7 @@ class IndexingResult:
             "failed_files": self.failed_files,
             "empty_count": self.empty_count,
             "empty_files": self.empty_files,
+            "cleaning_reports": self.cleaning_reports,
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -116,6 +123,10 @@ class IndexingResult:
             _public_path_label(file_path): message
             for file_path, message in self.empty_files.items()
         }
+        payload["cleaning_reports"] = {
+            _public_path_label(file_path): report
+            for file_path, report in self.cleaning_reports.items()
+        }
         return payload
 
 
@@ -130,12 +141,14 @@ class SingleFileIndexingResult:
         chunk_count: int,
         error_message: str | None = None,
         message: str | None = None,
+        cleaning_report: dict[str, Any] | None = None,
     ) -> None:
         self.file_path = file_path
         self.status = status
         self.chunk_count = chunk_count
         self.error_message = error_message
         self.message = message
+        self.cleaning_report = cleaning_report or {}
         self.start_time = datetime.now()
         self.end_time: datetime | None = None
 
@@ -154,6 +167,7 @@ class SingleFileIndexingResult:
             "duration_ms": self.get_duration_ms(),
             "error_message": self.error_message,
             "message": self.message,
+            "cleaning": self.cleaning_report,
         }
 
 
@@ -218,11 +232,7 @@ class VectorIndexService:
 
             result.directory_path = str(dir_path)
 
-            files = (
-                list(dir_path.glob("*.txt"))
-                + list(dir_path.glob("*.md"))
-                + list(dir_path.glob("*.markdown"))
-            )
+            files = self._supported_files(dir_path)
 
             if not files:
                 logger.warning(f"目录中没有找到支持的文件: {target_path}")
@@ -245,6 +255,10 @@ class VectorIndexService:
                         result.add_empty_file(
                             str(file_path), file_result.message or "文件未产生可检索分片"
                         )
+                        result.add_cleaning_report(
+                            str(file_path),
+                            file_result.cleaning_report,
+                        )
                         logger.warning(f"⚠ 文件未产生可检索分片: {file_path.name}")
                     else:
                         chunk_count = (
@@ -262,6 +276,11 @@ class VectorIndexService:
                                 else None
                             ),
                         )
+                        if isinstance(file_result, SingleFileIndexingResult):
+                            result.add_cleaning_report(
+                                str(file_path),
+                                file_result.cleaning_report,
+                            )
                         logger.info(f"✓ 文件索引成功: {file_path.name}")
                 except Exception as e:
                     result.increment_fail_count()
@@ -325,10 +344,17 @@ class VectorIndexService:
         normalized_path = path.as_posix()
 
         try:
-            content = path.read_text(encoding="utf-8")
-            logger.info(f"读取文件: {path}, 内容长度: {len(content)} 字符")
+            loader = document_loader_registry.get_loader(path)
+            loaded_documents, cleaning_report = loader.load(path)
+            logger.info(
+                f"读取文件: {path}, loader={loader.loader_type}, "
+                f"有效单元={len(loaded_documents)}, raw_units={cleaning_report.raw_units}"
+            )
 
-            documents = document_splitter_service.split_document(content, normalized_path)
+            documents = document_splitter_service.split_loaded_documents(
+                loaded_documents,
+                normalized_path,
+            )
             logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
             if documents:
@@ -344,6 +370,7 @@ class VectorIndexService:
                     status="success",
                     chunk_count=len(documents),
                     message="文件索引完成",
+                    cleaning_report=cleaning_report.model_dump(mode="json"),
                 ).finish()
             else:
                 vector_deleted = vector_store_manager.delete_by_source(
@@ -360,6 +387,7 @@ class VectorIndexService:
                         "文件内容为空或无法切分，未写入向量索引；"
                         f"已清理旧索引 vector={vector_deleted}, lexical={lexical_deleted}"
                     ),
+                    cleaning_report=cleaning_report.model_dump(mode="json"),
                 ).finish()
 
         except Exception as e:
@@ -411,6 +439,15 @@ class VectorIndexService:
             seen.add(resolved)
             resolved_roots.append(resolved)
         return resolved_roots
+
+    def _supported_files(self, dir_path: Path) -> list[Path]:
+        """Return files supported by the configured loader registry."""
+        supported = document_loader_registry.supported_extensions
+        return sorted(
+            path
+            for path in dir_path.iterdir()
+            if path.is_file() and path.suffix.lower().removeprefix(".") in supported
+        )
 
 
 vector_index_service = VectorIndexService()

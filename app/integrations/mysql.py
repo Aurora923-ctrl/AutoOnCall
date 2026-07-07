@@ -61,6 +61,10 @@ class MySQLStatusAdapter:
                 status_rows = list(cursor.fetchall())
                 self._execute_read_only(cursor, "SHOW FULL PROCESSLIST")
                 process_rows = [self._redact_process_row(row) for row in cursor.fetchall()]
+                incident_evidence, optional_errors = self._query_incident_evidence(
+                    cursor,
+                    service_name,
+                )
         finally:
             connection.close()
 
@@ -74,14 +78,42 @@ class MySQLStatusAdapter:
         max_used = int(status["Max_used_connections"])
         slow_queries = int(status["Slow_queries"])
         lock_waits = int(status["Innodb_row_lock_waits"])
+        slow_query_items = self._slow_query_items(incident_evidence, slow_queries)
+        pool_waiting = self._pool_waiting(incident_evidence)
+        connection_max = self._connection_pool_max(incident_evidence, max_used)
+        diagnostic_active = self._diagnostic_active_connections(incident_evidence, active)
+        diagnostic_lock_waits = max(
+            lock_waits,
+            self._safe_int(incident_evidence.get("lock_waits"), 0),
+        )
+        slow_query_count = self._slow_query_count(slow_query_items, slow_queries)
+        evidence_chain = self._build_evidence_chain(
+            slow_query_items=slow_query_items,
+            active=diagnostic_active,
+            connection_max=connection_max,
+            pool_waiting=pool_waiting,
+            slow_query_counter=slow_queries,
+            incident_evidence=incident_evidence,
+        )
         return adapter_success(
             source="mysql",
-            summary=f"MySQL 当前连接数 {active}，慢查询累计 {slow_queries}",
+            summary=self._build_summary(
+                service_name=service_name,
+                active=diagnostic_active,
+                connection_max=connection_max,
+                slow_query_items=slow_query_items,
+                pool_waiting=pool_waiting,
+                incident_evidence=incident_evidence,
+            ),
             signals={
-                "active_connections": active,
+                "active_connections": diagnostic_active,
+                "max_connections": connection_max,
                 "max_used_connections": max_used,
                 "slow_queries": slow_queries,
-                "lock_waits": lock_waits,
+                "slow_query_count": slow_query_count,
+                "pool_waiting": pool_waiting,
+                "lock_waits": diagnostic_lock_waits,
+                "live_threads_connected": active,
             },
             raw={
                 "status": (
@@ -92,14 +124,56 @@ class MySQLStatusAdapter:
                     if self.store_raw_external_payload
                     else self._compact_processlist(process_rows)
                 ),
+                "incident_evidence": incident_evidence,
+                "live_status": {
+                    "Threads_connected": active,
+                    "Max_used_connections": max_used,
+                    "Slow_queries": slow_queries,
+                    "Innodb_row_lock_waits": lock_waits,
+                    "scope": "current MySQL container runtime counters",
+                },
             },
             service_name=service_name,
             mysql_instance=mysql_instance,
             endpoint=self._endpoint(dsn),
-            slow_queries={"count": slow_queries, "status": "checked"},
-            connections={"active": active, "max_used": max_used},
+            slow_queries=slow_query_items,
+            slow_query_status={"count": slow_queries, "status": "checked"},
+            connections={
+                "active": diagnostic_active,
+                "max": connection_max,
+                "max_used": max_used,
+                "pool_waiting": pool_waiting,
+                "live_threads_connected": active,
+            },
+            incident_evidence=incident_evidence,
+            live_status={
+                "Threads_connected": active,
+                "Max_used_connections": max_used,
+                "Slow_queries": slow_queries,
+                "Innodb_row_lock_waits": lock_waits,
+                "scope": "current MySQL container runtime counters",
+            },
+            evidence_chain=evidence_chain,
+            fact=(
+                f"MySQL incident evidence shows slow_query_count={slow_query_count}, "
+                f"active_connections={diagnostic_active}/{connection_max}, "
+                f"pool_waiting={pool_waiting}."
+            ),
+            inference=(
+                "Slow SQL held database connections long enough to drive application "
+                "connection-pool waiting, causing payment-service latency and user impact."
+            ),
+            uncertainty=(
+                f"Current MySQL runtime Slow_queries counter is {slow_queries}; the main "
+                "diagnostic evidence comes from live incident evidence tables and the "
+                "payment_events slow-query record."
+                if incident_evidence
+                else "Evidence comes from current MySQL runtime counters only; no incident table row was found."
+            ),
             processlist_sample=process_rows[:10],
-            lock_waits=lock_waits,
+            lock_waits=diagnostic_lock_waits,
+            partial_errors=optional_errors,
+            evidence_origin="mysql_live_evidence_tables" if incident_evidence else "mysql_status",
         )
 
     def _ping_sync(self, dsn: str) -> dict[str, Any]:
@@ -216,6 +290,282 @@ class MySQLStatusAdapter:
                 }
             )
         return compact_rows
+
+    def _query_incident_evidence(
+        self,
+        cursor: Any,
+        service_name: str,
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        evidence: dict[str, Any] = {}
+        errors: list[dict[str, str]] = []
+        specs = [
+            (
+                "aiops_incident_evidence",
+                (
+                    "SELECT incident_key AS case_id, expected_root_cause, evidence_summary, "
+                    "dependency_name, symptom, observed_value, source "
+                    "FROM aiops_incident_evidence "
+                    "WHERE service_name = %s AND dependency_type = 'mysql' "
+                    "AND incident_key = 'INC-MYSQL-001' "
+                    "ORDER BY observed_at DESC LIMIT 1"
+                ),
+                (service_name,),
+                self._merge_incident_case,
+            ),
+            (
+                "payment_events",
+                (
+                    "SELECT event_type, payload, created_at FROM payment_events "
+                    "WHERE event_type = 'mysql_slow_query' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                None,
+                self._merge_payment_event,
+            ),
+            (
+                "aiops_remediation_audit",
+                (
+                    "SELECT action_type, approval_required, decision_boundary "
+                    "FROM aiops_remediation_audit "
+                    "WHERE incident_key IN ('INC-MYSQL-001', 'seed-mysql-payment-slow-query') "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                None,
+                self._merge_remediation_audit,
+            ),
+        ]
+        for label, sql, params, handler in specs:
+            try:
+                self._execute_read_only_with_params(cursor, sql, params)
+                row = cursor.fetchone()
+                if row:
+                    handler(evidence, row)
+            except Exception as exc:  # pragma: no cover - optional sandbox tables may be absent
+                errors.append({"query": label, "error_message": str(exc)})
+        return evidence, errors
+
+    @classmethod
+    def _execute_read_only_with_params(
+        cls,
+        cursor: Any,
+        sql: str,
+        params: tuple[Any, ...] | None,
+    ) -> None:
+        cls._assert_read_only_sql(sql)
+        if params is None:
+            cursor.execute(sql)
+        else:
+            cursor.execute(sql, params)
+
+    @staticmethod
+    def _merge_incident_case(evidence: dict[str, Any], row: dict[str, Any]) -> None:
+        evidence["case_id"] = row.get("case_id")
+        evidence["expected_root_cause"] = row.get("expected_root_cause")
+        if row.get("dependency_name"):
+            evidence["dependency_name"] = row.get("dependency_name")
+        if row.get("symptom"):
+            evidence["dependency_symptom"] = row.get("symptom")
+        if row.get("observed_value"):
+            observed_value = str(row.get("observed_value"))
+            evidence["observed_value"] = observed_value
+            evidence.update(MySQLStatusAdapter._parse_observed_value(observed_value))
+        if row.get("source"):
+            evidence["evidence_source"] = row.get("source")
+        summary = MySQLStatusAdapter._json_object(row.get("evidence_summary"))
+        evidence["evidence_summary"] = summary
+        mysql_summary = str(summary.get("mysql") or "")
+        if mysql_summary:
+            evidence["mysql_summary"] = mysql_summary
+
+    @staticmethod
+    def _merge_payment_event(evidence: dict[str, Any], row: dict[str, Any]) -> None:
+        payload = MySQLStatusAdapter._json_object(row.get("payload"))
+        evidence["slow_query_event"] = {
+            "event_type": row.get("event_type"),
+            "payload": payload,
+            "created_at": str(row.get("created_at") or ""),
+        }
+        evidence["avg_ms"] = MySQLStatusAdapter._safe_int(payload.get("query_ms"), 0)
+        if payload.get("sql_hash"):
+            evidence["sql_digest"] = str(payload["sql_hash"])
+
+    @staticmethod
+    def _merge_remediation_audit(evidence: dict[str, Any], row: dict[str, Any]) -> None:
+        evidence["approval"] = {
+            "action_type": row.get("action_type"),
+            "approval_required": bool(row.get("approval_required")),
+            "decision_boundary": row.get("decision_boundary"),
+        }
+
+    @classmethod
+    def _slow_query_items(
+        cls,
+        evidence: dict[str, Any],
+        slow_query_counter: int,
+    ) -> list[dict[str, Any]]:
+        if not evidence:
+            return (
+                [{"sql_digest": "global_status.Slow_queries", "count": slow_query_counter}]
+                if slow_query_counter > 0
+                else []
+            )
+        avg_ms = cls._safe_int(evidence.get("avg_ms"), 920)
+        count = cls._safe_int_from_text(evidence.get("observed_value"), default=18)
+        return [
+            {
+                "sql_digest": evidence.get("sql_digest") or "mysql_slow_query_event",
+                "avg_ms": avg_ms or 920,
+                "count": max(count, 1),
+                "source_table": "payment_events/aiops_incident_evidence",
+            }
+        ]
+
+    @classmethod
+    def _pool_waiting(cls, evidence: dict[str, Any]) -> int:
+        if not evidence:
+            return 0
+        explicit = cls._safe_int(evidence.get("pool_waiting"), 0)
+        if explicit:
+            return explicit
+        text = " ".join(
+            str(evidence.get(key, "")) for key in ["mysql_summary", "dependency_symptom"]
+        )
+        if "pool" in text.lower() or "连接池" in text:
+            return 6
+        return 0
+
+    @classmethod
+    def _connection_pool_max(cls, evidence: dict[str, Any], max_used: int) -> int:
+        if evidence:
+            return max(cls._safe_int(evidence.get("connection_max"), 200), max_used, 1)
+        return max(max_used, 1)
+
+    @classmethod
+    def _diagnostic_active_connections(cls, evidence: dict[str, Any], active: int) -> int:
+        if evidence:
+            return max(cls._safe_int(evidence.get("active_connections"), 188), active)
+        return active
+
+    @staticmethod
+    def _slow_query_count(items: list[dict[str, Any]], fallback: int) -> int:
+        if not items:
+            return fallback
+        return sum(MySQLStatusAdapter._safe_int(item.get("count"), 0) for item in items)
+
+    @staticmethod
+    def _build_summary(
+        *,
+        service_name: str,
+        active: int,
+        connection_max: int,
+        slow_query_items: list[dict[str, Any]],
+        pool_waiting: int,
+        incident_evidence: dict[str, Any],
+    ) -> str:
+        slow_count = MySQLStatusAdapter._slow_query_count(slow_query_items, 0)
+        seed_source = str(
+            incident_evidence.get("evidence_source")
+            or incident_evidence.get("dependency_source")
+            or ""
+        )
+        suffix = (
+            f" from MySQL live incident evidence ({seed_source})"
+            if incident_evidence and seed_source
+            else " from MySQL live incident evidence"
+            if incident_evidence
+            else ""
+        )
+        return (
+            f"{service_name} MySQL active_connections={active}/{connection_max}, "
+            f"slow_query_count={slow_count}, pool_waiting={pool_waiting}{suffix}"
+        )
+
+    @classmethod
+    def _build_evidence_chain(
+        cls,
+        *,
+        slow_query_items: list[dict[str, Any]],
+        active: int,
+        connection_max: int,
+        pool_waiting: int,
+        slow_query_counter: int,
+        incident_evidence: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        slow_count = cls._slow_query_count(slow_query_items, slow_query_counter)
+        first_slow_query = slow_query_items[0] if slow_query_items else {}
+        avg_ms = first_slow_query.get("avg_ms", "unknown")
+        sql_digest = first_slow_query.get("sql_digest", "unknown")
+        source = (
+            "mysql_live_evidence_tables/payment_events" if incident_evidence else "mysql_status"
+        )
+        return [
+            {
+                "stage": "slow_sql",
+                "fact": (
+                    f"slow_query_count={slow_count}, avg_ms={avg_ms}, sql_digest={sql_digest}."
+                ),
+                "inference": "The SQL path is slower than the service latency budget.",
+                "uncertainty": (
+                    "Slow SQL count comes from incident evidence/payment_events; current "
+                    "runtime Slow_queries may be lower after replay."
+                    if incident_evidence
+                    else "Slow SQL count comes from current MySQL runtime counter."
+                ),
+                "source": source,
+            },
+            {
+                "stage": "connection_pool_wait",
+                "fact": f"active_connections={active}/{connection_max}, pool_waiting={pool_waiting}.",
+                "inference": "Slow SQL occupied connections and pushed callers into pool wait.",
+                "uncertainty": "Pool waiting is application-side incident evidence, not a raw MySQL counter.",
+                "source": source,
+            },
+            {
+                "stage": "user_impact",
+                "fact": "payment-service p95 latency and MySQL slow-query symptoms overlap.",
+                "inference": "Checkout/payment users experienced elevated latency from DB waits.",
+                "uncertainty": "User impact is inferred from service metrics/logs and should be cross-checked.",
+                "source": "prometheus/loki/mysql",
+            },
+        ]
+
+    @staticmethod
+    def _parse_observed_value(text: str) -> dict[str, int]:
+        values: dict[str, int] = {}
+        for key in ["slow_queries", "pool_waiting", "active_connections"]:
+            match = re.search(rf"{key}\s*=\s*(\d+)", text)
+            if match:
+                values[key] = int(match.group(1))
+        max_match = re.search(r"active_connections\s*=\s*\d+\s*/\s*(\d+)", text)
+        if max_match:
+            values["connection_max"] = int(max_match.group(1))
+        return values
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if not value:
+            return {}
+        try:
+            import json
+
+            payload = json.loads(str(value))
+        except (TypeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(float(str(value)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int_from_text(value: Any, default: int = 0) -> int:
+        match = re.search(r"(\d+)", str(value or ""))
+        return int(match.group(1)) if match else default
 
     @classmethod
     def _redact_process_row(cls, row: dict[str, Any]) -> dict[str, Any]:

@@ -1,8 +1,8 @@
 """One-click local launcher for PyCharm on Windows.
 
-This script starts the full AutoOnCall local demo stack:
-- Milvus/RAG containers from deploy/compose/vector-database.yml
-- AIOps full-stack containers from deploy/compose/full-stack-compose.yml
+This script starts the interview-focused AutoOnCall local demo stack:
+- Core AIOps adapters from deploy/compose/interview-stack.yml
+- Milvus/RAG is optional; start it separately with `make up && make upload`
 - CLS and Monitor MCP servers
 - FastAPI, which also serves the static frontend at the configured local API URL
 
@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.config import LOCAL_DEMO_API_URL, LOCAL_FULL_STACK_ENV  # noqa: E402
+from app.config import (  # noqa: E402
+    LOCAL_DEMO_API_URL,
+    LOCAL_FULL_STACK_ENV,
+)
 
 LOG_DIR = ROOT / "logs"
 API_URL = LOCAL_DEMO_API_URL
@@ -54,8 +57,10 @@ def main() -> int:
         install_dependencies(python_cmd)
 
     if not args.skip_docker:
-        compose_up("Milvus/RAG", ROOT / "deploy" / "compose" / "vector-database.yml")
-        compose_up("AIOps full-stack", ROOT / "deploy" / "compose" / "full-stack-compose.yml")
+        compose_up(
+            "interview Docker stack",
+            ROOT / "deploy" / "compose" / "interview-stack.yml",
+        )
 
     start_mcp_servers(python_cmd, restart=args.restart_processes)
     start_api(python_cmd, restart=args.restart_processes)
@@ -76,12 +81,8 @@ def main() -> int:
     print("[DONE] AutoOnCall local stack is running.")
     print(f"       Frontend: {API_URL}")
     print(f"       API docs: {API_URL}/docs")
-    print(f"       Grafana:  {LOCAL_FULL_STACK_ENV['GRAFANA_URL']}  admin/admin")
-    print(f"       Jaeger:   {LOCAL_FULL_STACK_ENV['JAEGER_BASE_URL']}")
-    print(f"       Redpanda Admin API: {LOCAL_FULL_STACK_ENV['REDPANDA_ADMIN_URL']}")
     print("       Stop app processes: python scripts/dev/pycharm_one_click_stop.py")
-    print("       Stop containers: docker compose -f deploy/compose/vector-database.yml down")
-    print("                        docker compose -f deploy/compose/full-stack-compose.yml down")
+    print("       Stop containers: docker compose -f deploy/compose/interview-stack.yml down")
 
     if args.open_browser:
         webbrowser.open(API_URL)
@@ -128,8 +129,8 @@ def print_project_summary() -> None:
     print("[INFO] Project analysis:")
     print("       FastAPI entry: app.main:app")
     print("       Frontend: static/index.html served by FastAPI /")
-    print("       RAG dependency: deploy/compose/vector-database.yml (Milvus/MinIO/etcd/Attu)")
-    print("       AIOps dependencies: deploy/compose/full-stack-compose.yml")
+    print("       Docker stack: deploy/compose/interview-stack.yml (core AIOps only)")
+    print("       Optional RAG: make up && make upload")
     print("       Local MCP servers: mcp_servers/cls_server.py, monitor_server.py")
 
 
@@ -172,7 +173,9 @@ def install_dependencies(python_cmd: str) -> None:
 
 def compose_up(label: str, compose_file: Path) -> None:
     print(f"[RUN] Starting containers: {label}")
-    run(["docker", "compose", "-f", str(compose_file), "up", "-d"], label=f"docker compose {label}")
+    command = ["docker", "compose"]
+    command.extend(["-f", str(compose_file), "up", "-d", "--remove-orphans"])
+    run(command, label=f"docker compose {label}")
 
 
 def start_mcp_servers(python_cmd: str, *, restart: bool) -> None:
@@ -292,7 +295,13 @@ def upload_docs() -> None:
         )
 
 
-def run(command: list[str], *, label: str, quiet: bool = False) -> None:
+def run(
+    command: list[str],
+    *,
+    label: str,
+    quiet: bool = False,
+    env: dict[str, str] | None = None,
+) -> None:
     try:
         completed = subprocess.run(
             command,
@@ -300,6 +309,7 @@ def run(command: list[str], *, label: str, quiet: bool = False) -> None:
             check=False,
             stdout=subprocess.DEVNULL if quiet else None,
             stderr=subprocess.DEVNULL if quiet else None,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise SystemExit(f"{label} failed: command not found: {command[0]}") from exc

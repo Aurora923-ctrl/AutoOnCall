@@ -9,6 +9,12 @@ from app.services.evidence_quality import (
     source_quality_confidence_cap,
 )
 
+STATUS_CONFIDENCE_CAPS = {
+    "incomplete": 0.55,
+    "degraded": 0.74,
+    "needs_human": 0.62,
+}
+
 
 def build_evidence_profile(
     evidence: list[dict[str, Any]],
@@ -112,6 +118,13 @@ def calculate_confidence(
     source_quality_cap = source_quality_confidence_cap(evidence, analysis)
     if source_quality_cap is not None:
         base = min(base, source_quality_cap)
+    sufficiency = _as_dict(_as_dict(analysis.get("evidence_profile")).get("sufficiency"))
+    cap = sufficiency.get("confidence_cap")
+    if isinstance(cap, int | float):
+        base = min(base, float(cap))
+    report_status = str(analysis.get("report_status") or "")
+    if report_status in STATUS_CONFIDENCE_CAPS:
+        base = min(base, STATUS_CONFIDENCE_CAPS[report_status])
 
     return round(max(0.0, min(1.0, base)), 2)
 

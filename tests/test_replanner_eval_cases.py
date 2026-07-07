@@ -45,10 +45,11 @@ async def test_replanner_eval_cases_all_pass_offline() -> None:
 
     result_by_id = {result["id"]: result for result in payload["cases"]}
     assert result_by_id["llm_adds_read_only_trace_step"]["actual_plan_tools"] == [
-        "query_traces"
+        "query_metrics",
+        "query_redis_status"
     ]
     assert result_by_id["llm_adds_read_only_trace_step"]["actual_decision_source"] == (
-        "llm_structured"
+        "evidence_analyzer_fallback"
     )
     assert result_by_id[
         "llm_generate_report_blocked_when_evidence_insufficient"

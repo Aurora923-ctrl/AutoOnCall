@@ -2,7 +2,8 @@
 
 The package is intentionally deterministic: it generates the three mainline
 diagnosis reports and, by default, the offline eval summary that supports the
-"not a one-off demo" claim.
+    "not a one-off demo" claim. Redis/MySQL can be backed by the live adapter
+    stack; K8s is intentionally presented as an offline golden regression case.
 """
 
 from __future__ import annotations
@@ -154,7 +155,8 @@ def render_package_readme(package: dict[str, Any]) -> str:
             "",
             "1. State the business problem: OnCall evidence is scattered and risky actions "
             "must be controlled.",
-            "2. Open `reports/index.md` and show the fixed Redis/MySQL/K8s cases.",
+            "2. Open `reports/index.md`; present Redis/MySQL as live-adapter cases and "
+            "K8s as an offline golden regression case.",
             "3. Open one report and point to tool calls, evidence matrix, confidence, and "
             "uncertainties.",
             "4. Explain that high-risk remediation is approval/dry-run/manual-record only.",
@@ -163,6 +165,9 @@ def render_package_readme(package: dict[str, Any]) -> str:
             "## Boundary",
             "",
             "- Demo reports come from offline cases and fixtures.",
+            "- Redis/MySQL live proof is produced by `make interview-up`, "
+            "`make sandbox-verify`, and the live golden eval command.",
+            "- K8s CrashLoop/OOMKilled is offline regression coverage in the default demo.",
             "- Full-stack sandbox adapter evidence is documented separately in "
             "`deploy/sandbox.md`.",
             "- Do not describe this package as a real production deployment.",

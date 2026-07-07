@@ -28,10 +28,10 @@ class FakePlannerChain:
             steps=[
                 PlanStep(
                     step_id="s1",
-                    tool_name="query_traces",
+                    tool_name="query_redis_status",
                     purpose="LLM plan still runs after MCP discovery failure",
-                    input_args={"service_name": "order-service", "lookback": "10m"},
-                    expected_evidence="Trace evidence",
+                    input_args={"service_name": "order-service", "time_range": "10m"},
+                    expected_evidence="Redis evidence",
                     risk_level="low",
                 )
             ]
@@ -64,9 +64,9 @@ async def test_planner_uses_standard_tools_when_mcp_discovery_fails(monkeypatch)
         ),
     )
 
-    assert update["current_plan"][0]["tool_name"] == "query_traces"
+    assert update["current_plan"][0]["tool_name"] == "query_redis_status"
     assert update["current_plan"][0]["purpose"] == "LLM plan still runs after MCP discovery failure"
-    assert update["plan"][0].startswith("[s1] 使用 query_traces")
+    assert update["plan"][0].startswith("[s1] 使用 query_redis_status")
     assert update["warnings"] == [
         "MCP 工具发现失败，Planner 已降级使用本地和标准工具契约继续规划。"
     ]

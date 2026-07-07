@@ -115,13 +115,23 @@ def ensure_citation_block(answer: str, citations: list[dict[str, Any]]) -> str:
         source_file = str(item.get("source_file") or "未知来源")
         chunk_id = str(item.get("chunk_id") or "unknown")
         if source_file not in clean_answer or chunk_id not in clean_answer:
-            missing.append((source_file, chunk_id, item.get("score")))
+            missing.append((source_file, chunk_id, item.get("score"), item))
 
     if not missing:
         return clean_answer
 
     lines = ["", "", "引用来源："]
-    for source_file, chunk_id, score in missing:
+    for source_file, chunk_id, score, item in missing:
         score_text = format_score(score)
-        lines.append(f"- source_file: {source_file}; chunk_id: {chunk_id}; score: {score_text}")
+        locator_parts = [f"source_file: {source_file}", f"chunk_id: {chunk_id}"]
+        if item.get("page_number"):
+            locator_parts.append(f"page_number: {item.get('page_number')}")
+        if item.get("sheet_name"):
+            locator_parts.append(f"sheet_name: {item.get('sheet_name')}")
+        if item.get("row_number"):
+            locator_parts.append(f"row_number: {item.get('row_number')}")
+        if item.get("primary_key"):
+            locator_parts.append(f"primary_key: {item.get('primary_key')}")
+        locator_parts.append(f"score: {score_text}")
+        lines.append("- " + "; ".join(locator_parts))
     return clean_answer + "\n".join(lines)

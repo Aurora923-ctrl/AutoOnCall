@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -194,14 +194,14 @@ def _resolve_read_only(step: PlanStep, metadata: Any | None) -> bool:
 
 def _metadata_risk(metadata: Any | None) -> RiskLevel:
     value = getattr(metadata, "risk_level", "low") if metadata is not None else "low"
-    return value if value in RISK_ORDER else "low"
+    return cast(RiskLevel, value) if value in RISK_ORDER else "low"
 
 
 def _max_risk(*levels: str) -> RiskLevel:
     normalized: list[RiskLevel] = []
     for level in levels:
         if level in RISK_ORDER:
-            normalized.append(level)
+            normalized.append(cast(RiskLevel, level))
     if not normalized:
         return "low"
     return max(normalized, key=lambda level: RISK_ORDER[level])

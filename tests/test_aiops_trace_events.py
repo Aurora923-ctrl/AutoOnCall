@@ -70,7 +70,8 @@ async def test_executor_records_tool_call_trace(monkeypatch, tmp_path) -> None:
     assert len(events) == 1
     assert events[0].tool_name == "query_redis_status"
     assert events[0].step_id == "s1"
-    assert events[0].status == "success"
+    assert events[0].status == "failed"
+    assert events[0].metadata["data_source"] == "not_configured"
 
 
 @pytest.mark.asyncio

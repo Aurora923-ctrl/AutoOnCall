@@ -7,8 +7,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query
 
 from app.config import config
-from app.core.auth import READ_SCOPE, require_scope
+from app.core.auth import DIAGNOSE_SCOPE, READ_SCOPE, require_scope
 from app.models.api_contracts import (
+    IncidentFeedbackListResponse,
+    IncidentFeedbackResponse,
     IncidentListResponse,
     IncidentOverviewResponse,
     IncidentReplayResponse,
@@ -16,6 +18,7 @@ from app.models.api_contracts import (
     IncidentTraceResponse,
 )
 from app.models.approval import ApprovalRequest
+from app.models.feedback import DiagnosisFeedbackCreate
 from app.models.trace import TraceEvent
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.approval_service import ApprovalService, approval_service
@@ -25,6 +28,7 @@ from app.services.change_execution_service import (
     change_execution_service,
 )
 from app.services.evaluation_read_models import build_eval_summary_payload
+from app.services.feedback_service import FeedbackService, feedback_service
 from app.services.read_models import build_incident_overview, build_incident_replay
 from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
@@ -61,6 +65,11 @@ def get_incident_state_store() -> AIOpsStateStore:
 def get_change_execution_service() -> ChangeExecutionService:
     """Return the safe change execution service singleton."""
     return change_execution_service
+
+
+def get_feedback_service() -> FeedbackService:
+    """Return the feedback service singleton."""
+    return feedback_service
 
 
 def get_eval_summary_for_replay() -> dict[str, Any] | None:
@@ -228,3 +237,41 @@ async def get_incident_report(
             "markdown": report.markdown,
         }
     return payload
+
+
+@router.post(
+    "/incidents/{incident_id}/feedback",
+    response_model=IncidentFeedbackResponse,
+    dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))],
+)
+async def submit_incident_feedback(
+    incident_id: IncidentId,
+    payload: DiagnosisFeedbackCreate,
+) -> dict:
+    """Submit minimal operator feedback for report-quality improvement."""
+    report = get_report_generator().get_report(incident_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="incident report not found")
+    if payload.report_id != report.report_id:
+        raise HTTPException(status_code=400, detail="report_id does not match latest report")
+    trace_events = get_trace_service().list_events(incident_id=incident_id)
+    feedback = get_feedback_service().submit_feedback(
+        incident_id=incident_id,
+        payload=payload,
+        report=report,
+        trace_events=trace_events,
+    )
+    return {"feedback": feedback}
+
+
+@router.get(
+    "/incidents/{incident_id}/feedback",
+    response_model=IncidentFeedbackListResponse,
+    dependencies=[Depends(require_scope(READ_SCOPE))],
+)
+async def list_incident_feedback(incident_id: IncidentId) -> dict:
+    """List operator feedback for one incident."""
+    return {
+        "incident_id": incident_id,
+        "items": get_feedback_service().list_feedback(incident_id=incident_id),
+    }

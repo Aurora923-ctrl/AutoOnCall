@@ -116,8 +116,6 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "redis_maxclients" in page
     assert "mysql_slow_query" in page
     assert "pod_crashloop" in page
-    assert "redpanda_lag" in page
-    assert "redpanda_lag" in script
     assert "forbidden_sql" in page
     assert "/incidents/${encodeURIComponent(incidentId)}/replay" in script
     assert "/api/incidents/${incidentId}/report" in script
@@ -202,8 +200,6 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "dependency_signals" in script
     assert "extractDependencySignalsFromToolCalls" in script
     assert "formatDependencySignalTitle" in script
-    assert "Jaeger / Tempo" in script
-    assert "Redpanda / Kafka" in script
     assert "refreshToolContracts" in script
     assert "renderToolContracts" in script
     assert "renderToolContractSummary" in script
@@ -394,15 +390,14 @@ async def test_demo_incident_catalog_is_frontend_source_of_truth() -> None:
     payload = await list_demo_incidents()
     case_ids = [item["case_id"] for item in payload["items"]]
 
-    assert payload["count"] == 5
+    assert payload["count"] == 4
     assert case_ids == [
         "redis_maxclients",
         "mysql_slow_query",
         "pod_crashloop",
-        "redpanda_lag",
         "forbidden_sql",
     ]
-    assert payload["items"][3]["incident"]["raw_alert"]["consumer_lag"] == 128400
+    assert payload["items"][3]["incident"]["raw_alert"]["requested_action"] == "execute_sql"
     assert "redis-maxclients" in payload["items"][0]["aliases"]
 
 

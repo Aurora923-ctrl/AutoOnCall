@@ -48,6 +48,7 @@ poetry.lock
 .env.local
 .env.*
 !.env.example
+!deploy/sandbox.env
 
 # Logs
 logs/
@@ -64,6 +65,7 @@ logs/
 
 # Runtime indexes
 data/rag_lexical_index.json
+data/*.jsonl
 
 # Milvus
 volumes/

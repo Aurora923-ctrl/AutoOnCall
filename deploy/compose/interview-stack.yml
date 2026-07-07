@@ -1,0 +1,134 @@
+name: autooncall-full
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: autooncall-full-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --slow-query-log=ON
+      - --long-query-time=10
+      - --performance-schema=ON
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: autooncall
+      MYSQL_USER: autooncall
+      MYSQL_PASSWORD: autooncall123
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - D:/AppDataStorage/DockerData/autooncall-full/mysql8/data:/var/lib/mysql
+      - ../sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - autooncall-full-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: autooncall-full-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxclients
+      - "10000"
+      - --slowlog-log-slower-than
+      - "1000"
+      - --slowlog-max-len
+      - "128"
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - D:/AppDataStorage/DockerData/autooncall-full/redis7/data:/data
+    networks:
+      - autooncall-full-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  metrics-exporter:
+    image: python:3.11-alpine
+    container_name: autooncall-full-metrics-exporter
+    command: ["python", "/app/metrics_exporter.py"]
+    ports:
+      - "127.0.0.1:19108:9108"
+    volumes:
+      - ../sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
+    networks:
+      - autooncall-full-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=2).read()\"",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: autooncall-full-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ${PROMETHEUS_CONFIG_FILE:-../full-stack/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
+      - ../full-stack/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - D:/AppDataStorage/DockerData/autooncall-full/prometheus:/prometheus
+    depends_on:
+      metrics-exporter:
+        condition: service_healthy
+    networks:
+      - autooncall-full-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  loki:
+    image: grafana/loki:2.9.10
+    container_name: autooncall-full-loki
+    command: ["-config.file=/etc/loki/local-config.yml"]
+    ports:
+      - "127.0.0.1:13100:3100"
+    volumes:
+      - ../full-stack/loki-config.yml:/etc/loki/local-config.yml:ro
+      - D:/AppDataStorage/DockerData/autooncall-full/loki:/loki
+    networks:
+      - autooncall-full-net
+
+  loki-log-emitter:
+    image: python:3.11-alpine
+    container_name: autooncall-full-loki-log-emitter
+    command: ["python", "/app/loki_log_emitter.py"]
+    environment:
+      LOKI_PUSH_URL: "http://loki:3100/loki/api/v1/push"
+      LOKI_PUSH_INTERVAL_SECONDS: "30"
+    volumes:
+      - ../full-stack/loki_log_emitter.py:/app/loki_log_emitter.py:ro
+    depends_on:
+      - loki
+    networks:
+      - autooncall-full-net
+
+networks:
+  autooncall-full-net:
+    name: autooncall-full-net

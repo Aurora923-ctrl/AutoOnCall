@@ -40,19 +40,16 @@ Clients can send either `Authorization: Bearer <token>` or `X-AutoOnCall-Token: 
 
 ## External Adapters
 
-- `ALERTMANAGER_BASE_URL`: enables read-only alert queries through `query_alerts`.
 - `PROMETHEUS_BASE_URL`: enables real metrics in `query_metrics`.
 - `LOG_GATEWAY_URL` or `LOKI_BASE_URL`: enables real logs in `query_logs`.
-- `JAEGER_BASE_URL` or `TEMPO_BASE_URL`: enables trace lookups in `query_traces`.
-- `REDPANDA_ADMIN_URL`: enables Redpanda/Kafka lag evidence.
 - `KUBERNETES_API_SERVER`: enables read-only Pod and Event status in `query_k8s_status`.
 - `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`: enables Redis readiness and `INFO` evidence.
 - `MYSQL_DSN`, `MYSQL_URL`, or split MySQL host fields: enables MySQL readiness and read-only status evidence.
-- `CMDB_API_URL`: enables service ownership and topology context.
-- `DEPLOY_HISTORY_API_URL`: enables recent release/change correlation evidence.
-- `TICKET_API_URL`: enables historical incident search.
+- `CMDB_API_URL`: enables service ownership and topology context through an internal HTTP API. When it is blank and `MYSQL_DSN` is configured, the local interview stack reads the same business context from MySQL seed tables.
+- `DEPLOY_HISTORY_API_URL`: enables recent release/change correlation evidence through an internal HTTP API. When it is blank and `MYSQL_DSN` is configured, the local interview stack reads deploy history from MySQL seed tables.
+- `TICKET_API_URL`: enables historical incident search through an internal HTTP API. When it is blank and `MYSQL_DSN` is configured, the local interview stack reads and creates ticket records in MySQL.
 
-All adapters are fail-soft: missing config keeps the existing MCP/mock path when `AIOPS_MOCK_FALLBACK_ENABLED=true`; when it is false, missing config returns structured `failed/not_configured` tool output without crashing the Agent. External failures always return structured `failed` tool output.
+All adapters are fail-soft: in strict mode, missing config returns structured `failed/not_configured` tool output without crashing the Agent. The local interview stack intentionally keeps business-context HTTP adapter URLs blank because CMDB, deploy history, and ticket evidence are backed by real MySQL tables instead of mock HTTP services. External failures always return structured `failed` tool output.
 
 Use least-privilege external accounts. MySQL diagnosis users should only need `SELECT` and minimal `SHOW` permissions. Redis production users may not have `CONFIG` or `SLOWLOG`; disable those commands with `REDIS_ALLOW_ADMIN_COMMANDS=false` and rely on `INFO` signals.
 
@@ -101,7 +98,7 @@ docker run --rm -p 9900:9900 --env-file .env autooncall:local
 ```
 
 This image is a delivery wrapper, not a full production platform. It does not
-bundle Milvus, MySQL, Redis, Prometheus, Loki, Kubernetes mocks, or secret
+bundle Milvus, MySQL, Redis, Prometheus, Loki, Kubernetes APIs, or secret
 management. Configure those dependencies through compose, managed services, or
 an internal platform, and keep the safety defaults in this document in place.
 Because the image defaults to `PRODUCTION_EXPOSURE_STRICT=true`, an externally

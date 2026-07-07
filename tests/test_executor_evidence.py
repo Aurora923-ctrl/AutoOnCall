@@ -82,7 +82,9 @@ def state_with_step(step: PlanStep) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_executor_registry_step_creates_evidence_and_tool_call_record(monkeypatch) -> None:
+async def test_executor_registry_step_records_unconfigured_adapter_without_mock(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(config, "aiops_mock_fallback_enabled", True)
     monkeypatch.setattr(config, "redis_url", "")
     monkeypatch.setattr(config, "redis_host", "")
@@ -106,23 +108,24 @@ async def test_executor_registry_step_creates_evidence_and_tool_call_record(monk
     assert update["current_plan"] == []
     assert update["plan"] == []
     assert update["past_steps"]
-    assert update["executed_steps"][0]["status"] == "success"
+    assert update["executed_steps"][0]["status"] == "failed"
     assert update["plan"] == []
 
     evidence = update["gathered_evidence"][0]
     assert evidence["source_tool"] == "query_redis_status"
     assert evidence["step_id"] == "s1"
     assert evidence["evidence_type"] == "redis"
-    assert evidence["data_source"] == "mock"
-    assert evidence["stance"] == "supporting"
-    assert "Redis" in evidence["confidence_reason"]
-    assert 0.45 <= evidence["confidence"] <= 0.55
-    assert "connected_clients" in evidence["summary"]
-    assert "来源=mock" in evidence["fact"]
-    assert "支持当前根因假设" in evidence["inference"]
-    assert "Mock 回退" in evidence["uncertainty"]
-    assert "接入真实适配器" in evidence["next_step"]
-    assert evidence["raw_data"]["status"] == "success"
+    assert evidence["data_source"] == "not_configured"
+    assert evidence["stance"] == "unknown"
+    assert "工具失败" in evidence["confidence_reason"]
+    assert evidence["confidence"] == 0.05
+    assert "调用失败" in evidence["summary"]
+    assert "来源=not_configured" in evidence["fact"]
+    assert "证据缺口" in evidence["inference"]
+    assert "真实适配器未配置" in evidence["uncertainty"]
+    assert "配置 query_redis_status 对应真实适配器" in evidence["next_step"]
+    assert evidence["raw_data"]["status"] == "failed"
+    assert evidence["raw_data"]["output"]["error_type"] == "not_configured"
 
     record = update["tool_call_records"][0]
     assert record["trace_id"] == state["trace_id"]
@@ -131,12 +134,12 @@ async def test_executor_registry_step_creates_evidence_and_tool_call_record(monk
     assert record["tool_name"] == "query_redis_status"
     assert record["input_args"]["service_name"] == "order-service"
     assert "order-service" in record["input_summary"]
-    assert record["data_source"] == "mock"
-    assert "connected_clients" in record["output_summary"]
+    assert record["data_source"] == "not_configured"
+    assert "调用失败" in record["output_summary"]
     assert record["risk_level"] == "low"
     assert record["read_only"] is True
-    assert record["status"] == "success"
-    assert record["error_message"] is None
+    assert record["status"] == "failed"
+    assert record["error_message"] == "外部依赖未配置"
     assert record["latency_ms"] >= 0
 
 

@@ -75,8 +75,8 @@ class A2AFacade:
         base_url = config.normalized_api_base_url
         base_path = config.normalized_a2a_base_path
         agent_url = f"{base_url}{base_path}"
-        security_schemes = {}
-        security = []
+        security_schemes: dict[str, Any] = {}
+        security: list[dict[str, list[str]]] = []
         if config.api_auth_enabled:
             security_schemes = {
                 "bearerAuth": {
@@ -95,23 +95,23 @@ class A2AFacade:
                 "low-level infrastructure tools or production change execution."
             ),
             url=agent_url,
-            supported_interfaces=[
+            supportedInterfaces=[
                 {"transport": "HTTP+JSON", "url": agent_url},
                 {"transport": "SSE", "url": f"{agent_url}/message:stream"},
             ],
             provider={"organization": "AutoOnCall"},
             version=config.app_version,
-            documentation_url=f"{base_url}/docs",
+            documentationUrl=f"{base_url}/docs",
             capabilities={
                 "streaming": True,
                 "pushNotifications": False,
                 "stateTransitionHistory": True,
                 "extensions": ["autooncall.incident_replay", "autooncall.evidence_artifacts"],
             },
-            security_schemes=security_schemes,
+            securitySchemes=security_schemes,
             security=security,
-            default_input_modes=["text/plain", "application/json"],
-            default_output_modes=["application/json", "text/markdown", "text/plain"],
+            defaultInputModes=["text/plain", "application/json"],
+            defaultOutputModes=["application/json", "text/markdown", "text/plain"],
             skills=agent_skills(extended=extended),
         )
         return card.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -235,7 +235,7 @@ class A2AFacade:
         task_id = new_task_id("replay")
         task = A2ATask(
             id=task_id,
-            context_id=incident_id,
+            contextId=incident_id,
             status=task_status(
                 task_id=task_id,
                 context_id=incident_id,
@@ -257,7 +257,7 @@ class A2AFacade:
                 "links": replay.get("links", {}),
             },
         )
-        return dump_a2a(task)
+        return dict(dump_a2a(task))
 
     async def _answer_runbook_question(self, envelope: A2AEnvelope) -> dict[str, Any]:
         question = str(envelope.data.get("question") or envelope.text or "").strip()
@@ -275,7 +275,7 @@ class A2AFacade:
         answer = str(payload.get("answer") or "")
         task = A2ATask(
             id=task_id,
-            context_id=envelope.context_id or task_id,
+            contextId=envelope.context_id or task_id,
             status=task_status(
                 task_id=task_id,
                 context_id=envelope.context_id or task_id,
@@ -298,7 +298,7 @@ class A2AFacade:
                 "no_answer": bool(payload.get("no_answer")),
             },
         )
-        return dump_a2a(task)
+        return dict(dump_a2a(task))
 
     def task_from_snapshot(self, snapshot: AIOpsSessionSnapshot) -> dict[str, Any]:
         """Build an A2A task from the durable run snapshot."""
@@ -354,7 +354,7 @@ class A2AFacade:
 
         task = A2ATask(
             id=task_id,
-            context_id=incident_id,
+            contextId=incident_id,
             status=task_status(
                 task_id=task_id,
                 context_id=incident_id,
@@ -374,7 +374,7 @@ class A2AFacade:
                 "trace_summary": run_status.get("trace_summary", {}),
             },
         )
-        return dump_a2a(task)
+        return dict(dump_a2a(task))
 
     def task_from_terminal_event(
         self,
@@ -398,7 +398,7 @@ class A2AFacade:
             )
         task = A2ATask(
             id=task_id,
-            context_id=context_id or str(event.get("incident_id") or ""),
+            contextId=context_id or str(event.get("incident_id") or ""),
             status=task_status(
                 task_id=task_id,
                 context_id=context_id,
@@ -413,7 +413,7 @@ class A2AFacade:
                 "autooncall_status": status,
             },
         )
-        return dump_a2a(task)
+        return dict(dump_a2a(task))
 
     def _build_replay_payload(self, incident_id: str) -> dict[str, Any]:
         report = self.report_generator.get_report(incident_id)

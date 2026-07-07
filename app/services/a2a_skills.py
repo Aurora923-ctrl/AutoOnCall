@@ -44,8 +44,8 @@ def agent_skills(*, extended: bool = False) -> list[A2AAgentSkill]:
                 "structured incident. Produces evidence, trace, approval state, and report artifacts."
             ),
             tags=["aiops", "incident", "diagnosis"],
-            input_modes=["application/json", "text/plain"],
-            output_modes=["application/json", "text/markdown"],
+            inputModes=["application/json", "text/plain"],
+            outputModes=["application/json", "text/markdown"],
             examples=examples[SKILL_DIAGNOSE_INCIDENT] if extended else [],
         ),
         A2AAgentSkill(
@@ -53,8 +53,8 @@ def agent_skills(*, extended: bool = False) -> list[A2AAgentSkill]:
             name="Get Incident Status",
             description="Read the latest diagnosis task status and report links.",
             tags=["aiops", "status", "read-only"],
-            input_modes=["application/json"],
-            output_modes=["application/json"],
+            inputModes=["application/json"],
+            outputModes=["application/json"],
             examples=examples[SKILL_GET_INCIDENT_STATUS] if extended else [],
         ),
         A2AAgentSkill(
@@ -62,8 +62,8 @@ def agent_skills(*, extended: bool = False) -> list[A2AAgentSkill]:
             name="Explain Incident Replay",
             description="Return replay-ready timeline, evidence quality, approval flow, and report summary.",
             tags=["aiops", "replay", "evidence", "read-only"],
-            input_modes=["application/json"],
-            output_modes=["application/json"],
+            inputModes=["application/json"],
+            outputModes=["application/json"],
             examples=examples[SKILL_EXPLAIN_INCIDENT_REPLAY] if extended else [],
         ),
         A2AAgentSkill(
@@ -71,8 +71,8 @@ def agent_skills(*, extended: bool = False) -> list[A2AAgentSkill]:
             name="Answer Runbook Question",
             description="Answer a Runbook question with citation and no-answer refusal safeguards.",
             tags=["rag", "runbook", "citations", "read-only"],
-            input_modes=["application/json", "text/plain"],
-            output_modes=["application/json", "text/markdown", "text/plain"],
+            inputModes=["application/json", "text/plain"],
+            outputModes=["application/json", "text/markdown", "text/plain"],
             examples=examples[SKILL_ANSWER_RUNBOOK_QUESTION] if extended else [],
         ),
     ]

@@ -22,6 +22,9 @@ def test_rag_cases_cover_core_runbook_types_and_rejection() -> None:
     assert "service_503_but_dependency_timeout" in case_ids
     assert "reject_stock_investment" in case_ids
     assert "reject_resume_question" in case_ids
+    assert "pdf_postmortem_loader_metadata" in case_ids
+    assert "html_wiki_loader_heading" in case_ids
+    assert "table_ticket_loader_row_citation" in case_ids
     assert len(cases) >= 20
 
     reject_cases = [case for case in cases if case.get("should_reject")]
@@ -38,8 +41,8 @@ def test_rag_cases_cover_core_runbook_types_and_rejection() -> None:
 def test_rag_eval_cases_all_pass_offline() -> None:
     payload = evaluate_cases("eval/rag_cases.yaml", docs_dir="aiops-docs")
 
-    assert payload["summary"]["case_count"] == 22
-    assert payload["summary"]["passed_count"] == 22
+    assert payload["summary"]["case_count"] == 25
+    assert payload["summary"]["passed_count"] == 25
     assert payload["summary"]["pass_rate"] == 1.0
     assert payload["summary"]["recall_at_k"] == 1.0
     assert payload["summary"]["citation_coverage_rate"] == 1.0
@@ -50,7 +53,7 @@ def test_rag_eval_cases_all_pass_offline() -> None:
     assert payload["summary"]["mrr"] >= 0.9
 
     summary_text = render_summary(payload)
-    assert "RAG eval: 22/22 cases passed" in summary_text
+    assert "RAG eval: 25/25 cases passed" in summary_text
     assert "recall@3=100%" in summary_text
     assert "cite=100%" in summary_text
     assert "confusion=100%" in summary_text

@@ -10,7 +10,11 @@ HEALTH_LIVE_API = $(SERVER_URL)/health/live
 HEALTH_READY_API = $(SERVER_URL)/health/ready
 DOCS_DIR = aiops-docs
 MILVUS_CONTAINER = milvus-standalone
-PYTHON ?= $(shell if [ -x venv/Scripts/python.exe ]; then printf 'venv/Scripts/python.exe'; elif [ -x venv/bin/python ]; then printf 'venv/bin/python'; else printf 'python3'; fi)
+ifeq ($(OS),Windows_NT)
+PYTHON ?= .venv/Scripts/python.exe
+else
+PYTHON ?= $(shell if [ -x .venv/bin/python ]; then printf '.venv/bin/python'; elif [ -x venv/bin/python ]; then printf 'venv/bin/python'; else printf 'python3'; fi)
+endif
 MYPY_PYTHON_VERSION ?= $(shell $(PYTHON) -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 
 # 颜色输出
@@ -21,11 +25,11 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo demo-reports interview-demo test test-quick eval eval-rag eval-change eval-replanner format format-check lint fix type-check \
+        install install-dev dev run seed-demo demo demo-reports interview-demo test test-quick eval eval-rag eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
-        sandbox-up sandbox-down sandbox-status sandbox-verify sandbox-demo
+        interview-up interview-down interview-status sandbox-verify sandbox-demo
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -47,9 +51,8 @@ help:
 	@echo "  $(YELLOW)make up$(NC)           - 🐳 启动 Milvus 容器"
 	@echo "  $(YELLOW)make down$(NC)         - 🛑 停止 Milvus 容器"
 	@echo "  $(YELLOW)make status$(NC)       - 📊 查看容器状态"
-	@echo "  $(YELLOW)make sandbox-up$(NC)   - 🧪 启动完整 AIOps Docker 沙箱"
-	@echo "  $(YELLOW)make sandbox-verify$(NC) - 🔎 验证真实适配器是否被工具链消费"
-	@echo "  $(YELLOW)make sandbox-demo$(NC) - 🧪 运行真实适配器 AIOps 沙箱演示"
+	@echo "  $(YELLOW)make interview-up$(NC) - 启动校招核心 Docker 栈"
+	@echo "  $(YELLOW)make sandbox-verify$(NC) - 验证核心适配器是否被工具链消费"
 	@echo ""
 	@echo "$(CYAN)【服务管理】$(NC)"
 	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（MCP + FastAPI）"
@@ -137,7 +140,6 @@ init:
 	@echo "$(GREEN)🌐 服务访问地址:$(NC)"
 	@echo "   API 服务: $(SERVER_URL)"
 	@echo "   API 文档: $(SERVER_URL)/docs"
-	@echo "   Attu (Milvus Web UI): http://localhost:8000"
 	@echo "   MinIO: http://localhost:9001 (admin/minioadmin)"
 	@echo ""
 	@echo "$(YELLOW)💡 提示: 服务正在后台运行$(NC)"
@@ -172,7 +174,6 @@ up:
 			echo ""; \
 			echo "$(GREEN)🌐 服务访问地址:$(NC)"; \
 			echo "   Milvus: localhost:19530"; \
-			echo "   Attu (Web UI): http://localhost:8000"; \
 			echo "   MinIO: http://localhost:9001 (admin/minioadmin)"; \
 		else \
 			echo "$(RED)❌ 容器启动失败$(NC)"; \
@@ -205,26 +206,29 @@ status:
 		echo "$(YELLOW)提示: 请先创建 Milvus 容器$(NC)"; \
 	fi
 
-sandbox-up:  ## Start full local AIOps evidence sandbox
-	@echo "$(YELLOW)🧪 启动 AIOps 完整真实适配器沙箱...$(NC)"
-	docker compose -f deploy/compose/full-stack-compose.yml up -d
-	@echo "$(GREEN)✅ 沙箱已启动: MySQL 13306, Redis 16379, Prometheus 19090, Grafana 13000, Loki 13100, Jaeger 16686$(NC)"
+interview-up:  ## Start interview-focused local Docker stack
+	@echo "$(YELLOW)启动校招核心 Docker 栈...$(NC)"
+	docker compose -f deploy/compose/interview-stack.yml up -d --remove-orphans
+	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py
+	@echo "$(GREEN)校招核心栈已启动: Redis 16379, MySQL 13306, metrics-exporter 19108, Prometheus 19090, Loki 13100$(NC)"
+	@echo "$(YELLOW)RAG/Milvus 是加分项，需单独运行 make up && make upload。$(NC)"
 
-sandbox-down:  ## Stop full local AIOps evidence sandbox
-	@echo "$(YELLOW)🛑 停止 AIOps 完整真实适配器沙箱...$(NC)"
-	docker compose -f deploy/compose/full-stack-compose.yml down
-	@echo "$(GREEN)✅ 沙箱已停止$(NC)"
+interview-down:  ## Stop interview-focused local Docker stack
+	@echo "$(YELLOW)停止校招核心 Docker 栈...$(NC)"
+	docker compose -f deploy/compose/interview-stack.yml down
+	@echo "$(GREEN)校招核心栈已停止$(NC)"
 
-sandbox-status:  ## Show local full evidence sandbox containers
-	@echo "$(YELLOW)📊 AIOps 沙箱容器状态:$(NC)"
-	docker compose -f deploy/compose/full-stack-compose.yml ps
+interview-status:  ## Show interview-focused Docker stack containers
+	@echo "$(YELLOW)校招核心 Docker 栈状态:$(NC)"
+	docker compose -f deploy/compose/interview-stack.yml ps
 
-sandbox-verify:  ## Verify ToolRegistry consumes real full-stack adapter sources
-	@echo "$(YELLOW)🔎 验证 AIOps 真实适配器数据源...$(NC)"
+sandbox-verify:  ## Verify ToolRegistry consumes interview adapter sources
+	@echo "$(YELLOW)验证 AIOps 校招核心适配器数据源...$(NC)"
+	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py
 	$(PYTHON) scripts/sandbox/verify_full_stack_adapters.py
 
-sandbox-demo:  ## Run deterministic AIOps scenarios against real sandbox adapters
-	@echo "$(YELLOW)🧪 运行 Redis/MySQL/Prometheus 真实数据流演示...$(NC)"
+sandbox-demo:  ## Run deterministic AIOps scenarios against interview adapters
+	@echo "$(YELLOW)运行 Redis/MySQL/Prometheus 真实数据流演示...$(NC)"
 	$(PYTHON) scripts/sandbox/simulate_mysql_redis_aiops.py
 
 demo-reports:  ## Generate deterministic Redis/MySQL/K8s interview demo reports
@@ -658,11 +662,11 @@ test-integrations:  ## Run Docker/live integration tests
 
 eval:  ## 运行 AIOps 离线评测
 	@echo "$(YELLOW)🧪 运行 AIOps 离线评测...$(NC)"
-	$(PYTHON) scripts/eval/eval_cases.py --cases eval/cases.yaml --report-path logs/eval_reports.db --summary-json logs/eval_summary.json --summary-md logs/eval_summary.md
+	$(PYTHON) scripts/eval/eval_cases.py --cases eval/cases.yaml --env-file deploy/sandbox.env --report-path logs/eval_reports.db --summary-json logs/eval_summary.json --summary-md logs/eval_summary.md
 
 eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
-	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
 
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
@@ -671,6 +675,10 @@ eval-change:  ## 运行安全变更离线评测
 eval-replanner:  ## 运行 Replanner LLM 决策离线评测
 	@echo "$(YELLOW)🧪 运行 Replanner LLM 决策离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_replanner_cases.py --cases eval/replanner_cases.yaml --summary-json logs/replanner_eval_summary.json --summary-md logs/replanner_eval_summary.md
+
+export-bad-cases:  ## Export high-value feedback into offline eval cases
+	@echo "$(YELLOW)Exporting bad cases into eval YAML...$(NC)"
+	$(PYTHON) scripts/eval/export_bad_cases.py
 
 hygiene-check:  ## 检查本地生成产物
 	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"

@@ -1,8 +1,0 @@
-{
-  "service": "mock-ticketing",
-  "description": "Static ticketing fixture service for AutoOnCall sandbox",
-  "endpoints": [
-    "/tickets.json",
-    "/tickets/INC-REDIS-001.json"
-  ]
-}
