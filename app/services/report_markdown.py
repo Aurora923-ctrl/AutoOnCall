@@ -82,6 +82,9 @@ def render_markdown(report: DiagnosisReport) -> str:
             "### 证据充分性",
             _render_evidence_sufficiency(report),
             "",
+            "### Conclusion Alignment",
+            _render_conclusion_alignment(report),
+            "",
             "### 数据源边界",
             _render_data_source_boundaries(report),
             "",
@@ -541,6 +544,61 @@ def _render_evidence_sufficiency(report: DiagnosisReport) -> str:
             "或 needs_human，不能输出过度确定的根因。"
         )
     return "\n".join(lines)
+
+
+def _render_conclusion_alignment(report: DiagnosisReport) -> str:
+    alignment = report.conclusion_alignment or {}
+    if not alignment:
+        return "- Not recorded."
+
+    fields = _as_dict(alignment.get("fields"))
+    lines = [
+        f"- Status: {alignment.get('status', 'unknown')}",
+        f"- Missing fields: {_render_inline_list(alignment.get('missing_fields'))}",
+    ]
+
+    root = _as_dict(fields.get("root_cause"))
+    lines.append(
+        "- root_cause: "
+        f"aligned={str(bool(root.get('aligned'))).lower()}; "
+        f"evidence={_render_inline_list(root.get('evidence_ids'))}; "
+        f"citations={_render_alignment_citations(root.get('citations'))}"
+    )
+
+    key_findings = fields.get("key_findings")
+    if isinstance(key_findings, list):
+        for index, item in enumerate(key_findings[:8], 1):
+            finding = _as_dict(item)
+            lines.append(
+                f"- key_findings[{index}]: "
+                f"aligned={str(bool(finding.get('aligned'))).lower()}; "
+                f"evidence={_render_inline_list(finding.get('evidence_ids'))}; "
+                f"citations={_render_alignment_citations(finding.get('citations'))}; "
+                f"text={_md_cell(finding.get('text', ''))}"
+            )
+
+    remediation = _as_dict(fields.get("remediation_suggestion"))
+    lines.append(
+        "- remediation_suggestion: "
+        f"aligned={str(bool(remediation.get('aligned'))).lower()}; "
+        f"evidence={_render_inline_list(remediation.get('evidence_ids'))}; "
+        f"citations={_render_alignment_citations(remediation.get('citations'))}"
+    )
+    return "\n".join(lines)
+
+
+def _render_alignment_citations(value: Any) -> str:
+    if not isinstance(value, list) or not value:
+        return "none"
+    rendered = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        source_file = item.get("source_file")
+        chunk_id = item.get("chunk_id")
+        if source_file and chunk_id:
+            rendered.append(f"{source_file}#{chunk_id}")
+    return ", ".join(rendered) if rendered else "none"
 
 
 def _render_data_source_boundaries(report: DiagnosisReport) -> str:

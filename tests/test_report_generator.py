@@ -221,6 +221,14 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert report.confidence > 0.7
     assert report.status == "completed"
     assert report.evidence_sufficiency["complete"] is True
+    assert report.conclusion_alignment["status"] == "aligned"
+    assert report.conclusion_alignment["missing_fields"] == []
+    assert report.conclusion_alignment["fields"]["root_cause"]["evidence_ids"]
+    assert report.conclusion_alignment["fields"]["root_cause"]["citations"]
+    assert report.conclusion_alignment["fields"]["remediation_suggestion"]["aligned"] is True
+    assert "### Conclusion Alignment" in report.markdown
+    assert "root_cause: aligned=true" in report.markdown
+    assert "remediation_suggestion: aligned=true" in report.markdown
 
     reloaded = ReportGenerator(tmp_path / "reports.db")
     assert reloaded.get_report(report.incident_id).report_id == report.report_id
@@ -246,6 +254,39 @@ def test_report_generator_downgrades_completed_when_evidence_is_insufficient(tmp
     assert "处置参考" in missing_text
     assert "报告由 completed 降级为 incomplete" in report.markdown
     assert "当前置信度上限：0.55" in report.markdown
+
+
+def test_report_generator_downgrades_unaligned_conclusions(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"] = []
+    state["tool_call_records"] = []
+    state["evidence_analysis"] = {
+        "evidence_profile": {
+            "sufficiency": {
+                "complete": True,
+                "status": "complete",
+            }
+        }
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status == "needs_human"
+    assert report.conclusion_alignment["status"] == "needs_human_confirmation"
+    assert set(report.conclusion_alignment["missing_fields"]) == {
+        "root_cause",
+        "key_findings",
+        "remediation_suggestion",
+    }
+    assert report.root_cause.startswith("待人工确认：")
+    assert all(item.startswith("待人工确认：") for item in report.key_findings)
+    assert report.remediation_suggestion.startswith("待人工确认：")
+    assert "root_cause: aligned=false" in report.markdown
+    assert "报告由 completed 降级为 needs_human" in report.markdown
 
 
 def test_report_generator_explains_redis_live_info_vs_incident_evidence(tmp_path) -> None:

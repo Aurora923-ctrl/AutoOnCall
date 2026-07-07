@@ -102,6 +102,41 @@ class ReportGenerator:
             risk_summary=risk_summary,
             status=status,
         )
+        root_cause = selected_root_cause or _select_root_cause(hypotheses, evidence, errors)
+        key_findings = _build_key_findings(hypotheses, evidence, tool_calls, errors)
+        remediation_suggestion = _build_remediation(
+            state=state,
+            evidence=evidence,
+            risk_summary=risk_summary,
+            pending_approval=pending_approval,
+        )
+        conclusion_alignment = _build_conclusion_alignment(
+            root_cause=root_cause,
+            key_findings=key_findings,
+            remediation_suggestion=remediation_suggestion,
+            hypothesis_ranking=hypothesis_ranking,
+            selected_root_cause_id=selected_root_cause_id,
+            evidence=evidence,
+        )
+        status, alignment_warnings = _apply_conclusion_alignment_gate(
+            requested_status=status,
+            alignment=conclusion_alignment,
+        )
+        if alignment_warnings:
+            warnings = _dedupe_strings([*warnings, *alignment_warnings])
+            evidence_analysis["report_status"] = status
+            manual_action_required = _manual_action_required(
+                pending_approval=pending_approval,
+                risk_summary=risk_summary,
+                status=status,
+            )
+            root_cause = _downgrade_unaligned_text(root_cause, conclusion_alignment, "root_cause")
+            key_findings = _downgrade_unaligned_findings(key_findings, conclusion_alignment)
+            remediation_suggestion = _downgrade_unaligned_text(
+                remediation_suggestion,
+                conclusion_alignment,
+                "remediation_suggestion",
+            )
 
         report = DiagnosisReport(
             incident_id=incident_id,
@@ -112,12 +147,12 @@ class ReportGenerator:
             environment=str(incident.get("environment") or "unknown"),
             status=status,
             summary=_build_summary(incident, evidence, hypotheses, errors, status),
-            root_cause=selected_root_cause or _select_root_cause(hypotheses, evidence, errors),
+            root_cause=root_cause,
             hypotheses=hypotheses,
             hypothesis_ranking=hypothesis_ranking,
             selected_root_cause_id=selected_root_cause_id,
             evidence=evidence,
-            key_findings=_build_key_findings(hypotheses, evidence, tool_calls, errors),
+            key_findings=key_findings,
             confirmed_facts=_build_confirmed_facts(evidence, tool_calls),
             inferred_conclusions=_build_inferred_conclusions(hypotheses, evidence),
             next_steps=_build_next_steps(evidence, errors, risk_summary, pending_approval),
@@ -130,18 +165,14 @@ class ReportGenerator:
             approval_status=approval_status,
             approval_decision=_build_approval_decision(pending_approval, risk_summary),
             change_plan=_build_change_plan_snapshot(state, pending_approval, risk_summary),
-            remediation_suggestion=_build_remediation(
-                state=state,
-                evidence=evidence,
-                risk_summary=risk_summary,
-                pending_approval=pending_approval,
-            ),
+            remediation_suggestion=remediation_suggestion,
             prevention=_build_prevention(evidence, errors),
             trace_summary=_build_trace_summary(events),
             errors=errors,
             warnings=warnings,
             evidence_profile=evidence_profile,
             evidence_sufficiency=_as_dict(evidence_profile.get("sufficiency")),
+            conclusion_alignment=conclusion_alignment,
             confidence_reason=_build_confidence_reason(evidence, evidence_analysis, errors),
             uncertainties=_build_uncertainties(
                 evidence_analysis,
@@ -550,6 +581,276 @@ def _build_key_findings(
         findings.append(f"{len(failed_tools)} 次工具调用失败，需要人工复核数据完整性")
     findings.extend(errors[:2])
     return findings[:8] or ["未形成明确关键发现"]
+
+
+def _build_conclusion_alignment(
+    *,
+    root_cause: str,
+    key_findings: list[str],
+    remediation_suggestion: str,
+    hypothesis_ranking: list[dict[str, Any]],
+    selected_root_cause_id: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Link conclusion-level fields to evidence IDs or RAG citations."""
+    root_evidence_ids = _selected_hypothesis_evidence_ids(
+        hypothesis_ranking,
+        selected_root_cause_id,
+    )
+    if not root_evidence_ids:
+        root_evidence_ids = _supporting_evidence_ids(evidence)
+
+    root_refs = _alignment_refs_from_evidence_ids(evidence, root_evidence_ids)
+    if not root_refs["evidence_ids"] and not root_refs["citations"]:
+        root_refs = _alignment_refs_from_evidence_ids(evidence, _supporting_evidence_ids(evidence))
+    finding_items = [
+        _align_text_to_evidence(finding, evidence, prefer_supporting=False)
+        for finding in key_findings
+    ]
+    remediation_refs = _alignment_refs_for_remediation(remediation_suggestion, evidence)
+
+    fields: dict[str, Any] = {
+        "root_cause": {
+            "text": root_cause,
+            "evidence_ids": root_refs["evidence_ids"],
+            "citations": root_refs["citations"],
+            "aligned": bool(root_refs["evidence_ids"] or root_refs["citations"]),
+        },
+        "key_findings": finding_items,
+        "remediation_suggestion": {
+            "text": remediation_suggestion,
+            "evidence_ids": remediation_refs["evidence_ids"],
+            "citations": remediation_refs["citations"],
+            "aligned": bool(remediation_refs["evidence_ids"] or remediation_refs["citations"]),
+        },
+    }
+
+    missing = []
+    if not fields["root_cause"]["aligned"]:
+        missing.append("root_cause")
+    if any(not item["aligned"] for item in finding_items):
+        missing.append("key_findings")
+    if not fields["remediation_suggestion"]["aligned"]:
+        missing.append("remediation_suggestion")
+
+    return {
+        "status": "aligned" if not missing else "needs_human_confirmation",
+        "required_fields": ["root_cause", "key_findings", "remediation_suggestion"],
+        "missing_fields": missing,
+        "fields": fields,
+    }
+
+
+def _apply_conclusion_alignment_gate(
+    *,
+    requested_status: str,
+    alignment: dict[str, Any],
+) -> tuple[str, list[str]]:
+    if requested_status != "completed":
+        return requested_status, []
+    missing = [str(item) for item in alignment.get("missing_fields", []) if str(item).strip()]
+    if not missing:
+        return requested_status, []
+    return (
+        "needs_human",
+        [
+            "报告由 completed 降级为 needs_human：关键结论缺少 evidence_id 或 RAG citation 回链，"
+            f"字段={', '.join(missing)}。"
+        ],
+    )
+
+
+def _downgrade_unaligned_text(
+    value: str,
+    alignment: dict[str, Any],
+    field_name: str,
+) -> str:
+    if field_name not in set(alignment.get("missing_fields", [])):
+        return value
+    return f"待人工确认：{value or '当前结论缺少稳定证据回链。'}"
+
+
+def _downgrade_unaligned_findings(
+    findings: list[str],
+    alignment: dict[str, Any],
+) -> list[str]:
+    items = alignment.get("fields", {}).get("key_findings", [])
+    if not isinstance(items, list):
+        return findings
+    result = []
+    for index, finding in enumerate(findings):
+        item = items[index] if index < len(items) and isinstance(items[index], dict) else {}
+        if item.get("aligned"):
+            result.append(finding)
+        else:
+            result.append(f"待人工确认：{finding}")
+    return result
+
+
+def _selected_hypothesis_evidence_ids(
+    hypothesis_ranking: list[dict[str, Any]],
+    selected_root_cause_id: str,
+) -> list[str]:
+    for item in hypothesis_ranking:
+        if selected_root_cause_id and item.get("hypothesis_id") != selected_root_cause_id:
+            continue
+        raw_ids = item.get("supporting_evidence_ids")
+        if isinstance(raw_ids, list):
+            return [str(value) for value in raw_ids if str(value).strip()]
+    return []
+
+
+def _alignment_refs_from_evidence_ids(
+    evidence: list[dict[str, Any]],
+    evidence_ids: list[str],
+) -> dict[str, Any]:
+    id_set = set(evidence_ids)
+    matched = [
+        item
+        for item in evidence
+        if str(item.get("evidence_id") or "") in id_set
+        or str(item.get("source_tool") or "") in id_set
+    ]
+    citations = _rag_citations_from_evidence(matched)
+    return {
+        "evidence_ids": [
+            str(item.get("evidence_id"))
+            for item in matched
+            if str(item.get("evidence_id") or "").strip()
+        ],
+        "citations": citations,
+    }
+
+
+def _align_text_to_evidence(
+    text: str,
+    evidence: list[dict[str, Any]],
+    *,
+    prefer_supporting: bool,
+) -> dict[str, Any]:
+    terms = _alignment_terms(text)
+    candidates = []
+    for item in evidence:
+        if prefer_supporting and str(item.get("stance") or "") != "supporting":
+            continue
+        haystack = _evidence_alignment_text(item)
+        if terms and not any(term in haystack for term in terms):
+            continue
+        candidates.append(item)
+    if not candidates and terms:
+        candidates = [
+            item
+            for item in evidence
+            if any(term in _evidence_alignment_text(item) for term in terms)
+        ]
+    if not candidates and not terms:
+        candidates = [item for item in evidence if str(item.get("stance") or "") == "supporting"]
+    if not candidates:
+        candidates = [item for item in evidence if str(item.get("evidence_id") or "").strip()]
+    candidates = candidates[:3]
+    citations = _rag_citations_from_evidence(candidates)
+    evidence_ids = [
+        str(item.get("evidence_id"))
+        for item in candidates
+        if str(item.get("evidence_id") or "").strip()
+    ]
+    return {
+        "text": text,
+        "evidence_ids": evidence_ids,
+        "citations": citations,
+        "aligned": bool(evidence_ids or citations),
+    }
+
+
+def _alignment_refs_for_remediation(
+    remediation_suggestion: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reference_evidence = [
+        item
+        for item in evidence
+        if str(item.get("evidence_type") or "") in {"runbook", "ticket", "deploy_history", "risk"}
+        or str(item.get("source_tool") or "")
+        in {"search_runbook", "retrieve_knowledge", "search_history_ticket", "query_deploy_history"}
+    ]
+    if not reference_evidence:
+        aligned = _align_text_to_evidence(remediation_suggestion, evidence, prefer_supporting=True)
+        return {"evidence_ids": aligned["evidence_ids"], "citations": aligned["citations"]}
+    reference_evidence = reference_evidence[:4]
+    return {
+        "evidence_ids": [
+            str(item.get("evidence_id"))
+            for item in reference_evidence
+            if str(item.get("evidence_id") or "").strip()
+        ],
+        "citations": _rag_citations_from_evidence(reference_evidence),
+    }
+
+
+def _alignment_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    tokens = [
+        "redis",
+        "maxclients",
+        "connected_clients",
+        "mysql",
+        "slow",
+        "query",
+        "pool",
+        "p95",
+        "5xx",
+        "timeout",
+        "k8s",
+        "pod",
+        "oom",
+        "runbook",
+        "ticket",
+        "deploy",
+        "approval",
+    ]
+    return [token for token in tokens if token in lowered]
+
+
+def _evidence_alignment_text(item: dict[str, Any]) -> str:
+    raw_data = _as_dict(item.get("raw_data"))
+    output = _as_dict(raw_data.get("output"))
+    parts = [
+        item.get("evidence_id"),
+        item.get("source_tool"),
+        item.get("data_source"),
+        item.get("evidence_type"),
+        item.get("summary"),
+        item.get("fact"),
+        item.get("inference"),
+        item.get("uncertainty"),
+        output.get("summary"),
+    ]
+    return " ".join(str(part).lower() for part in parts if part)
+
+
+def _rag_citations_from_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in evidence:
+        raw_data = _as_dict(item.get("raw_data"))
+        output = _as_dict(raw_data.get("output"))
+        for payload in (raw_data, output):
+            results = payload.get("retrieval_results")
+            if not isinstance(results, list):
+                continue
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                source_file = str(result.get("source_file") or "").strip()
+                chunk_id = str(result.get("chunk_id") or "").strip()
+                if not source_file or not chunk_id:
+                    continue
+                key = f"{source_file}#{chunk_id}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                citations.append({"source_file": source_file, "chunk_id": chunk_id})
+    return citations[:5]
 
 
 def _build_confirmed_facts(
