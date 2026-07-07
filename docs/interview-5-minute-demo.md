@@ -30,15 +30,24 @@ make sandbox-verify
   --cases eval\cases.yaml `
   --env-file deploy\sandbox.env `
   --report-path logs\live_golden_eval_reports.db `
-  --summary-json logs\live_golden_eval_summary.json `
-  --summary-md logs\live_golden_eval_summary.md `
+  --summary-json logs\live_golden_eval_summary_current.json `
+  --summary-md logs\live_golden_eval_summary_current.md `
   --skip-rag
+.venv\Scripts\python.exe scripts\eval\eval_rag_cases.py `
+  --cases eval\rag_cases.yaml `
+  --docs-dir aiops-docs `
+  --summary-json logs\rag_eval_summary_current.json `
+  --summary-md logs\rag_eval_summary_current.md
+.venv\Scripts\python.exe scripts\eval\build_interview_summary.py `
+  --summary-json logs\interview_eval_summary.json `
+  --summary-md logs\interview_eval_summary.md
 ```
 
 Then open:
 
-- `logs/live_golden_eval_summary.json`
-- `logs/live_golden_eval_summary.md`
+- `logs/interview_eval_summary.md`
+- `logs/live_golden_eval_summary_current.md` only when the interviewer asks for AIOps details
+- `logs/rag_eval_summary_current.md` only when the interviewer asks for RAG details
 - one Redis or MySQL report from the generated report database or web UI
 - `docs/negative-boundary-cases.md` if the interviewer asks how the system behaves when evidence is incomplete
 
@@ -62,6 +71,8 @@ Run the eval command with `--env-file deploy\sandbox.env --skip-rag`. Explain:
 
 - Redis/MySQL are live adapter golden chains.
 - K8s is an offline golden regression case, not live container-backed.
+- The live AIOps summary intentionally skips RAG; use `logs/interview_eval_summary.md`
+  as the single rollup and `logs/rag_eval_summary_current.md` for standalone RAG.
 - `runtime_vs_incident_boundary_hit=true` proves the report distinguishes current
   runtime from replay incident-window evidence.
 - `evidence_sufficiency_hit=true` proves completed reports require primary
@@ -94,6 +105,15 @@ RAG document gap, tool gap, or report-template issue.
 
 For concrete negative examples, use `docs/negative-boundary-cases.md`: Runbook
 missing becomes `needs_human`; K8s RBAC denied becomes `degraded`.
+
+## Conclusion Alignment Wording
+
+Use this sentence if asked how report conclusions are grounded:
+
+AutoOnCall does not claim full-sentence fact checking. It performs
+conclusion-level alignment: `root_cause`, `key_findings`, and
+`remediation_suggestion` must link back to an `evidence_id` or RAG citation.
+If that link is missing, the report is downgraded to `needs_human`.
 
 ## Honest K8s Wording
 

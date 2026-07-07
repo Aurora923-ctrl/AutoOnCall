@@ -26,7 +26,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo demo-reports interview-demo test test-quick eval eval-rag eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
+        install install-dev dev run seed-demo demo demo-reports interview-demo interview-summary test test-quick eval eval-rag eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -239,6 +239,9 @@ demo-reports:  ## Generate deterministic Redis/MySQL/K8s interview demo reports
 interview-demo:  ## Build fixed interview demo reports and eval summary package
 	@echo "$(YELLOW)📝 生成 AutoOnCall 面试演示包...$(NC)"
 	$(PYTHON) scripts/demo/run_interview_demo.py
+
+interview-summary:  ## Build one interview-facing eval summary from current artifacts
+	$(PYTHON) scripts/eval/build_interview_summary.py
 
 # ============================================================
 # MCP 服务管理

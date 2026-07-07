@@ -61,6 +61,16 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | CSV ticket table | `tickets.csv` row `ticket_id=INC-REDIS-001` links root cause and approved resolution | Historical experience supports the chosen remediation path | Table rows are historical context, not live proof |
 | Runbook | Maxclients investigation checklist | Gives a safe operator workflow | Eval fixture is deterministic offline content |
 
+## Evidence Matrix
+
+| Layer | Evidence | Role in RCA |
+| --- | --- | --- |
+| Live Evidence | `redis_info` incident evidence: `connected_clients=9940/maxclients=10000`, `blocked_clients=37` | Primary Redis-domain evidence for maxclients exhaustion |
+| Live Evidence | Prometheus and Loki symptoms | Confirms user impact and timing without pretending to prove Redis alone |
+| Knowledge Basis | `redis_postmortem.pdf` and Redis runbook checklist | Grounds the investigation workflow and remediation boundary |
+| Historical Experience | `ticket_api` and `tickets.csv` row `INC-REDIS-001` | Shows a similar prior incident and approved resolution path |
+| Other | Current `live_info.connected_clients` | Proves adapter connectivity and current runtime state, not outage-window saturation |
+
 ## Runtime Vs Incident Window
 
 - `live_info` is the current Docker Redis runtime. It proves the adapter is connected to the real container.
@@ -82,6 +92,18 @@ Read-only diagnosis can complete without approval. The following actions require
 - Apply traffic throttling that affects production users.
 
 Safe immediate guidance is to reduce retry storms, inspect hot keys and idle clients, confirm client pool usage, and prepare an approved capacity/configuration change.
+
+## Conclusion Alignment
+
+AutoOnCall treats alignment as conclusion-level grounding, not full-sentence fact checking.
+
+| Conclusion field | Required backing | Status |
+| --- | --- | --- |
+| `root_cause` | `query_redis_status` evidence plus Redis PDF/runbook citation | aligned |
+| `key_findings` | Redis incident key, Prometheus symptoms, Loki timeout logs | aligned |
+| `remediation_suggestion` | Historical ticket / CSV row and approval-boundary evidence | aligned |
+
+If one of these links is missing, the generated report should be downgraded to `needs_human` rather than presented as a completed RCA.
 
 ## Eval Summary
 

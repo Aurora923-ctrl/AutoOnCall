@@ -61,6 +61,16 @@ This is the main MySQL portfolio case for interviews. It demonstrates a live ada
 | Historical ticket | Similar slow query / pool wait incident | Prior remediation informs the next safe action | Historical match is advisory, not proof |
 | XLSX history table | `tickets.xlsx` includes payment deploy history and MySQL slow-query ticket rows | Historical experience links release context to pool waiting remediation | Spreadsheet rows support but do not prove root cause alone |
 
+## Evidence Matrix
+
+| Layer | Evidence | Role in RCA |
+| --- | --- | --- |
+| Live Evidence | MySQL incident evidence: `slow_queries=18`, `active_connections=188/200`, `pool_waiting=6` | Primary database-domain evidence for slow-query / pool-wait diagnosis |
+| Live Evidence | Prometheus and Loki payment symptoms | Confirms user impact and timing without proving the SQL digest alone |
+| Knowledge Basis | `payment_wiki.html` slow-query guidance | Grounds the diagnostic workflow, `EXPLAIN` step, and approval boundary |
+| Historical Experience | `ticket_api`, deploy history, and `tickets.xlsx` rows | Shows similar prior incidents and release context |
+| Other | Current `live_status` counters | Proves adapter connectivity and current runtime state, not replay-window saturation |
+
 ## Runtime Vs Incident Window
 
 - `live_status` is the current Docker MySQL runtime. It proves the adapter can query the real container.
@@ -83,6 +93,18 @@ Read-only diagnosis can complete without approval. The following actions require
 - Run data-changing SQL or operational scripts.
 
 Safe immediate guidance is to capture the SQL digest and `EXPLAIN`, reduce the expensive payment path behind a flag if available, verify lock waits and pool settings, and prepare an approved SQL/index/pool change.
+
+## Conclusion Alignment
+
+AutoOnCall treats alignment as conclusion-level grounding, not full-sentence fact checking.
+
+| Conclusion field | Required backing | Status |
+| --- | --- | --- |
+| `root_cause` | `query_mysql_status` evidence plus payment wiki citation | aligned |
+| `key_findings` | MySQL incident table, Prometheus latency/error symptoms, Loki payment timeout logs | aligned |
+| `remediation_suggestion` | Historical ticket / XLSX row and approval-boundary evidence | aligned |
+
+If one of these links is missing, the generated report should be downgraded to `needs_human` rather than presented as a completed RCA.
 
 ## Eval Summary
 
