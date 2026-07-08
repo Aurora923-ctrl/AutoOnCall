@@ -117,7 +117,7 @@ For the Redis chain, keep this wording explicit during the interview:
 - `incident_evidence` is the replay incident-window evidence stored in the real Redis key `autooncall:incident:order-service:redis-maxclients`. It is the evidence used to explain the simulated outage window, for example `connected_clients=9940/maxclients=10000`.
 - Do not claim the current Redis container is still saturated if `live_info.connected_clients` is low; say the current runtime is healthy/idle while the seeded incident key preserves the outage-window facts.
 
-The Prometheus demo alerts are loaded from `deploy/full-stack/alert-rules.yml` through `rule_files` in `deploy/full-stack/prometheus.yml`. The rule expressions intentionally match the exporter metrics: `autooncall_http_5xx_rate` and `autooncall_p95_latency_ms`.
+The Prometheus demo alerts are loaded from `deploy/adapters/alert-rules.yml` through `rule_files` in `deploy/adapters/prometheus.yml`. The rule expressions intentionally match the exporter metrics: `autooncall_http_5xx_rate` and `autooncall_p95_latency_ms`.
 
 To avoid Windows PowerShell code-page mojibake during interviews, present generated UTF-8 artifacts or the web UI instead of raw terminal Chinese output. Prefer:
 

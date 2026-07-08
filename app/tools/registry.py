@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.models.plan import PlanStep
 from app.tools.base import AIOpsTool, ToolContract, ToolExecutionResult
 from app.tools.context_tool import QueryDeployHistoryTool, QueryServiceContextTool
 from app.tools.logs_tool import QueryLogsTool
@@ -23,6 +24,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, AIOpsTool] = {}
+        self._default_incident: dict[str, Any] | None = None
 
     def register(self, tool: AIOpsTool) -> None:
         """Register a tool by its stable name."""
@@ -42,7 +44,19 @@ class ToolRegistry:
         """Return auditable contracts for all registered tools."""
         return [tool.contract() for tool in self._tools.values()]
 
-    async def arun(self, name: str, input_args: dict[str, Any]) -> ToolExecutionResult:
+    def with_incident_context(self, incident: dict[str, Any] | None) -> ToolRegistry:
+        """Attach incident context used by the execution-time policy guard."""
+        self._default_incident = dict(incident or {})
+        return self
+
+    async def arun(
+        self,
+        name: str,
+        input_args: dict[str, Any],
+        *,
+        incident: dict[str, Any] | None = None,
+        step: PlanStep | dict[str, Any] | None = None,
+    ) -> ToolExecutionResult:
         """Run a registered tool by name."""
         tool = self.get(name)
         if not tool:
@@ -51,6 +65,41 @@ class ToolRegistry:
                 status="failed",
                 input_args=input_args,
                 error_message=f"Tool is not registered: {name}",
+            )
+        from app.agent.aiops.risk_controller import assess_plan_step
+
+        policy_step = _policy_step(name, input_args, tool, step)
+        decision = assess_plan_step(
+            policy_step,
+            tool_registry=self,
+            incident=incident if incident is not None else self._default_incident,
+        )
+        if decision.policy != "allow":
+            return ToolExecutionResult(
+                tool_name=name,
+                status="failed",
+                input_args=input_args,
+                output={
+                    "status": "failed",
+                    "source": "policy_guard",
+                    "policy": decision.policy,
+                    "risk_level": decision.risk_level,
+                    "read_only": decision.read_only,
+                    "reason": decision.reason,
+                    "matched_rules": decision.matched_rules,
+                    "summary": f"工具执行被 Policy Guard 拦截: {decision.reason}",
+                },
+                risk_level=decision.risk_level,
+                read_only=decision.read_only,
+                error_message=decision.reason,
+                metadata={
+                    "policy_guard": {
+                        "policy": decision.policy,
+                        "risk_level": decision.risk_level,
+                        "read_only": decision.read_only,
+                        "matched_rules": decision.matched_rules,
+                    }
+                },
             )
         return await tool.arun(input_args)
 
@@ -69,3 +118,25 @@ def create_default_tool_registry(langchain_tools: list[Any] | None = None) -> To
     registry.register(SearchHistoryTicketTool())
     registry.register(SuggestRemediationTool())
     return registry
+
+
+def _policy_step(
+    name: str,
+    input_args: dict[str, Any],
+    tool: AIOpsTool,
+    step: PlanStep | dict[str, Any] | None,
+) -> PlanStep:
+    if isinstance(step, PlanStep):
+        return step
+    if isinstance(step, dict):
+        try:
+            return PlanStep(**step)
+        except Exception:
+            pass
+    return PlanStep(
+        tool_name=name,
+        purpose=getattr(tool, "description", "") or f"Run tool {name}",
+        input_args=dict(input_args or {}),
+        expected_evidence="Tool policy guard preflight",
+        risk_level=getattr(tool, "risk_level", "low"),
+    )

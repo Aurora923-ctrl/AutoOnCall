@@ -33,6 +33,7 @@ from app.services.a2a_skills import (
     SKILL_GET_INCIDENT_STATUS,
     agent_skills,
 )
+from app.services.aiops_read_models import build_incident_replay
 from app.services.aiops_read_models.common import list_run_trace_events
 from app.services.aiops_read_models.run import build_aiops_run_status
 from app.services.aiops_service import aiops_service as default_aiops_service
@@ -43,7 +44,6 @@ from app.services.change_execution_service import (
     change_execution_service as default_change_execution_service,
 )
 from app.services.rag_agent_service import rag_agent_service as default_rag_agent_service
-from app.services.read_models import build_incident_replay
 from app.services.report_generator import report_generator as default_report_generator
 from app.services.trace_service import trace_service as default_trace_service
 

@@ -404,13 +404,6 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "判断是否由实例异常或发布导致",
         )
         add(
-            f"查询 {service_name} 服务不可用期间调用链错误传播",
-            "判断是否由下游依赖或自身错误导致",
-        )
-        add(
-            "判断服务不可用是否伴随消息积压或分区异常",
-        )
-        add(
             "query_deploy_history",
             f"查询 {service_name} 近期发布记录",
             "判断服务不可用是否与最近发布相关",
@@ -437,9 +430,6 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "query_logs",
             f"检索 {service_name} timeout、ERROR 和慢调用日志",
             "确认慢响应对应的应用错误或下游依赖",
-        )
-        add(
-            "判断慢响应是否由消息积压或消费延迟放大",
         )
         add(
             "query_mysql_status",
@@ -535,7 +525,9 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "获取故障的基础监控画像",
         )
         add(
-            "补充消息队列依赖健康证据",
+            "query_logs",
+            f"检索 {service_name} 最近 10 分钟 ERROR、timeout 和异常日志",
+            "获取应用侧错误证据，避免依赖未接入的 Trace/MQ 兜底分析",
         )
         add("query_deploy_history", f"查询 {service_name} 近期发布记录", "判断是否存在变更关联")
         add(

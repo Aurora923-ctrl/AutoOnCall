@@ -28,6 +28,7 @@ def collect_eval_environment(*, suite: str) -> dict[str, Any]:
         "rag_top_k": config.rag_top_k,
         "rag_hybrid_search_enabled": config.rag_hybrid_search_enabled,
         "rag_rerank_enabled": config.rag_rerank_enabled,
+        "rag_retrieval_fusion_strategy": config.rag_retrieval_fusion_strategy,
         "rag_max_l2_distance": config.rag_max_l2_distance,
         "rag_min_lexical_trust_score": config.rag_min_lexical_trust_score,
         "aiops_mock_fallback_enabled": config.aiops_mock_fallback_enabled,

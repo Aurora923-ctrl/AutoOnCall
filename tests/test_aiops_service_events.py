@@ -4,6 +4,7 @@ import importlib
 
 import pytest
 
+from app.services.aiops_progress import build_progress_payload
 from app.services.aiops_service import (
     _build_fallback_final_response,
     _merge_checkpoint_with_node_output,
@@ -12,6 +13,19 @@ from app.services.aiops_service import (
 )
 from app.services.report_generator import ReportGenerator
 from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR
+
+REQUIRED_PROGRESS_FIELDS = {
+    "phase",
+    "node_name",
+    "current_tool",
+    "tool_total",
+    "tool_success_count",
+    "tool_failed_count",
+    "evidence_count",
+    "risk_policy",
+    "report_status",
+    "cursor",
+}
 
 
 def test_planner_event_includes_structured_plan_for_new_clients() -> None:
@@ -54,6 +68,40 @@ def test_executor_event_exposes_evidence_tool_records_and_result_preview() -> No
     assert event["result_preview"] == "connected_clients=9940/10000"
     assert event["evidence"][0]["source_tool"] == "query_redis_status"
     assert event["tool_call_records"][0]["tool_name"] == "query_redis_status"
+
+
+def test_progress_payload_exposes_stable_recovery_contract() -> None:
+    progress = build_progress_payload(
+        {
+            "session_id": "session-progress",
+            "trace_id": "trace-progress",
+            "incident": {"incident_id": "inc-progress"},
+            "current_plan": [
+                {"step_id": "s2", "tool_name": "query_logs", "status": "pending"}
+            ],
+            "past_steps": [("metrics", "ok")],
+            "tool_call_records": [
+                {"tool_name": "query_metrics", "status": "success"},
+                {"tool_name": "query_redis_status", "status": "failed"},
+            ],
+            "gathered_evidence": [{"summary": "metrics ok"}],
+            "risk_assessment": {"policy": "allow"},
+        },
+        phase="executing",
+        node_name="executor",
+        cursor="session-progress:000002",
+    )
+
+    assert REQUIRED_PROGRESS_FIELDS <= set(progress)
+    assert progress["phase"] == "executing"
+    assert progress["current_tool"] == "query_logs"
+    assert progress["tool_total"] == 2
+    assert progress["tool_success_count"] == 1
+    assert progress["tool_failed_count"] == 1
+    assert progress["evidence_count"] == 1
+    assert progress["risk_policy"] == "allow"
+    assert progress["report_status"] == "not_started"
+    assert progress["cursor"] == "session-progress:000002"
 
 
 def test_replanner_event_returns_approval_required_when_pending_approval_exists() -> None:
@@ -218,12 +266,19 @@ async def test_execute_complete_generates_structured_report_when_graph_has_no_re
 
     events = [event async for event in service.execute("order-service timeout", "fallback-session")]
     complete = events[-1]
+    progress_events = [event for event in events if event["type"] == "progress"]
 
+    assert progress_events
+    assert all(REQUIRED_PROGRESS_FIELDS <= set(event["progress"]) for event in progress_events)
+    assert progress_events[0]["progress"]["cursor"] == "fallback-session:000001"
+    assert progress_events[-1]["progress"]["phase"] == "complete"
     assert complete["type"] == "complete"
     assert complete["status"] == "escalated"
     assert complete["structured_report"]["incident_id"] == "inc-fallback"
     assert complete["structured_report"]["status"] == "escalated"
     assert complete["response"] == complete["structured_report"]["markdown"]
+    assert complete["progress"]["phase"] == "complete"
+    assert complete["progress_cursor"] == complete["progress"]["cursor"]
 
 
 @pytest.mark.asyncio
@@ -243,9 +298,13 @@ async def test_execute_error_event_uses_public_message_without_raw_exception() -
 
     events = [event async for event in service.execute("orders incident", "error-session")]
     error_event = events[-1]
+    progress_events = [event for event in events if event["type"] == "progress"]
     serialized = str(error_event)
 
+    assert progress_events[-1]["progress"]["phase"] == "error"
+    assert progress_events[-1]["progress"]["cursor"] == "error-session:000002"
     assert error_event["type"] == "error"
+    assert error_event["progress"]["phase"] == "error"
     assert error_event["message"] == GENERIC_DIAGNOSIS_ERROR
     assert error_event["trace_event"]["error_message"] == GENERIC_DIAGNOSIS_ERROR
     assert "secret" not in serialized

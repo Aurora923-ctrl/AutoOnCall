@@ -133,9 +133,25 @@ async def test_aiops_api_runs_real_graph_nodes_with_fallbacks(monkeypatch, tmp_p
         assert response.status_code == 200
         events = _parse_sse_events(response.text)
         event_types = {event["type"] for event in events}
+        progress_events = [event for event in events if event["type"] == "progress"]
+        required_progress_fields = {
+            "phase",
+            "node_name",
+            "current_tool",
+            "tool_total",
+            "tool_success_count",
+            "tool_failed_count",
+            "evidence_count",
+            "risk_policy",
+            "report_status",
+            "cursor",
+        }
         assert "plan" in event_types
+        assert "progress" in event_types
         assert "step_complete" in event_types
         assert "report" in event_types
+        assert progress_events
+        assert all(required_progress_fields <= set(event["progress"]) for event in progress_events)
         assert events[-1]["type"] == "complete"
 
         complete_event = events[-1]

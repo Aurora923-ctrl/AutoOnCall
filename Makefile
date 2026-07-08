@@ -26,8 +26,8 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo demo-reports interview-demo interview-summary test test-quick eval eval-rag eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
-        security pre-commit-install pre-commit check-all coverage docs shell \
+        install install-dev dev run seed-demo demo demo-reports interview-demo interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
+        api-contract-verify security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
         interview-up interview-down interview-status sandbox-verify sandbox-demo
@@ -95,8 +95,10 @@ help:
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
 	@echo "  $(YELLOW)make eval$(NC)         - 🧪 运行 AIOps 离线评测"
 	@echo "  $(YELLOW)make eval-rag$(NC)     - 🧪 运行 RAG 检索离线评测"
+	@echo "  $(YELLOW)make eval-ragas$(NC)   - 🧪 运行 RAGAS 质量评测（手动/面试）"
 	@echo "  $(YELLOW)make eval-change$(NC)  - 🧪 运行安全变更离线评测"
 	@echo "  $(YELLOW)make eval-replanner$(NC) - 🧪 运行 Replanner LLM 决策评测"
+	@echo "  $(YELLOW)make api-contract-verify$(NC) - 离线验证 API/SSE/ToolContract 契约"
 	@echo "  $(YELLOW)make verify$(NC)       - ✅ 运行只验证门禁（不修改源码）"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 兼容入口，等同 make verify"
 	@echo ""
@@ -242,6 +244,11 @@ interview-demo:  ## Build fixed interview demo reports and eval summary package
 
 interview-summary:  ## Build one interview-facing eval summary from current artifacts
 	$(PYTHON) scripts/eval/build_interview_summary.py
+
+interview-ragas:  ## Refresh optional RAGAS quality report for interview demos
+	@echo "$(YELLOW)馃И Refreshing interview RAGAS quality snapshot...$(NC)"
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
+	$(PYTHON) scripts/eval/build_interview_summary.py --ragas-summary logs/ragas_eval_summary.json
 
 # ============================================================
 # MCP 服务管理
@@ -672,6 +679,10 @@ eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
 
+eval-ragas:  ## Run optional RAGAS quality evaluation for RAG answers
+	@echo "$(YELLOW)🧪 Running optional RAGAS quality evaluation...$(NC)"
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
+
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
@@ -680,9 +691,13 @@ eval-replanner:  ## 运行 Replanner LLM 决策离线评测
 	@echo "$(YELLOW)🧪 运行 Replanner LLM 决策离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_replanner_cases.py --cases eval/replanner_cases.yaml --summary-json logs/replanner_eval_summary.json --summary-md logs/replanner_eval_summary.md
 
-export-bad-cases:  ## Export high-value feedback into offline eval cases
-	@echo "$(YELLOW)Exporting bad cases into eval YAML...$(NC)"
+export-bad-cases:  ## Export high-value feedback into reviewable eval backlog drafts
+	@echo "$(YELLOW)Exporting bad cases into reviewable eval backlog drafts...$(NC)"
 	$(PYTHON) scripts/eval/export_bad_cases.py
+
+api-contract-verify:  ## Offline API/SSE/ToolContract compatibility verification
+	@echo "$(YELLOW)Verifying API/SSE/ToolContract compatibility offline...$(NC)"
+	$(PYTHON) scripts/eval/verify_api_contracts.py
 
 hygiene-check:  ## 检查本地生成产物
 	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"

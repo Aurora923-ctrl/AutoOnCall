@@ -36,3 +36,18 @@ def test_sse_message_keeps_terminal_status_contract() -> None:
     assert payload["status"] == "waiting_approval"
     assert payload["structured_report"]["status"] == "waiting_approval"
     assert payload["diagnosis"]["status"] == "waiting_approval"
+
+
+def test_sse_message_uses_progress_cursor_as_event_id() -> None:
+    event = sse_message(
+        {
+            "type": "progress",
+            "progress_cursor": "session-1:000001",
+            "phase": "planning",
+        }
+    )
+
+    assert event["id"] == "session-1:000001"
+    payload = json.loads(event["data"])
+    assert payload["type"] == "progress"
+    assert is_terminal_event(payload) is False

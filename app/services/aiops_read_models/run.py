@@ -8,6 +8,7 @@ from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from app.services.aiops_progress import build_progress_payload
 from app.services.aiops_read_models.common import (
     build_approval_summary,
     build_run_links,
@@ -31,6 +32,7 @@ def build_aiops_run_status(
     report_payload = report.model_dump(mode="json") if report else snapshot.report
     latest_event = latest_trace_event(events)
     latest_approval = latest_approval_request(approvals)
+    progress = progress_for_snapshot(snapshot, status=status, report_payload=report_payload)
 
     return {
         "available": True,
@@ -61,6 +63,9 @@ def build_aiops_run_status(
         "report_id": report.report_id if report else snapshot.final_report_id,
         "report": report_payload,
         "has_report": bool(report_payload),
+        "progress": progress,
+        "progress_cursor": progress.get("cursor") or snapshot.progress_cursor,
+        "progress_events": snapshot.progress_events,
         "errors": snapshot.errors,
         "warnings": snapshot.warnings,
         "trace_summary": build_run_trace_summary(events, latest_event),
@@ -86,6 +91,7 @@ def build_aiops_run_summary(
     approval_summary = build_approval_summary(approvals, latest_approval)
     status = effective_run_status(snapshot, report, approvals)
     report_payload = report.model_dump(mode="json") if report else snapshot.report or {}
+    progress = progress_for_snapshot(snapshot, status=status, report_payload=report_payload)
     report_id = (
         report.report_id
         if report
@@ -126,8 +132,56 @@ def build_aiops_run_summary(
         "tool_call_count": len(snapshot.tool_call_records),
         "error_count": len(snapshot.errors),
         "warning_count": len(snapshot.warnings),
+        "progress": progress,
+        "progress_cursor": progress.get("cursor") or snapshot.progress_cursor,
         "links": build_run_links(snapshot.session_id, snapshot.incident_id),
     }
+
+
+def progress_for_snapshot(
+    snapshot: AIOpsSessionSnapshot,
+    *,
+    status: str | None = None,
+    report_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return stored progress or derive a compatible snapshot progress payload."""
+    if snapshot.progress:
+        return dict(snapshot.progress)
+
+    state = snapshot.to_state()
+    if report_payload:
+        state["report"] = report_payload
+    resolved_status = status or snapshot.status or "running"
+    return build_progress_payload(
+        state,
+        phase=_phase_from_snapshot(snapshot, resolved_status),
+        node_name=snapshot.node_name or "workflow",
+        cursor=snapshot.progress_cursor or f"{snapshot.session_id}:snapshot",
+        status=resolved_status,
+        message=f"Recovered AIOps run at node={snapshot.node_name or 'workflow'}",
+    )
+
+
+def _phase_from_snapshot(snapshot: AIOpsSessionSnapshot, status: str) -> str:
+    if status in {"failed"}:
+        return "error"
+    if status in {
+        "completed",
+        "approval_resumed",
+        "approval_rejected",
+        "approval_cancelled",
+        "blocked",
+        "escalated",
+    }:
+        return "complete"
+    if status == "waiting_approval" or snapshot.pending_approval:
+        return "approval"
+    return {
+        "planner": "planning",
+        "executor": "executing",
+        "replanner": "replanning",
+        "report_generator": "reporting",
+    }.get(snapshot.node_name or "", "workflow")
 
 
 def filter_aiops_run_summaries(

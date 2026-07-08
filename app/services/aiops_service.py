@@ -28,6 +28,13 @@ from app.services.aiops_event_formatters import (
     format_planner_event,
     format_replanner_event,
 )
+from app.services.aiops_progress import (
+    attach_progress,
+    build_progress_from_event,
+    build_progress_payload,
+    progress_event_payload,
+    state_with_progress,
+)
 from app.services.aiops_resume_reports import _build_persisted_resume_report
 from app.services.aiops_service_helpers import (
     _attach_trace_event,
@@ -138,6 +145,13 @@ class AIOpsService:
             Dict[str, Any]: 流式事件
         """
         session_id = session_id or f"session-{uuid4().hex}"
+        progress_index = 0
+
+        def next_progress_cursor() -> str:
+            nonlocal progress_index
+            progress_index += 1
+            return f"{session_id}:{progress_index:06d}"
+
         logger.info(
             f"[会话 {session_id}] 开始执行任务: "
             f"{summarize_text_for_log(user_input, label='aiops_input')}"
@@ -151,7 +165,7 @@ class AIOpsService:
             )
             trace_id = initial_state["trace_id"]
             incident_id = _extract_incident_id(dict(initial_state))
-            trace_service.create_event(
+            start_trace_event = trace_service.create_event(
                 trace_id=trace_id,
                 incident_id=incident_id,
                 node_name="workflow",
@@ -161,12 +175,22 @@ class AIOpsService:
                 status="success",
                 metadata={"session_id": session_id},
             )
+            start_progress = build_progress_payload(
+                dict(initial_state),
+                phase="workflow",
+                node_name="workflow",
+                cursor=next_progress_cursor(),
+                status="running",
+                message="AIOps workflow started",
+            )
+            initial_snapshot_state = state_with_progress(dict(initial_state), start_progress)
             self._save_session_snapshot(
                 session_id=session_id,
-                state=dict(initial_state),
+                state=initial_snapshot_state,
                 status="running",
                 node_name="workflow",
             )
+            yield _attach_trace_event(progress_event_payload(start_progress), start_trace_event)
 
             config_dict = {"configurable": {"thread_id": session_id}}
 
@@ -205,13 +229,21 @@ class AIOpsService:
                             snapshot_state,
                             node_output,
                         )
+                    progress = build_progress_from_event(
+                        event_payload,
+                        snapshot_state,
+                        node_name=node_name,
+                        cursor=next_progress_cursor(),
+                    )
+                    snapshot_state = state_with_progress(snapshot_state, progress)
                     self._save_session_snapshot(
                         session_id=session_id,
                         state=snapshot_state,
                         status=_snapshot_status_from_event(event_payload),
                         node_name=node_name,
                     )
-                    yield _attach_trace_event(event_payload, trace_event)
+                    yield _attach_trace_event(progress_event_payload(progress), trace_event)
+                    yield _attach_trace_event(attach_progress(event_payload, progress), trace_event)
 
             final_state = self.graph.get_state(config_dict)
             final_response = ""
@@ -235,6 +267,22 @@ class AIOpsService:
             if not final_response:
                 final_response = _build_fallback_final_response(final_values)
             if not structured_report and final_values:
+                report_progress = build_progress_payload(
+                    dict(final_values),
+                    phase="reporting",
+                    node_name="report_generator",
+                    cursor=next_progress_cursor(),
+                    status="running",
+                    report_status="generating",
+                    message="Generating diagnosis report",
+                )
+                self._save_session_snapshot(
+                    session_id=session_id,
+                    state=state_with_progress(dict(final_values), report_progress),
+                    status="running",
+                    node_name="report_generator",
+                )
+                yield progress_event_payload(report_progress)
                 generated_report = report_generator.generate_from_state(
                     final_values,
                     status=_infer_terminal_report_status(final_values),
@@ -255,6 +303,20 @@ class AIOpsService:
             final_snapshot_state["report"] = structured_report
             final_snapshot_state["pending_approval"] = pending_approval
             final_snapshot_state["risk_assessment"] = risk_assessment
+            complete_progress = build_progress_payload(
+                final_snapshot_state,
+                phase="complete",
+                node_name="workflow",
+                cursor=next_progress_cursor(),
+                status=terminal_status,
+                report_status=(
+                    str((structured_report or {}).get("status") or terminal_status)
+                    if isinstance(structured_report, dict)
+                    else terminal_status
+                ),
+                message="AIOps workflow completed",
+            )
+            final_snapshot_state = state_with_progress(final_snapshot_state, complete_progress)
             self._save_session_snapshot(
                 session_id=session_id,
                 state=final_snapshot_state,
@@ -271,7 +333,9 @@ class AIOpsService:
                 status=terminal_status,
                 metadata={"session_id": session_id},
             )
-            yield {
+            yield _attach_trace_event(progress_event_payload(complete_progress), complete_trace_event)
+            yield attach_progress(
+                {
                 "type": "complete",
                 "stage": "complete",
                 "status": terminal_status,
@@ -284,7 +348,9 @@ class AIOpsService:
                 "pending_approval": pending_approval,
                 "risk_assessment": risk_assessment,
                 "structured_report": structured_report,
-            }
+                },
+                complete_progress,
+            )
 
             logger.info(f"[会话 {session_id}] 任务执行完成")
 
@@ -294,9 +360,19 @@ class AIOpsService:
                 f"error_type={type(e).__name__}, {summarize_text_for_log(e, label='error')}"
             )
             public_message = public_exception_message(e, fallback=GENERIC_DIAGNOSIS_ERROR)
+            error_state = dict(locals().get("initial_state", {}) or {})
+            error_progress = build_progress_payload(
+                error_state,
+                phase="error",
+                node_name="workflow",
+                cursor=next_progress_cursor(),
+                status="failed",
+                report_status="failed",
+                message=public_message,
+            )
             self._save_session_snapshot(
                 session_id=session_id,
-                state=dict(locals().get("initial_state", {}) or {}),
+                state=state_with_progress(error_state, error_progress),
                 status="failed",
                 node_name="workflow",
             )
@@ -310,7 +386,9 @@ class AIOpsService:
                 error_message=public_message,
                 metadata={"session_id": session_id},
             )
-            yield {
+            yield _attach_trace_event(progress_event_payload(error_progress), error_trace_event)
+            yield attach_progress(
+                {
                 "type": "error",
                 "stage": "error",
                 "status": "failed",
@@ -318,7 +396,9 @@ class AIOpsService:
                 "trace_id": error_trace_event.trace_id,
                 "trace_event_id": error_trace_event.event_id,
                 "trace_event": error_trace_event.model_dump(mode="json"),
-            }
+                },
+                error_progress,
+            )
 
     async def diagnose(
         self,
@@ -349,8 +429,11 @@ class AIOpsService:
                     "stage": "diagnosis_complete",
                     "status": diagnosis_status,
                     "message": "诊断流程完成",
+                    "response": event.get("response", ""),
                     "incident_id": event.get("incident_id", ""),
                     "trace_id": event.get("trace_id", ""),
+                    "progress": event.get("progress"),
+                    "progress_cursor": event.get("progress_cursor", ""),
                     "pending_approval": event.get("pending_approval"),
                     "risk_assessment": event.get("risk_assessment"),
                     "structured_report": event.get("structured_report"),
@@ -467,6 +550,13 @@ class AIOpsService:
                 )
                 resume_source = "report_fallback"
 
+        progress_index = 0
+
+        def next_resume_progress_cursor() -> str:
+            nonlocal progress_index
+            progress_index += 1
+            return f"{session_id}:resume-{progress_index:06d}"
+
         resume_event = trace_service.create_event(
             trace_id=trace_id,
             incident_id=incident_id,
@@ -483,7 +573,25 @@ class AIOpsService:
                 "boundary": "agent_does_not_execute_production_change",
             },
         )
-        yield {
+        resume_state = dict(values or {})
+        if not resume_state:
+            resume_state = {
+                "session_id": session_id,
+                "trace_id": trace_id,
+                "incident": {"incident_id": incident_id},
+            }
+        resume_progress = build_progress_payload(
+            resume_state,
+            phase="approval",
+            node_name="workflow",
+            cursor=next_resume_progress_cursor(),
+            status="running",
+            report_status="generating",
+            message="Approved decision recorded; resuming diagnosis",
+        )
+        yield _attach_trace_event(progress_event_payload(resume_progress), resume_event)
+        yield attach_progress(
+            {
             "type": "status",
             "stage": "diagnosis_resumed",
             "status": "running",
@@ -494,9 +602,12 @@ class AIOpsService:
             "trace_event": resume_event.model_dump(mode="json"),
             "resume_source": resume_source,
             "execution_boundary": "agent_does_not_execute_production_change",
-        }
+            },
+            resume_progress,
+        )
 
         approval_payload = approval.model_dump(mode="json")
+        resumed_snapshot_state: dict[str, Any]
         if values:
             report_state = dict(values)
             risk_summary = dict(report_state.get("risk_assessment") or {})
@@ -519,9 +630,19 @@ class AIOpsService:
             resumed_state["risk_assessment"] = risk_summary
             resumed_state["report"] = report.model_dump(mode="json")
             resumed_state["response"] = report.markdown
+            report_progress = build_progress_payload(
+                resumed_state,
+                phase="reporting",
+                node_name="report_generator",
+                cursor=next_resume_progress_cursor(),
+                status="approval_resumed",
+                report_status=report.status,
+                message="Approval resume report generated",
+            )
+            resumed_snapshot_state = state_with_progress(resumed_state, report_progress)
             self._save_session_snapshot(
                 session_id=session_id,
-                state=resumed_state,
+                state=resumed_snapshot_state,
                 status="approval_resumed",
                 node_name="workflow",
             )
@@ -533,24 +654,35 @@ class AIOpsService:
             )
             risk_summary = dict(report.risk_summary or {})
             report_generator.save_report(report)
+            resumed_state = {
+                "session_id": session_id,
+                "input": report.summary,
+                "trace_id": trace_id,
+                "incident": {
+                    "incident_id": incident_id,
+                    "title": report.title,
+                    "service_name": report.service_name,
+                    "severity": report.severity,
+                    "environment": report.environment,
+                },
+                "risk_assessment": risk_summary,
+                "pending_approval": None,
+                "report": report.model_dump(mode="json"),
+                "response": report.markdown,
+            }
+            report_progress = build_progress_payload(
+                resumed_state,
+                phase="reporting",
+                node_name="report_generator",
+                cursor=next_resume_progress_cursor(),
+                status="approval_resumed",
+                report_status=report.status,
+                message="Approval resume report generated",
+            )
+            resumed_snapshot_state = state_with_progress(resumed_state, report_progress)
             self._save_session_snapshot(
                 session_id=session_id,
-                state={
-                    "session_id": session_id,
-                    "input": report.summary,
-                    "trace_id": trace_id,
-                    "incident": {
-                        "incident_id": incident_id,
-                        "title": report.title,
-                        "service_name": report.service_name,
-                        "severity": report.severity,
-                        "environment": report.environment,
-                    },
-                    "risk_assessment": risk_summary,
-                    "pending_approval": None,
-                    "report": report.model_dump(mode="json"),
-                    "response": report.markdown,
-                },
+                state=resumed_snapshot_state,
                 status="approval_resumed",
                 node_name="workflow",
             )
@@ -570,7 +702,9 @@ class AIOpsService:
                 "resume_source": resume_source,
             },
         )
-        yield {
+        yield _attach_trace_event(progress_event_payload(report_progress), report_event)
+        yield attach_progress(
+            {
             "type": "report",
             "stage": "resumed_report",
             "status": report.status,
@@ -583,7 +717,9 @@ class AIOpsService:
             "execution_boundary": "agent_does_not_execute_production_change",
             "report": report.markdown,
             "structured_report": report.model_dump(mode="json"),
-        }
+            },
+            report_progress,
+        )
 
         complete_event = trace_service.create_event(
             trace_id=trace_id,
@@ -599,7 +735,24 @@ class AIOpsService:
                 "resume_source": resume_source,
             },
         )
-        yield {
+        complete_progress = build_progress_payload(
+            resumed_snapshot_state,
+            phase="complete",
+            node_name="workflow",
+            cursor=next_resume_progress_cursor(),
+            status=report.status,
+            report_status=report.status,
+            message="Approval resume lifecycle completed",
+        )
+        self._save_session_snapshot(
+            session_id=session_id,
+            state=state_with_progress(resumed_snapshot_state, complete_progress),
+            status=report.status,
+            node_name="workflow",
+        )
+        yield _attach_trace_event(progress_event_payload(complete_progress), complete_event)
+        yield attach_progress(
+            {
             "type": "complete",
             "stage": "resume_complete",
             "status": report.status,
@@ -618,7 +771,9 @@ class AIOpsService:
                 "report": report.markdown,
                 "structured_report": report.model_dump(mode="json"),
             },
-        }
+            },
+            complete_progress,
+        )
 
     def _best_effort_update_checkpoint_after_resume(
         self,

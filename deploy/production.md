@@ -18,7 +18,7 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 - Use persistent storage for `AIOPS_SQLITE_PATH` in single-replica deployments, or set `AIOPS_STORAGE_BACKEND=mysql` with `MYSQL_DSN` before multi-replica deployments.
 - Back up the configured AIOps state store. SQLite needs file-level backup; MySQL should use managed database backup.
 - Set `AIOPS_MOCK_FALLBACK_ENABLED=false` in staging and production checks when unconfigured adapters must return structured `failed/not_configured` evidence instead of deterministic mock data.
-- Keep `AIOPS_STORE_RAW_EXTERNAL_PAYLOAD=false` unless temporarily debugging. With the default value, external responses and Alertmanager webhook payloads are stored in compact form.
+- Keep `AIOPS_STORE_RAW_EXTERNAL_PAYLOAD=false` unless temporarily debugging. With the default value, external responses and Alertmanager webhook payloads are stored in compact form; oversized tool outputs are redacted into `AIOPS_TOOL_OUTPUT_ARTIFACT_DIR`, while Trace/Report keeps only summary, hash, size, and artifact reference.
 - Keep `MILVUS_RECREATE_ON_DIMENSION_MISMATCH=false`; rebuild mismatched collections only through an explicit maintenance procedure.
 - Keep `INDEX_ALLOWED_ROOTS` limited to trusted knowledge-base directories such as `uploads,aiops-docs`.
 - Use `/health/live` for process liveness and `/health/ready` for dependency and adapter readiness.

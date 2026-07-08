@@ -8,6 +8,7 @@ from app.services.evidence_quality import (
     build_evidence_quality_profile,
     source_quality_confidence_cap,
 )
+from app.utils.structured_data import as_dict as _as_dict, dedupe_strings as _dedupe_strings
 
 STATUS_CONFIDENCE_CAPS = {
     "incomplete": 0.55,
@@ -162,16 +163,3 @@ def _has_enough_successful_diagnostic_evidence(evidence: list[dict[str, Any]]) -
     return successful >= 3
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _dedupe_strings(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result

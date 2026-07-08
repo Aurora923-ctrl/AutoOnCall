@@ -18,6 +18,7 @@ def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "lexical_candidate_count": payload.get("lexical_candidate_count"),
         "max_l2_distance": payload.get("max_l2_distance"),
         "retrieval_mode": payload.get("retrieval_mode", ""),
+        "fusion_strategy": payload.get("fusion_strategy", "weighted"),
         "retrieval_degraded": bool(payload.get("retrieval_degraded")),
         "vector_error_message": payload.get("vector_error_message", ""),
         "vector_error_type": payload.get("vector_error_type", ""),
@@ -66,6 +67,8 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
         "lexical_score": item.get("lexical_score"),
         "vector_score": item.get("vector_score"),
         "rerank_score": item.get("rerank_score"),
+        "rrf_score": item.get("rrf_score"),
+        "fusion_strategy": item.get("fusion_strategy"),
         "content_preview": item.get("content_preview", ""),
         "retrieval_reason": item.get("retrieval_reason", ""),
     }

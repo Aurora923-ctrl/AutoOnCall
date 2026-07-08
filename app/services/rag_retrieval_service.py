@@ -32,6 +32,7 @@ def retrieve_structured_knowledge(
     metadata_filter: dict[str, Any] | None = None,
     hybrid_search_enabled: bool | None = None,
     rerank_enabled: bool | None = None,
+    fusion_strategy: str | None = None,
     vector_store: Any | None = None,
     vector_store_provider: Callable[[], Any] | None = None,
     lexical_index: Any | None = None,
@@ -45,6 +46,7 @@ def retrieve_structured_knowledge(
         config.rag_hybrid_search_enabled if hybrid_search_enabled is None else hybrid_search_enabled
     )
     rerank_on = config.rag_rerank_enabled if rerank_enabled is None else rerank_enabled
+    normalized_fusion_strategy = normalize_fusion_strategy(fusion_strategy)
     candidate_k = _candidate_count(k) if hybrid_enabled or rerank_on else k
     expr = build_milvus_metadata_expr(metadata_filter)
     resolved_lexical_index = lexical_index or lexical_index_service
@@ -91,9 +93,9 @@ def retrieve_structured_knowledge(
                 raise
 
         retrieval_mode = (
-            build_degraded_retrieval_mode(rerank_on)
+            build_degraded_retrieval_mode(rerank_on, normalized_fusion_strategy)
             if vector_error_detail
-            else build_retrieval_mode(hybrid_enabled, rerank_on)
+            else build_retrieval_mode(hybrid_enabled, rerank_on, normalized_fusion_strategy)
         )
         vector_error_message = build_public_vector_error_message(vector_error_detail)
         raw_results = merge_raw_retrieval_results(vector_results, lexical_results)
@@ -114,6 +116,7 @@ def retrieve_structured_knowledge(
             top_k=k,
             hybrid_search_enabled=hybrid_enabled,
             rerank_enabled=rerank_on,
+            fusion_strategy=normalized_fusion_strategy,
         )
         trusted = []
         rejected = []
@@ -157,6 +160,7 @@ def retrieve_structured_knowledge(
                 "max_l2_distance": threshold,
                 "min_lexical_trust_score": lexical_threshold,
                 "retrieval_mode": retrieval_mode,
+                "fusion_strategy": normalized_fusion_strategy,
                 "retrieval_degraded": bool(vector_error_detail),
                 "vector_error_message": vector_error_message,
                 "vector_error_type": vector_error_type,
@@ -182,6 +186,7 @@ def retrieve_structured_knowledge(
             "max_l2_distance": threshold,
             "min_lexical_trust_score": lexical_threshold,
             "retrieval_mode": retrieval_mode,
+            "fusion_strategy": normalized_fusion_strategy,
             "retrieval_degraded": bool(vector_error_detail),
             "vector_error_message": vector_error_message,
             "vector_error_type": vector_error_type,
@@ -207,7 +212,12 @@ def retrieve_structured_knowledge(
             "candidate_k": candidate_k,
             "max_l2_distance": threshold,
             "min_lexical_trust_score": lexical_threshold,
-            "retrieval_mode": build_retrieval_mode(hybrid_enabled, rerank_on),
+            "retrieval_mode": build_retrieval_mode(
+                hybrid_enabled,
+                rerank_on,
+                normalized_fusion_strategy,
+            ),
+            "fusion_strategy": normalized_fusion_strategy,
             "retrieval_degraded": False,
             "vector_error_message": build_public_vector_error_message(vector_error_detail),
             "vector_error_type": vector_error_type,
@@ -452,6 +462,7 @@ def rerank_retrieval_candidates(
     top_k: int,
     hybrid_search_enabled: bool,
     rerank_enabled: bool,
+    fusion_strategy: str | None = None,
 ) -> list[dict[str, Any]]:
     """Blend vector ranking with lexical signals and return final ordered chunks."""
     if not candidates:
@@ -459,6 +470,7 @@ def rerank_retrieval_candidates(
 
     query_terms = extract_retrieval_terms(query)
     deduped = deduplicate_candidates(candidates)
+    normalized_fusion_strategy = normalize_fusion_strategy(fusion_strategy)
     for index, chunk in enumerate(deduped, 1):
         metadata = dict(chunk.get("metadata") or {})
         has_vector_signal = (
@@ -468,18 +480,28 @@ def rerank_retrieval_candidates(
         lexical_score = compute_lexical_score(query_terms, chunk) if hybrid_search_enabled else 0.0
         vector_score = normalize_vector_distance(chunk.get("score")) if has_vector_signal else 0.0
         base_rank_score = 1 / max(index, 1)
-        rerank_score = (
-            (0.55 * vector_score) + (0.35 * lexical_score) + (0.10 * base_rank_score)
-            if rerank_enabled or hybrid_search_enabled
-            else base_rank_score
+        weighted_score = _weighted_fusion_score(
+            vector_score=vector_score,
+            lexical_score=lexical_score,
+            base_rank_score=base_rank_score,
+            fusion_enabled=rerank_enabled or hybrid_search_enabled,
         )
+        rrf_score = _rrf_fusion_score(metadata, base_rank=index)
+        rerank_score = rrf_score if normalized_fusion_strategy == "rrf" else weighted_score
         chunk["lexical_score"] = round(lexical_score, 4)
         chunk["vector_score"] = round(vector_score, 4)
         chunk["rerank_score"] = round(rerank_score, 4)
+        chunk["rrf_score"] = round(rrf_score, 4)
+        chunk["fusion_strategy"] = normalized_fusion_strategy
         chunk["retrieval_signals"] = {
             "vector_score": chunk["vector_score"],
             "lexical_score": chunk["lexical_score"],
             "rerank_score": chunk["rerank_score"],
+            "rrf_score": chunk["rrf_score"],
+            "vector_rank": metadata.get("_vector_rank"),
+            "lexical_rank": metadata.get("_lexical_rank"),
+            "base_rank": index,
+            "fusion_strategy": normalized_fusion_strategy,
         }
 
     if rerank_enabled or hybrid_search_enabled:
@@ -495,6 +517,43 @@ def rerank_retrieval_candidates(
     for rank, chunk in enumerate(deduped[:top_k], 1):
         chunk["rank"] = rank
     return deduped[:top_k]
+
+
+def normalize_fusion_strategy(value: str | None = None) -> str:
+    """Return the supported retrieval fusion strategy without changing safe defaults."""
+    strategy = str(value or config.rag_retrieval_fusion_strategy or "weighted").strip().lower()
+    return strategy if strategy in {"weighted", "rrf"} else "weighted"
+
+
+def _weighted_fusion_score(
+    *,
+    vector_score: float,
+    lexical_score: float,
+    base_rank_score: float,
+    fusion_enabled: bool,
+) -> float:
+    if not fusion_enabled:
+        return base_rank_score
+    return (0.55 * vector_score) + (0.35 * lexical_score) + (0.10 * base_rank_score)
+
+
+def _rrf_fusion_score(
+    metadata: dict[str, Any],
+    *,
+    base_rank: int,
+    k: int = 60,
+) -> float:
+    ranks = [_coerce_rank(metadata.get("_vector_rank")), _coerce_rank(metadata.get("_lexical_rank"))]
+    ranks.append(max(base_rank, 1))
+    return sum(1 / (k + rank) for rank in ranks if rank is not None)
+
+
+def _coerce_rank(value: Any) -> int | None:
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return None
+    return rank if rank > 0 else None
 
 
 def deduplicate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -621,20 +680,31 @@ def normalize_metadata_filter(metadata_filter: dict[str, Any] | None) -> dict[st
     return normalized
 
 
-def build_retrieval_mode(hybrid_search_enabled: bool, rerank_enabled: bool) -> str:
+def build_retrieval_mode(
+    hybrid_search_enabled: bool,
+    rerank_enabled: bool,
+    fusion_strategy: str | None = None,
+) -> str:
     """Return a stable retrieval-mode label for observability and eval reports."""
+    strategy = normalize_fusion_strategy(fusion_strategy)
     if hybrid_search_enabled and rerank_enabled:
-        return "hybrid_vector_lexical_rerank"
+        return "hybrid_vector_lexical_rrf_rerank" if strategy == "rrf" else "hybrid_vector_lexical_rerank"
     if hybrid_search_enabled:
-        return "hybrid_vector_lexical"
+        return "hybrid_vector_lexical_rrf" if strategy == "rrf" else "hybrid_vector_lexical"
     if rerank_enabled:
-        return "vector_rerank"
+        return "vector_rrf_rerank" if strategy == "rrf" else "vector_rerank"
     return "vector"
 
 
-def build_degraded_retrieval_mode(rerank_enabled: bool) -> str:
+def build_degraded_retrieval_mode(
+    rerank_enabled: bool,
+    fusion_strategy: str | None = None,
+) -> str:
     """Return the retrieval mode used when vector search falls back to lexical only."""
-    return "lexical_degraded_rerank" if rerank_enabled else "lexical_degraded"
+    strategy = normalize_fusion_strategy(fusion_strategy)
+    if not rerank_enabled:
+        return "lexical_degraded"
+    return "lexical_degraded_rrf_rerank" if strategy == "rrf" else "lexical_degraded_rerank"
 
 
 def build_public_vector_error_message(error_detail: str) -> str:

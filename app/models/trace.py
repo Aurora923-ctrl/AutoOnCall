@@ -20,6 +20,7 @@ class ToolCallRecord(BaseModel):
     input_summary: str = ""
     output: Any = None
     output_summary: str = ""
+    output_artifact: dict[str, Any] | None = None
     data_source: str = "unknown"
     latency_ms: float = 0.0
     status: str = "pending"

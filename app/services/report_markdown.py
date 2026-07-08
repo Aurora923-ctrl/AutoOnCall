@@ -6,6 +6,8 @@ from typing import Any
 
 from app.models.report import DiagnosisReport
 from app.services.change_execution_read_models import build_change_execution_stages
+from app.services.evidence_graph import evidence_layer as _shared_evidence_layer
+from app.utils.structured_data import as_dict as _as_dict
 
 
 def render_markdown(report: DiagnosisReport) -> str:
@@ -23,8 +25,7 @@ def render_markdown(report: DiagnosisReport) -> str:
         if report.approval_status == "pending"
         else f"审批状态：{report.approval_status}。"
     )
-    return "\n".join(
-        [
+    sections = [
             f"# {report.title}",
             "",
             "## 1. 故障摘要",
@@ -85,6 +86,9 @@ def render_markdown(report: DiagnosisReport) -> str:
             "### Conclusion Alignment",
             _render_conclusion_alignment(report),
             "",
+            "### Incident Evidence Graph",
+            _render_incident_evidence_graph(report),
+            "",
             "### 数据源边界",
             _render_data_source_boundaries(report),
             "",
@@ -109,9 +113,6 @@ def render_markdown(report: DiagnosisReport) -> str:
             "",
             "### 工具调用摘要",
             _render_tool_calls(report.tool_calls),
-            "",
-            "### Tracing 与消息队列证据",
-            _render_dependency_signals(report.dependency_signals),
             "",
             "### Trace 摘要",
             f"- trace_id：{report.trace_id or 'unknown'}",
@@ -141,7 +142,14 @@ def render_markdown(report: DiagnosisReport) -> str:
             "### 预防建议",
             report.prevention or "暂无预防建议。",
         ]
-    )
+    if report.dependency_signals:
+        trace_summary_index = sections.index("### Trace 摘要")
+        sections[trace_summary_index:trace_summary_index] = [
+            "### Tracing 与消息队列证据",
+            _render_dependency_signals(report.dependency_signals),
+            "",
+        ]
+    return "\n".join(sections)
 
 
 def _render_interview_snapshot(report: DiagnosisReport) -> str:
@@ -291,8 +299,8 @@ def _render_tool_call_table(tool_calls: list[dict[str, Any]]) -> str:
     if not tool_calls:
         return "- No tool calls recorded."
     lines = [
-        "| Tool | Source | Status | Latency ms | Summary |",
-        "| --- | --- | --- | ---: | --- |",
+        "| Tool | Source | Status | Latency ms | Artifact | Summary |",
+        "| --- | --- | --- | ---: | --- | --- |",
     ]
     for call in tool_calls[:8]:
         lines.append(
@@ -301,6 +309,7 @@ def _render_tool_call_table(tool_calls: list[dict[str, Any]]) -> str:
             f"{_md_cell(call.get('data_source', 'unknown'))} | "
             f"{_md_cell(call.get('status', 'unknown'))} | "
             f"{call.get('latency_ms', 0)} | "
+            f"{_md_cell(_artifact_label(call.get('output_artifact')))} | "
             f"{_md_cell(call.get('output_summary') or call.get('error_message') or '')} |"
         )
     return "\n".join(lines)
@@ -381,9 +390,37 @@ def _render_change_plan(report: DiagnosisReport) -> str:
             _render_indented_bullets(plan.get("rollback_steps")),
             "- 验证步骤：",
             _render_indented_bullets(plan.get("verification_steps")),
+            "- 结构化安全处置 Playbook：",
+            _render_remediation_playbook(plan.get("remediation_playbook")),
             "- 边界：Agent 只生成建议和计划；生产写操作需在审批通过后进入安全变更流程。",
         ]
     )
+
+
+def _render_remediation_playbook(value: Any) -> str:
+    playbook = _as_dict(value)
+    if not playbook:
+        return "  - 未生成结构化 playbook。"
+    lines = [
+        f"  - 摘要：{playbook.get('summary') or '未记录'}",
+        f"  - 风险策略：{playbook.get('risk_policy') or 'approval_required'}；"
+        f"需要审批：{'是' if playbook.get('approval_required', True) else '否'}",
+        "  - Pre-check：",
+        *_nested_bullets(playbook.get("pre_check"), indent="    "),
+        "  - Dry-run：",
+        *_nested_bullets(playbook.get("dry_run"), indent="    "),
+        "  - Sandbox / Manual record：",
+        *_nested_bullets(playbook.get("sandbox_or_manual_record"), indent="    "),
+        "  - Rollback：",
+        *_nested_bullets(playbook.get("rollback"), indent="    "),
+        "  - Observe metrics：",
+        *_nested_bullets(playbook.get("observe_metrics"), indent="    "),
+        "  - Stop conditions：",
+        *_nested_bullets(playbook.get("stop_conditions"), indent="    "),
+        "  - Safety notes：",
+        *_nested_bullets(playbook.get("safety_notes"), indent="    "),
+    ]
+    return "\n".join(lines)
 
 
 def _render_change_executions(report: DiagnosisReport) -> str:
@@ -424,11 +461,19 @@ def _render_indented_bullets(value: Any) -> str:
     return "\n".join(f"  - {item}" for item in value)
 
 
+def _nested_bullets(value: Any, *, indent: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return [f"{indent}- 无"]
+    return [f"{indent}- {item}" for item in value]
+
+
 def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     if not tool_calls:
         return "- 无"
     lines = []
     for call in tool_calls:
+        artifact = _artifact_label(call.get("output_artifact"))
+        artifact_text = f"artifact={artifact} " if artifact else ""
         lines.append(
             "- "
             f"{call.get('tool_name', 'unknown')} "
@@ -436,10 +481,22 @@ def _render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
             f"source={call.get('data_source', 'unknown')} "
             f"status={call.get('status', 'unknown')} "
             f"latency_ms={call.get('latency_ms', 0)} "
+            f"{artifact_text}"
             f"input={call.get('input_summary') or '未记录'} "
             f"summary={call.get('output_summary') or call.get('error_message') or '未记录'}"
         )
     return "\n".join(lines)
+
+
+def _artifact_label(value: Any) -> str:
+    artifact = _as_dict(value)
+    if not artifact:
+        return ""
+    artifact_id = artifact.get("artifact_id") or "artifact"
+    size = artifact.get("size_bytes")
+    if isinstance(size, int | float):
+        return f"{artifact_id} ({int(size)} bytes)"
+    return str(artifact_id)
 
 
 def _render_dependency_signals(signals: list[dict[str, Any]]) -> str:
@@ -487,11 +544,19 @@ def _render_evidence_quality(report: DiagnosisReport) -> str:
     by_type = _as_dict(profile.get("by_type"))
     by_stance = _as_dict(profile.get("by_stance"))
     by_data_source = _as_dict(profile.get("by_data_source"))
+    by_layer = _as_dict(profile.get("by_layer"))
+    root_cause_closure = _as_dict(profile.get("root_cause_closure"))
+    root_cause_reference_ids = _root_cause_reference_ids(root_cause_closure)
     failed_tools = profile.get("failed_tools")
     lines = [
         f"- 类型分布：{_render_counter(by_type)}",
         f"- 立场分布：{_render_counter(by_stance)}",
         f"- 数据源分布：{_render_counter(by_data_source)}",
+        f"- 证据层级：{_render_counter(by_layer)}",
+        f"- 根因闭环：{root_cause_closure.get('status') or 'unknown'}；"
+        f"live={_render_inline_list(root_cause_closure.get('live_evidence_ids'))}；"
+        f"knowledge/history={_render_inline_list(root_cause_reference_ids)}",
+        f"- 大输出 Artifact 数：{profile.get('artifact_count', 0)}",
         f"- 失败工具：{_render_inline_list(failed_tools)}",
     ]
     for item in report.evidence[:8]:
@@ -505,6 +570,15 @@ def _render_evidence_quality(report: DiagnosisReport) -> str:
             f"reason={item.get('confidence_reason', '') or '未标注'}"
         )
     return "\n".join(lines)
+
+
+def _root_cause_reference_ids(root_cause_closure: dict[str, Any]) -> list[Any]:
+    knowledge = root_cause_closure.get("knowledge_evidence_ids")
+    history = root_cause_closure.get("history_evidence_ids")
+    return [
+        *(knowledge if isinstance(knowledge, list) else []),
+        *(history if isinstance(history, list) else []),
+    ]
 
 
 def _render_evidence_sufficiency(report: DiagnosisReport) -> str:
@@ -829,10 +903,6 @@ def _dedupe_inline(items: list[str]) -> list[str]:
     return result
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 # Interview-oriented evidence rendering. These definitions intentionally live
 # after the legacy helpers so the report keeps the old sections while upgrading
 # the matrix that interviewers inspect first.
@@ -965,6 +1035,67 @@ def _render_evidence_matrix(report: DiagnosisReport) -> str:
     return "\n".join(lines)
 
 
+def _render_incident_evidence_graph(report: DiagnosisReport) -> str:
+    graph = _as_dict(report.evidence_graph)
+    if not graph:
+        return "- Graph not recorded."
+
+    stats = _as_dict(graph.get("stats"))
+    closure = _as_dict(graph.get("root_cause_closure"))
+    nodes = [item for item in graph.get("nodes", []) if isinstance(item, dict)]
+    edges = [item for item in graph.get("edges", []) if isinstance(item, dict)]
+    lines = [
+        f"- graph_id: {graph.get('graph_id', 'unknown')}",
+        f"- nodes: {stats.get('node_count', len(nodes))}; edges: {stats.get('edge_count', len(edges))}",
+        f"- root-cause closure: {closure.get('status', 'unknown')}",
+        f"- required layers: {_render_inline_list(closure.get('required_layers'))}",
+        f"- live evidence: {_render_inline_list(closure.get('live_evidence_ids'))}",
+        f"- knowledge evidence: {_render_inline_list(closure.get('knowledge_evidence_ids'))}",
+        f"- history evidence: {_render_inline_list(closure.get('history_evidence_ids'))}",
+    ]
+    if closure.get("missing_layers"):
+        lines.append(f"- missing layers: {_render_inline_list(closure.get('missing_layers'))}")
+
+    lines.append("#### Root Cause Support Nodes")
+    support_nodes = [
+        node
+        for node in nodes
+        if node.get("node_type") == "evidence" and node.get("is_root_cause_support")
+    ]
+    if support_nodes:
+        for node in support_nodes[:8]:
+            lines.append(
+                "- "
+                f"{node.get('evidence_id', 'unknown')} "
+                f"layer={node.get('layer', 'other')} "
+                f"stance={node.get('stance', 'neutral')} "
+                f"source={node.get('data_source', 'unknown')} "
+                f"confidence={float(node.get('confidence') or 0.0):.2f} "
+                f"label={_md_cell(node.get('label', ''))}"
+            )
+    else:
+        lines.append("- none")
+
+    lines.append("#### Key Edges")
+    key_edges = [
+        edge
+        for edge in edges
+        if edge.get("relation")
+        in {"has_hypothesis", "supported_by", "refuted_by", "grounded_in", "produced_by"}
+    ]
+    if key_edges:
+        for edge in key_edges[:12]:
+            lines.append(
+                "- "
+                f"{edge.get('source', 'unknown')} "
+                f"-[{edge.get('relation', 'rel')}]-> "
+                f"{edge.get('target', 'unknown')}"
+            )
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
 def _evidence_by_interview_layer(
     evidence: list[dict[str, Any]], layer: str
 ) -> list[dict[str, Any]]:
@@ -986,31 +1117,7 @@ def _first_layer_evidence(evidence: list[dict[str, Any]], layer: str) -> dict[st
 
 
 def _evidence_layer(item: dict[str, Any]) -> str:
-    source = str(item.get("data_source") or "").lower()
-    tool = str(item.get("source_tool") or "").lower()
-    evidence_type = str(item.get("evidence_type") or "").lower()
-    source_files = _evidence_source_files(item)
-
-    if (
-        source in LIVE_EVIDENCE_SOURCES
-        or tool in LIVE_EVIDENCE_TOOLS
-        or evidence_type in LIVE_EVIDENCE_TYPES
-    ):
-        return "live"
-    if (
-        source in HISTORY_EVIDENCE_SOURCES
-        or tool in HISTORY_EVIDENCE_TOOLS
-        or evidence_type in HISTORY_EVIDENCE_TYPES
-        or any(_has_suffix(path, HISTORY_DOC_SUFFIXES) for path in source_files)
-    ):
-        return "history"
-    if (
-        tool in KNOWLEDGE_EVIDENCE_TOOLS
-        or evidence_type in KNOWLEDGE_EVIDENCE_TYPES
-        or any(_has_suffix(path, KNOWLEDGE_DOC_SUFFIXES) for path in source_files)
-    ):
-        return "knowledge"
-    return "other"
+    return _shared_evidence_layer(item)
 
 
 def _evidence_source_files(item: dict[str, Any]) -> list[str]:

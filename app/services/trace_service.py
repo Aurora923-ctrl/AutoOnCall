@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ from app.models.trace import ToolCallRecord, TraceEvent
 from app.services.aiops_store import create_aiops_store
 from app.services.legacy_migration import resolve_legacy_jsonl_path
 from app.services.sqlite_store import resolve_sqlite_path
+from app.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
 
 class TraceService:
@@ -57,15 +57,15 @@ class TraceService:
             node_name=node_name,
             event_type=event_type,
             step_id=step_id,
-            input_summary=_truncate(_redact_sensitive_text(input_summary)),
-            output_summary=_truncate(_redact_sensitive_text(output_summary)),
+            input_summary=_truncate(redact_sensitive_text(input_summary)),
+            output_summary=_truncate(redact_sensitive_text(output_summary)),
             tool_name=tool_name,
-            tool_args=_redact_sensitive_data(dict(tool_args or {})),
-            tool_result=_compact_value(_redact_sensitive_data(tool_result)),
+            tool_args=redact_sensitive_data(dict(tool_args or {})),
+            tool_result=_compact_value(redact_sensitive_data(tool_result)),
             latency_ms=latency_ms,
             status=status,
-            error_message=_redact_sensitive_text(error_message) if error_message else None,
-            metadata=_redact_sensitive_data(dict(metadata or {})),
+            error_message=redact_sensitive_text(error_message) if error_message else None,
+            metadata=redact_sensitive_data(dict(metadata or {})),
         )
         self._store.save_trace_event(event)
         return event
@@ -115,7 +115,7 @@ class TraceService:
                 else call.error_message or call.output_summary or ""
             ),
             tool_name=call.tool_name,
-            tool_args=_redact_sensitive_data(call.input_args),
+            tool_args=redact_sensitive_data(call.input_args),
             tool_result=call.output,
             latency_ms=call.latency_ms,
             status=call.status,
@@ -125,6 +125,7 @@ class TraceService:
                 "data_source": call.data_source,
                 "risk_level": call.risk_level,
                 "read_only": call.read_only,
+                "output_artifact": call.output_artifact,
             },
         )
 
@@ -307,55 +308,6 @@ def _compact_value(value: Any) -> Any:
 
 def _truncate(text: str, limit: int = 1000) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def _redact_sensitive_data(value: Any) -> Any:
-    """Recursively redact sensitive values before Trace persistence."""
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if _is_sensitive_key(str(key)) else _redact_sensitive_data(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_data(item) for item in value]
-    if isinstance(value, str):
-        return _redact_sensitive_text(value)
-    return value
-
-
-_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|"
-    r"authorization|cookie|credential|dsn)\b\s*([=:])\s*(?!Bearer\b)([^,\s;&]+)"
-)
-
-
-def _redact_sensitive_text(text: str) -> str:
-    redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
-    return _SECRET_ASSIGNMENT_PATTERN.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
-        redacted,
-    )
-
-
-def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(
-        token in lowered
-        for token in [
-            "password",
-            "passwd",
-            "pwd",
-            "token",
-            "secret",
-            "key",
-            "dsn",
-            "authorization",
-            "cookie",
-            "credential",
-            "bearer",
-        ]
-    )
 
 
 trace_service = TraceService()

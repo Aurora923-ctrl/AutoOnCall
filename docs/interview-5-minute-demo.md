@@ -38,10 +38,16 @@ make sandbox-verify
   --docs-dir aiops-docs `
   --summary-json logs\rag_eval_summary_current.json `
   --summary-md logs\rag_eval_summary_current.md
+.venv\Scripts\python.exe scripts\eval\eval_ragas_cases.py `
+  --cases eval\rag_cases.yaml `
+  --docs-dir aiops-docs `
+  --summary-json logs\ragas_eval_summary.json `
+  --summary-md logs\ragas_eval_summary.md
 .\.venv\Scripts\python.exe scripts\eval\verify_milvus_multisource_rag.py `
   --summary-json logs\milvus_multisource_verification.json `
   --summary-md logs\milvus_multisource_verification.md
 .venv\Scripts\python.exe scripts\eval\build_interview_summary.py `
+  --ragas-summary logs\ragas_eval_summary.json `
   --summary-json logs\interview_eval_summary.json `
   --summary-md logs\interview_eval_summary.md
 ```
@@ -51,6 +57,7 @@ Then open:
 - `logs/interview_eval_summary.md`
 - `logs/live_golden_eval_summary_current.md` only when the interviewer asks for AIOps details
 - `logs/rag_eval_summary_current.md` only when the interviewer asks for RAG details
+- `logs/ragas_eval_summary.md` when the interviewer asks how answer quality is evaluated
 - `logs/milvus_multisource_verification.md` only when the interviewer asks whether PDF/HTML/CSV/XLSX entered Milvus
 - one Redis or MySQL report from the generated report database or web UI
 - `docs/negative-boundary-cases.md` if the interviewer asks how the system behaves when evidence is incomplete
@@ -94,13 +101,27 @@ impact.
 
 In the report, keep the audience on the first nine sections. They read like a
 real OnCall incident review draft. Use the appendices only when asked to inspect
-the ToolCall table, Evidence matrix, Trace summary, or Runbook references.
+the Incident Evidence Graph, Evidence matrix, ToolCall table, Trace summary, or
+Runbook references.
 
-4:20-5:00: Engineering constraint
+4:20-4:40: RAGAS quality snapshot
+
+Open `logs/interview_eval_summary.md` and point to `RAGAS Quality Snapshot`.
+Explain the boundary clearly:
+
+- RAG retrieval eval answers "did we retrieve the right trusted sources?"
+- RAGAS id-smoke answers "does a fixed answer-quality regression satisfy
+  context-id recall, citations, refusal boundaries, and OnCall actionability?"
+- `id-smoke` is reproducible without a judge key; `--metrics-profile full`
+  additionally runs faithfulness and response relevancy with a judge model.
+
+4:40-5:00: Engineering constraint
 
 Close with the system boundary: tools are read-only by default, evidence records
 carry fact/inference/uncertainty, production write actions are never executed
-automatically, and eval prevents the core chains from silently regressing.
+automatically, safe remediation is expressed as approval + pre-check + dry-run +
+rollback + observation, and eval prevents the core chains from silently
+regressing.
 
 Also mention the negative boundary: if evidence is incomplete, reports are
 downgraded to `incomplete`, `degraded`, or `needs_human` instead of pretending to
@@ -118,6 +139,11 @@ AutoOnCall does not claim full-sentence fact checking. It performs
 conclusion-level alignment: `root_cause`, `key_findings`, and
 `remediation_suggestion` must link back to an `evidence_id` or RAG citation.
 If that link is missing, the report is downgraded to `needs_human`.
+
+The report also materializes an `evidence_graph` artifact. It is not a new
+diagnosis engine; it is a read model over the same Evidence, ToolCallRecord,
+hypothesis ranking, and citations. The graph makes the business claim auditable:
+an RCA should have live incident evidence plus knowledge or historical backing.
 
 ## Honest K8s Wording
 

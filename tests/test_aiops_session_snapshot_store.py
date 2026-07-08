@@ -34,6 +34,26 @@ def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
                     "status": "success",
                 }
             ],
+            "progress": {
+                "phase": "executing",
+                "node_name": "executor",
+                "current_tool": "query_redis_status",
+                "tool_total": 2,
+                "tool_success_count": 1,
+                "tool_failed_count": 0,
+                "evidence_count": 1,
+                "risk_policy": "allow",
+                "report_status": "not_started",
+                "cursor": "session-redis:000002",
+            },
+            "progress_cursor": "session-redis:000002",
+            "progress_events": [
+                {
+                    "cursor": "session-redis:000002",
+                    "phase": "executing",
+                    "node_name": "executor",
+                }
+            ],
         },
     )
     store.save_aiops_session_snapshot(first)
@@ -46,10 +66,14 @@ def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
     assert saved.status == "running"
     assert saved.current_plan[0]["tool_name"] == "query_redis_status"
     assert saved.executed_steps[0]["tool_name"] == "query_metrics"
+    assert saved.progress["phase"] == "executing"
+    assert saved.progress_cursor == "session-redis:000002"
+    assert saved.progress_events[0]["cursor"] == "session-redis:000002"
     state = saved.to_state()
     assert state["session_id"] == "session-redis"
     assert state["incident"]["incident_id"] == "inc-redis"
     assert state["executed_steps"][0]["step_id"] == "step-0"
+    assert state["progress"]["cursor"] == "session-redis:000002"
 
     second = AIOpsSessionSnapshot.from_state(
         session_id="session-redis",

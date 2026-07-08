@@ -83,6 +83,33 @@ def test_evidence_sufficiency_complete_with_history_ticket() -> None:
 
     assert profile["sufficiency"]["complete"] is True
     assert profile["sufficiency"]["status"] == "complete"
+    assert profile["by_layer"]["live"] == 2
+    assert profile["by_layer"]["history"] == 1
+    assert profile["root_cause_closure"]["status"] == "satisfied"
+    assert profile["root_cause_closure"]["has_live_evidence"] is True
+    assert profile["root_cause_closure"]["has_knowledge_or_history"] is True
+
+
+def test_evidence_profile_tracks_artifacts_and_incomplete_root_cause_closure() -> None:
+    profile = build_evidence_quality_profile(
+        [
+            {
+                **_evidence("redis_info", data_source="redis_info", evidence_type="redis"),
+                "evidence_id": "evd-live",
+                "artifact_refs": [
+                    {
+                        "artifact_id": "toolout-query-redis-1",
+                        "artifact_ref": "data/aiops_tool_artifacts/toolout-query-redis-1.json",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert profile["artifact_count"] == 1
+    assert profile["by_layer"]["live"] == 1
+    assert profile["root_cause_closure"]["status"] == "incomplete"
+    assert profile["root_cause_closure"]["missing"] == ["knowledge/history basis"]
 
 
 def test_runbook_no_answer_rejection_does_not_count_as_reference() -> None:
@@ -107,6 +134,7 @@ def test_runbook_no_answer_rejection_does_not_count_as_reference() -> None:
     assert sufficiency["complete"] is False
     assert sufficiency["has_reference_evidence"] is False
     assert "可信 Runbook / 历史工单处置参考" in sufficiency["missing_evidence"]
+    assert profile["root_cause_closure"]["has_knowledge_or_history"] is False
 
 
 def test_failed_k8s_domain_tool_blocks_metric_only_primary_substitution() -> None:

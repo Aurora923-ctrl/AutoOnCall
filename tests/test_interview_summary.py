@@ -106,21 +106,53 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
             "doc_type_counts": {"pdf": 2, "html": 4, "table": 12},
         }
     }
+    ragas_payload = {
+        "run": {
+            "metric_profile": "id-smoke",
+            "answer_source": "reference-fixture",
+            "judge_model": "qwen-max",
+            "embedding_model": "text-embedding-v4",
+            "artifacts": {"summary_md": "logs/ragas_eval_summary.md"},
+        },
+        "summary": {
+            "status": "passed",
+            "case_count": 8,
+            "core_case_count": 4,
+            "refusal_case_count": 2,
+            "passed_count": 8,
+            "pass_rate": 1.0,
+            "core_case_pass_rate": 1.0,
+            "id_context_precision_avg": 0.91,
+            "id_context_recall_avg": 1.0,
+            "oncall_actionability_avg": 1.0,
+            "refusal_boundary_rate": 1.0,
+            "faithfulness_avg": 0.0,
+            "response_relevancy_avg": 0.0,
+        },
+    }
 
     payload = build_summary(
         live_payload=live_payload,
         rag_payload=rag_payload,
         adapter_payload=adapter_payload,
         milvus_payload=milvus_payload,
+        ragas_payload=ragas_payload,
     )
     markdown = render_markdown(payload)
 
     assert payload["summary"]["status"] == "passed"
     assert payload["summary"]["rag_metrics"]["passed_count"] == 30
+    assert payload["summary"]["ragas_quality"]["passed_count"] == 8
+    assert payload["summary"]["ragas_quality"]["profile"] == "id-smoke"
     assert payload["summary"]["milvus_multisource"]["inserted_chunks"] == 18
     assert payload["summary"]["conclusion_alignment"]["aligned_count"] == 3
     assert payload["summary"]["adapter_sources"]["mock_fallback_detected"] is False
     assert "RAG eval: `30/30 passed`" in markdown
+    assert "RAGAS quality: `8/8 passed`" in markdown
+    assert "profile: `id-smoke`" in markdown
+    assert "RAGAS id-smoke is a reproducible answer-quality regression" in markdown
+    assert "refusal boundary: `100%`" in markdown
+    assert "faithfulness/full judge: `not_run_in_id_smoke`" in markdown
     assert "conclusion_alignment_rate: `3/3 (100%)`" in markdown
     assert "Milvus Multi-Source Snapshot" in markdown
     assert "Probe pass rate: `6/6`" in markdown
@@ -143,6 +175,9 @@ def test_interview_docs_keep_single_rollup_and_grounding_boundaries() -> None:
     assert "logs/interview_eval_summary.md" in demo_doc
     assert "logs/interview_eval_summary.md" in sandbox
     assert "logs/rag_eval_summary_current.md" in readme
+    assert "logs/ragas_eval_summary.md" in readme
+    assert "eval_ragas_cases.py" in readme
+    assert "RAGAS" in demo_doc
     assert "logs/milvus_multisource_verification.md" in readme
     assert "--skip-rag" in demo_doc
     assert "K8s CrashLoop/OOMKilled is currently an offline golden regression case" in demo_doc

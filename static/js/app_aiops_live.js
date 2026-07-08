@@ -27,12 +27,25 @@ Object.assign(window.AutoOnCallApp.prototype, {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let terminalReceived = false;
 
         try {
             while (true) {
                 const { done, value } = await reader.read();
 
                 if (done) {
+                    if (!terminalReceived) {
+                        const recoveredPayload = await this.recoverAIOpsRunFromSnapshot(
+                            aiopsRun,
+                            loadingMessageElement,
+                            fullResponse,
+                            'eof_without_terminal'
+                        );
+                        if (recoveredPayload) {
+                            return;
+                        }
+                        aiopsRun.status = aiopsRun.status || 'running';
+                    }
                     if (fullResponse) {
                         this.updateAIOpsMessage(
                             loadingMessageElement,
@@ -53,6 +66,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
                         continue;
                     }
                     if (parsedLine.done) {
+                        terminalReceived = true;
                         this.updateAIOpsMessage(
                             loadingMessageElement,
                             fullResponse,
@@ -69,10 +83,17 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     }
 
                     fullResponse = this.applyAIOpsEvent(sseMessage, aiopsRun, fullResponse);
+                    aiopsRun.responseText = fullResponse;
                     if (sseMessage.type === 'error') {
-                        throw new Error(sseMessage.data || sseMessage.message || '智能运维分析失败');
+                        terminalReceived = true;
+                        const eventError = new Error(
+                            sseMessage.data || sseMessage.message || '智能运维分析失败'
+                        );
+                        eventError.aiopsTerminalEvent = true;
+                        throw eventError;
                     }
                     if (sseMessage.type === 'complete' || sseMessage.type === 'done') {
+                        terminalReceived = true;
                         this.updateAIOpsMessage(
                             loadingMessageElement,
                             fullResponse,
@@ -87,6 +108,48 @@ Object.assign(window.AutoOnCallApp.prototype, {
         } finally {
             reader.releaseLock();
         }
+    }
+,
+    async recoverAIOpsRunFromSnapshot(runState, messageElement, currentText = '', reason = '') {
+        if (!runState || !runState.sessionId) return null;
+        this.setAIOpsFormStatus('诊断状态同步中', 'warning');
+        const payload = await this.refreshAIOpsRunStatus(runState.sessionId, {
+            runState,
+            silent: true,
+            recovery_reason: reason
+        });
+        if (!payload) return null;
+
+        const report = runState.structuredReport || payload.report || payload.structured_report || null;
+        let recoveredText = currentText || runState.responseText || '';
+        if (report?.markdown && !this.isTextAlreadyIncluded(recoveredText, report.markdown)) {
+            recoveredText = `${recoveredText}\n\n${report.markdown}`.trim();
+        }
+        if (!recoveredText.trim()) {
+            recoveredText = `诊断连接中断，已同步后端状态：${this.formatRecoveredAIOpsStatusLabel(payload)}`;
+        }
+        if (messageElement) {
+            this.updateAIOpsMessage(
+                messageElement,
+                recoveredText,
+                this.buildAIOpsDetails(runState)
+            );
+        }
+        this.saveLastAIOpsRunState(runState, {
+            status: runState.status || payload.status || 'running',
+            status_metadata: runState.statusMetadata || payload.status_metadata || null,
+            updated_at: this.currentIsoTime(),
+            has_report: Boolean(report),
+            progress: runState.progress,
+            progress_cursor: runState.progressCursor,
+            error_message: ''
+        });
+        await this.refreshAfterAIOpsRun(runState);
+        this.setAIOpsFormStatus(
+            this.formatRecoveredAIOpsStatusLabel(runState),
+            this.statusTone(runState)
+        );
+        return payload;
     }
 ,
     async refreshAfterAIOpsRun(runState) {
@@ -156,6 +219,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             plan: () => currentText + `\n\n## 执行计划\n${message.message || '诊断计划已生成'}\n`,
             step_complete: () => currentText + `\n- ${message.message || '步骤执行完成'}\n`,
             status: () => currentText + `\n${message.message || '诊断流程更新'}\n`,
+            progress: () => currentText,
             approval_required: () => currentText + this.formatAIOpsApprovalEvent(message),
             report: () => currentText + `\n\n## 诊断报告\n\n${message.report || ''}\n`,
             complete: () => this.buildFinalAIOpsResponse(currentText, message, runState),
@@ -351,7 +415,11 @@ Object.assign(window.AutoOnCallApp.prototype, {
         if (!runState) return;
         const status = runState.status || (message && message.status) || 'running';
         const statusReason = (message && message.message) || '诊断流程运行中';
-        this.upsertDashboardIncidentFromRun(runState, status, statusReason);
+        const progress = runState.progress || this.extractAIOpsProgress(message);
+        const displayStatusReason = progress
+            ? this.formatAIOpsProgressSummary(progress)
+            : statusReason;
+        this.upsertDashboardIncidentFromRun(runState, status, displayStatusReason);
         this.renderPlanCards(runState.plan);
         this.renderExecutionSteps(runState.executionSteps);
         this.renderToolCallTable(runState.toolCalls);
@@ -365,6 +433,19 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 this.showNotification('诊断已暂停：后续动作需要人工审批', 'warning');
             }
         }
+    }
+,
+    formatAIOpsProgressSummary(progress) {
+        if (!progress) return '';
+        const phase = progress.phase || 'progress';
+        const tool = progress.current_tool || '-';
+        const success = progress.tool_success_count ?? 0;
+        const failed = progress.tool_failed_count ?? 0;
+        const total = progress.tool_total ?? 0;
+        const evidence = progress.evidence_count ?? 0;
+        const risk = progress.risk_policy || 'unknown';
+        const report = progress.report_status || 'not_started';
+        return `phase=${phase} 路 node=${progress.node_name || '-'} 路 tool=${tool} 路 tools ${success}/${total} failed ${failed} 路 evidence ${evidence} 路 risk=${risk} 路 report=${report}`;
     }
 ,
     upsertDashboardIncidentFromRun(runState, status, statusReason = '') {
@@ -560,6 +641,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
             stepCount: 0,
             completedStepCount: 0,
             evidenceCount: 0,
+            progress: null,
+            progressCursor: '',
+            progressEvents: [],
             toolCalls: [],
             structuredReport: null,
             pendingApproval: null,
@@ -578,6 +662,26 @@ Object.assign(window.AutoOnCallApp.prototype, {
 
         runState.eventCount += 1;
         runState.lastEventType = message.type || runState.lastEventType;
+        const progress = this.extractAIOpsProgress(message);
+        if (progress) {
+            runState.progress = progress;
+            runState.progressCursor = progress.cursor || message.progress_cursor || runState.progressCursor || '';
+            runState.progressEvents = Array.isArray(runState.progressEvents)
+                ? runState.progressEvents
+                : [];
+            const progressKey = progress.cursor || `${progress.phase || 'progress'}-${runState.eventCount}`;
+            if (!runState.progressEvents.some((item) => (item.cursor || '') === progressKey)) {
+                runState.progressEvents.push({
+                    ...progress,
+                    cursor: progressKey
+                });
+                runState.progressEvents = runState.progressEvents.slice(-20);
+            }
+            runState.evidenceCount = Math.max(
+                runState.evidenceCount,
+                Number(progress.evidence_count || 0)
+            );
+        }
         runState.incidentId = message.incident_id || runState.incidentId;
         runState.traceId = message.trace_id || runState.traceId;
         runState.status = this.extractAIOpsStatus(message) || runState.status;
@@ -815,6 +919,30 @@ Object.assign(window.AutoOnCallApp.prototype, {
         return null;
     }
 ,
+    extractAIOpsProgress(message) {
+        if (!message || typeof message !== 'object') return null;
+        const progress = message.progress && typeof message.progress === 'object'
+            ? message.progress
+            : (message.type === 'progress' ? message : null);
+        if (!progress || typeof progress !== 'object') return null;
+        return {
+            phase: progress.phase || message.stage || '',
+            node_name: progress.node_name || '',
+            current_tool: progress.current_tool || '',
+            tool_total: Number(progress.tool_total || 0),
+            tool_success_count: Number(progress.tool_success_count || 0),
+            tool_failed_count: Number(progress.tool_failed_count || 0),
+            evidence_count: Number(progress.evidence_count || 0),
+            risk_policy: progress.risk_policy || 'unknown',
+            report_status: progress.report_status || '',
+            cursor: progress.cursor || message.progress_cursor || '',
+            status: progress.status || message.status || 'running',
+            message: progress.message || message.message || '',
+            incident_id: progress.incident_id || message.incident_id || '',
+            trace_id: progress.trace_id || message.trace_id || ''
+        };
+    }
+,
     extractAIOpsStatus(message) {
         if (!message || typeof message !== 'object') return '';
         if (typeof message.status === 'string' && message.status) {
@@ -885,6 +1013,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
             `状态=${runState.status || 'unknown'}；` +
             `SSE事件数=${runState.eventCount}；最近事件=${runState.lastEventType || 'unknown'}`
         );
+
+        if (runState.progress) {
+            details.push(`Progress: ${this.formatAIOpsProgressSummary(runState.progress)}`);
+        }
 
         if (runState.plan.length > 0) {
             details.push(`执行计划：共 ${runState.plan.length} 个步骤；已完成 ${runState.stepCount} 个步骤`);
@@ -1186,6 +1318,18 @@ Object.assign(window.AutoOnCallApp.prototype, {
             );
         } catch (error) {
             console.error('智能运维分析失败:', error);
+            if (!error.aiopsTerminalEvent) {
+                const recoveredPayload = await this.recoverAIOpsRunFromSnapshot(
+                    liveRunState,
+                    loadingMessage,
+                    liveRunState.responseText || '',
+                    'stream_error'
+                );
+                if (recoveredPayload) {
+                    this.showNotification('诊断连接中断，已同步后端最新状态', 'warning');
+                    return;
+                }
+            }
             liveRunState.status = 'failed';
             liveRunState.errors.push(error.message || '智能运维分析失败');
             this.saveLastAIOpsRunState(liveRunState, {

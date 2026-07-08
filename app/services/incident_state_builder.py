@@ -16,6 +16,7 @@ from app.services.incident_lifecycle import (
     manual_action_required_from_change_execution,
     status_from_change_execution,
 )
+from app.utils.structured_data import as_dict as _as_dict
 
 
 def build_incident_state_from_state(
@@ -253,9 +254,3 @@ def _alert_can_override_auto_diagnosis_failure(existing: IncidentState) -> bool:
     return existing.status == "failed" and metadata.get("alert_auto_diagnosis_status") == "failed"
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    return value if isinstance(value, dict) else {}

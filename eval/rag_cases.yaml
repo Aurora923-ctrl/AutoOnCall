@@ -25,6 +25,18 @@ cases:
     case_type: confusion
     query: 接口变慢且 CPU 高，但火焰图没有明显热点，MySQL 慢查询和连接池等待上升，根因更像数据库慢查询
     expected_source: slow_response.md
+    reference_answer: >
+      应优先按数据库慢查询方向排查，而不是只按 CPU 高处理。回答需要说明 CPU 升高可能是等待或重试的伴随现象，
+      并建议检查慢 SQL、连接池等待、数据库活跃连接和最近发布。
+    reference_context_ids:
+      - slow_response.md
+    ragas_tags:
+      - core_interview
+      - confusion
+    business_rubric:
+      - 区分 CPU 表象和数据库慢查询主故障域
+      - 包含慢 SQL 或连接池等待证据定位
+      - 给出处置建议且不越过审批边界
     expected_keywords:
       - 慢查询
       - 数据库连接池
@@ -91,6 +103,18 @@ cases:
     case_type: confusion
     query: 服务出现 503，但应用没有崩溃日志，Redis 和 MQ 依赖超时导致接口失败
     expected_source: service_unavailable.md
+    reference_answer: >
+      应把主方向放在下游依赖超时或不可用上，先确认 Redis/MQ 连接、超时日志、错误率和重试放大，再评估降级、
+      限流或恢复依赖服务，不应直接判断应用自身崩溃。
+    reference_context_ids:
+      - service_unavailable.md
+    ragas_tags:
+      - core_interview
+      - confusion
+    business_rubric:
+      - 识别 503 背后的依赖故障
+      - 包含 Redis 或 MQ 超时证据定位
+      - 建议降级或限流并保留人工审批边界
     expected_keywords:
       - 依赖服务
       - Redis
@@ -105,6 +129,17 @@ cases:
   - id: slow_response_sql
     query: payment-service 接口响应慢，数据库慢查询数量增加，连接池等待
     expected_source: slow_response.md
+    reference_answer: >
+      应围绕 payment-service 的数据库慢查询和连接池等待排查，检查慢 SQL、EXPLAIN、活跃连接、连接池等待、
+      最近发布和可回滚变更，处置建议应优先降低查询压力或回滚高风险发布。
+    reference_context_ids:
+      - slow_response.md
+    ragas_tags:
+      - core_interview
+    business_rubric:
+      - 说明慢查询和连接池等待是关键证据
+      - 给出 SQL/连接池/发布历史排查步骤
+      - 涉及变更时提示审批或 dry-run
     expected_keywords:
       - 慢查询
       - 数据库
@@ -126,6 +161,15 @@ cases:
   - id: reject_resume_question
     query: 秋招简历里的项目经历应该怎么包装更好？
     should_reject: true
+    reference_answer: >
+      当前知识库只覆盖 OnCall 故障诊断和 Runbook，不应回答简历包装建议，应拒答并提示补充可信知识库文档。
+    ragas_tags:
+      - core_interview
+      - refusal_boundary
+    business_rubric:
+      - 拒绝知识库外问题
+      - 不给出简历包装建议
+      - 明确说明需要补充可信文档
 
   - id: reject_reimbursement_policy
     query: 公司差旅报销和年假申请流程是什么？
@@ -146,6 +190,18 @@ cases:
   - id: pdf_postmortem_loader_metadata
     query: Redis Maxclients Postmortem connected_clients maxclients
     expected_source: redis_postmortem.pdf
+    reference_answer: >
+      应引用 Redis maxclients 复盘材料，说明 connected_clients 接近 maxclients 是容量耗尽信号，并建议结合
+      incident-window 指标、连接来源和扩容或限流方案判断。
+    reference_context_ids:
+      - redis_postmortem.pdf
+    ragas_tags:
+      - core_interview
+      - multi_source
+    business_rubric:
+      - 说明 connected_clients 与 maxclients 的关系
+      - 区分复盘知识和实时 incident-window 证据
+      - 输出扩容、限流或连接治理建议
     expected_keywords:
       - maxclients
       - connected_clients
@@ -153,6 +209,18 @@ cases:
   - id: html_wiki_loader_heading
     query: Payment Runbook MySQL slow query EXPLAIN active_connections pool_waiting
     expected_source: payment_wiki.html
+    reference_answer: >
+      应引用 Payment Runbook，围绕 MySQL slow query、EXPLAIN、active_connections 和 pool_waiting 排查，
+      并结合发布历史判断是否需要回滚或准备索引变更。
+    reference_context_ids:
+      - payment_wiki.html
+    ragas_tags:
+      - core_interview
+      - multi_source
+    business_rubric:
+      - 覆盖 EXPLAIN、active_connections、pool_waiting
+      - 连接 MySQL 慢查询和支付服务响应慢
+      - 涉及索引或回滚时提示审批
     expected_keywords:
       - slow query
       - EXPLAIN

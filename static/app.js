@@ -2,6 +2,8 @@
 // Keep this file small; feature code lives under /static/js/.
 window.AUTOONCALL_SCRIPT_FILES = [
     'app_core.js',
+    'app_api_client.js',
+    'app_dashboard_store.js',
     'app_state.js',
     'app_workbench.js',
     'app_replay.js',

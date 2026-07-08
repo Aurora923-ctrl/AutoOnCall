@@ -9,6 +9,7 @@ from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.evidence_analyzer import EvidenceAnalysis
 from app.models.evidence import Evidence
 from app.models.trace import ToolCallRecord
+from app.services.change_plan_builder import build_change_plan
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
 
@@ -176,7 +177,7 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "## 附录 A. 面试速览" in report.markdown
     assert "### Tool Call Table" in report.markdown
     assert "### Evidence Quick View" in report.markdown
-    assert "| Tool | Source | Status | Latency ms | Summary |" in report.markdown
+    assert "| Tool | Source | Status | Latency ms | Artifact | Summary |" in report.markdown
     assert "| supporting | 4 |" in report.markdown
     assert "## 1. 故障摘要" in report.markdown
     assert "## 2. 影响范围" in report.markdown
@@ -204,6 +205,30 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "### 证据矩阵" in report.markdown
     assert "Root-cause evidence closure" in report.markdown
     assert "closure: satisfied (live + knowledge/history)" in report.markdown
+    assert report.evidence_graph["root_cause_closure"]["status"] == "closed"
+    assert report.evidence_graph["root_cause_closure"]["live_evidence_ids"]
+    assert (
+        report.evidence_graph["root_cause_closure"]["knowledge_evidence_ids"]
+        or report.evidence_graph["root_cause_closure"]["history_evidence_ids"]
+    )
+    graph_nodes = report.evidence_graph["nodes"]
+    graph_edges = report.evidence_graph["edges"]
+    assert any(node["node_type"] == "incident" for node in graph_nodes)
+    assert any(node["node_type"] == "hypothesis" and node["selected"] for node in graph_nodes)
+    assert any(
+        node["node_type"] == "evidence" and node["layer"] == "live" for node in graph_nodes
+    )
+    assert any(
+        node["node_type"] == "evidence" and node["layer"] == "knowledge" for node in graph_nodes
+    )
+    assert any(
+        node["node_type"] == "evidence" and node["layer"] == "history" for node in graph_nodes
+    )
+    assert any(edge["relation"] == "supported_by" for edge in graph_edges)
+    assert any(edge["relation"] == "grounded_in" for edge in graph_edges)
+    assert "### Incident Evidence Graph" in report.markdown
+    assert "root-cause closure: closed" in report.markdown
+    assert "#### Key Edges" in report.markdown
     assert "### Live Evidence" in report.markdown
     assert "### Knowledge Basis" in report.markdown
     assert "### Historical Experience" in report.markdown
@@ -247,6 +272,8 @@ def test_report_generator_downgrades_completed_when_evidence_is_insufficient(tmp
 
     assert report.status in {"incomplete", "needs_human", "degraded"}
     assert report.status == "incomplete"
+    assert report.evidence_graph["root_cause_closure"]["status"] == "incomplete"
+    assert "knowledge_or_history" in report.evidence_graph["root_cause_closure"]["missing_layers"]
     assert report.confidence <= 0.55
     assert report.evidence_sufficiency["complete"] is False
     missing_text = " ".join(report.evidence_sufficiency["missing_evidence"])
@@ -524,6 +551,55 @@ def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> N
     assert "人工调整配置" in report.markdown
     assert "Agent 只输出诊断和处置建议" in report.markdown
     assert "回滚方案" in report.markdown
+
+
+def test_report_generator_renders_structured_remediation_playbook_from_plan_builder(
+    tmp_path,
+) -> None:
+    state = _state_with_redis_evidence()
+    plan = build_change_plan(
+        incident_id=state["incident"]["incident_id"],
+        action="调整 Redis maxclients 配置",
+        risk_level="high",
+        tool_name="manual_change_record",
+        service_name="order-service",
+        environment="prod",
+        reason="Redis maxclients incident-window evidence is saturated.",
+        metadata={"component": "redis", "scenario": "redis-maxclients"},
+    )
+    state["risk_assessment"] = {
+        "risk_level": "high",
+        "policy": "approval_required",
+        "need_approval": True,
+        "action": plan.action,
+    }
+    state["pending_approval"] = {
+        "approval_id": "apr-playbook-1",
+        "status": "pending",
+        "action": plan.action,
+        "risk_level": "high",
+        "change_plan": plan.model_dump(mode="json"),
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="waiting_approval",
+    )
+
+    playbook = report.change_plan["remediation_playbook"]
+    assert report.manual_action_required is True
+    assert report.approval_status == "pending"
+    assert playbook["approval_required"] is True
+    assert playbook["risk_policy"] == "approval_required"
+    assert playbook["dry_run"]
+    assert playbook["rollback"]
+    assert playbook["stop_conditions"]
+    assert "结构化安全处置 Playbook" in report.markdown
+    assert "Dry-run" in report.markdown
+    assert "Rollback" in report.markdown
+    assert "Stop conditions" in report.markdown
+    assert "Safety notes" in report.markdown
 
 
 def test_report_generator_marks_approval_decision_on_latest_report(tmp_path) -> None:

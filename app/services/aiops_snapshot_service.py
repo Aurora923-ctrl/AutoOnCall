@@ -63,6 +63,8 @@ def _snapshot_state_with_existing_identity(
     if not snapshot_state.get("trace_id"):
         snapshot_state["trace_id"] = existing.trace_id
 
+    _merge_existing_progress(snapshot_state, existing)
+
     incident_payload = snapshot_state.get("incident")
     if not incident_payload:
         snapshot_state["incident"] = existing.incident or {"incident_id": existing.incident_id}
@@ -70,3 +72,37 @@ def _snapshot_state_with_existing_identity(
         incident_payload["incident_id"] = existing.incident_id
 
     return snapshot_state
+
+
+def _merge_existing_progress(
+    snapshot_state: dict[str, Any],
+    existing: AIOpsSessionSnapshot,
+) -> None:
+    """Keep progress recovery data when a save path only updates business state."""
+    if not snapshot_state.get("progress") and existing.progress:
+        snapshot_state["progress"] = dict(existing.progress)
+    if not snapshot_state.get("progress_cursor") and existing.progress_cursor:
+        snapshot_state["progress_cursor"] = existing.progress_cursor
+
+    incoming_events = _progress_events(snapshot_state.get("progress_events"))
+    existing_events = _progress_events(existing.progress_events)
+    if not incoming_events:
+        if existing_events:
+            snapshot_state["progress_events"] = existing_events
+        return
+
+    merged_by_cursor: dict[str, dict[str, Any]] = {}
+    cursorless: list[dict[str, Any]] = []
+    for item in [*existing_events, *incoming_events]:
+        cursor = str(item.get("cursor") or "")
+        if cursor:
+            merged_by_cursor[cursor] = item
+        else:
+            cursorless.append(item)
+    snapshot_state["progress_events"] = [*cursorless, *merged_by_cursor.values()][-20:]
+
+
+def _progress_events(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]

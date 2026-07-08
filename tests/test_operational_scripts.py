@@ -112,6 +112,7 @@ def test_runtime_paths_are_loaded_from_central_config() -> None:
     assert "ALLOWED_EXTENSIONS = config.upload_allowed_extension_list" in upload_api
     assert "MAX_FILE_SIZE = config.upload_max_file_size" in upload_api
     assert "EVAL_SUMMARY_PATH = Path(config.eval_summary_path)" in evaluations_api
+    assert "EVAL_BACKLOG_PATH = Path(config.eval_backlog_path)" in evaluations_api
     assert "ADAPTER_VERIFICATION_PATH = Path(config.adapter_verification_path)" in evaluations_api
     assert "DEFAULT_LEXICAL_INDEX_PATH = Path(config.rag_lexical_index_path)" in lexical_index
 
@@ -128,6 +129,17 @@ def test_makefile_exposes_demo_reports_target() -> None:
 
     assert "demo-reports:" in makefile
     assert "scripts/demo/generate_demo_reports.py" in makefile
+
+
+def test_makefile_exposes_api_contract_verifier_without_forcing_verify_gate() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "api-contract-verify:" in makefile
+    assert "scripts/eval/verify_api_contracts.py" in makefile
+
+    verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]
+    verify = verify.split("check-all:", maxsplit=1)[0]
+    assert "api-contract-verify" not in verify
 
 
 def test_readme_points_to_five_minute_interview_demo_and_core_stack() -> None:

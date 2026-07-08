@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 
 from app.models.approval import ApprovalRequest
 from app.models.change_plan import ChangePlan
+from app.services.aiops_state_utils import extract_incident_id, incident_field
 from app.services.approval_service import approval_service
 from app.services.change_plan_builder import build_change_plan
 
@@ -23,8 +24,8 @@ def build_change_plan_from_risk_decision(
         action=str(_decision_value(decision, "action", "需要人工确认的后续处置动作")),
         risk_level=str(_decision_value(decision, "risk_level", "medium")),
         tool_name=str(_decision_value(decision, "tool_name", "") or ""),
-        service_name=str(_incident_field(state, "service_name", "unknown-service")),
-        environment=str(_incident_field(state, "environment", "unknown")),
+        service_name=str(incident_field(state, "service_name", "unknown-service")),
+        environment=str(incident_field(state, "environment", "unknown")),
         reason=str(_decision_value(decision, "reason", "")),
         metadata={
             "trace_id": state.get("trace_id"),
@@ -72,9 +73,74 @@ def create_approval_request_from_risk_decision(
     return repository.create_request(request)
 
 
-def extract_incident_id(state: Mapping[str, Any]) -> str:
-    """Extract incident_id from state values without assuming model instances."""
-    return str(_incident_field(state, "incident_id", "incident-unknown"))
+def generate_approval_waiting_response(state_update: Mapping[str, Any]) -> str:
+    """Generate a deterministic pause response for pending approval."""
+    approval = _mapping_value(state_update.get("pending_approval"))
+    risk = _mapping_value(state_update.get("risk_assessment"))
+    return f"""# AIOps 诊断已暂停，等待人工审批
+
+## 待审批动作
+{approval.get("action", "需要人工确认的后续处置动作")}
+
+## 风险等级
+{risk.get("risk_level", approval.get("risk_level", "medium"))}
+
+## 审批原因
+{approval.get("reason", "后续动作可能影响线上系统，需要人工审批后再继续")}
+
+## 人工动作边界
+审批只用于确认后续人工处置建议，Agent 不会自动执行生产变更。
+
+## 回滚建议
+执行任何变更前需要确认回滚命令、影响范围和观察窗口。
+"""
+
+
+def generate_forbidden_response(decision: Any) -> str:
+    """Generate deterministic response for forbidden actions."""
+    return f"""# AIOps 已拦截危险动作
+
+## 动作
+{_decision_value(decision, "action", "")}
+
+## 风险等级
+{_decision_value(decision, "risk_level", "high")}
+
+## 拦截原因
+{_decision_value(decision, "reason", "")}
+
+## 处理建议
+请通过人工变更、工单审批或专用运维平台重新评估该动作，不允许 Agent 自动执行。若确需处理，必须先准备回滚方案。
+"""
+
+
+def generate_risk_stop_response(decision: Any) -> str:
+    """Render the stop reason for the user-facing diagnosis stream."""
+    policy = str(_decision_value(decision, "policy", ""))
+    if policy == "forbidden":
+        title = "AIOps 已拦截危险动作"
+        next_step = "该动作不会自动执行，请由人工在变更流程中重新评估。"
+    else:
+        title = "AIOps 诊断已暂停，等待人工审批"
+        next_step = "审批通过前，Agent 不会自动执行该动作。"
+
+    return f"""# {title}
+
+## 动作
+{_decision_value(decision, "action", "")}
+
+## 风险等级
+{_decision_value(decision, "risk_level", "medium")}
+
+## 策略
+{policy or "approval_required"}
+
+## 原因
+{_decision_value(decision, "reason", "")}
+
+## 下一步
+{next_step}
+"""
 
 
 def build_approval_idempotency_key(state: Mapping[str, Any], decision: Any) -> str:
@@ -107,17 +173,14 @@ def find_pending_approval_by_idempotency_key(
     return None
 
 
-def _incident_field(state: Mapping[str, Any], field_name: str, default: str) -> Any:
-    incident = state.get("incident") or {}
-    if isinstance(incident, Mapping):
-        return incident.get(field_name) or default
-    return getattr(incident, field_name, default) or default
-
-
 def _decision_value(decision: Any, field_name: str, default: Any) -> Any:
     if isinstance(decision, Mapping):
         return decision.get(field_name, default)
     return getattr(decision, field_name, default)
+
+
+def _mapping_value(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _optional_str(value: Any) -> str | None:

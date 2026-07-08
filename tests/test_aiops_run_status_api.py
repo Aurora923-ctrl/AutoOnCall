@@ -149,6 +149,27 @@ async def test_aiops_run_status_assembles_recovery_payload(monkeypatch) -> None:
                     "summary": "Redis connected_clients 接近 maxclients",
                 }
             ],
+            "progress": {
+                "phase": "executing",
+                "node_name": "executor",
+                "current_tool": "query_redis_status",
+                "tool_total": 1,
+                "tool_success_count": 1,
+                "tool_failed_count": 0,
+                "evidence_count": 1,
+                "risk_policy": "allow",
+                "report_status": "not_started",
+                "cursor": "run-recover:000003",
+                "status": "running",
+            },
+            "progress_cursor": "run-recover:000003",
+            "progress_events": [
+                {
+                    "cursor": "run-recover:000003",
+                    "phase": "executing",
+                    "node_name": "executor",
+                }
+            ],
         },
     )
     report = DiagnosisReport(
@@ -207,6 +228,11 @@ async def test_aiops_run_status_assembles_recovery_payload(monkeypatch) -> None:
     assert payload["tool_call_records"][0]["status"] == "success"
     assert payload["warnings"][0].startswith("步骤 s9 使用了 LLM ToolNode")
     assert payload["gathered_evidence"][0]["source_tool"] == "query_redis_status"
+    assert payload["progress"]["phase"] == "executing"
+    assert payload["progress"]["current_tool"] == "query_redis_status"
+    assert payload["progress"]["tool_success_count"] == 1
+    assert payload["progress_cursor"] == "run-recover:000003"
+    assert payload["progress_events"][0]["cursor"] == "run-recover:000003"
     assert payload["trace_summary"]["event_count"] == 1
     assert payload["trace_summary"]["latest_event_type"] == "tool_call"
     assert payload["approval_summary"]["status"] == "pending"
@@ -486,3 +512,56 @@ async def test_aiops_run_status_returns_404_for_unknown_session(monkeypatch) -> 
 
     assert response.status_code == 404
     assert response.json()["detail"] == "AIOps diagnosis run not found"
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_status_derives_progress_for_legacy_snapshot(monkeypatch) -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="run-legacy-progress",
+        status="running",
+        node_name="executor",
+        state={
+            "trace_id": "trace-legacy-progress",
+            "incident": {
+                "incident_id": "INC-LEGACY-PROGRESS",
+                "service_name": "order-service",
+            },
+            "current_plan": [
+                {"step_id": "s2", "tool_name": "query_logs", "status": "pending"}
+            ],
+            "past_steps": [
+                ({"step_id": "s1", "tool_name": "query_metrics"}, "ok"),
+            ],
+            "tool_call_records": [
+                {"tool_name": "query_metrics", "status": "success"},
+            ],
+            "gathered_evidence": [{"summary": "metrics ok"}],
+        },
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(snapshot),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/aiops/runs/run-legacy-progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    progress = payload["progress"]
+    assert progress["phase"] == "executing"
+    assert progress["node_name"] == "executor"
+    assert progress["current_tool"] == "query_logs"
+    assert progress["tool_total"] == 2
+    assert progress["tool_success_count"] == 1
+    assert progress["tool_failed_count"] == 0
+    assert progress["evidence_count"] == 1
+    assert progress["risk_policy"] == "allow"
+    assert progress["report_status"] == "not_started"
+    assert payload["progress_cursor"] == "run-legacy-progress:snapshot"

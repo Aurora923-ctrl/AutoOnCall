@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_LIVE_SUMMARY = REPO_ROOT / "logs" / "live_golden_eval_summary_current.json"
 DEFAULT_RAG_SUMMARY = REPO_ROOT / "logs" / "rag_eval_summary_current.json"
+DEFAULT_RAGAS_SUMMARY = REPO_ROOT / "logs" / "ragas_eval_summary.json"
 DEFAULT_ADAPTER_SUMMARY = REPO_ROOT / "logs" / "full_stack_adapter_verification.json"
 DEFAULT_MILVUS_SUMMARY = REPO_ROOT / "logs" / "milvus_multisource_verification.json"
 DEFAULT_CHANGE_SUMMARY = REPO_ROOT / "logs" / "change_eval_summary.json"
@@ -93,6 +94,7 @@ def build_summary(
     rag_payload: dict[str, Any] | None,
     adapter_payload: dict[str, Any] | None,
     milvus_payload: dict[str, Any] | None = None,
+    ragas_payload: dict[str, Any] | None = None,
     change_payload: dict[str, Any] | None = None,
     replanner_payload: dict[str, Any] | None = None,
     source_artifacts: dict[str, str] | None = None,
@@ -124,16 +126,19 @@ def build_summary(
                 "interview-facing rollup; live AIOps and RAG evals remain separate "
                 "source artifacts to avoid treating --skip-rag as a RAG result"
             ),
-            "source_artifacts": {
-                "live_aiops": str(DEFAULT_LIVE_SUMMARY.relative_to(REPO_ROOT)),
-                "rag": str(DEFAULT_RAG_SUMMARY.relative_to(REPO_ROOT)),
-                "adapter_verification": str(DEFAULT_ADAPTER_SUMMARY.relative_to(REPO_ROOT)),
-                "milvus_multisource": str(DEFAULT_MILVUS_SUMMARY.relative_to(REPO_ROOT)),
-                "safe_change": str(DEFAULT_CHANGE_SUMMARY.relative_to(REPO_ROOT)),
-                "replanner": str(DEFAULT_REPLANNER_SUMMARY.relative_to(REPO_ROOT)),
-            }
-            if source_artifacts is None
-            else source_artifacts,
+            "source_artifacts": (
+                {
+                    "live_aiops": str(DEFAULT_LIVE_SUMMARY.relative_to(REPO_ROOT)),
+                    "rag": str(DEFAULT_RAG_SUMMARY.relative_to(REPO_ROOT)),
+                    "ragas": str(DEFAULT_RAGAS_SUMMARY.relative_to(REPO_ROOT)),
+                    "adapter_verification": str(DEFAULT_ADAPTER_SUMMARY.relative_to(REPO_ROOT)),
+                    "milvus_multisource": str(DEFAULT_MILVUS_SUMMARY.relative_to(REPO_ROOT)),
+                    "safe_change": str(DEFAULT_CHANGE_SUMMARY.relative_to(REPO_ROOT)),
+                    "replanner": str(DEFAULT_REPLANNER_SUMMARY.relative_to(REPO_ROOT)),
+                }
+                if source_artifacts is None
+                else source_artifacts
+            ),
         },
         "summary": {
             "status": "passed" if core_passed else "failed",
@@ -154,19 +159,19 @@ def build_summary(
             },
             "conclusion_alignment": _conclusion_alignment_summary([redis, mysql]),
             "rag_metrics": _rag_metrics(rag_payload),
+            "ragas_quality": _ragas_quality(ragas_payload),
             "milvus_multisource": _milvus_summary(milvus_payload),
             "adapter_sources": {
                 "status": (adapter_payload or {}).get("status", "missing"),
                 "data_sources": (adapter_payload or {}).get("data_sources", []),
-                "mock_fallback_detected": (adapter_payload or {}).get(
-                    "mock_fallback_detected"
-                ),
+                "mock_fallback_detected": (adapter_payload or {}).get("mock_fallback_detected"),
                 "missing_sources": (adapter_payload or {}).get("missing_sources", []),
                 "failed_tools": (adapter_payload or {}).get("failed_tools", []),
             },
             "interview_boundaries": [
                 "Redis/MySQL are live adapter golden chains backed by the local Docker stack.",
                 "RAG eval is shown from its own retrieval summary, not from the --skip-rag AIOps run.",
+                "RAGAS quality is optional and separate from retrieval recall; id-smoke is reproducible without a judge key.",
                 "K8s CrashLoop/OOMKilled is an offline golden regression case in the default interview.",
                 "Conclusion alignment is conclusion-level grounding, not full-sentence fact checking.",
             ],
@@ -182,9 +187,7 @@ def _chain_summary(case: dict[str, Any]) -> dict[str, Any]:
         "tool_sources": case.get("tool_sources", {}),
         "required_live_sources_hit": bool(metrics.get("required_live_sources_hit")),
         "evidence_sufficiency_hit": bool(metrics.get("evidence_sufficiency_hit")),
-        "runtime_vs_incident_boundary_hit": bool(
-            metrics.get("runtime_vs_incident_boundary_hit")
-        ),
+        "runtime_vs_incident_boundary_hit": bool(metrics.get("runtime_vs_incident_boundary_hit")),
         "approval_boundary_hit": bool(metrics.get("approval_boundary_hit")),
     }
 
@@ -199,12 +202,39 @@ def _rag_metrics(payload: dict[str, Any] | None) -> dict[str, Any]:
         "strict_recall_at_k": float(summary.get("strict_recall_at_k", 0.0) or 0.0),
         "mrr": float(summary.get("mrr", 0.0) or 0.0),
         "citation_coverage_rate": float(summary.get("citation_coverage_rate", 0.0) or 0.0),
-        "no_answer_rejection_rate": float(
-            summary.get("no_answer_rejection_rate", 0.0) or 0.0
-        ),
-        "confusion_case_pass_rate": float(
-            summary.get("confusion_case_pass_rate", 0.0) or 0.0
-        ),
+        "no_answer_rejection_rate": float(summary.get("no_answer_rejection_rate", 0.0) or 0.0),
+        "confusion_case_pass_rate": float(summary.get("confusion_case_pass_rate", 0.0) or 0.0),
+    }
+
+
+def _ragas_quality(payload: dict[str, Any] | None) -> dict[str, Any]:
+    run = (payload or {}).get("run", {})
+    summary = (payload or {}).get("summary", {})
+    if not isinstance(run, dict):
+        run = {}
+    if not isinstance(summary, dict):
+        summary = {}
+    artifacts = run.get("artifacts") if isinstance(run.get("artifacts"), dict) else {}
+    return {
+        "available": bool(payload),
+        "status": str(summary.get("status") or "missing"),
+        "profile": str(run.get("metric_profile") or ""),
+        "answer_source": str(run.get("answer_source") or ""),
+        "case_count": int(summary.get("case_count", 0) or 0),
+        "core_case_count": int(summary.get("core_case_count", 0) or 0),
+        "refusal_case_count": int(summary.get("refusal_case_count", 0) or 0),
+        "passed_count": int(summary.get("passed_count", 0) or 0),
+        "pass_rate": float(summary.get("pass_rate", 0.0) or 0.0),
+        "core_case_pass_rate": float(summary.get("core_case_pass_rate", 0.0) or 0.0),
+        "id_context_precision_avg": float(summary.get("id_context_precision_avg", 0.0) or 0.0),
+        "id_context_recall_avg": float(summary.get("id_context_recall_avg", 0.0) or 0.0),
+        "oncall_actionability_avg": float(summary.get("oncall_actionability_avg", 0.0) or 0.0),
+        "refusal_boundary_rate": float(summary.get("refusal_boundary_rate", 0.0) or 0.0),
+        "faithfulness_avg": float(summary.get("faithfulness_avg", 0.0) or 0.0),
+        "response_relevancy_avg": float(summary.get("response_relevancy_avg", 0.0) or 0.0),
+        "judge_model": str(run.get("judge_model") or ""),
+        "embedding_model": str(run.get("embedding_model") or ""),
+        "artifacts": artifacts,
     }
 
 
@@ -294,6 +324,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     modules = summary["modules"]
     chains = summary["portfolio_chains"]
     rag = summary["rag_metrics"]
+    ragas = summary["ragas_quality"]
     alignment = summary["conclusion_alignment"]
     milvus = summary["milvus_multisource"]
     adapter = summary["adapter_sources"]
@@ -352,6 +383,23 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- no-answer rejection: `{_ratio_percent(rag['no_answer_rejection_rate'])}`",
             f"- confusion case pass: `{_ratio_percent(rag['confusion_case_pass_rate'])}`",
             "",
+            "## RAGAS Quality Snapshot",
+            "",
+            f"- RAGAS quality: `{ragas['passed_count']}/{ragas['case_count']} passed`",
+            f"- profile: `{ragas['profile'] or 'missing'}`",
+            f"- answer source: `{ragas['answer_source'] or 'missing'}`",
+            f"- ID context recall: `{_ratio_percent(ragas['id_context_recall_avg'])}`",
+            f"- ID context precision: `{_ratio_percent(ragas['id_context_precision_avg'])}`",
+            f"- OnCall actionability: `{_ratio_percent(ragas['oncall_actionability_avg'])}`",
+            f"- refusal boundary: `{_ragas_refusal_text(ragas)}`",
+            f"- faithfulness/full judge: `{_ragas_full_metric_text(ragas, 'faithfulness_avg')}`",
+            f"- response relevancy/full judge: "
+            f"`{_ragas_full_metric_text(ragas, 'response_relevancy_avg')}`",
+            f"- judge model: `{_ragas_judge_text(ragas)}`",
+            "",
+            "> RAGAS id-smoke is a reproducible answer-quality regression. "
+            "Use `--metrics-profile full` when a judge key is available.",
+            "",
             "## Conclusion Alignment",
             "",
             f"- conclusion_alignment_rate: "
@@ -391,6 +439,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "",
             "- `logs/live_golden_eval_summary_current.md`: live AIOps run; usually uses `--skip-rag`.",
             "- `logs/rag_eval_summary_current.md`: standalone RAG retrieval result.",
+            "- `logs/ragas_eval_summary.md`: optional RAGAS answer quality result.",
             "- `logs/milvus_multisource_verification.md`: Milvus storage proof for PDF/HTML/CSV/XLSX chunks.",
             "- `logs/full_stack_adapter_verification.json`: real adapter source proof.",
             "",
@@ -412,6 +461,24 @@ def _module_notes(
             f"citation={_ratio_percent(rag['citation_coverage_rate'])}"
         )
     return item["status"]
+
+
+def _ragas_refusal_text(ragas: dict[str, Any]) -> str:
+    if int(ragas.get("refusal_case_count", 0) or 0) <= 0:
+        return "not_covered"
+    return _ratio_percent(ragas.get("refusal_boundary_rate"))
+
+
+def _ragas_full_metric_text(ragas: dict[str, Any], key: str) -> str:
+    if ragas.get("profile") != "full":
+        return "not_run_in_id_smoke"
+    return _ratio_percent(ragas.get(key))
+
+
+def _ragas_judge_text(ragas: dict[str, Any]) -> str:
+    if ragas.get("profile") != "full":
+        return "not_required_for_id_smoke"
+    return str(ragas.get("judge_model") or "missing")
 
 
 def _alignment_markdown_rows(rows: list[dict[str, Any]]) -> list[str]:
@@ -458,6 +525,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live-summary", default=str(DEFAULT_LIVE_SUMMARY))
     parser.add_argument("--rag-summary", default=str(DEFAULT_RAG_SUMMARY))
+    parser.add_argument("--ragas-summary", default=str(DEFAULT_RAGAS_SUMMARY))
     parser.add_argument("--adapter-summary", default=str(DEFAULT_ADAPTER_SUMMARY))
     parser.add_argument("--milvus-summary", default=str(DEFAULT_MILVUS_SUMMARY))
     parser.add_argument("--change-summary", default=str(DEFAULT_CHANGE_SUMMARY))
@@ -475,11 +543,13 @@ def main(argv: list[str] | None = None) -> int:
         rag_payload=load_json(Path(args.rag_summary)),
         adapter_payload=load_json(Path(args.adapter_summary)),
         milvus_payload=load_json(Path(args.milvus_summary)),
+        ragas_payload=load_json(Path(args.ragas_summary)),
         change_payload=load_json(Path(args.change_summary)),
         replanner_payload=load_json(Path(args.replanner_summary)),
         source_artifacts={
             "live_aiops": args.live_summary,
             "rag": args.rag_summary,
+            "ragas": args.ragas_summary,
             "adapter_verification": args.adapter_summary,
             "milvus_multisource": args.milvus_summary,
             "safe_change": args.change_summary,

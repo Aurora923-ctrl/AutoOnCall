@@ -71,6 +71,7 @@ class Evidence(BaseModel):
     uncertainty: str = ""
     next_step: str = ""
     raw_data: dict[str, Any] = Field(default_factory=dict)
+    artifact_refs: list[dict[str, Any]] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     related_hypothesis: str = ""
     created_at: datetime = Field(default_factory=utc_now)

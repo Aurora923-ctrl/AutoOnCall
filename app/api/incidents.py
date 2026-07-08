@@ -20,6 +20,7 @@ from app.models.api_contracts import (
 from app.models.approval import ApprovalRequest
 from app.models.feedback import DiagnosisFeedbackCreate
 from app.models.trace import TraceEvent
+from app.services.aiops_read_models import build_incident_overview, build_incident_replay
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.approval_service import ApprovalService, approval_service
 from app.services.change_execution_read_models import build_change_execution_read_model
@@ -29,7 +30,6 @@ from app.services.change_execution_service import (
 )
 from app.services.evaluation_read_models import build_eval_summary_payload
 from app.services.feedback_service import FeedbackService, feedback_service
-from app.services.read_models import build_incident_overview, build_incident_replay
 from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
 

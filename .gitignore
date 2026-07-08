@@ -66,6 +66,7 @@ logs/
 # Runtime indexes
 data/rag_lexical_index.json
 data/*.jsonl
+data/aiops_tool_artifacts/
 
 # Milvus
 volumes/

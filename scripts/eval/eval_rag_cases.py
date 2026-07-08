@@ -88,6 +88,8 @@ DOMAIN_TERMS = {
     "超时",
 }
 
+EVAL_FUSION_STRATEGIES = ("weighted", "rrf")
+
 
 def load_cases(path: str | Path = DEFAULT_CASES_PATH) -> list[dict[str, Any]]:
     """Load RAG evaluation cases from YAML."""
@@ -190,6 +192,9 @@ def evaluate_cases(
             if not result["passed"]
         ],
     }
+    strategy_metrics = build_strategy_comparison(results)
+    summary["strategy_metrics"] = strategy_metrics
+    summary["strategy_comparison"] = strategy_metrics
     return {
         "run": {
             "started_at": started_at.isoformat(),
@@ -203,6 +208,7 @@ def evaluate_cases(
             "docs_dir": str(Path(docs_dir)),
             "top_k": top_k,
             "min_score": min_score,
+            "fusion_strategies": list(EVAL_FUSION_STRATEGIES),
             "case_ids": [str(case.get("id", "")) for case in cases],
             "environment": collect_eval_environment(suite="rag"),
         },
@@ -225,6 +231,16 @@ def evaluate_case(
     threshold = float(case.get("min_score", min_score))
     case_index = _index_with_case_fixture(index, case)
     retrieved = search_offline(case_index, query, top_k=top_k, min_score=threshold)
+    strategy_results = {
+        strategy: search_offline(
+            case_index,
+            query,
+            top_k=top_k,
+            min_score=threshold,
+            fusion_strategy=strategy,
+        )
+        for strategy in EVAL_FUSION_STRATEGIES
+    }
     expected_sources = _expected_sources(case)
 
     if should_reject:
@@ -248,6 +264,10 @@ def evaluate_case(
             "expected_sources": [],
             "retrieved_sources": [item["source_file"] for item in retrieved],
             "top_score": retrieved[0]["offline_score"] if retrieved else 0.0,
+            "strategy_results": {
+                strategy: _strategy_case_payload(items, [])
+                for strategy, items in strategy_results.items()
+            },
         }
 
     rank = _first_expected_rank(retrieved, expected_sources)
@@ -286,6 +306,10 @@ def evaluate_case(
         "expected_sources": expected_sources,
         "retrieved_sources": [item["source_file"] for item in retrieved],
         "top_score": retrieved[0]["offline_score"] if retrieved else 0.0,
+        "strategy_results": {
+            strategy: _strategy_case_payload(items, expected_sources)
+            for strategy, items in strategy_results.items()
+        },
     }
 
 
@@ -373,20 +397,103 @@ def search_offline(
     *,
     top_k: int = DEFAULT_TOP_K,
     min_score: float = DEFAULT_MIN_SCORE,
+    fusion_strategy: str = "weighted",
 ) -> list[dict[str, Any]]:
     """Search the offline index with deterministic lexical scoring."""
     query_terms = extract_terms(query)
     scored = []
-    for chunk in index:
+    for base_rank, chunk in enumerate(index, 1):
         score = lexical_score(query, query_terms, chunk)
         if score < min_score:
             continue
         ranked = dict(chunk)
         ranked["offline_score"] = round(score, 4)
+        ranked["offline_base_rank"] = base_rank
+        ranked["offline_rrf_score"] = round(_offline_rrf_score(base_rank=base_rank), 4)
         ranked.pop("offline_terms", None)
         scored.append(ranked)
-    scored.sort(key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"]))
+    if fusion_strategy == "rrf":
+        scored.sort(
+            key=lambda item: (
+                -item["offline_rrf_score"],
+                -item["offline_score"],
+                item["source_file"],
+                item["chunk_id"],
+            )
+        )
+    else:
+        scored.sort(key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"]))
     return scored[:top_k]
+
+
+def build_strategy_comparison(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build lightweight weighted/RRF comparison metrics for the existing RAG cases."""
+    return {strategy: _strategy_metrics(results, strategy) for strategy in EVAL_FUSION_STRATEGIES}
+
+
+def _strategy_metrics(results: list[dict[str, Any]], strategy: str) -> dict[str, Any]:
+    non_reject_results = [result for result in results if not result["should_reject"]]
+    reject_results = [result for result in results if result["should_reject"]]
+    strategy_payloads = [
+        result.get("strategy_results", {}).get(strategy, {}) for result in non_reject_results
+    ]
+    reject_payloads = [
+        result.get("strategy_results", {}).get(strategy, {}) for result in reject_results
+    ]
+    doc_type_hits = _doc_type_coverage(strategy_payloads)
+    return {
+        "recall_at_k": _ratio(
+            sum(1 for item in strategy_payloads if item.get("recall_at_k")),
+            len(strategy_payloads),
+        ),
+        "mrr": round(
+            sum(float(item.get("reciprocal_rank") or 0.0) for item in strategy_payloads)
+            / max(len(strategy_payloads), 1),
+            4,
+        ),
+        "citation_coverage_rate": _ratio(
+            sum(1 for item in strategy_payloads if item.get("citation_hit")),
+            len(strategy_payloads),
+        ),
+        "no_answer_rejection_rate": _ratio(
+            sum(1 for item in reject_payloads if item.get("rejection_hit")),
+            len(reject_payloads),
+        ),
+        "doc_type_coverage": doc_type_hits,
+        "doc_type_count": len(doc_type_hits),
+    }
+
+
+def _strategy_case_payload(
+    retrieved: list[dict[str, Any]],
+    expected_sources: list[str],
+) -> dict[str, Any]:
+    rank = _first_expected_rank(retrieved, expected_sources)
+    return {
+        "recall_at_k": rank > 0,
+        "reciprocal_rank": round(1 / rank, 4) if rank > 0 else 0.0,
+        "citation_hit": _retrieved_has_valid_citation(retrieved),
+        "rejection_hit": len(retrieved) == 0,
+        "retrieved_sources": [item["source_file"] for item in retrieved],
+        "doc_types": [_doc_type_from_source(str(item.get("source_file") or "")) for item in retrieved],
+    }
+
+
+def _doc_type_coverage(strategy_payloads: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in strategy_payloads:
+        for doc_type in item.get("doc_types", []):
+            counts[doc_type] = counts.get(doc_type, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _doc_type_from_source(source_file: str) -> str:
+    suffix = Path(source_file).suffix.lower().lstrip(".")
+    return suffix or "unknown"
+
+
+def _offline_rrf_score(*, base_rank: int, k: int = 60) -> float:
+    return 1 / (k + max(base_rank, 1))
 
 
 def lexical_score(query: str, query_terms: set[str], chunk: dict[str, Any]) -> float:
@@ -435,6 +542,14 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"reject={summary['no_answer_rejection_rate']:.0%}"
         )
     ]
+    strategy_parts = []
+    for strategy, metrics in (summary.get("strategy_metrics") or {}).items():
+        strategy_parts.append(
+            f"{strategy}:recall@{summary['top_k']}={metrics['recall_at_k']:.0%},"
+            f"MRR={metrics['mrr']:.2f},reject={metrics['no_answer_rejection_rate']:.0%}"
+        )
+    if strategy_parts:
+        lines.append("Strategy comparison: " + " | ".join(strategy_parts))
     for result in payload["cases"]:
         status = "PASS" if result["passed"] else "FAIL"
         retrieved = ",".join(result["retrieved_sources"][:3]) or "none"
@@ -475,8 +590,21 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         "",
         "> 以上指标只代表离线固定 case 的检索回归结果，不代表线上问答准确率。",
         "",
-        "## 失败定位",
+        "## 融合策略对比",
     ]
+    for strategy, metrics in (summary.get("strategy_metrics") or {}).items():
+        lines.append(
+            f"- {strategy}：recall@{summary['top_k']} {metrics['recall_at_k']:.0%}，"
+            f"MRR {metrics['mrr']:.2f}，citation {metrics['citation_coverage_rate']:.0%}，"
+            f"reject {metrics['no_answer_rejection_rate']:.0%}，"
+            f"doc types {metrics['doc_type_count']}"
+        )
+    lines.extend(
+        [
+            "",
+        "## 失败定位",
+        ]
+    )
     if failed_cases:
         for item in failed_cases:
             lines.append(

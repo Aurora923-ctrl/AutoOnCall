@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from app.api import alerts, approvals, feedback, file, incidents
+from app.api import alerts, approvals, evaluations, feedback, file, incidents
 
 
 def test_incident_and_approval_routes_expose_response_models() -> None:
@@ -11,6 +11,7 @@ def test_incident_and_approval_routes_expose_response_models() -> None:
     app.include_router(approvals.router, prefix="/api")
     app.include_router(incidents.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")
+    app.include_router(evaluations.router, prefix="/api")
     app.include_router(file.router, prefix="/api")
 
     schema = app.openapi()
@@ -32,6 +33,10 @@ def test_incident_and_approval_routes_expose_response_models() -> None:
         ("/api/incidents/{incident_id}/feedback", "get"): "IncidentFeedbackListResponse",
         ("/api/feedback", "post"): "BadCaseFeedbackResponse",
         ("/api/feedback/bad-cases", "get"): "BadCaseFeedbackListResponse",
+        ("/api/feedback/eval-backlog", "get"): "EvalBacklogListResponse",
+        ("/api/eval/backlog", "get"): "EvalBacklogResponse",
+        ("/api/eval/ragas", "get"): "EvalRagasResponse",
+        ("/api/eval/ragas-summary", "get"): "EvalRagasResponse",
         ("/api/knowledge/indexing/reports", "get"): "KnowledgeIndexingReportsResponse",
     }
 

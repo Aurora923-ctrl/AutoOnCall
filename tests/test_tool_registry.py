@@ -6,7 +6,7 @@ import pytest
 
 from app.config import config
 from app.tools.base import AIOpsTool
-from app.tools.registry import create_default_tool_registry
+from app.tools.registry import ToolRegistry, create_default_tool_registry
 
 
 class FakeAsyncTool:
@@ -40,6 +40,17 @@ class MutableContractTool(AIOpsTool):
 
     async def _call(self, input_args: dict):
         return {"status": "ok"}
+
+
+class RestartServiceTool(AIOpsTool):
+    name = "restart_service"
+    description = "restart service"
+    input_schema = {"type": "object"}
+    risk_level = "medium"
+    read_only = False
+
+    async def _call(self, input_args: dict):
+        return {"status": "success", "summary": "restarted"}
 
 
 def test_registry_registers_standard_aiops_tools() -> None:
@@ -109,6 +120,26 @@ async def test_query_metrics_uses_mcp_like_tools_when_available() -> None:
     assert "p95_latency_ms" not in result.output
     assert "error_rate" not in result.output
     assert "synthetic_fields" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_registry_policy_guard_blocks_non_read_only_prod_action() -> None:
+    registry = ToolRegistry().with_incident_context(
+        {"environment": "prod", "service_name": "order-service"}
+    )
+    registry.register(RestartServiceTool())
+
+    result = await registry.arun(
+        "restart_service",
+        {"service_name": "order-service"},
+    )
+
+    assert result.status == "failed"
+    assert result.output["source"] == "policy_guard"
+    assert result.output["policy"] == "approval_required"
+    assert result.risk_level == "high"
+    assert result.read_only is False
+    assert "tool:not-read-only" in result.output["matched_rules"]
 
 
 @pytest.mark.asyncio

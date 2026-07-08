@@ -16,7 +16,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.models.report import DiagnosisReport  # noqa: E402
 from app.services.report_generator import ReportGenerator  # noqa: E402
-from scripts.eval.eval_cases import DEFAULT_CASES_PATH, evaluate_case, load_cases, load_env_file  # noqa: E402
+from scripts.eval.eval_cases import (  # noqa: E402
+    DEFAULT_CASES_PATH,
+    evaluate_case,
+    load_cases,
+    load_env_file,
+)
 
 DEFAULT_DEMO_CASE_IDS = (
     "redis_maxclients_timeout",

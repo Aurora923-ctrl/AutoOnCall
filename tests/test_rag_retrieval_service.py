@@ -8,6 +8,7 @@ from app.services.lexical_index_service import LexicalIndexService
 from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
     normalize_metadata_filter,
+    rerank_retrieval_candidates,
     retrieve_structured_knowledge,
 )
 from app.tools import runbook_tool as runbook_module
@@ -70,6 +71,7 @@ def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
     assert payload["no_answer_rejected"] is False
     assert payload["answer_policy"] == "answer_with_citations"
     assert payload["retrieval_mode"] == "hybrid_vector_lexical_rerank"
+    assert payload["fusion_strategy"] == "weighted"
     assert payload["candidate_k"] >= 2
     assert "引用要求" in payload["content"]
     assert "source_file: redis.md" in payload["content"]
@@ -204,6 +206,60 @@ def test_hybrid_rerank_can_promote_lexically_strong_candidate() -> None:
     assert top["source_file"] == "redis.md"
     assert top["lexical_score"] > 0
     assert top["rerank_score"] > 0
+
+
+def test_rrf_strategy_can_promote_candidate_with_stronger_rank_signals() -> None:
+    vector_first = {
+        "rank": 1,
+        "doc_id": "generic",
+        "source_file": "generic.md",
+        "chunk_id": "generic.md#0001",
+        "score": 0.1,
+        "content": "generic service notes",
+        "metadata": {"_retrieval_source": "vector", "_vector_rank": 1},
+    }
+    hybrid_ranked = {
+        "rank": 2,
+        "doc_id": "redis",
+        "source_file": "redis.md",
+        "chunk_id": "redis.md#0001",
+        "score": 0.2,
+        "content": "Redis maxclients connection timeout runbook",
+        "metadata": {"_retrieval_source": "hybrid", "_vector_rank": 3, "_lexical_rank": 1},
+    }
+
+    ranked = rerank_retrieval_candidates(
+        "Redis maxclients connection timeout",
+        [vector_first, hybrid_ranked],
+        top_k=1,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+        fusion_strategy="rrf",
+    )
+
+    assert ranked[0]["source_file"] == "redis.md"
+    assert ranked[0]["fusion_strategy"] == "rrf"
+    assert ranked[0]["retrieval_signals"]["rrf_score"] == ranked[0]["rrf_score"]
+
+
+def test_rrf_strategy_does_not_bypass_trust_gate() -> None:
+    document = Document(
+        page_content="Redis maxclients connection timeout runbook",
+        metadata={"_file_name": "redis.md", "_chunk_id": "redis.md#0001"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        top_k=1,
+        max_distance=0.5,
+        vector_store=FakeVectorStore([(document, 8.0)]),
+        fusion_strategy="rrf",
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["fusion_strategy"] == "rrf"
+    assert payload["retrieval_results"] == []
+    assert payload["rejected_results"][0]["rrf_score"] > 0
 
 
 def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) -> None:

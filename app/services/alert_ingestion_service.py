@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
@@ -19,39 +18,13 @@ from app.models.incident import Incident, utc_now
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.incident_lifecycle import normalize_alert_status
 from app.services.incident_state_builder import build_incident_state_from_alert
+from app.utils.redaction import REDACTED_VALUE, is_sensitive_key, redact_sensitive_data
 
 ALERT_SOURCE_ALERTMANAGER = "alertmanager"
 MAX_FINGERPRINT_LENGTH = 128
 MAX_SERVICE_NAME_LENGTH = 128
 MAX_ENVIRONMENT_LENGTH = 64
 MAX_ALERT_FIELD_VALUE_LENGTH = 4096
-REDACTED_VALUE = "[REDACTED]"
-SENSITIVE_ALERT_KEYWORDS = (
-    "password",
-    "passwd",
-    "pwd",
-    "token",
-    "secret",
-    "apikey",
-    "api_key",
-    "access_key",
-    "credential",
-    "authorization",
-    "bearer",
-    "cookie",
-    "dsn",
-)
-_AUTH_HEADER_VALUE_RE = re.compile(
-    r"\b(authorization)\s*([:=])\s*(?:bearer|basic)?\s*[^,\s;&]+",
-    re.IGNORECASE,
-)
-_BEARER_VALUE_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential|cookie|dsn)"
-    r"(\s*[:=]\s*)"
-    r"[^,\s;&]+",
-    re.IGNORECASE,
-)
 
 
 class AlertIngestionService:
@@ -388,7 +361,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _redact_mapping(values: dict[str, Any]) -> dict[str, Any]:
     redacted: dict[str, Any] = {}
     for key, value in values.items():
-        if _is_sensitive_alert_key(str(key)):
+        if is_sensitive_key(str(key)):
             redacted[key] = REDACTED_VALUE
         else:
             redacted[key] = _redact_value(value)
@@ -398,30 +371,11 @@ def _redact_mapping(values: dict[str, Any]) -> dict[str, Any]:
 def _redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         return _redact_mapping(value)
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return _truncate_text(_redact_sensitive_text(value), MAX_ALERT_FIELD_VALUE_LENGTH)
-    return value
-
-
-def _redact_sensitive_text(value: str) -> str:
-    text = _AUTH_HEADER_VALUE_RE.sub(
-        lambda match: f"{match.group(1)}{match.group(2)} {REDACTED_VALUE}",
+    return redact_sensitive_data(
         value,
+        redact_auth_scheme=True,
+        max_string_length=MAX_ALERT_FIELD_VALUE_LENGTH,
     )
-    text = _BEARER_VALUE_RE.sub(f"Bearer {REDACTED_VALUE}", text)
-    return _SECRET_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED_VALUE}",
-        text,
-    )
-
-
-def _is_sensitive_alert_key(key: str) -> bool:
-    normalized = key.strip().lower().replace("-", "_").replace(".", "_")
-    return any(keyword in normalized for keyword in SENSITIVE_ALERT_KEYWORDS)
 
 
 alert_ingestion_service = AlertIngestionService()

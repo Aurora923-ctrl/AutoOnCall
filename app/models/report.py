@@ -46,6 +46,7 @@ class DiagnosisReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     evidence_profile: dict[str, Any] = Field(default_factory=dict)
     evidence_sufficiency: dict[str, Any] = Field(default_factory=dict)
+    evidence_graph: dict[str, Any] = Field(default_factory=dict)
     conclusion_alignment: dict[str, Any] = Field(default_factory=dict)
     confidence_reason: str = ""
     uncertainties: list[str] = Field(default_factory=list)

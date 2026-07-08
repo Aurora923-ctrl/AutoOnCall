@@ -10,6 +10,7 @@ def build_eval_summary_payload(
     raw_payload: dict[str, Any],
     *,
     summary_path: Path,
+    backlog_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the frontend/API payload for an available evaluation summary."""
     summary = _dict_or_empty(raw_payload.get("summary"))
@@ -18,6 +19,7 @@ def build_eval_summary_payload(
     rag_summary = _dict_or_empty(rag.get("summary"))
     resume_metrics = _dict_or_empty(summary.get("resume_metrics"))
     categories = _dict_or_empty(summary.get("categories"))
+    backlog = build_eval_backlog_summary(backlog_payload)
 
     return {
         "available": True,
@@ -31,6 +33,7 @@ def build_eval_summary_payload(
         "dashboard": build_eval_dashboard(run, summary, resume_metrics, categories, rag_summary),
         "cases": raw_payload.get("cases", []) if isinstance(raw_payload.get("cases"), list) else [],
         "failed_cases": summary.get("failed_cases", []),
+        "eval_backlog": backlog,
         "message": "evaluation summary loaded",
     }
 
@@ -55,8 +58,195 @@ def build_eval_unavailable_payload(message: str, *, summary_path: Path) -> dict[
         },
         "cases": [],
         "failed_cases": [],
+        "eval_backlog": build_eval_backlog_summary(None),
         "message": message,
     }
+
+
+def build_ragas_summary_payload(
+    raw_payload: dict[str, Any],
+    *,
+    summary_path: Path,
+) -> dict[str, Any]:
+    """Build the frontend/API payload for an available RAGAS quality summary."""
+    run = _dict_or_empty(raw_payload.get("run"))
+    summary = _dict_or_empty(raw_payload.get("summary"))
+    thresholds = _dict_or_empty(raw_payload.get("thresholds"))
+    quality_contract = _dict_or_empty(raw_payload.get("quality_contract"))
+    case_scores = raw_payload.get("case_scores", [])
+    cases = case_scores if isinstance(case_scores, list) else []
+    failed_cases = summary.get("failed_cases", [])
+    if not isinstance(failed_cases, list):
+        failed_cases = []
+    dashboard = build_ragas_dashboard(run, summary, thresholds)
+    return {
+        "available": True,
+        "path": summary_path.name,
+        "artifact": summary_path.name,
+        "run": run,
+        "summary": summary,
+        "thresholds": thresholds,
+        "quality_contract": quality_contract,
+        "dashboard": dashboard,
+        "case_scores": cases,
+        "failed_cases": failed_cases,
+        "message": "RAGAS quality summary loaded",
+    }
+
+
+def build_ragas_unavailable_payload(message: str, *, summary_path: Path) -> dict[str, Any]:
+    """Build the stable unavailable payload for missing or invalid RAGAS summaries."""
+    return {
+        "available": False,
+        "path": summary_path.name,
+        "artifact": summary_path.name,
+        "run": None,
+        "summary": None,
+        "thresholds": {},
+        "quality_contract": {},
+        "dashboard": {
+            "generated_at": None,
+            "scope": "",
+            "command": "",
+            "artifacts": {},
+            "metrics": [],
+            "profile": "",
+        },
+        "case_scores": [],
+        "failed_cases": [],
+        "message": message,
+    }
+
+
+def build_eval_backlog_summary(backlog_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Return compact eval-backlog counters for dashboards."""
+    payload = backlog_payload if isinstance(backlog_payload, dict) else {}
+    summary = _dict_or_empty(payload.get("summary"))
+    items = payload.get("items", [])
+    if not summary and isinstance(items, list):
+        summary = _summarize_backlog_items(items)
+    return {
+        "available": bool(payload),
+        "summary": summary
+        or {
+            "total": 0,
+            "by_target": {},
+            "by_category": {},
+            "by_priority": {},
+            "by_review_status": {},
+            "by_eval_file": {},
+        },
+        "items": items if isinstance(items, list) else [],
+    }
+
+
+def build_ragas_dashboard(
+    run: dict[str, Any],
+    summary: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    """Build metrics for the optional RAGAS quality dashboard."""
+    profile = str(run.get("metric_profile") or "")
+    judge_model = (
+        "not_required_for_id_smoke"
+        if profile == "id-smoke"
+        else str(run.get("judge_model") or "")
+    )
+    embedding_model = (
+        "not_required_for_id_smoke"
+        if profile == "id-smoke"
+        else str(run.get("embedding_model") or "")
+    )
+    metrics = [
+        _metric(
+            "ragas_pass_rate",
+            "RAGAS case pass rate",
+            summary.get("pass_rate"),
+            "percent",
+            "Fixed-case RAG answer quality pass rate for the selected RAGAS profile.",
+            "summary.pass_rate",
+        ),
+        _metric(
+            "ragas_core_pass_rate",
+            "Core RAGAS pass rate",
+            summary.get("core_case_pass_rate"),
+            "percent",
+            "Pass rate for interview-critical RAGAS cases.",
+            "summary.core_case_pass_rate",
+        ),
+        _metric(
+            "ragas_id_recall",
+            "ID context recall",
+            summary.get("id_context_recall_avg"),
+            "percent",
+            "Whether retrieved context ids cover the expected trusted sources.",
+            "summary.id_context_recall_avg",
+        ),
+        _metric(
+            "ragas_id_precision",
+            "ID context precision",
+            summary.get("id_context_precision_avg"),
+            "percent",
+            "How much extra context appears in Top-K retrieval; reported for smoke profile.",
+            "summary.id_context_precision_avg",
+        ),
+        _metric(
+            "ragas_actionability",
+            "OnCall actionability",
+            summary.get("oncall_actionability_avg"),
+            "percent",
+            "Business gate requiring incident domain, evidence language, and bounded actions.",
+            "summary.oncall_actionability_avg",
+        ),
+        _metric(
+            "ragas_refusal_boundary",
+            "Refusal boundary",
+            summary.get("refusal_boundary_rate"),
+            "percent",
+            "Out-of-scope questions must refuse with explicit trusted-source language.",
+            "summary.refusal_boundary_rate",
+        ),
+        _metric(
+            "ragas_faithfulness",
+            "Faithfulness",
+            summary.get("faithfulness_avg"),
+            "percent",
+            "LLM-as-judge support by retrieved context; populated by the full profile.",
+            "summary.faithfulness_avg",
+        ),
+        _metric(
+            "ragas_relevancy",
+            "Response relevancy",
+            summary.get("response_relevancy_avg"),
+            "percent",
+            "LLM-as-judge answer focus; populated by the full profile.",
+            "summary.response_relevancy_avg",
+        ),
+    ]
+    return {
+        "generated_at": run.get("ended_at") or run.get("started_at"),
+        "scope": run.get("evaluation_scope", ""),
+        "command": _ragas_command_hint(run),
+        "artifacts": _dict_or_empty(run.get("artifacts")),
+        "metrics": metrics,
+        "profile": profile,
+        "answer_source": run.get("answer_source", ""),
+        "judge_model": judge_model,
+        "embedding_model": embedding_model,
+        "thresholds": thresholds,
+    }
+
+
+def _ragas_command_hint(run: dict[str, Any]) -> str:
+    profile = str(run.get("metric_profile") or "id-smoke")
+    answer_source = str(run.get("answer_source") or "product-offline")
+    cases_path = str(run.get("cases_path") or "eval/rag_cases.yaml")
+    docs_dir = str(run.get("docs_dir") or "aiops-docs")
+    return (
+        "python scripts/eval/eval_ragas_cases.py "
+        f"--cases {cases_path} --docs-dir {docs_dir} "
+        f"--answer-source {answer_source} --metrics-profile {profile}"
+    )
 
 
 def build_adapter_unavailable_payload(message: str, *, adapter_path: Path) -> dict[str, Any]:
@@ -239,6 +429,33 @@ def _metric(
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _summarize_backlog_items(items: list[Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "total": 0,
+        "by_target": {},
+        "by_category": {},
+        "by_priority": {},
+        "by_review_status": {},
+        "by_eval_file": {},
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        summary["total"] = int(summary["total"]) + 1
+        _increment(summary["by_target"], item.get("target"))
+        _increment(summary["by_category"], item.get("category"))
+        _increment(summary["by_priority"], item.get("priority"))
+        _increment(summary["by_review_status"], item.get("review_status"))
+        _increment(summary["by_eval_file"], item.get("suggested_eval_file"))
+    return summary
+
+
+def _increment(bucket: dict[str, int], value: Any) -> None:
+    key = str(value or "").strip()
+    if key:
+        bucket[key] = bucket.get(key, 0) + 1
 
 
 def _first_present(*values: Any) -> Any:

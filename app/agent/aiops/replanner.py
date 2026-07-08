@@ -13,10 +13,13 @@ from pydantic import BaseModel, Field
 
 from app.config import config
 from app.models.plan import PlanStep
+from app.services.aiops_state_utils import extract_incident_id
 from app.services.approval_service import approval_service
 from app.services.approval_workflow import (
     build_change_plan_from_risk_decision,
     create_approval_request_from_risk_decision,
+    generate_approval_waiting_response,
+    generate_forbidden_response,
 )
 from app.services.context_budget import DEFAULT_CONTEXT_BUDGETER, ContextBudgeter
 from app.services.incident_lifecycle import infer_terminal_report_status
@@ -543,7 +546,7 @@ def _approval_state_update(
     change_plan = build_change_plan_from_risk_decision(state, risk_decision)
     trace_service.record_risk_decision(
         trace_id=state.get("trace_id") or "trace-unknown",
-        incident_id=_extract_incident_id(state),
+        incident_id=extract_incident_id(state),
         step_id=risk_decision.step_id,
         action=risk_decision.action,
         policy=risk_decision.policy,
@@ -603,7 +606,7 @@ def _record_replanner_decision(
     """Write the structured Replanner decision into trace storage."""
     trace_service.create_event(
         trace_id=state.get("trace_id") or "trace-unknown",
-        incident_id=_extract_incident_id(state),
+        incident_id=extract_incident_id(state),
         node_name="replanner",
         event_type="replan_decision",
         input_summary=f"hypotheses={len(analysis.hypotheses)}, confidence={analysis.confidence:.2f}",
@@ -624,53 +627,14 @@ def _record_replanner_decision(
     )
 
 
-def _extract_incident_id(state: PlanExecuteState) -> str:
-    """Extract incident_id from state values without assuming model instances."""
-    incident = state.get("incident") or {}
-    if isinstance(incident, dict):
-        return str(incident.get("incident_id") or "incident-unknown")
-    return str(getattr(incident, "incident_id", "incident-unknown"))
-
-
 def _generate_approval_waiting_response(state_update: dict[str, Any]) -> str:
-    """Generate a deterministic pause response for pending approval."""
-    approval = state_update.get("pending_approval") or {}
-    risk = state_update.get("risk_assessment") or {}
-    return f"""# AIOps 诊断已暂停，等待人工审批
-
-## 待审批动作
-{approval.get("action", "需要人工确认的后续处置动作")}
-
-## 风险等级
-{risk.get("risk_level", approval.get("risk_level", "medium"))}
-
-## 审批原因
-{approval.get("reason", "后续动作可能影响线上系统，需要人工审批后再继续")}
-
-## 人工动作边界
-审批只用于确认后续人工处置建议，Agent 不会自动执行生产变更。
-
-## 回滚建议
-执行任何变更前需要确认回滚命令、影响范围和观察窗口。
-"""
+    """Compatibility wrapper for the shared approval pause renderer."""
+    return generate_approval_waiting_response(state_update)
 
 
 def _generate_forbidden_response(decision: RiskControlDecision) -> str:
-    """Generate deterministic response for forbidden actions."""
-    return f"""# AIOps 已拦截危险动作
-
-## 动作
-{decision.action}
-
-## 风险等级
-{decision.risk_level}
-
-## 拦截原因
-{decision.reason}
-
-## 处理建议
-请通过人工变更、工单审批或专用运维平台重新评估该动作，不允许 Agent 自动执行。若确需处理，必须先准备回滚方案。
-"""
+    """Compatibility wrapper for the shared forbidden-action renderer."""
+    return generate_forbidden_response(decision)
 
 
 async def _generate_response_with_analysis(

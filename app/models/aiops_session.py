@@ -8,6 +8,14 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.models.incident import utc_now
+from app.utils.structured_data import (
+    as_dict,
+    dict_list,
+    json_safe,
+    normalize_past_steps,
+    optional_dict,
+    string_list,
+)
 
 
 class AIOpsSessionSnapshot(BaseModel):
@@ -35,6 +43,9 @@ class AIOpsSessionSnapshot(BaseModel):
     remediation_suggestion: str = ""
     report: dict[str, Any] | None = None
     final_report_id: str | None = None
+    progress: dict[str, Any] = Field(default_factory=dict)
+    progress_cursor: str = ""
+    progress_events: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -86,6 +97,9 @@ class AIOpsSessionSnapshot(BaseModel):
             remediation_suggestion=str(state.get("remediation_suggestion") or ""),
             report=report,
             final_report_id=final_report_id,
+            progress=_to_dict(state.get("progress")),
+            progress_cursor=str(state.get("progress_cursor") or ""),
+            progress_events=_to_dict_list(state.get("progress_events")),
             errors=[str(item) for item in state.get("errors") or []],
             warnings=[str(item) for item in state.get("warnings") or []],
         )
@@ -112,62 +126,33 @@ class AIOpsSessionSnapshot(BaseModel):
             "remediation_suggestion": self.remediation_suggestion,
             "report": dict(self.report) if self.report else None,
             "response": str((self.report or {}).get("markdown") or ""),
+            "progress": dict(self.progress),
+            "progress_cursor": self.progress_cursor,
+            "progress_events": list(self.progress_events),
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
 
 
 def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_json_safe(item) for item in value]
-    return str(value)
+    return json_safe(value)
 
 
 def _to_dict(value: Any) -> dict[str, Any]:
-    safe = _json_safe(value)
-    return safe if isinstance(safe, dict) else {}
+    return as_dict(value)
 
 
 def _to_optional_dict(value: Any) -> dict[str, Any] | None:
-    payload = _to_dict(value)
-    return payload or None
+    return optional_dict(value)
 
 
 def _to_dict_list(value: Any) -> list[dict[str, Any]]:
-    safe = _json_safe(value)
-    if not isinstance(safe, list):
-        return []
-    return [item if isinstance(item, dict) else {"value": item} for item in safe]
+    return dict_list(value, wrap_scalars=True)
 
 
 def _to_string_list(value: Any) -> list[str]:
-    safe = _json_safe(value)
-    if not isinstance(safe, list):
-        return []
-    result: list[str] = []
-    for item in safe:
-        if isinstance(item, dict) and set(item.keys()) == {"value"}:
-            item = item.get("value")
-        if item is not None:
-            result.append(str(item))
-    return result
+    return string_list(value)
 
 
 def _normalize_past_steps(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    for item in value:
-        if isinstance(item, (tuple, list)) and len(item) == 2:
-            normalized.append({"step": _json_safe(item[0]), "result": _json_safe(item[1])})
-        elif isinstance(item, dict):
-            normalized.append(_to_dict(item))
-        else:
-            normalized.append({"value": _json_safe(item)})
-    return normalized
+    return normalize_past_steps(value)

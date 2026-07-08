@@ -55,6 +55,9 @@ class PlanExecuteState(TypedDict, total=False):
     final_diagnosis: str
     remediation_suggestion: str
     report: dict[str, Any] | None
+    progress: dict[str, Any]
+    progress_cursor: str
+    progress_events: Annotated[list[dict[str, Any]], operator.add]
 
     # 错误列表和全链路 trace
     errors: Annotated[list[str], operator.add]
@@ -144,6 +147,9 @@ def create_initial_aiops_state(
         "final_diagnosis": "",
         "remediation_suggestion": "",
         "report": None,
+        "progress": {},
+        "progress_cursor": "",
+        "progress_events": [],
         "errors": [],
         "warnings": [],
         "trace_id": f"trace-{uuid4().hex}",

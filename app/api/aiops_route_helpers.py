@@ -16,6 +16,13 @@ from loguru import logger
 from app.api.sse import is_terminal_event, sse_message
 from app.config import config
 from app.models.approval import ApprovalRequest
+from app.services.aiops_read_models import (
+    build_aiops_run_status,
+    build_aiops_run_summary,
+    filter_aiops_run_summaries,
+    is_known_incident_id,
+    list_run_trace_events,
+)
 from app.services.approval_service import ApprovalNotFoundError
 from app.services.change_execution_read_models import build_change_execution_read_model
 from app.services.change_execution_service import (
@@ -28,13 +35,6 @@ from app.services.demo_incidents import (
     build_demo_incident,
     canonical_demo_case_id,
     demo_incident_aliases,
-)
-from app.services.read_models import (
-    build_aiops_run_status,
-    build_aiops_run_summary,
-    filter_aiops_run_summaries,
-    is_known_incident_id,
-    list_run_trace_events,
 )
 from app.utils.public_errors import (
     GENERIC_CHANGE_ERROR,

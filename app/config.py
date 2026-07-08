@@ -67,7 +67,17 @@ class Settings(BaseSettings):
     upload_max_file_size_mb: int = 10
     upload_read_chunk_size: int = 1024 * 1024
     eval_summary_path: str = "logs/eval_summary.json"
+    eval_backlog_path: str = "logs/eval_backlog_drafts.json"
     adapter_verification_path: str = "logs/full_stack_adapter_verification.json"
+    ragas_eval_enabled: bool = False
+    ragas_eval_summary_path: str = "logs/ragas_eval_summary.json"
+    ragas_eval_model: str = ""
+    ragas_eval_embedding_model: str = ""
+    ragas_min_faithfulness: float = 0.85
+    ragas_min_response_relevancy: float = 0.80
+    ragas_min_id_context_precision: float = 0.75
+    ragas_min_id_context_recall: float = 0.75
+    ragas_min_oncall_actionability: float = 0.80
 
     # ---- DashScope / LLM 配置 -------------------------------------------------
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
@@ -91,6 +101,7 @@ class Settings(BaseSettings):
     rag_hybrid_search_enabled: bool = True
     rag_hybrid_candidate_multiplier: int = 4
     rag_rerank_enabled: bool = True
+    rag_retrieval_fusion_strategy: str = "weighted"
     rag_min_lexical_trust_score: float = 0.20
 
     chunk_max_size: int = 800
@@ -108,6 +119,8 @@ class Settings(BaseSettings):
     aiops_mock_fallback_enabled: bool = False
     aiops_replanner_llm_enabled: bool = False
     service_topology_path: str = "config/service_topology.yaml"
+    aiops_tool_output_artifact_dir: str = "data/aiops_tool_artifacts"
+    aiops_tool_output_inline_bytes: int = 20_000
 
     # ---- A2A 北向协作接口配置 -------------------------------------------------
     # Disabled by default so existing local demos and production deployments do
@@ -233,6 +246,16 @@ class Settings(BaseSettings):
     def effective_rag_model(self) -> str:
         """Return the model used by RAG and AIOps LLM calls."""
         return self.rag_model or self.dashscope_model
+
+    @property
+    def effective_ragas_eval_model(self) -> str:
+        """Return the model used by optional RAGAS judge runs."""
+        return self.ragas_eval_model or self.effective_rag_model
+
+    @property
+    def effective_ragas_eval_embedding_model(self) -> str:
+        """Return the embedding model used by optional RAGAS judge runs."""
+        return self.ragas_eval_embedding_model or self.dashscope_embedding_model
 
     @property
     def log_file_retention(self) -> str:

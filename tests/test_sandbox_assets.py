@@ -110,7 +110,7 @@ def test_sandbox_demo_script_targets_full_stack_compose() -> None:
 
 
 def test_sandbox_metrics_exporter_renders_prometheus_series() -> None:
-    exporter_path = ROOT / "deploy" / "sandbox" / "metrics_exporter.py"
+    exporter_path = ROOT / "deploy" / "adapters" / "metrics_exporter.py"
     spec = importlib.util.spec_from_file_location("sandbox_metrics_exporter", exporter_path)
     assert spec is not None
     assert spec.loader is not None
@@ -127,8 +127,8 @@ def test_sandbox_metrics_exporter_renders_prometheus_series() -> None:
 
 
 def test_prometheus_rules_use_exported_metric_names_and_are_loaded() -> None:
-    rules = (ROOT / "deploy" / "full-stack" / "alert-rules.yml").read_text(encoding="utf-8")
-    prometheus = (ROOT / "deploy" / "full-stack" / "prometheus.yml").read_text(encoding="utf-8")
+    rules = (ROOT / "deploy" / "adapters" / "alert-rules.yml").read_text(encoding="utf-8")
+    prometheus = (ROOT / "deploy" / "adapters" / "prometheus.yml").read_text(encoding="utf-8")
 
     assert 'autooncall_http_5xx_rate{service="order-service"} > 0.05' in rules
     assert 'autooncall_p95_latency_ms{service="order-service"} > 1000' in rules
@@ -139,8 +139,8 @@ def test_prometheus_rules_use_exported_metric_names_and_are_loaded() -> None:
 
 
 def test_sandbox_business_fixtures_are_interview_ready() -> None:
-    mysql_seed = ROOT / "deploy" / "sandbox" / "mysql-init" / "001_init.sql"
-    loki_emitter = ROOT / "deploy" / "full-stack" / "loki_log_emitter.py"
+    mysql_seed = ROOT / "deploy" / "adapters" / "mysql-init" / "001_init.sql"
+    loki_emitter = ROOT / "deploy" / "adapters" / "loki_log_emitter.py"
 
     seed_text = mysql_seed.read_text(encoding="utf-8")
     loki_text = loki_emitter.read_text(encoding="utf-8")
@@ -160,7 +160,7 @@ def test_sandbox_business_fixtures_are_interview_ready() -> None:
 
 
 def test_mysql_redis_golden_seed_uses_live_sources() -> None:
-    mysql_seed = (ROOT / "deploy" / "sandbox" / "mysql-init" / "001_init.sql").read_text(
+    mysql_seed = (ROOT / "deploy" / "adapters" / "mysql-init" / "001_init.sql").read_text(
         encoding="utf-8"
     )
     compose = (ROOT / "deploy" / "compose" / "interview-stack.yml").read_text(
@@ -180,9 +180,9 @@ def test_mysql_redis_golden_seed_uses_live_sources() -> None:
 
 
 def test_sandbox_business_http_mocks_are_removed() -> None:
-    assert not (ROOT / "deploy" / "full-stack" / "mock-cmdb").exists()
-    assert not (ROOT / "deploy" / "full-stack" / "mock-ticketing").exists()
-    assert not (ROOT / "deploy" / "full-stack" / "mock-deploy-history").exists()
+    assert not (ROOT / "deploy" / "adapters" / "mock-cmdb").exists()
+    assert not (ROOT / "deploy" / "adapters" / "mock-ticketing").exists()
+    assert not (ROOT / "deploy" / "adapters" / "mock-deploy-history").exists()
 
 
 def test_k8s_golden_case_is_explicitly_offline_fixture() -> None:

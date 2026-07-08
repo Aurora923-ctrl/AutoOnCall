@@ -43,6 +43,7 @@ class AutoOnCallApp {
             },
             health: null,
             evalSummary: null,
+            ragasSummary: null,
             adapterVerification: null,
             toolContracts: [],
             toolContractsError: ''

@@ -27,6 +27,21 @@ class ChangeStep(BaseModel):
     status: ChangeStepStatus = "pending"
 
 
+class RemediationPlaybook(BaseModel):
+    """Auditable remediation playbook that never executes production changes itself."""
+
+    summary: str = ""
+    risk_policy: Literal["allow", "approval_required", "forbidden"] = "approval_required"
+    approval_required: bool = True
+    pre_check: list[str] = Field(default_factory=list)
+    dry_run: list[str] = Field(default_factory=list)
+    sandbox_or_manual_record: list[str] = Field(default_factory=list)
+    rollback: list[str] = Field(default_factory=list)
+    observe_metrics: list[str] = Field(default_factory=list)
+    stop_conditions: list[str] = Field(default_factory=list)
+    safety_notes: list[str] = Field(default_factory=list)
+
+
 class ChangePlan(BaseModel):
     """A non-executing production change plan attached to approvals and reports."""
 
@@ -41,6 +56,7 @@ class ChangePlan(BaseModel):
     verification_steps: list[str] = Field(default_factory=list)
     steps: list[ChangeStep] = Field(default_factory=list)
     rollback_plan: list[ChangeStep] = Field(default_factory=list)
+    remediation_playbook: RemediationPlaybook | None = None
     observe_metrics: list[str] = Field(default_factory=list)
     blast_radius: str = ""
     expires_in_seconds: int = 3600

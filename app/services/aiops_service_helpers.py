@@ -8,6 +8,7 @@ from app.services.aiops_prompt_builder import (
     build_incident_diagnosis_input,
     format_raw_alert_for_prompt,
 )
+from app.services.aiops_state_utils import extract_incident_id
 from app.services.incident_lifecycle import (
     incident_status_from_runtime_status,
     infer_terminal_report_status,
@@ -20,18 +21,10 @@ ADDITIVE_STATE_FIELDS = {
     "executed_steps",
     "tool_call_records",
     "gathered_evidence",
+    "progress_events",
     "errors",
     "warnings",
 }
-
-
-def _extract_incident_id(state: dict[str, Any]) -> str:
-    """Extract incident_id from a LangGraph state snapshot."""
-    incident = state.get("incident") or {}
-    if isinstance(incident, dict):
-        return str(incident.get("incident_id") or "incident-unknown")
-    return str(getattr(incident, "incident_id", "incident-unknown"))
-
 
 def _attach_trace_event(event_payload: dict[str, Any], trace_event: TraceEvent) -> dict[str, Any]:
     """Add trace metadata to an SSE event without changing its original shape."""
@@ -91,6 +84,11 @@ def _build_fallback_final_response(state: dict[str, Any]) -> str:
         f"{error_block}"
         f"{warning_block}"
     )
+
+
+def _extract_incident_id(state: dict[str, Any]) -> str:
+    """Compatibility wrapper for older imports from this helper module."""
+    return extract_incident_id(state)
 
 
 def _infer_terminal_report_status(state: dict[str, Any]) -> str:

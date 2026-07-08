@@ -273,81 +273,6 @@ Object.assign(window.AutoOnCallApp.prototype, {
         this.showNotification('接口令牌已清除', 'info');
     }
 ,
-    async apiGet(path) {
-        const response = await this.apiFetch(path);
-        if (!response.ok) {
-            throw new Error(`HTTP错误: ${response.status}`);
-        }
-        return response.json();
-    }
-,
-    async apiGetWithStatus(path) {
-        const response = await this.apiFetch(path);
-        try {
-            const data = await response.json();
-            return {
-                ok: response.ok,
-                status: response.status,
-                data
-            };
-        } catch (error) {
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-            throw error;
-        }
-    }
-,
-    authHeaders(headers = {}) {
-        const normalizedHeaders = { ...headers };
-        const token = this.readApiToken();
-        if (token) {
-            normalizedHeaders['X-AutoOnCall-Token'] = token;
-        }
-        return normalizedHeaders;
-    }
-,
-    readApiToken() {
-        try {
-            const sessionToken = (sessionStorage.getItem(this.apiTokenStorageKey) || '').trim();
-            if (sessionToken) return sessionToken;
-            const legacyToken = (localStorage.getItem(this.apiTokenStorageKey) || '').trim();
-            if (legacyToken) {
-                sessionStorage.setItem(this.apiTokenStorageKey, legacyToken);
-                localStorage.removeItem(this.apiTokenStorageKey);
-                return legacyToken;
-            }
-        } catch (error) {
-            console.warn('读取接口令牌失败:', error);
-        }
-        return '';
-    }
-,
-    writeApiToken(token) {
-        try {
-            sessionStorage.setItem(this.apiTokenStorageKey, token);
-            localStorage.removeItem(this.apiTokenStorageKey);
-        } catch (error) {
-            console.warn('保存接口令牌失败:', error);
-        }
-    }
-,
-    clearApiTokenStorage() {
-        try {
-            sessionStorage.removeItem(this.apiTokenStorageKey);
-            localStorage.removeItem(this.apiTokenStorageKey);
-        } catch (error) {
-            console.warn('清除接口令牌失败:', error);
-        }
-    }
-,
-    async apiFetch(path, options = {}) {
-        return fetch(path, {
-            ...options,
-            headers: this.authHeaders(options.headers || {})
-        });
-    }
-,
     async refreshHealthStatus() {
         try {
             const [liveResult, readyResult] = await Promise.all([
@@ -357,7 +282,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             const live = liveResult.data.data || liveResult.data;
             const ready = readyResult.data.data || readyResult.data;
             const health = this.mergeHealthChecks(live, ready, liveResult.status, readyResult.status);
-            this.dashboardState.health = health;
+            this.setDashboardState('health', health);
             this.renderHealthSummary(health);
         } catch (error) {
             this.renderHealthError(error);
@@ -500,7 +425,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const query = this.buildAIOpsRunHistoryQuery();
             const data = await this.apiGet(`${this.apiBaseUrl}/aiops/runs?${query}`);
-            this.dashboardState.aiopsRuns = Array.isArray(data.items) ? data.items : [];
+            this.setDashboardItems('aiopsRuns', data.items);
             this.renderAIOpsRunHistory();
         } catch (error) {
             if (this.aiOpsRunHistoryList) {
@@ -583,6 +508,15 @@ Object.assign(window.AutoOnCallApp.prototype, {
     }
 ,
     formatAIOpsRunCounters(run) {
+        const progress = run?.progress || {};
+        if (progress.phase || progress.cursor) {
+            const phase = progress.phase || 'progress';
+            const success = progress.tool_success_count ?? 0;
+            const total = progress.tool_total ?? run.tool_call_count ?? 0;
+            const failed = progress.tool_failed_count ?? 0;
+            const evidence = progress.evidence_count ?? run.evidence_count ?? 0;
+            return `phase ${phase} 路 tools ${success}/${total} 路 failed ${failed} 路 evidence ${evidence} 路 risk ${progress.risk_policy || 'unknown'}`;
+        }
         const completed = run.completed_step_count ?? 0;
         const tools = run.tool_call_count ?? 0;
         const evidence = run.evidence_count ?? 0;
@@ -683,7 +617,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             current.unshift(item);
         }
         current.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
-        this.dashboardState.aiopsRuns = current.slice(0, 20);
+        this.setDashboardState('aiopsRuns', current.slice(0, 20));
         this.renderAIOpsRunHistory();
     }
 ,
@@ -694,6 +628,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         const executionSteps = Array.isArray(payload.execution_steps) ? payload.execution_steps : [];
         const toolCalls = Array.isArray(payload.tool_call_records) ? payload.tool_call_records : [];
         const evidence = Array.isArray(payload.gathered_evidence) ? payload.gathered_evidence : [];
+        const progress = payload.progress || null;
         return {
             diagnosis_run_id: sessionId,
             session_id: sessionId,
@@ -717,6 +652,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
             tool_call_count: toolCalls.length,
             error_count: payload.error_message ? 1 : 0,
             warning_count: Array.isArray(payload.warnings) ? payload.warnings.length : 0,
+            progress,
+            progress_cursor: payload.progress_cursor || progress?.cursor || '',
             links: {
                 run: sessionId ? `/api/aiops/runs/${sessionId}` : ''
             }
@@ -734,7 +671,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshIncidents() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/incidents?limit=50`);
-            this.dashboardState.incidents = Array.isArray(data.items) ? data.items : [];
+            this.setDashboardItems('incidents', data.items);
             if (!this.selectedIncidentId && this.dashboardState.incidents.length > 0) {
                 this.selectedIncidentId = this.dashboardState.incidents[0].incident_id;
             }
@@ -784,7 +721,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshAlerts() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/alerts?limit=20`);
-            this.dashboardState.alerts = Array.isArray(data.items) ? data.items : [];
+            this.setDashboardItems('alerts', data.items);
             this.renderAlertList();
         } catch (error) {
             if (this.alertList) {
@@ -922,10 +859,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
             this.renderIncidentDetailError(detail.reason);
         }
         if (replay.status === 'fulfilled') {
-            this.dashboardState.incidentReplay = replay.value;
+            this.setDashboardState('incidentReplay', replay.value);
             this.renderIncidentReplay(replay.value);
         } else {
-            this.dashboardState.incidentReplay = null;
+            this.setDashboardState('incidentReplay', null);
             this.renderIncidentReplayError(replay.reason);
         }
         if (trace.status === 'fulfilled') {
@@ -944,7 +881,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             this.renderApprovalsError(approvals.reason);
         }
         if (changes.status === 'fulfilled') {
-            this.dashboardState.changeExecutions = Array.isArray(changes.value.items) ? changes.value.items : [];
+            this.setDashboardItems('changeExecutions', changes.value.items);
             this.renderChangeExecutions(this.dashboardState.changeExecutions);
         } else {
             this.renderChangeExecutionError(changes.reason);

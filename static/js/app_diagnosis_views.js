@@ -462,7 +462,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshApprovals() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/approvals/pending?include_approved_actions=true`);
-            this.dashboardState.approvals = Array.isArray(data.items) ? data.items : [];
+            this.setDashboardItems('approvals', data.items);
             this.renderApprovals(this.dashboardState.approvals);
         } catch (error) {
             this.renderApprovalsError(error);
@@ -758,9 +758,27 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     async refreshEvalSummary() {
         try {
-            const data = await this.apiGet(`${this.apiBaseUrl}/eval/summary`);
-            this.dashboardState.evalSummary = data;
-            this.renderEvalSummary(data);
+            const [evalResult, ragasResult] = await Promise.allSettled([
+                this.apiGet(`${this.apiBaseUrl}/eval/summary`),
+                this.apiGet(`${this.apiBaseUrl}/eval/ragas`)
+            ]);
+            if (evalResult.status === 'fulfilled') {
+                this.setDashboardState('evalSummary', evalResult.value);
+            } else {
+                this.setDashboardState('evalSummary', {
+                    available: false,
+                    message: evalResult.reason?.message || '离线评测摘要不可用'
+                });
+            }
+            if (ragasResult.status === 'fulfilled') {
+                this.setDashboardState('ragasSummary', ragasResult.value);
+            } else {
+                this.setDashboardState('ragasSummary', {
+                    available: false,
+                    message: ragasResult.reason?.message || 'RAGAS 质量摘要不可用'
+                });
+            }
+            this.renderEvalSummary(this.dashboardState.evalSummary, this.dashboardState.ragasSummary);
         } catch (error) {
             if (this.evalStatus) this.evalStatus.textContent = '不可用';
             if (this.evalSummary) {
@@ -772,10 +790,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshAdapterVerification() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/eval/adapter-verification`);
-            this.dashboardState.adapterVerification = data;
+            this.setDashboardState('adapterVerification', data);
             this.renderAdapterVerification(data);
         } catch (error) {
-            this.dashboardState.adapterVerification = null;
+            this.setDashboardState('adapterVerification', null);
             if (this.adapterVerifyStatus) this.adapterVerifyStatus.textContent = '未生成';
             if (this.adapterVerification) {
                 this.adapterVerification.innerHTML = `<div class="empty-state">${this.escapeHtml(error.message || '暂无适配器验收报告，请运行 make sandbox-verify')}</div>`;
@@ -786,19 +804,19 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshToolContracts() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/aiops/tools/contracts`);
-            this.dashboardState.toolContracts = Array.isArray(data.items) ? data.items : [];
-            this.dashboardState.toolContractsError = '';
+            this.setDashboardItems('toolContracts', data.items);
+            this.setDashboardState('toolContractsError', '');
             this.renderToolContracts(data);
         } catch (error) {
-            this.dashboardState.toolContracts = [];
-            this.dashboardState.toolContractsError = error.message || '工具契约不可用';
+            this.setDashboardItems('toolContracts', []);
+            this.setDashboardState('toolContractsError', error.message || '工具契约不可用');
             this.renderToolContracts(null);
         }
     }
 ,
     renderToolContracts(payload) {
         if (payload && Array.isArray(payload.items)) {
-            this.dashboardState.toolContracts = payload.items;
+            this.setDashboardItems('toolContracts', payload.items);
         }
         const contracts = Array.isArray(this.dashboardState.toolContracts)
             ? this.dashboardState.toolContracts
@@ -1057,13 +1075,14 @@ Object.assign(window.AutoOnCallApp.prototype, {
         `;
     }
 ,
-    renderEvalSummary(payload) {
+    renderEvalSummary(payload, ragasPayload = this.dashboardState.ragasSummary) {
         const available = Boolean(payload && payload.available);
+        const ragasAvailable = Boolean(ragasPayload && ragasPayload.available);
         if (this.evalStatus) {
-            this.evalStatus.textContent = available ? '已加载' : '未生成';
+            this.evalStatus.textContent = available || ragasAvailable ? '已加载' : '未生成';
         }
         if (!this.evalSummary) return;
-        if (!available) {
+        if (!available && !ragasAvailable) {
             this.evalSummary.innerHTML = `<div class="empty-state">${this.escapeHtml(payload?.message || '暂无评测摘要')}</div>`;
             return;
         }
@@ -1109,6 +1128,100 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 <div>
                     <span>失败用例</span>
                     <div class="source-strip">${failedCaseRows}</div>
+                </div>
+            </div>
+            ${this.renderRagasQualityPanel(ragasPayload)}
+        `;
+    }
+,
+    renderRagasQualityPanel(payload) {
+        if (!payload || payload.available === false) {
+            return `
+                <div class="eval-detail-panel ragas-quality-panel">
+                    <div>
+                        <span>RAGAS 答案质量门禁</span>
+                        <p>${this.escapeHtml(payload?.message || '暂无 RAGAS 质量摘要，请运行 eval_ragas_cases.py')}</p>
+                    </div>
+                </div>
+            `;
+        }
+        const dashboard = this.resolveEvalDashboard(payload);
+        const metrics = Array.isArray(dashboard.metrics) ? dashboard.metrics : [];
+        const summary = payload.summary || {};
+        const run = payload.run || {};
+        const failedCases = Array.isArray(payload.failed_cases) ? payload.failed_cases : [];
+        const visibleCases = Array.isArray(payload.case_scores)
+            ? payload.case_scores.slice(0, 6)
+            : [];
+        const metricKeys = new Set([
+            'ragas_pass_rate',
+            'ragas_core_pass_rate',
+            'ragas_id_recall',
+            'ragas_id_precision',
+            'ragas_actionability',
+            'ragas_refusal_boundary',
+            'ragas_faithfulness',
+            'ragas_relevancy'
+        ]);
+        const visibleMetrics = metrics.filter((metric) => metricKeys.has(metric.key));
+        const failedCaseRows = failedCases.length > 0
+            ? failedCases.map((item) => `
+                <article class="adapter-check-item">
+                    <div class="incident-title-row">
+                        <strong>${this.escapeHtml(item.id || 'unknown')}</strong>
+                        <span class="meta-pill error">${this.escapeHtml(item.suggested_backlog_category || 'quality_gate')}</span>
+                    </div>
+                    <p>${this.escapeHtml((item.failed_metrics || []).join(', ') || 'unknown failure')}</p>
+                </article>
+            `).join('')
+            : '<div class="empty-state">RAGAS 门禁无失败用例</div>';
+        const caseRows = visibleCases.map((item) => `
+            <tr>
+                <td>${this.escapeHtml(item.id || 'unknown')}</td>
+                <td><span class="meta-pill ${item.passed ? 'success' : 'error'}">${item.passed ? 'PASS' : 'FAIL'}</span></td>
+                <td>${this.escapeHtml((item.tags || []).join(', ') || item.case_type || 'positive')}</td>
+                <td>${this.escapeHtml((item.failed_metrics || []).join(', ') || '-')}</td>
+            </tr>
+        `).join('');
+        return `
+            <div class="eval-detail-panel ragas-quality-panel">
+                <div>
+                    <span>RAGAS 答案质量门禁</span>
+                    <div class="source-strip">
+                        <span class="source-pill ${this.statusTone(summary.status)}">${this.escapeHtml(summary.status || 'unknown')}</span>
+                        <span class="source-pill">profile=${this.escapeHtml(dashboard.profile || run.metric_profile || 'unknown')}</span>
+                        <span class="source-pill">answer=${this.escapeHtml(dashboard.answer_source || run.answer_source || 'unknown')}</span>
+                        <span class="source-pill">judge=${this.escapeHtml(dashboard.judge_model || run.judge_model || 'not_required')}</span>
+                    </div>
+                    <p>把 RAGAS ID context、citation guard、拒答边界和 OnCall actionability 组合成固定用例质量回归。</p>
+                </div>
+                <div class="metric-grid">
+                    ${visibleMetrics.map((metric) => `
+                        <div class="metric-tile">
+                            <span>${this.escapeHtml(metric.label || metric.key || '指标')}</span>
+                            <strong>${this.escapeHtml(this.formatEvalMetric(metric))}</strong>
+                            <p>${this.escapeHtml(metric.description || '')}</p>
+                        </div>
+                    `).join('')}
+                </div>
+                <div>
+                    <span>失败门禁与改进队列</span>
+                    <div class="adapter-check-list">${failedCaseRows}</div>
+                </div>
+                <div class="tool-call-table compact-tool-contracts">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Case</th>
+                                <th>结果</th>
+                                <th>标签</th>
+                                <th>未通过指标</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${caseRows || '<tr><td colspan="4">暂无 RAGAS case 明细</td></tr>'}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         `;

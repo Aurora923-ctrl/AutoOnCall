@@ -10,12 +10,14 @@ from typing import Any
 from app.models.incident import utc_now
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from app.services.aiops_state_utils import extract_incident_id as _extract_incident_id
 from app.services.aiops_store import create_aiops_store
 from app.services.change_execution_read_models import (
     change_execution_next_steps,
     change_execution_uncertainties,
 )
 from app.services.change_plan_builder import update_change_plan_status
+from app.services.evidence_graph import build_incident_evidence_graph
 from app.services.incident_lifecycle import (
     incident_status_from_report_status,
     manual_action_required_from_change_execution,
@@ -32,6 +34,11 @@ from app.services.report_quality import (
 )
 from app.services.sqlite_store import resolve_sqlite_path
 from app.services.trace_service import trace_service
+from app.utils.structured_data import (
+    as_dict as _as_dict,
+    dedupe_strings as _dedupe_strings,
+    dict_list as _dict_list,
+)
 
 
 class ReportGenerator:
@@ -137,6 +144,16 @@ class ReportGenerator:
                 conclusion_alignment,
                 "remediation_suggestion",
             )
+        evidence_graph = build_incident_evidence_graph(
+            incident_id=incident_id,
+            trace_id=trace_id,
+            root_cause=root_cause,
+            selected_root_cause_id=selected_root_cause_id,
+            hypothesis_ranking=hypothesis_ranking,
+            evidence=evidence,
+            tool_calls=tool_calls,
+            conclusion_alignment=conclusion_alignment,
+        )
 
         report = DiagnosisReport(
             incident_id=incident_id,
@@ -172,6 +189,7 @@ class ReportGenerator:
             warnings=warnings,
             evidence_profile=evidence_profile,
             evidence_sufficiency=_as_dict(evidence_profile.get("sufficiency")),
+            evidence_graph=evidence_graph,
             conclusion_alignment=conclusion_alignment,
             confidence_reason=_build_confidence_reason(evidence, evidence_analysis, errors),
             uncertainties=_build_uncertainties(
@@ -349,11 +367,6 @@ class ReportGenerator:
             self._store.save_report(report)
 
 
-def _extract_incident_id(state: dict[str, Any]) -> str:
-    incident = _as_dict(state.get("incident"))
-    return str(incident.get("incident_id") or "incident-unknown")
-
-
 def _incident_status_from_report_status(status: str) -> str:
     return incident_status_from_report_status(status)
 
@@ -400,29 +413,6 @@ def _apply_evidence_sufficiency_gate(
         details.append("失败工具：" + "、".join(failed_tools))
     detail_text = "；".join(details) or "证据充分性门槛未满足"
     return status, [f"报告由 completed 降级为 {status}：{detail_text}。"]
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    if hasattr(value, "model_dump"):
-        payload = value.model_dump(mode="json")
-        return payload if isinstance(payload, dict) else {}
-    return {}
-
-
-def _dict_list(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    result = []
-    for item in value:
-        if isinstance(item, dict):
-            result.append(dict(item))
-        elif hasattr(item, "model_dump"):
-            result.append(item.model_dump(mode="json"))
-    return result
 
 
 def _build_hypothesis_ranking(
@@ -513,6 +503,7 @@ def _compact_tool_call(record: dict[str, Any]) -> dict[str, Any]:
         "data_source": record.get("data_source", "unknown"),
         "input_summary": record.get("input_summary", ""),
         "output_summary": record.get("output_summary", ""),
+        "output_artifact": record.get("output_artifact"),
         "risk_level": record.get("risk_level", "low"),
         "read_only": record.get("read_only", True),
         "input_args": record.get("input_args", {}),
@@ -1155,17 +1146,6 @@ def _build_dependency_signals(
 ) -> list[dict[str, Any]]:
     """Advanced dependency panels were removed from the campus-recruiting mainline."""
     return []
-
-
-def _dedupe_strings(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def _record_report_generated(

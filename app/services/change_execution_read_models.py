@@ -7,6 +7,7 @@ from typing import Any
 
 from app.models.change_execution import ChangeExecution
 from app.services.incident_lifecycle import status_from_change_execution, status_metadata
+from app.utils.structured_data import dedupe_strings as _dedupe_strings
 
 
 def build_change_execution_read_model(execution: ChangeExecution) -> dict[str, Any]:
@@ -194,12 +195,3 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _dedupe_strings(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result

@@ -9,8 +9,10 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.models.incident import new_model_id, utc_now
 
-FeedbackTarget = Literal["rag", "aiops"]
+FeedbackTarget = Literal["rag", "aiops", "change", "ragas"]
 FeedbackVote = Literal["thumb_up", "thumb_down"]
+EvalBacklogPriority = Literal["P0", "P1", "P2"]
+EvalBacklogReviewStatus = Literal["new", "reviewed", "promoted", "rejected"]
 BadCaseCategory = Literal[
     "retrieval_failure",
     "missing_citation",
@@ -103,6 +105,28 @@ class BadCaseFeedback(BaseModel):
     high_value: bool = False
     improvement_items: list[dict[str, str]] = Field(default_factory=list)
     exported_eval_case_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class EvalBacklogItem(BaseModel):
+    """Reviewable draft that connects one bad case to a future eval regression case."""
+
+    backlog_id: str = Field(default_factory=lambda: new_model_id("ebl"))
+    feedback_id: str
+    source: str = "feedback"
+    target: FeedbackTarget
+    category: BadCaseCategory
+    priority: EvalBacklogPriority = "P1"
+    review_status: EvalBacklogReviewStatus = "new"
+    suggested_eval_file: str
+    suggested_eval_suite: str = "aiops"
+    suggested_eval_case_id: str
+    suggested_eval_dimension: str
+    expected_behavior: str = ""
+    failure_reasons: list[str] = Field(default_factory=list)
+    evidence_snapshot: dict[str, Any] = Field(default_factory=dict)
+    links: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
 

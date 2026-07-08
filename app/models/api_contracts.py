@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.models.approval import ApprovalRequest
-from app.models.feedback import BadCaseFeedback, DiagnosisFeedback
+from app.models.feedback import BadCaseFeedback, DiagnosisFeedback, EvalBacklogItem
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 
@@ -129,6 +129,37 @@ class BadCaseFeedbackListResponse(BaseModel):
     """List response for captured bad cases."""
 
     items: list[BadCaseFeedback] = Field(default_factory=list)
+
+
+class EvalBacklogListResponse(BaseModel):
+    """List response for reviewable eval-backlog drafts."""
+
+    items: list[EvalBacklogItem] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvalBacklogResponse(BaseModel):
+    """Read response for reviewable eval-backlog drafts."""
+
+    available: bool = False
+    summary: dict[str, Any] = Field(default_factory=dict)
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvalRagasResponse(BaseModel):
+    """Read response for the latest optional RAGAS quality report."""
+
+    available: bool = False
+    path: str = ""
+    artifact: str = ""
+    run: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    quality_contract: dict[str, Any] = Field(default_factory=dict)
+    dashboard: dict[str, Any] = Field(default_factory=dict)
+    case_scores: list[dict[str, Any]] = Field(default_factory=list)
+    failed_cases: list[dict[str, Any]] = Field(default_factory=list)
+    message: str = ""
 
 
 class KnowledgeIndexingReportsResponse(BaseModel):

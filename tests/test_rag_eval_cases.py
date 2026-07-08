@@ -6,6 +6,7 @@ from scripts.eval.eval_rag_cases import (
     evaluate_cases,
     load_cases,
     render_summary,
+    search_offline,
 )
 
 
@@ -52,9 +53,13 @@ def test_rag_eval_cases_all_pass_offline() -> None:
     assert payload["summary"]["reject_case_count"] >= 5
     assert payload["summary"]["confusion_case_count"] >= 4
     assert payload["summary"]["mrr"] >= 0.9
+    assert payload["summary"]["strategy_metrics"]["weighted"]["recall_at_k"] == 1.0
+    assert "rrf" in payload["summary"]["strategy_metrics"]
+    assert payload["run"]["fusion_strategies"] == ["weighted", "rrf"]
 
     summary_text = render_summary(payload)
     assert "RAG eval: 30/30 cases passed" in summary_text
+    assert "Strategy comparison:" in summary_text
     assert "recall@3=100%" in summary_text
     assert "cite=100%" in summary_text
     assert "confusion=100%" in summary_text
@@ -65,6 +70,45 @@ def test_rag_eval_cases_all_pass_offline() -> None:
         assert result["failure_reasons"] == {}
         if not result["should_reject"]:
             assert result["citation_hit"] is True
+            assert "weighted" in result["strategy_results"]
+            assert "rrf" in result["strategy_results"]
+
+
+def test_rag_eval_offline_strategy_comparison_can_rank_by_rrf() -> None:
+    index = [
+        {
+            "source_file": "weaker.md",
+            "chunk_id": "weaker.md#0001",
+            "content": "Redis timeout",
+            "heading_path": "",
+            "offline_terms": {"redis", "timeout"},
+        },
+        {
+            "source_file": "stronger.md",
+            "chunk_id": "stronger.md#0001",
+            "content": "Redis timeout maxclients connection",
+            "heading_path": "",
+            "offline_terms": {"redis", "timeout", "maxclients", "connection"},
+        },
+    ]
+
+    weighted = search_offline(
+        index,
+        "Redis timeout maxclients connection",
+        top_k=1,
+        min_score=0.1,
+        fusion_strategy="weighted",
+    )
+    rrf = search_offline(
+        index,
+        "Redis timeout maxclients connection",
+        top_k=1,
+        min_score=0.1,
+        fusion_strategy="rrf",
+    )
+
+    assert weighted[0]["source_file"] == "stronger.md"
+    assert rrf[0]["source_file"] == "weaker.md"
 
 
 def test_rag_eval_case_failure_identifies_failed_metric() -> None:

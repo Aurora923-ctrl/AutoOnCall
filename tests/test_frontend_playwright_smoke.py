@@ -44,9 +44,15 @@ def test_static_workbench_renders_in_browser(tmp_path) -> None:
                 lambda message: errors.append(message.text) if message.type == "error" else None,
             )
             page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+            page.locator("#apiTokenInput").wait_for(state="visible", timeout=5000)
+            page.wait_for_function(
+                "() => window.autoOnCallApp && "
+                "typeof window.autoOnCallApp.saveApiToken === 'function'"
+            )
             page.locator("#apiTokenInput").fill("demo-token")
             page.locator("#apiTokenSaveBtn").click()
-            assert page.locator("#authStatusBadge").inner_text() == "已设置"
+            page.locator("#authStatusBadge").wait_for(state="visible", timeout=5000)
+            assert page.locator("#authStatusBadge").inner_text(timeout=5000) == "已设置"
             page.locator("#aiOpsPresetSelect").wait_for(state="visible", timeout=5000)
             page.locator("#aiOpsPresetSelect").select_option("redis_maxclients")
             assert page.locator("#aiOpsServiceName").input_value() == "order-service"

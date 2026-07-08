@@ -3,29 +3,31 @@ Executor 节点：执行单个步骤
 基于 LangGraph 官方教程实现
 """
 
+import asyncio
 import json
-import re
-from typing import Any, cast
+from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
-from langgraph.prebuilt import ToolNode
 from loguru import logger
 
 from app.agent.mcp_client import get_mcp_client_with_retry
-from app.config import config
 from app.models.approval import ApprovalRequest
-from app.models.evidence import (
-    Evidence,
-    build_confidence_reason,
-    infer_evidence_stance,
-    infer_evidence_type,
-    normalize_data_source,
-)
+from app.models.evidence import Evidence
 from app.models.plan import PlanStep
 from app.models.trace import ToolCallRecord
+from app.services.aiops_execution_records import (
+    format_tool_error,
+    result_for_persistence,
+    summarize_input_args,
+    summarize_tool_result,
+    tool_result_to_call_record,
+    tool_result_to_evidence,
+)
+from app.services.aiops_state_utils import extract_incident_id
 from app.services.approval_service import approval_service
-from app.services.approval_workflow import create_approval_request_from_risk_decision
+from app.services.approval_workflow import (
+    create_approval_request_from_risk_decision,
+    generate_risk_stop_response,
+)
 from app.services.trace_service import trace_service
 from app.tools import get_current_time, retrieve_knowledge
 from app.tools.base import ToolExecutionResult
@@ -33,6 +35,14 @@ from app.tools.registry import ToolRegistry, create_default_tool_registry
 from app.utils.log_safety import summarize_text_for_log
 from app.utils.public_errors import public_exception_message
 
+from .execution_fallbacks import (
+    ensure_plan_step,
+    execute_with_llm_tools,
+    fallback_text_to_tool_result,
+    fallback_warnings,
+    message_content_to_text,
+    safe_fallback_tools,
+)
 from .risk_controller import RiskControlDecision, assess_plan_step
 from .state import (
     PlanExecuteState,
@@ -40,6 +50,19 @@ from .state import (
     parse_plan_step,
     remaining_plan_state_update,
 )
+
+READ_ONLY_EVIDENCE_FANOUT_LIMIT = 4
+READ_ONLY_EVIDENCE_FANOUT_TOOLS = {
+    "query_metrics",
+    "query_logs",
+    "query_redis_status",
+    "query_mysql_status",
+    "query_k8s_status",
+    "search_runbook",
+    "search_history_ticket",
+    "query_service_context",
+    "query_deploy_history",
+}
 
 
 async def executor(state: PlanExecuteState) -> dict[str, Any]:
@@ -74,7 +97,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         all_tools = local_tools + mcp_tools
 
-        registry = create_default_tool_registry(all_tools)
+        registry = create_default_tool_registry(all_tools).with_incident_context(state.get("incident"))
         logger.info(f"Tool Registry 已加载 {len(registry.list_tools())} 个标准工具")
 
         risk_block_update = _risk_gate_state_update(
@@ -83,39 +106,74 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         if risk_block_update is not None:
             return risk_block_update
 
-        direct_result = await _try_execute_registered_step(plan_step, registry, state)
         gathered_evidence: list[dict[str, Any]] = []
         tool_call_records: list[dict[str, Any]] = []
+        past_steps: list[tuple[str, str]] = []
+        executed_steps: list[dict[str, Any]] = []
         errors: list[str] = []
         warnings: list[str] = []
+        consumed_count = 1
 
-        if direct_result is not None:
-            result, step_status, evidence, tool_call_record = direct_result
-            gathered_evidence.append(evidence)
-            tool_call_records.append(tool_call_record)
-            if step_status == "failed":
-                errors.append(_format_tool_error(tool_call_record))
+        fanout_steps = _select_read_only_evidence_fanout_steps(
+            plan_step,
+            current_plan,
+            registry,
+            state,
+        )
+        if len(fanout_steps) > 1:
+            batch_results = await _execute_registered_step_fanout(fanout_steps, registry, state)
+            consumed_count = len(fanout_steps)
+            for batch_step, (result, step_status, evidence, tool_call_record) in zip(
+                fanout_steps,
+                batch_results,
+                strict=False,
+            ):
+                gathered_evidence.append(evidence)
+                tool_call_records.append(tool_call_record)
+                past_steps.append((_format_plan_step_for_execution(batch_step), result))
+                marked = _mark_step(batch_step, step_status)
+                if marked:
+                    executed_steps.append(marked)
+                if step_status == "failed":
+                    errors.append(_format_tool_error(tool_call_record))
         else:
-            result, step_status, evidence, tool_call_record = await _execute_fallback_step(
-                task,
-                plan_step,
-                all_tools,
-                state,
-            )
-            gathered_evidence.append(evidence)
-            tool_call_records.append(tool_call_record)
-            warnings.extend(_fallback_warnings(tool_call_record, plan_step))
-            if step_status == "failed":
-                errors.append(_format_tool_error(tool_call_record))
+            direct_result = await _try_execute_registered_step(plan_step, registry, state)
+            if direct_result is not None:
+                result, step_status, evidence, tool_call_record = direct_result
+                gathered_evidence.append(evidence)
+                tool_call_records.append(tool_call_record)
+                past_steps.append((task, result))
+                marked = _mark_step(plan_step, step_status) if plan_step else None
+                if marked:
+                    executed_steps.append(marked)
+                if step_status == "failed":
+                    errors.append(_format_tool_error(tool_call_record))
+            else:
+                result, step_status, evidence, tool_call_record = await _execute_fallback_step(
+                    task,
+                    plan_step,
+                    all_tools,
+                    state,
+                )
+                gathered_evidence.append(evidence)
+                tool_call_records.append(tool_call_record)
+                past_steps.append((task, result))
+                marked = _mark_step(plan_step, step_status) if plan_step else None
+                if marked:
+                    executed_steps.append(marked)
+                warnings.extend(_fallback_warnings(tool_call_record, plan_step))
+                if step_status == "failed":
+                    errors.append(_format_tool_error(tool_call_record))
 
-        logger.info(f"步骤执行完成，结果长度: {len(result)}")
-
-        executed_step = _mark_step(plan_step, step_status) if plan_step else None
+        logger.info(
+            f"Executor 完成 {len(past_steps)} 个步骤，"
+            f"结果总长度: {sum(len(result) for _, result in past_steps)}"
+        )
 
         state_update = {
-            **remaining_plan_state_update(current_plan, plan),
-            "past_steps": [(task, result)],  # 使用 operator.add 追加
-            "executed_steps": [executed_step] if executed_step else [],
+            **remaining_plan_state_update(current_plan, plan, consumed=consumed_count),
+            "past_steps": past_steps,  # 使用 operator.add 追加
+            "executed_steps": executed_steps,
         }
         if gathered_evidence:
             state_update["gathered_evidence"] = gathered_evidence
@@ -158,90 +216,26 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
 
 async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
-    """Execute a task through the legacy LLM + ToolNode path."""
-    # 创建 LLM（绑定工具）
-    llm = ChatQwen(
-        model=config.effective_rag_model,
-        api_key=cast(Any, config.dashscope_api_key),
-        base_url=config.dashscope_api_base,
-        temperature=0,
-    )
-
-    safe_tools = _safe_fallback_tools(all_tools)
-    llm_with_tools = llm.bind_tools(safe_tools) if safe_tools else llm
-    tool_node = ToolNode(safe_tools) if safe_tools else None
-
-    messages = [
-        SystemMessage(
-            content="""你是一个能力强大的助手，负责执行具体的任务步骤。
-
-你可以使用各种工具来完成任务。对于每个步骤：
-1. 理解步骤的目标
-2. 如果步骤指定了工具名，优先使用该工具
-3. 调用工具获取信息
-4. 返回执行结果
-
-注意：
-- 如果工具调用失败，请说明失败原因
-- 不要编造数据，只返回实际获取的信息
-- 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""
-        ),
-        HumanMessage(content=f"请执行以下任务: {task}"),
-    ]
-
-    llm_response = await llm_with_tools.ainvoke(messages)
-    logger.info(f"LLM 响应类型: {type(llm_response)}")
-
-    if tool_node is not None and hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
-        logger.info(f"检测到 {len(llm_response.tool_calls)} 个工具调用")
-        messages.append(llm_response)
-        tool_messages = await tool_node.ainvoke({"messages": messages})
-        messages.extend(tool_messages["messages"])
-        final_response = await llm_with_tools.ainvoke(messages)
-        return _message_content_to_text(
-            final_response.content if hasattr(final_response, "content") else final_response
-        )
-
-    logger.info("LLM 未调用工具，直接返回结果")
-    return _message_content_to_text(
-        llm_response.content if hasattr(llm_response, "content") else llm_response
-    )
+    """Compatibility wrapper for the extracted fallback executor."""
+    return await execute_with_llm_tools(task, all_tools)
 
 
 def _message_content_to_text(content: Any) -> str:
-    """Render LangChain message content into a stable text result."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if text:
-                    parts.append(str(text))
-            else:
-                parts.append(str(item))
-        return "".join(parts)
-    return str(content)
+    """Compatibility wrapper for fallback message rendering."""
+    return message_content_to_text(content)
 
 
 def _safe_fallback_tools(all_tools: list[Any]) -> list[Any]:
-    """Limit legacy LLM fallback to explicitly safe local read-only helpers."""
-    safe_names = {"get_current_time", "retrieve_knowledge"}
-    return [
-        tool
-        for tool in all_tools
-        if getattr(tool, "name", getattr(tool, "__name__", "")) in safe_names
-    ]
+    """Compatibility wrapper for fallback tool filtering."""
+    return safe_fallback_tools(all_tools)
 
 
 async def _try_execute_registered_step(
     plan_step: PlanStep | None,
     registry: ToolRegistry,
     state: PlanExecuteState,
+    *,
+    batch_metadata: dict[str, Any] | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]] | None:
     """Try deterministic execution through the Tool Registry."""
     if not plan_step or plan_step.tool_name == "manual_analysis":
@@ -255,7 +249,16 @@ async def _try_execute_registered_step(
         f"通过 Tool Registry 调用 {plan_step.tool_name}: "
         f"{_summarize_input_args(plan_step.input_args)}"
     )
-    result = await registry.arun(plan_step.tool_name, plan_step.input_args)
+    result = await registry.arun(
+        plan_step.tool_name,
+        plan_step.input_args,
+        incident=state.get("incident"),
+        step=plan_step,
+    )
+    if batch_metadata:
+        metadata = dict(result.metadata or {})
+        metadata["evidence_batch"] = dict(batch_metadata)
+        result = result.model_copy(update={"metadata": metadata})
     persisted_result = _result_for_persistence(result)
     evidence = _tool_result_to_evidence(persisted_result, plan_step)
     tool_call_record = _tool_result_to_call_record(persisted_result, plan_step, state)
@@ -270,6 +273,117 @@ async def _try_execute_registered_step(
         "success" if result.status == "success" else "failed",
         evidence.model_dump(mode="json"),
         tool_call_record.model_dump(mode="json"),
+    )
+
+
+def _select_read_only_evidence_fanout_steps(
+    plan_step: PlanStep | None,
+    current_plan: list[dict[str, Any]],
+    registry: ToolRegistry,
+    state: PlanExecuteState,
+) -> list[PlanStep]:
+    """Return adjacent low-risk read-only evidence steps that can run together."""
+    if not plan_step or len(current_plan) <= 1:
+        return []
+
+    selected: list[PlanStep] = []
+    for raw_step in current_plan:
+        parsed_step = parse_plan_step(raw_step)
+        if parsed_step is None:
+            break
+        if not _is_read_only_evidence_fanout_step(parsed_step, registry, state):
+            break
+        selected.append(parsed_step)
+        if len(selected) >= READ_ONLY_EVIDENCE_FANOUT_LIMIT:
+            break
+    return selected
+
+
+def _is_read_only_evidence_fanout_step(
+    step: PlanStep,
+    registry: ToolRegistry,
+    state: PlanExecuteState,
+) -> bool:
+    """Keep fan-out limited to deterministic low-risk evidence collection tools."""
+    if step.risk_level != "low":
+        return False
+    if step.tool_name not in READ_ONLY_EVIDENCE_FANOUT_TOOLS:
+        return False
+    tool = registry.get(step.tool_name)
+    if not tool or not getattr(tool, "read_only", False):
+        return False
+    decision = assess_plan_step(step, tool_registry=registry, incident=state.get("incident"))
+    return decision.policy == "allow" and decision.read_only and decision.risk_level == "low"
+
+
+async def _execute_registered_step_fanout(
+    steps: list[PlanStep],
+    registry: ToolRegistry,
+    state: PlanExecuteState,
+) -> list[tuple[str, str, dict[str, Any], dict[str, Any]]]:
+    """Execute a bounded batch of read-only steps while preserving plan order."""
+    batch_id = f"fanout-{steps[0].step_id}-{len(steps)}"
+    tasks = [
+        _execute_registered_fanout_item(
+            step,
+            registry,
+            state,
+            batch_metadata={
+                "batch_id": batch_id,
+                "batch_size": len(steps),
+                "batch_index": index,
+                "execution_mode": "bounded_read_only_fanout",
+            },
+        )
+        for index, step in enumerate(steps, 1)
+    ]
+    return await asyncio.gather(*tasks)
+
+
+async def _execute_registered_fanout_item(
+    step: PlanStep,
+    registry: ToolRegistry,
+    state: PlanExecuteState,
+    *,
+    batch_metadata: dict[str, Any],
+) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    """Execute one fan-out item; a failure becomes failed evidence, not batch failure."""
+    try:
+        result = await _try_execute_registered_step(
+            step,
+            registry,
+            state,
+            batch_metadata=batch_metadata,
+        )
+        if result is not None:
+            return result
+    except Exception as exc:
+        logger.warning(
+            f"并行只读取证步骤 {step.step_id}/{step.tool_name} 失败: "
+            f"error_type={type(exc).__name__}, {summarize_text_for_log(exc, label='error')}"
+        )
+
+    public_message = "并行只读取证步骤执行失败，请检查服务端日志"
+    failed_result = ToolExecutionResult(
+        tool_name=step.tool_name,
+        status="failed",
+        input_args=step.input_args,
+        error_message=public_message,
+        metadata={"evidence_batch": dict(batch_metadata)},
+    )
+    persisted_result = _result_for_persistence(failed_result)
+    evidence = _tool_result_to_evidence(persisted_result, step)
+    tool_call_record = _record_and_dump_tool_call(persisted_result, step, state)
+    return (
+        json.dumps(
+            persisted_result.model_dump(mode="json"),
+            ensure_ascii=False,
+            default=str,
+            indent=2,
+        ),
+        "failed",
+        evidence.model_dump(mode="json"),
+        tool_call_record,
     )
 
 
@@ -289,18 +403,8 @@ async def _execute_fallback_step(
 
 
 def _ensure_plan_step(plan_step: PlanStep | None, task: str) -> PlanStep:
-    """Create a minimal PlanStep for legacy string-only plan entries."""
-    if plan_step:
-        return plan_step
-    return PlanStep(
-        step_id="legacy-step",
-        tool_name="legacy_plan_step",
-        purpose=task,
-        input_args={"task": task},
-        expected_evidence="Legacy execution result wrapped as structured evidence",
-        risk_level="low",
-        status="pending",
-    )
+    """Compatibility wrapper for fallback step normalization."""
+    return ensure_plan_step(plan_step, task)
 
 
 def _fallback_text_to_tool_result(
@@ -308,68 +412,16 @@ def _fallback_text_to_tool_result(
     result_text: str,
     plan_step: PlanStep,
 ) -> ToolExecutionResult:
-    """Wrap manual or unregistered fallback execution in the standard tool result shape."""
-    tool_name = plan_step.tool_name
-    input_args = plan_step.input_args
-    execution_path = (
-        "manual_analysis" if plan_step.tool_name == "manual_analysis" else "llm_toolnode_fallback"
-    )
-    fallback_reason = (
-        "manual_analysis_requested"
-        if execution_path == "manual_analysis"
-        else "structured_tool_not_registered"
-    )
-    is_manual_analysis = execution_path == "manual_analysis"
-    error_message = None
-    if not is_manual_analysis:
-        error_message = (
-            f"工具 {tool_name} 未注册到 Tool Registry，"
-            "LLM ToolNode 兜底结果不可作为标准工具成功证据。"
-        )
-    return ToolExecutionResult(
-        tool_name=tool_name,
-        status="success" if is_manual_analysis else "failed",
-        input_args=input_args,
-        output={
-            "summary": result_text,
-            "task": task,
-            "execution_path": execution_path,
-            "structured_tool_registered": False,
-            "fallback_reason": fallback_reason,
-        },
-        risk_level=plan_step.risk_level,
-        read_only=True,
-        error_message=error_message,
-        metadata={
-            "execution_path": execution_path,
-            "structured_tool_registered": False,
-            "fallback_reason": fallback_reason,
-        },
-    )
+    """Compatibility wrapper for fallback result normalization."""
+    return fallback_text_to_tool_result(task, result_text, plan_step)
 
 
 def _fallback_warnings(
     tool_call_record: dict[str, Any],
     plan_step: PlanStep | None,
 ) -> list[str]:
-    """Return operator-visible warnings for non-registry execution paths."""
-    output = tool_call_record.get("output") if isinstance(tool_call_record, dict) else {}
-    if not isinstance(output, dict):
-        return []
-    execution_path = str(output.get("execution_path") or "")
-    if execution_path == "llm_toolnode_fallback":
-        tool_name = tool_call_record.get("tool_name") or getattr(plan_step, "tool_name", "unknown")
-        step_id = tool_call_record.get("step_id") or getattr(plan_step, "step_id", "unknown")
-        return [
-            (
-                f"步骤 {step_id} 使用了 LLM ToolNode 兜底路径："
-                f"工具 {tool_name} 未注册到 Tool Registry，结果需用标准工具复核。"
-            )
-        ]
-    if execution_path == "manual_analysis":
-        step_id = tool_call_record.get("step_id") or getattr(plan_step, "step_id", "unknown")
-        return [f"步骤 {step_id} 使用人工分析兜底路径，结论需结合真实工具证据复核。"]
-    return []
+    """Compatibility wrapper for fallback warnings."""
+    return fallback_warnings(tool_call_record, plan_step)
 
 
 def _risk_gate_state_update(
@@ -403,7 +455,7 @@ def _risk_gate_state_update(
     )
     trace_service.record_risk_decision(
         trace_id=state.get("trace_id") or "trace-unknown",
-        incident_id=_extract_incident_id(state),
+        incident_id=extract_incident_id(state),
         step_id=plan_step.step_id,
         action=decision.action,
         policy=decision.policy,
@@ -510,31 +562,8 @@ def _record_and_dump_tool_call(
 
 
 def _generate_risk_stop_response(decision: RiskControlDecision) -> str:
-    """Render the stop reason for the user-facing diagnosis stream."""
-    if decision.policy == "forbidden":
-        title = "AIOps 已拦截危险动作"
-        next_step = "该动作不会自动执行，请由人工在变更流程中重新评估。"
-    else:
-        title = "AIOps 诊断已暂停，等待人工审批"
-        next_step = "审批通过前，Agent 不会自动执行该动作。"
-
-    return f"""# {title}
-
-## 动作
-{decision.action}
-
-## 风险等级
-{decision.risk_level}
-
-## 策略
-{decision.policy}
-
-## 原因
-{decision.reason}
-
-## 下一步
-{next_step}
-"""
+    """Compatibility wrapper for the shared risk-stop renderer."""
+    return generate_risk_stop_response(decision)
 
 
 def _risk_decision_to_evidence(decision: RiskControlDecision, step: PlanStep) -> Evidence:
@@ -605,114 +634,13 @@ def _mark_step(step: PlanStep | None, status: str) -> dict[str, Any] | None:
 
 
 def _result_for_persistence(result: ToolExecutionResult) -> ToolExecutionResult:
-    """Return a copy with bulky external raw payloads removed for Trace/Report storage."""
-    redacted_args = _redact_sensitive_data(result.input_args)
-    redacted_output = _redact_sensitive_data(result.output)
-    updates: dict[str, Any] = {}
-    if redacted_args != result.input_args:
-        updates["input_args"] = redacted_args
-    if redacted_output != result.output:
-        updates["output"] = redacted_output
-    persisted_result = result.model_copy(update=updates) if updates else result
-    if config.aiops_store_raw_external_payload:
-        return persisted_result
-    if not isinstance(persisted_result.output, dict):
-        return persisted_result
-    compact_output = _compact_external_payload(persisted_result.output)
-    compact_output = _redact_sensitive_data(compact_output)
-    if compact_output is persisted_result.output:
-        return persisted_result
-    return persisted_result.model_copy(update={"output": compact_output})
-
-
-def _compact_external_payload(output: dict[str, Any]) -> dict[str, Any]:
-    source = str(output.get("source") or "")
-    if source not in {
-        "prometheus",
-        "loki",
-        "log_gateway",
-        "cmdb",
-        "deploy_history",
-        "redis_info",
-        "kubernetes",
-        "mysql",
-        "ticket_api",
-    }:
-        return output
-    compact = dict(output)
-    raw = compact.get("raw")
-    if isinstance(raw, dict):
-        compact["raw"] = _compact_raw_payload(raw)
-        compact["raw_truncated"] = True
-    return compact
-
-
-def _compact_raw_payload(raw: dict[str, Any]) -> dict[str, Any]:
-    compact: dict[str, Any] = {}
-    for key, value in raw.items():
-        if isinstance(value, dict):
-            compact[key] = {
-                nested_key: nested_value
-                for nested_key, nested_value in value.items()
-                if nested_key
-                in {
-                    "connected_clients",
-                    "blocked_clients",
-                    "maxclients",
-                    "used_memory",
-                    "maxmemory",
-                    "Threads_connected",
-                    "Max_used_connections",
-                    "Slow_queries",
-                    "Innodb_row_lock_waits",
-                }
-                or str(nested_key).startswith("db")
-            }
-            if len(compact[key]) != len(value):
-                compact[key]["_raw_truncated"] = True
-        elif isinstance(value, list):
-            compact[key] = value[:5]
-        else:
-            compact[key] = value
-    return compact
+    """Compatibility wrapper for the extracted execution-record builder."""
+    return result_for_persistence(result)
 
 
 def _tool_result_to_evidence(result: ToolExecutionResult, step: PlanStep) -> Evidence:
-    """Convert a tool result into audit-ready diagnostic evidence."""
-    raw_data = result.model_dump(mode="json")
-    stance = infer_evidence_stance(
-        source_tool=result.tool_name,
-        raw_data=raw_data,
-        summary=_summarize_tool_result(result),
-    )
-    data_source = normalize_data_source(result.tool_name, raw_data)
-    confidence = _evidence_confidence(result, data_source)
-    execution_path = result.metadata.get("execution_path")
-    if execution_path == "manual_analysis":
-        confidence = min(confidence, 0.35)
-    elif execution_path == "llm_toolnode_fallback":
-        confidence = 0.1 if result.status == "failed" else min(confidence, 0.35)
-
-    return Evidence(
-        source_tool=result.tool_name,
-        step_id=step.step_id,
-        summary=_summarize_tool_result(result),
-        evidence_type=infer_evidence_type(result.tool_name),
-        data_source=data_source,
-        stance=stance,
-        confidence_reason=build_confidence_reason(
-            source_tool=result.tool_name,
-            raw_data=raw_data,
-            stance=stance,
-        ),
-        fact=_build_evidence_fact(result, data_source),
-        inference=_build_evidence_inference(result, stance),
-        uncertainty=_build_evidence_uncertainty(result, data_source),
-        next_step=_build_evidence_next_step(result, data_source, step),
-        raw_data=raw_data,
-        confidence=confidence,
-        related_hypothesis=step.expected_evidence,
-    )
+    """Compatibility wrapper for tests and older imports."""
+    return tool_result_to_evidence(result, step)
 
 
 def _tool_result_to_call_record(
@@ -720,207 +648,20 @@ def _tool_result_to_call_record(
     step: PlanStep,
     state: PlanExecuteState,
 ) -> ToolCallRecord:
-    """Convert a tool result into a replayable tool call audit record."""
-    return ToolCallRecord(
-        trace_id=state.get("trace_id") or "trace-unknown",
-        incident_id=_extract_incident_id(state),
-        step_id=step.step_id,
-        tool_name=result.tool_name,
-        input_args=result.input_args,
-        input_summary=_summarize_input_args(result.input_args),
-        output=result.output,
-        output_summary=_summarize_tool_result(result),
-        data_source=normalize_data_source(result.tool_name, result.model_dump(mode="json")),
-        latency_ms=result.latency_ms,
-        status=result.status,
-        risk_level=result.risk_level,
-        read_only=result.read_only,
-        error_message=result.error_message,
-    )
-
-
-def _extract_incident_id(state: PlanExecuteState) -> str:
-    """Return incident_id from dict or model-like state values."""
-    incident = state.get("incident") or {}
-    if isinstance(incident, dict):
-        return str(incident.get("incident_id") or "incident-unknown")
-    return str(getattr(incident, "incident_id", "incident-unknown"))
+    """Compatibility wrapper for tests and older imports."""
+    return tool_result_to_call_record(result, step, state)
 
 
 def _summarize_tool_result(result: ToolExecutionResult) -> str:
-    """Create a compact human-readable evidence summary."""
-    if result.status == "failed":
-        return f"工具 {result.tool_name} 调用失败: {result.error_message or '未知错误'}"
-
-    output = result.output
-    if isinstance(output, dict):
-        summary = output.get("summary")
-        if summary:
-            return str(summary)
-        return f"工具 {result.tool_name} 返回 {len(output)} 个结构化字段"
-    if isinstance(output, list):
-        return f"工具 {result.tool_name} 返回 {len(output)} 条记录"
-    if output is None:
-        return f"工具 {result.tool_name} 调用成功，但未返回输出"
-
-    text = str(output).strip()
-    return text[:300] if len(text) > 300 else text
+    """Compatibility wrapper for tests and older imports."""
+    return summarize_tool_result(result)
 
 
 def _summarize_input_args(input_args: dict[str, Any]) -> str:
-    """Create a compact, non-secret input summary for tool audit displays."""
-    if not input_args:
-        return "无输入参数"
-    safe_args = _redact_sensitive_data(input_args)
-    text = json.dumps(safe_args, ensure_ascii=False, default=str)
-    return text[:220] + "..." if len(text) > 220 else text
-
-
-def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(
-        token in lowered
-        for token in [
-            "password",
-            "passwd",
-            "pwd",
-            "token",
-            "secret",
-            "key",
-            "dsn",
-            "authorization",
-            "cookie",
-            "credential",
-            "bearer",
-        ]
-    )
-
-
-def _redact_sensitive_data(value: Any) -> Any:
-    """Recursively redact sensitive values before durable audit persistence."""
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if _is_sensitive_key(str(key)) else _redact_sensitive_data(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_data(item) for item in value]
-    if isinstance(value, str):
-        return _redact_sensitive_text(value)
-    return value
-
-
-_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|"
-    r"authorization|cookie|credential|dsn)\b\s*([=:])\s*(?!Bearer\b)([^,\s;&]+)"
-)
-
-
-def _redact_sensitive_text(text: str) -> str:
-    redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
-    return _SECRET_ASSIGNMENT_PATTERN.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
-        redacted,
-    )
-
-
-def _evidence_confidence(result: ToolExecutionResult, data_source: str) -> float:
-    """Score confidence from status and provenance, not just successful execution."""
-    if result.status == "failed":
-        return 0.05 if data_source == "not_configured" else 0.1
-    if data_source in {
-        "prometheus",
-        "loki",
-        "log_gateway",
-        "cmdb",
-        "deploy_history",
-        "redis_info",
-        "kubernetes",
-        "mysql",
-        "ticket_api",
-    }:
-        return 0.82
-    if data_source in {"mcp_monitor", "mcp_cls", "rag"}:
-        return 0.72
-    if data_source == "mcp_monitor_mixed":
-        return 0.6
-    if data_source == "mock":
-        return 0.5
-    if data_source == "rule_based":
-        return 0.65
-    if data_source == "failed":
-        return 0.1
-    return 0.65
-
-
-def _build_evidence_fact(result: ToolExecutionResult, data_source: str) -> str:
-    """Separate directly observed data from later diagnostic inference."""
-    if result.status == "failed":
-        return f"{result.tool_name} 未返回可用数据，来源={data_source}"
-    if isinstance(result.output, dict) and result.output.get("fact"):
-        return str(result.output["fact"])
-    summary = _summarize_tool_result(result)
-    return f"{summary}；来源={data_source}"
-
-
-def _build_evidence_inference(result: ToolExecutionResult, stance: str) -> str:
-    """Summarize what this evidence does to the active hypothesis."""
-    if result.status == "failed":
-        return "该步骤不能支持根因判断，只能作为证据缺口记录。"
-    if isinstance(result.output, dict) and result.output.get("inference"):
-        return str(result.output["inference"])
-    if stance == "supporting":
-        return "该证据支持当前根因假设。"
-    if stance == "refuting":
-        return "该证据与当前根因假设不一致，需要补充其他证据。"
-    if stance == "unknown":
-        return "该证据当前无法判断立场，只能作为证据缺口或待复核记录。"
-    return "该证据目前只提供背景信息，尚不足以单独确认根因。"
-
-
-def _build_evidence_uncertainty(result: ToolExecutionResult, data_source: str) -> str:
-    """Make mock, fallback, and failure boundaries explicit."""
-    if (
-        result.status != "failed"
-        and isinstance(result.output, dict)
-        and result.output.get("uncertainty")
-    ):
-        return str(result.output["uncertainty"])
-    if data_source == "not_configured":
-        return "真实适配器未配置且 Mock 回退关闭，不能生成真实系统证据。"
-    if data_source == "failed":
-        return result.error_message or "真实适配器调用失败，证据不完整。"
-    if data_source == "mock":
-        return "该证据来自 Mock 回退，只适合本地演示，不代表真实生产状态。"
-    if data_source in {"rule_based", "manual_analysis", "llm_toolnode_fallback"}:
-        return "该结果来自规则或人工/LLM 兜底路径，需要结合真实工具证据复核。"
-    if result.status == "failed":
-        return result.error_message or "工具调用失败，证据不完整。"
-    return "该证据来自当前配置的数据源，仍需结合时间窗口、采样完整性和其他工具交叉验证。"
-
-
-def _build_evidence_next_step(
-    result: ToolExecutionResult,
-    data_source: str,
-    step: PlanStep,
-) -> str:
-    """Recommend the next verification action based on provenance and status."""
-    if data_source == "not_configured":
-        return f"配置 {result.tool_name} 对应真实适配器，或开启 Mock 模式后仅作演示。"
-    if result.status == "failed":
-        return "检查工具配置、网络、权限或超时设置后重试。"
-    if data_source == "mock":
-        return "接入真实适配器后重复该步骤，确认 Mock 结论是否成立。"
-    if step.expected_evidence:
-        return f"用后续步骤交叉验证：{step.expected_evidence}"
-    return "继续执行计划中的后续证据采集步骤。"
+    """Compatibility wrapper for tests and older imports."""
+    return summarize_input_args(input_args)
 
 
 def _format_tool_error(tool_call_record: dict[str, Any]) -> str:
-    """Render failed tool call as a state error string."""
-    return (
-        f"工具 {tool_call_record.get('tool_name')} "
-        f"步骤 {tool_call_record.get('step_id')} 调用失败: "
-        f"{tool_call_record.get('error_message') or '未知错误'}"
-    )
+    """Compatibility wrapper for tests and older imports."""
+    return format_tool_error(tool_call_record)

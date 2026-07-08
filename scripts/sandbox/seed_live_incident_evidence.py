@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SQL_PATH = ROOT / "deploy" / "sandbox" / "mysql-init" / "001_init.sql"
+DEFAULT_SQL_PATH = ROOT / "deploy" / "adapters" / "mysql-init" / "001_init.sql"
 DEFAULT_REDIS_CONTAINER = "autooncall-full-redis"
 DEFAULT_MYSQL_CONTAINER = "autooncall-full-mysql"
 MYSQL_USER = "root"

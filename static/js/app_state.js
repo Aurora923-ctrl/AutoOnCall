@@ -250,6 +250,11 @@ Object.assign(window.AutoOnCallApp.prototype, {
             pending_approval: extra.pending_approval || runState?.pendingApproval || previous.pending_approval || null,
             has_report: extra.has_report ?? Boolean(runState?.structuredReport || previous.has_report),
             plan: Array.isArray(runState?.plan) ? runState.plan : previous.plan || [],
+            progress: runState?.progress || extra.progress || previous.progress || null,
+            progress_cursor: runState?.progressCursor || extra.progress_cursor || previous.progress_cursor || '',
+            progress_events: Array.isArray(runState?.progressEvents)
+                ? runState.progressEvents
+                : previous.progress_events || [],
             execution_steps: Array.isArray(runState?.executionSteps)
                 ? runState.executionSteps
                 : previous.execution_steps || [],
@@ -295,6 +300,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
         runState.status = saved.status || '';
         runState.statusMetadata = saved.status_metadata || null;
         runState.pendingApproval = saved.pending_approval || null;
+        runState.progress = saved.progress || null;
+        runState.progressCursor = saved.progress_cursor || '';
+        runState.progressEvents = Array.isArray(saved.progress_events) ? saved.progress_events : [];
         runState.plan = this.normalizeAIOpsPlanItems(saved.plan || []);
         runState.executionSteps = Array.isArray(saved.execution_steps) ? saved.execution_steps : [];
         runState.toolCalls = Array.isArray(saved.tool_call_records) ? saved.tool_call_records : [];
@@ -367,6 +375,11 @@ Object.assign(window.AutoOnCallApp.prototype, {
         target.traceId = payload.trace_id || target.traceId || '';
         target.status = payload.status || target.status || '';
         target.statusMetadata = payload.status_metadata || target.statusMetadata || null;
+        target.progress = payload.progress || target.progress || null;
+        target.progressCursor = payload.progress_cursor || target.progress?.cursor || target.progressCursor || '';
+        target.progressEvents = Array.isArray(payload.progress_events)
+            ? payload.progress_events
+            : target.progressEvents || [];
         target.plan = this.normalizeAIOpsPlanItems(
             Array.isArray(payload.current_plan) && payload.current_plan.length
                 ? payload.current_plan
@@ -412,7 +425,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
             started_at: payload.started_at,
             updated_at: payload.updated_at,
             has_report: Boolean(payload.has_report || report),
-            pending_approval: target.pendingApproval
+            pending_approval: target.pendingApproval,
+            progress: target.progress,
+            progress_cursor: target.progressCursor
         });
 
         if (options.fromRestore) {

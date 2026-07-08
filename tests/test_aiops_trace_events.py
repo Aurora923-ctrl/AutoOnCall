@@ -174,9 +174,19 @@ async def test_resume_after_approval_uses_persisted_report_when_checkpoint_is_mi
         )
     ]
 
-    assert [event["type"] for event in events] == ["status", "report", "complete"]
-    assert events[0]["execution_boundary"] == "agent_does_not_execute_production_change"
-    assert "不会自动执行生产变更" in events[0]["message"]
+    assert [event["type"] for event in events] == [
+        "progress",
+        "status",
+        "progress",
+        "report",
+        "progress",
+        "complete",
+    ]
+    business_events = [event for event in events if event["type"] != "progress"]
+    assert [event["type"] for event in business_events] == ["status", "report", "complete"]
+    assert events[0]["progress_cursor"]
+    assert business_events[0]["execution_boundary"] == "agent_does_not_execute_production_change"
+    assert "不会自动执行生产变更" in business_events[0]["message"]
     assert events[-1]["status"] == "approval_resumed"
     assert events[-1]["resume_source"] == "report_fallback"
     assert events[-1]["execution_boundary"] == "agent_does_not_execute_production_change"
@@ -277,9 +287,19 @@ async def test_resume_after_approval_uses_persisted_session_snapshot_when_checkp
         )
     ]
 
-    assert [event["type"] for event in events] == ["status", "report", "complete"]
-    assert events[0]["resume_source"] == "session_snapshot"
-    assert events[0]["execution_boundary"] == "agent_does_not_execute_production_change"
+    assert [event["type"] for event in events] == [
+        "progress",
+        "status",
+        "progress",
+        "report",
+        "progress",
+        "complete",
+    ]
+    business_events = [event for event in events if event["type"] != "progress"]
+    assert [event["type"] for event in business_events] == ["status", "report", "complete"]
+    assert events[0]["progress_cursor"]
+    assert business_events[0]["resume_source"] == "session_snapshot"
+    assert business_events[0]["execution_boundary"] == "agent_does_not_execute_production_change"
     assert events[-1]["status"] == "approval_resumed"
     assert events[-1]["resume_source"] == "session_snapshot"
     assert events[-1]["execution_boundary"] == "agent_does_not_execute_production_change"

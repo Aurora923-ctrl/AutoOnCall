@@ -20,7 +20,7 @@ services:
       - "127.0.0.1:13306:3306"
     volumes:
       - D:/AppDataStorage/DockerData/autooncall-full/mysql8/data:/var/lib/mysql
-      - ../sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ../adapters/mysql-init:/docker-entrypoint-initdb.d:ro
     networks:
       - autooncall-full-net
     healthcheck:
@@ -61,7 +61,7 @@ services:
     ports:
       - "127.0.0.1:19108:9108"
     volumes:
-      - ../sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
+      - ../adapters/metrics_exporter.py:/app/metrics_exporter.py:ro
     networks:
       - autooncall-full-net
     healthcheck:
@@ -85,8 +85,8 @@ services:
     ports:
       - "127.0.0.1:19090:9090"
     volumes:
-      - ${PROMETHEUS_CONFIG_FILE:-../full-stack/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
-      - ../full-stack/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - ${PROMETHEUS_CONFIG_FILE:-../adapters/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
+      - ../adapters/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
       - D:/AppDataStorage/DockerData/autooncall-full/prometheus:/prometheus
     depends_on:
       metrics-exporter:
@@ -110,7 +110,7 @@ services:
     ports:
       - "127.0.0.1:13100:3100"
     volumes:
-      - ../full-stack/loki-config.yml:/etc/loki/local-config.yml:ro
+      - ../adapters/loki-config.yml:/etc/loki/local-config.yml:ro
       - D:/AppDataStorage/DockerData/autooncall-full/loki:/loki
     networks:
       - autooncall-full-net
@@ -123,7 +123,7 @@ services:
       LOKI_PUSH_URL: "http://loki:3100/loki/api/v1/push"
       LOKI_PUSH_INTERVAL_SECONDS: "30"
     volumes:
-      - ../full-stack/loki_log_emitter.py:/app/loki_log_emitter.py:ro
+      - ../adapters/loki_log_emitter.py:/app/loki_log_emitter.py:ro
     depends_on:
       - loki
     networks:

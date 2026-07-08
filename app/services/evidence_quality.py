@@ -61,6 +61,8 @@ def build_evidence_quality_profile(
     trusted_source_count = 0
     degraded_source_count = 0
     fallback_source_count = 0
+    layer_counts = {"live": 0, "knowledge": 0, "history": 0, "other": 0}
+    artifact_count = 0
 
     for evidence in evidence_items:
         if not isinstance(evidence, dict):
@@ -71,6 +73,9 @@ def build_evidence_quality_profile(
         by_type[evidence_type] = by_type.get(evidence_type, 0) + 1
         by_stance[stance] = by_stance.get(stance, 0) + 1
         by_data_source[data_source] = by_data_source.get(data_source, 0) + 1
+        layer = evidence_layer(evidence, evidence_type, data_source)
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+        artifact_count += len(evidence_artifacts(evidence))
         confidence = evidence.get("confidence")
         if isinstance(confidence, int | float):
             confidence_values.append(float(confidence))
@@ -99,18 +104,23 @@ def build_evidence_quality_profile(
         tool_records=tool_records,
         failed_tools=dedupe_strings([tool for tool in failed_tools if tool]),
     )
+    root_cause_closure = build_root_cause_closure(evidence_items)
 
     return {
         "by_type": by_type,
         "by_stance": by_stance,
         "by_data_source": by_data_source,
+        "by_layer": layer_counts,
         "failed_tools": dedupe_strings([tool for tool in failed_tools if tool]),
         "average_evidence_confidence": average(confidence_values),
         "diagnostic_success_count": diagnostic_success_count,
         "trusted_source_count": trusted_source_count,
         "degraded_source_count": degraded_source_count,
         "fallback_source_count": fallback_source_count,
+        "artifact_count": artifact_count,
         "source_quality": source_quality,
+        "root_cause_closure": root_cause_closure,
+        "root_cause_closure_status": root_cause_closure["status"],
         "supporting_count": by_stance.get("supporting", 0),
         "refuting_count": by_stance.get("refuting", 0),
         "neutral_count": by_stance.get("neutral", 0),
@@ -119,6 +129,122 @@ def build_evidence_quality_profile(
         "sufficiency_status": sufficiency["status"],
         "confidence_cap": sufficiency["confidence_cap"],
     }
+
+
+LIVE_EVIDENCE_SOURCES = {
+    "prometheus",
+    "loki",
+    "log_gateway",
+    "redis_info",
+    "kubernetes",
+    "mysql",
+    "mcp_monitor",
+    "mcp_cls",
+}
+LIVE_EVIDENCE_TYPES = {
+    "metric",
+    "log",
+    "redis",
+    "mysql",
+    "k8s",
+    "kubernetes",
+    "trace",
+    "message_queue",
+    "alert",
+}
+KNOWLEDGE_EVIDENCE_TOOLS = {"search_runbook", "retrieve_runbook", "retrieve_knowledge"}
+KNOWLEDGE_EVIDENCE_TYPES = {"runbook", "knowledge"}
+HISTORY_EVIDENCE_SOURCES = {"ticket_api", "deploy_history"}
+HISTORY_EVIDENCE_TOOLS = {"search_history_ticket", "query_deploy_history"}
+HISTORY_EVIDENCE_TYPES = {"ticket", "change", "deploy_history"}
+
+
+def build_root_cause_closure(evidence_items: list[Any]) -> dict[str, Any]:
+    """Check whether root-cause claims have live evidence plus runbook/history support."""
+    live_ids: list[str] = []
+    knowledge_ids: list[str] = []
+    history_ids: list[str] = []
+    failed_critical_tools: list[str] = []
+
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            continue
+        evidence_type = evidence_type_for_quality(evidence)
+        data_source = evidence_data_source(evidence)
+        source_tool = str(evidence.get("source_tool") or "")
+        evidence_id = str(evidence.get("evidence_id") or source_tool or data_source)
+        raw_data = as_dict(evidence.get("raw_data"))
+        if raw_data.get("status") == "failed" and (
+            evidence_type in PRIMARY_DOMAIN_EVIDENCE_TYPES
+            or data_source in PRIMARY_DOMAIN_SOURCES
+            or source_tool in {"query_redis_status", "query_mysql_status", "query_k8s_status"}
+        ):
+            failed_critical_tools.append(source_tool or data_source or evidence_type)
+            continue
+        if not is_successful_or_reference_evidence(evidence, evidence_type):
+            continue
+        if is_no_answer_reference(evidence):
+            continue
+        if str(evidence.get("stance") or "") not in {"supporting", "neutral"}:
+            continue
+
+        layer = evidence_layer(evidence, evidence_type, data_source)
+        if layer == "live":
+            live_ids.append(evidence_id)
+        elif layer == "knowledge":
+            knowledge_ids.append(evidence_id)
+        elif layer == "history":
+            history_ids.append(evidence_id)
+
+    live_ids = dedupe_strings([item for item in live_ids if item])
+    knowledge_ids = dedupe_strings([item for item in knowledge_ids if item])
+    history_ids = dedupe_strings([item for item in history_ids if item])
+    reference_ids = dedupe_strings([*knowledge_ids, *history_ids])
+    missing: list[str] = []
+    if not live_ids:
+        missing.append("live evidence")
+    if not reference_ids:
+        missing.append("knowledge/history basis")
+    status = "satisfied" if not missing else "incomplete"
+
+    return {
+        "status": status,
+        "satisfied": status == "satisfied",
+        "has_live_evidence": bool(live_ids),
+        "has_knowledge_or_history": bool(reference_ids),
+        "live_evidence_ids": live_ids,
+        "knowledge_evidence_ids": knowledge_ids,
+        "history_evidence_ids": history_ids,
+        "missing": missing,
+        "failed_critical_tools": dedupe_strings([item for item in failed_critical_tools if item]),
+    }
+
+
+def evidence_layer(evidence: dict[str, Any], evidence_type: str, data_source: str) -> str:
+    source_tool = str(evidence.get("source_tool") or "").lower()
+    if data_source in LIVE_EVIDENCE_SOURCES or evidence_type in LIVE_EVIDENCE_TYPES:
+        return "live"
+    if (
+        data_source in HISTORY_EVIDENCE_SOURCES
+        or source_tool in HISTORY_EVIDENCE_TOOLS
+        or evidence_type in HISTORY_EVIDENCE_TYPES
+    ):
+        return "history"
+    if source_tool in KNOWLEDGE_EVIDENCE_TOOLS or evidence_type in KNOWLEDGE_EVIDENCE_TYPES:
+        return "knowledge"
+    return "other"
+
+
+def evidence_artifacts(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts = evidence.get("artifact_refs")
+    if isinstance(artifacts, list):
+        return [item for item in artifacts if isinstance(item, dict)]
+    raw_data = as_dict(evidence.get("raw_data"))
+    output = as_dict(raw_data.get("output"))
+    artifact = output.get("artifact_ref")
+    if artifact:
+        return [{"artifact_ref": artifact}]
+    return []
 
 
 def build_evidence_sufficiency(

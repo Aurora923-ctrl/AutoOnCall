@@ -34,7 +34,7 @@ services:
     ports:
       - "3307:3306"
     volumes:
-      - ./sandbox/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ../adapters/mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uautooncall", "-pautooncall123"]
       interval: 5s
@@ -48,7 +48,7 @@ services:
     ports:
       - "9109:9108"
     volumes:
-      - ./sandbox/metrics_exporter.py:/app/metrics_exporter.py:ro
+      - ../adapters/metrics_exporter.py:/app/metrics_exporter.py:ro
     healthcheck:
       test:
         [
@@ -68,7 +68,7 @@ services:
     ports:
       - "9091:9090"
     volumes:
-      - ./sandbox/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../adapters/sandbox-prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
       sandbox-metrics-exporter:
         condition: service_healthy

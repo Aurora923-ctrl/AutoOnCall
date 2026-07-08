@@ -47,8 +47,22 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "/aiops/status-catalog" in script
     assert "approval_required" in script
     assert "buildAIOpsDetails" in script
+    assert "Progress: ${this.formatAIOpsProgressSummary(runState.progress)}" in script
+    assert "recoverAIOpsRunFromSnapshot" in script
+    assert "eof_without_terminal" in script
+    assert "stream_error" in script
+    assert "!error.aiopsTerminalEvent" in script
+    assert "诊断连接中断，已同步后端状态" in script
     assert "beginLiveAIOpsRun" in script
     assert "renderLiveAIOpsProgress" in script
+    assert "extractAIOpsProgress" in script
+    assert "formatAIOpsProgressSummary" in script
+    assert "progress: () => currentText" in script
+    assert "progress_cursor" in script
+    assert "progress_events" in script
+    assert "progressCursor" in script
+    assert "progressEvents" in script
+    assert "phase ${phase}" in script
     assert "autooncallAIOpsRun" in script
     assert "loadLastAIOpsRunState" in script
     assert "saveLastAIOpsRunState" in script
@@ -154,6 +168,14 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "/changes/${encodeURIComponent(changePlanId)}/resume" in script
     assert "/changes/${encodeURIComponent(changeExecutionId)}/manual-result" in script
     assert "refreshEvalSummary" in script
+    assert "/eval/ragas" in script
+    assert "ragasSummary" in script
+    assert "renderRagasQualityPanel" in script
+    assert "RAGAS 答案质量门禁" in script
+    assert "RAGAS 门禁无失败用例" in script
+    assert "ragas_id_precision" in script
+    assert "ragas_relevancy" in script
+    assert "eval_ragas_cases.py" in script
     assert "resolveEvalDashboard" in script
     assert "buildLegacyEvalDashboard" in script
     assert "formatEvalMetric" in script

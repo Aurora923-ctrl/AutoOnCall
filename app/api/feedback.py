@@ -5,9 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from app.core.auth import DIAGNOSE_SCOPE, READ_SCOPE, require_scope
-from app.models.api_contracts import BadCaseFeedbackListResponse, BadCaseFeedbackResponse
+from app.models.api_contracts import (
+    BadCaseFeedbackListResponse,
+    BadCaseFeedbackResponse,
+    EvalBacklogListResponse,
+)
 from app.models.feedback import BadCaseFeedbackCreate
-from app.services.feedback_service import FeedbackService, feedback_service
+from app.services.feedback_service import FeedbackService, feedback_service, summarize_eval_backlog
 
 router = APIRouter()
 
@@ -44,3 +48,20 @@ async def list_bad_case_feedback(
             high_value_only=high_value_only,
         )
     }
+
+
+@router.get(
+    "/feedback/eval-backlog",
+    response_model=EvalBacklogListResponse,
+    dependencies=[Depends(require_scope(READ_SCOPE))],
+)
+async def list_eval_backlog(
+    target: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
+) -> dict:
+    """List reviewable eval backlog drafts without promoting them into eval YAML."""
+    items = get_feedback_service().list_eval_backlog(
+        target=target,
+        review_status=review_status,
+    )
+    return {"items": items, "summary": summarize_eval_backlog(items)}
