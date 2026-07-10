@@ -124,9 +124,7 @@ def _change_context_text(
     metadata: dict[str, Any],
 ) -> str:
     metadata_parts = [
-        f"{key}={value}"
-        for key, value in metadata.items()
-        if key is not None and value is not None
+        f"{key}={value}" for key, value in metadata.items() if key is not None and value is not None
     ]
     return f"{action} {tool_name} {reason} {' '.join(metadata_parts)}".lower()
 

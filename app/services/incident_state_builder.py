@@ -252,5 +252,3 @@ def _alert_can_override_auto_diagnosis_failure(existing: IncidentState) -> bool:
     """Allow alert lifecycle updates to recover a state failed only by auto diagnosis."""
     metadata = dict(existing.metadata or {})
     return existing.status == "failed" and metadata.get("alert_auto_diagnosis_status") == "failed"
-
-

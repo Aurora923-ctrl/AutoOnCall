@@ -232,9 +232,15 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "### Live Evidence" in report.markdown
     assert "### Knowledge Basis" in report.markdown
     assert "### Historical Experience" in report.markdown
+    assert "Layer role: current adapter or incident-window facts" in report.markdown
+    assert "Layer role: Runbook, postmortem, or wiki material" in report.markdown
+    assert "Layer role: tickets, deploy history, or tables" in report.markdown
     assert "layer=live" in report.markdown
     assert "layer=knowledge" in report.markdown
     assert "layer=history" in report.markdown
+    assert "rca_role=root-cause-support" in report.markdown
+    assert "citations=redis_postmortem.pdf#redis-postmortem-001" in report.markdown
+    assert "payment_wiki.html#payment-wiki-001" in report.markdown
     assert "数据源分布" in report.markdown
     assert "失败工具" in report.markdown
     assert "## 运行告警" in report.markdown

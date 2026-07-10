@@ -65,6 +65,15 @@ async def test_verify_adapters_passes_when_all_real_sources_match() -> None:
     assert payload["failed_tools"] == []
     assert payload["missing_sources"] == []
     assert payload["not_integrated"] == []
+    assert payload["passed_golden_chain_count"] == 2
+    assert payload["golden_chains"]["redis_maxclients"]["passed"] is True
+    assert payload["golden_chains"]["mysql_slow_query"]["passed"] is True
+    assert payload["golden_chains"]["redis_maxclients"]["required_sources"] == [
+        "redis_info",
+        "prometheus",
+        "loki",
+        "ticket_api",
+    ]
 
 
 @pytest.mark.asyncio
@@ -86,3 +95,6 @@ async def test_verify_adapters_fails_when_mock_fallback_is_used() -> None:
     assert payload["status"] == "failed"
     assert payload["failed_tools"] == ["query_metrics"]
     assert payload["mock_fallback_detected"] is True
+    assert payload["golden_chains"]["redis_maxclients"]["passed"] is False
+    assert payload["golden_chains"]["mysql_slow_query"]["passed"] is False
+    assert "query_metrics" in payload["golden_chains"]["redis_maxclients"]["failed_tools"]

@@ -196,9 +196,7 @@ def _tool_count(tool_calls: list[dict[str, Any]], status: str) -> int:
 
 def _failed_tool_count(tool_calls: list[dict[str, Any]]) -> int:
     return sum(
-        1
-        for call in tool_calls
-        if str(call.get("status") or "").lower() in _FAILED_TOOL_STATUSES
+        1 for call in tool_calls if str(call.get("status") or "").lower() in _FAILED_TOOL_STATUSES
     )
 
 

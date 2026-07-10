@@ -193,5 +193,3 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     return dict(value) if isinstance(value, Mapping) else {}
-
-

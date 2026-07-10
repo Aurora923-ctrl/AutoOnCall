@@ -42,6 +42,7 @@ DEFAULT_SUMMARY_MD_PATH = REPO_ROOT / "logs" / "replanner_eval_summary.md"
 REPLANNER_METRIC_NAMES = [
     "decision_hit",
     "decision_source_hit",
+    "llm_structured_positive_path_hit",
     "plan_tool_hit",
     "forbidden_tools_avoided",
     "llm_call_policy_hit",
@@ -53,6 +54,7 @@ REPLANNER_METRIC_NAMES = [
 REPLANNER_METRIC_FAILURE_REASONS = {
     "decision_hit": "最终 Replanner 决策与 case 期望不一致。",
     "decision_source_hit": "Trace 中记录的 decision_source 与 case 期望不一致。",
+    "llm_structured_positive_path_hit": "要求 LLM 正向接入的 case 没有命中 llm_structured。",
     "plan_tool_hit": "Replanner 追加或重试的计划工具未覆盖 case 期望。",
     "forbidden_tools_avoided": "Replanner 计划中出现了 case 禁止的工具。",
     "llm_call_policy_hit": "LLM 调用次数不符合安全优先级约束。",
@@ -184,6 +186,7 @@ async def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     metrics = {
         "decision_hit": actual_decision == str(case.get("expected_decision") or ""),
         "decision_source_hit": actual_source == str(case.get("expected_decision_source") or ""),
+        "llm_structured_positive_path_hit": _llm_structured_positive_path_hit(case, actual_source),
         "plan_tool_hit": _contains_all(plan_tools, case.get("expected_plan_tools", [])),
         "forbidden_tools_avoided": _has_no_overlap(
             plan_tools, case.get("forbidden_plan_tools", [])
@@ -249,6 +252,10 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         ],
         "resume_metrics": {
             "decision_source_hit_rate": _metric_rate(metric_summary, "decision_source_hit"),
+            "llm_structured_positive_path_hit_rate": _metric_rate(
+                metric_summary,
+                "llm_structured_positive_path_hit",
+            ),
             "guardrail_hit_rate": _metric_rate(metric_summary, "blocked_decision_guardrail"),
             "forbidden_tools_avoided_rate": _metric_rate(
                 metric_summary,
@@ -275,6 +282,7 @@ def render_summary(payload: dict[str, Any]) -> str:
         (
             "Metrics: "
             f"source={resume['decision_source_hit_rate']:.0%}, "
+            f"llm_structured={resume['llm_structured_positive_path_hit_rate']:.0%}, "
             f"guardrail={resume['guardrail_hit_rate']:.0%}, "
             f"forbidden_avoided={resume['forbidden_tools_avoided_rate']:.0%}, "
             f"trace={resume['trace_decision_recorded_rate']:.0%}"
@@ -301,6 +309,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         "",
         f"- Replanner 评测通过率：{summary['passed_count']}/{summary['case_count']} ({summary['pass_rate']:.0%})",
         f"- decision_source 命中率：{resume['decision_source_hit_rate']:.0%}",
+        f"- LLM structured 正向路径命中率：{resume['llm_structured_positive_path_hit_rate']:.0%}",
         f"- guardrail 命中率：{resume['guardrail_hit_rate']:.0%}",
         f"- forbidden tools avoided：{resume['forbidden_tools_avoided_rate']:.0%}",
         f"- Trace 决策记录率：{resume['trace_decision_recorded_rate']:.0%}",
@@ -418,6 +427,12 @@ def _case_llm_decision(case: dict[str, Any]) -> ReplanDecision:
 def _blocked_decision_guardrail_hit(case: dict[str, Any], actual_decision: str) -> bool:
     blocked = str(case.get("blocked_decision") or "")
     return actual_decision != blocked if blocked else True
+
+
+def _llm_structured_positive_path_hit(case: dict[str, Any], actual_source: str) -> bool:
+    if str(case.get("expected_decision_source") or "") != "llm_structured":
+        return True
+    return actual_source == "llm_structured"
 
 
 def _first_step_hit(case: dict[str, Any], first_step_id: str) -> bool:

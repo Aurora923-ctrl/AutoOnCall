@@ -26,122 +26,122 @@ def render_markdown(report: DiagnosisReport) -> str:
         else f"审批状态：{report.approval_status}。"
     )
     sections = [
-            f"# {report.title}",
-            "",
-            "## 1. 故障摘要",
-            report.summary or "暂无摘要。",
-            "",
-            "## 2. 影响范围",
-            report.impact or "暂无影响范围信息。",
-            "",
-            "## 3. 初步根因",
-            _render_root_cause_with_evidence(report),
-            "",
-            "## 4. 关键证据",
-            _render_key_evidence_for_review(report),
-            "",
-            "## 5. 排查过程",
-            _render_investigation_process(report),
-            "",
-            "## 6. 风险动作判断",
-            _render_risk_action_judgement(report),
-            "",
-            "## 7. 建议处置",
-            report.remediation_suggestion or "暂无处理建议。",
-            "",
-            "## 8. 回滚 / 观察指标",
-            _render_rollback_and_observation(report),
-            "",
-            "## 9. 未确认事项",
-            _render_unconfirmed_items(report),
-            "",
-            f"> 置信度原因：{report.confidence_reason}",
-            f"> 报告置信度：{report.confidence:.2f}",
-            "",
-            "## 附录 A. 面试速览",
-            _render_interview_snapshot(report),
-            "",
-            "## 附录 B. 证据审计",
-            "### 根因判断",
-            report.root_cause or "暂未形成明确根因。",
-            "",
-            "### 根因假设矩阵",
-            _render_hypothesis_ranking(report),
-            "",
-            "### 已确认事实",
-            _render_bullets(report.confirmed_facts),
-            "",
-            "### 推断结论",
-            _render_bullets(report.inferred_conclusions),
-            "",
-            "### 关键证据明细",
-            _render_bullets(report.key_findings),
-            "",
-            "### 证据质量",
-            _render_evidence_quality(report),
-            "",
-            "### 证据充分性",
-            _render_evidence_sufficiency(report),
-            "",
-            "### Conclusion Alignment",
-            _render_conclusion_alignment(report),
-            "",
-            "### Incident Evidence Graph",
-            _render_incident_evidence_graph(report),
-            "",
-            "### 数据源边界",
-            _render_data_source_boundaries(report),
-            "",
-            "### 诊断链路证据",
-            _render_diagnostic_chains(report),
-            "",
-            "### 证据矩阵",
-            _render_evidence_matrix(report),
-            "",
-            "### 不确定性",
-            _render_bullets(report.uncertainties) if report.uncertainties else "- 暂无",
-            "",
-            "### 运行告警",
-            _render_bullets(report.warnings) if report.warnings else "- 暂无",
-            "",
-            "### 下一步建议",
-            _render_bullets(report.next_steps),
-            "",
-            "## 附录 C. 工具、Trace 与 Runbook",
-            "### Runbook 引用",
-            _render_runbook_references(report.evidence),
-            "",
-            "### 工具调用摘要",
-            _render_tool_calls(report.tool_calls),
-            "",
-            "### Trace 摘要",
-            f"- trace_id：{report.trace_id or 'unknown'}",
-            f"- 事件数：{report.trace_summary.get('event_count', 0)}",
-            f"- 异常或阻断事件数：{report.trace_summary.get('failed_or_blocked_count', 0)}",
-            "",
-            "## 附录 D. 风险、审批与变更",
-            "### 风险与审批",
-            f"- 风险等级：{risk_level}",
-            f"- 策略：{risk_policy}",
-            f"- {approval_line}",
-            _render_approval_decision(report),
-            f"- 是否需要人工动作：{'是' if report.manual_action_required else '否'}",
-            "",
-            "### 变更计划草案",
-            _render_change_plan(report),
-            "",
-            "### 安全变更执行",
-            _render_change_executions(report),
-            "",
-            "### 处理建议",
-            report.remediation_suggestion or "暂无处理建议。",
-            "",
-            "### 人工动作与回滚边界",
-            _render_manual_action_boundary(report),
-            "",
-            "### 预防建议",
-            report.prevention or "暂无预防建议。",
-        ]
+        f"# {report.title}",
+        "",
+        "## 1. 故障摘要",
+        report.summary or "暂无摘要。",
+        "",
+        "## 2. 影响范围",
+        report.impact or "暂无影响范围信息。",
+        "",
+        "## 3. 初步根因",
+        _render_root_cause_with_evidence(report),
+        "",
+        "## 4. 关键证据",
+        _render_key_evidence_for_review(report),
+        "",
+        "## 5. 排查过程",
+        _render_investigation_process(report),
+        "",
+        "## 6. 风险动作判断",
+        _render_risk_action_judgement(report),
+        "",
+        "## 7. 建议处置",
+        report.remediation_suggestion or "暂无处理建议。",
+        "",
+        "## 8. 回滚 / 观察指标",
+        _render_rollback_and_observation(report),
+        "",
+        "## 9. 未确认事项",
+        _render_unconfirmed_items(report),
+        "",
+        f"> 置信度原因：{report.confidence_reason}",
+        f"> 报告置信度：{report.confidence:.2f}",
+        "",
+        "## 附录 A. 面试速览",
+        _render_interview_snapshot(report),
+        "",
+        "## 附录 B. 证据审计",
+        "### 根因判断",
+        report.root_cause or "暂未形成明确根因。",
+        "",
+        "### 根因假设矩阵",
+        _render_hypothesis_ranking(report),
+        "",
+        "### 已确认事实",
+        _render_bullets(report.confirmed_facts),
+        "",
+        "### 推断结论",
+        _render_bullets(report.inferred_conclusions),
+        "",
+        "### 关键证据明细",
+        _render_bullets(report.key_findings),
+        "",
+        "### 证据质量",
+        _render_evidence_quality(report),
+        "",
+        "### 证据充分性",
+        _render_evidence_sufficiency(report),
+        "",
+        "### Conclusion Alignment",
+        _render_conclusion_alignment(report),
+        "",
+        "### Incident Evidence Graph",
+        _render_incident_evidence_graph(report),
+        "",
+        "### 数据源边界",
+        _render_data_source_boundaries(report),
+        "",
+        "### 诊断链路证据",
+        _render_diagnostic_chains(report),
+        "",
+        "### 证据矩阵",
+        _render_evidence_matrix(report),
+        "",
+        "### 不确定性",
+        _render_bullets(report.uncertainties) if report.uncertainties else "- 暂无",
+        "",
+        "### 运行告警",
+        _render_bullets(report.warnings) if report.warnings else "- 暂无",
+        "",
+        "### 下一步建议",
+        _render_bullets(report.next_steps),
+        "",
+        "## 附录 C. 工具、Trace 与 Runbook",
+        "### Runbook 引用",
+        _render_runbook_references(report.evidence),
+        "",
+        "### 工具调用摘要",
+        _render_tool_calls(report.tool_calls),
+        "",
+        "### Trace 摘要",
+        f"- trace_id：{report.trace_id or 'unknown'}",
+        f"- 事件数：{report.trace_summary.get('event_count', 0)}",
+        f"- 异常或阻断事件数：{report.trace_summary.get('failed_or_blocked_count', 0)}",
+        "",
+        "## 附录 D. 风险、审批与变更",
+        "### 风险与审批",
+        f"- 风险等级：{risk_level}",
+        f"- 策略：{risk_policy}",
+        f"- {approval_line}",
+        _render_approval_decision(report),
+        f"- 是否需要人工动作：{'是' if report.manual_action_required else '否'}",
+        "",
+        "### 变更计划草案",
+        _render_change_plan(report),
+        "",
+        "### 安全变更执行",
+        _render_change_executions(report),
+        "",
+        "### 处理建议",
+        report.remediation_suggestion or "暂无处理建议。",
+        "",
+        "### 人工动作与回滚边界",
+        _render_manual_action_boundary(report),
+        "",
+        "### 预防建议",
+        report.prevention or "暂无预防建议。",
+    ]
     if report.dependency_signals:
         trace_summary_index = sections.index("### Trace 摘要")
         sections[trace_summary_index:trace_summary_index] = [
@@ -1016,22 +1016,42 @@ def _root_cause_minimum_evidence_links(
 
 def _render_evidence_matrix(report: DiagnosisReport) -> str:
     groups = [
-        ("Live Evidence", _evidence_by_interview_layer(report.evidence, "live")),
-        ("Knowledge Basis", _evidence_by_interview_layer(report.evidence, "knowledge")),
-        ("Historical Experience", _evidence_by_interview_layer(report.evidence, "history")),
-        ("Other / Uncertain Evidence", _uncategorized_evidence(report.evidence)),
+        (
+            "Live Evidence",
+            "current adapter or incident-window facts used to prove symptoms and runtime state",
+            _evidence_by_interview_layer(report.evidence, "live"),
+        ),
+        (
+            "Knowledge Basis",
+            "Runbook, postmortem, or wiki material used to explain why the symptom implies this RCA",
+            _evidence_by_interview_layer(report.evidence, "knowledge"),
+        ),
+        (
+            "Historical Experience",
+            "tickets, deploy history, or tables used to compare similar incidents and changes",
+            _evidence_by_interview_layer(report.evidence, "history"),
+        ),
+        (
+            "Other / Uncertain Evidence",
+            "neutral, failed, or incomplete evidence that should not be overstated",
+            _uncategorized_evidence(report.evidence),
+        ),
     ]
+    closure = _as_dict(_as_dict(report.evidence_graph).get("root_cause_closure"))
+    root_support_ids = set(str(item) for item in closure.get("supporting_evidence_ids") or [])
     lines = [
         "- Matrix rule: every root-cause conclusion should link to at least "
         "one live evidence item plus one knowledge or historical basis.",
+        f"- Root-cause closure status: {closure.get('status', 'unknown')}",
     ]
-    for title, items in groups:
+    for title, purpose, items in groups:
         lines.append(f"### {title}")
+        lines.append(f"- Layer role: {purpose}.")
         if not items:
             lines.append("- none")
             continue
         for item in items[:8]:
-            lines.append(_render_evidence_matrix_item(item))
+            lines.append(_render_evidence_matrix_item(item, root_support_ids=root_support_ids))
     return "\n".join(lines)
 
 
@@ -1147,7 +1167,11 @@ def _has_suffix(value: str, suffixes: tuple[str, ...]) -> bool:
     return value.lower().strip().endswith(suffixes)
 
 
-def _render_evidence_matrix_item(item: dict[str, Any]) -> str:
+def _render_evidence_matrix_item(
+    item: dict[str, Any],
+    *,
+    root_support_ids: set[str] | None = None,
+) -> str:
     raw_data = _as_dict(item.get("raw_data"))
     status = raw_data.get("status") or "unknown"
     summary = (
@@ -1156,16 +1180,21 @@ def _render_evidence_matrix_item(item: dict[str, Any]) -> str:
         or str(item.get("uncertainty") or "").strip()
         or "no summary"
     )
+    evidence_id = str(item.get("evidence_id") or "unknown")
+    citations = _evidence_citation_refs(item)
+    rca_role = "root-cause-support" if evidence_id in (root_support_ids or set()) else "context"
     return (
         "- "
-        f"id={item.get('evidence_id', 'unknown')} "
+        f"id={evidence_id} "
         f"layer={_evidence_layer(item)} "
+        f"rca_role={rca_role} "
         f"tool={item.get('source_tool', 'unknown')} "
         f"source={item.get('data_source', 'unknown')} "
         f"type={item.get('evidence_type', 'unknown')} "
         f"stance={item.get('stance', 'neutral')} "
         f"status={status} "
         f"confidence={float(item.get('confidence') or 0.0):.2f} "
+        f"citations={_render_inline_list(citations)} "
         f"summary={summary}"
     )
 
@@ -1180,3 +1209,18 @@ def _evidence_short_ref(item: dict[str, Any]) -> str:
         or str(item.get("inference") or "").strip()
     )
     return f"{evidence_id} ({tool}/{source}) {fact}".strip()
+
+
+def _evidence_citation_refs(item: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for payload in _candidate_retrieval_payloads(item):
+        for result in payload.get("retrieval_results", []) or []:
+            if not isinstance(result, dict):
+                continue
+            source_file = str(result.get("source_file") or "").strip()
+            chunk_id = str(result.get("chunk_id") or "").strip()
+            if source_file and chunk_id:
+                refs.append(f"{source_file}#{chunk_id}")
+            elif source_file:
+                refs.append(source_file)
+    return _dedupe_inline(refs)[:5]

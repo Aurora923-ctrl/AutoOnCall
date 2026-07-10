@@ -26,7 +26,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo demo-reports interview-demo interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
+        install install-dev dev run seed-demo demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         api-contract-verify security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -45,6 +45,7 @@ help:
 	@echo "  $(YELLOW)make bootstrap$(NC)    - 📦 安装项目和开发工具"
 	@echo "  $(YELLOW)make seed-demo$(NC)    - 🎬 生成诊断回放工作台样例数据"
 	@echo "  $(YELLOW)make demo$(NC)         - 🎬 生成样例数据并启动本地演示服务"
+	@echo "  $(YELLOW)make interview-demo-all$(NC) - 生成面试演示包和统一 eval 摘要"
 	@echo "  $(YELLOW)make verify-local$(NC) - ✅ 快速测试 + AIOps/RAG/安全变更评测"
 	@echo "  $(YELLOW)make hygiene-check$(NC) - 🧼 检查本地生成产物"
 	@echo ""
@@ -241,6 +242,12 @@ demo-reports:  ## Generate deterministic Redis/MySQL/K8s interview demo reports
 interview-demo:  ## Build fixed interview demo reports and eval summary package
 	@echo "$(YELLOW)📝 生成 AutoOnCall 面试演示包...$(NC)"
 	$(PYTHON) scripts/demo/run_interview_demo.py
+
+interview-demo-all:  ## Build the complete interview demo package and rollup summary
+	@echo "$(YELLOW)Building complete AutoOnCall interview demo package...$(NC)"
+	$(PYTHON) scripts/demo/run_interview_demo.py
+	$(PYTHON) scripts/eval/build_interview_summary.py
+	@echo "$(GREEN)Interview artifacts ready: logs/interview_demo/README.md and logs/interview_eval_summary.md$(NC)"
 
 interview-summary:  ## Build one interview-facing eval summary from current artifacts
 	$(PYTHON) scripts/eval/build_interview_summary.py

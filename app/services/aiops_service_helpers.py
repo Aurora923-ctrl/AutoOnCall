@@ -26,6 +26,7 @@ ADDITIVE_STATE_FIELDS = {
     "warnings",
 }
 
+
 def _attach_trace_event(event_payload: dict[str, Any], trace_event: TraceEvent) -> dict[str, Any]:
     """Add trace metadata to an SSE event without changing its original shape."""
     event_payload["trace_id"] = trace_event.trace_id

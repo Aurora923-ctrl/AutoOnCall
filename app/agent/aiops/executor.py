@@ -97,7 +97,9 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         all_tools = local_tools + mcp_tools
 
-        registry = create_default_tool_registry(all_tools).with_incident_context(state.get("incident"))
+        registry = create_default_tool_registry(all_tools).with_incident_context(
+            state.get("incident")
+        )
         logger.info(f"Tool Registry 已加载 {len(registry.list_tools())} 个标准工具")
 
         risk_block_update = _risk_gate_state_update(

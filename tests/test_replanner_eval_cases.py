@@ -14,11 +14,12 @@ def test_replanner_eval_cases_cover_llm_guardrails() -> None:
     cases = load_cases("eval/replanner_cases.yaml")
     case_ids = {case["id"] for case in cases}
 
+    assert "llm_adds_registered_read_only_steps" in case_ids
     assert "llm_adds_read_only_trace_step" in case_ids
     assert "llm_generate_report_blocked_when_evidence_insufficient" in case_ids
     assert "llm_unsafe_tool_falls_back_to_evidence_analyzer" in case_ids
     assert "failed_tool_retry_skips_llm_decision" in case_ids
-    assert len(cases) == 4
+    assert len(cases) == 5
 
     for case in cases:
         assert case.get("llm_decision")
@@ -30,8 +31,8 @@ def test_replanner_eval_cases_cover_llm_guardrails() -> None:
 async def test_replanner_eval_cases_all_pass_offline() -> None:
     payload = await evaluate_cases("eval/replanner_cases.yaml")
 
-    assert payload["summary"]["case_count"] == 4
-    assert payload["summary"]["passed_count"] == 4
+    assert payload["summary"]["case_count"] == 5
+    assert payload["summary"]["passed_count"] == 5
     assert payload["summary"]["pass_rate"] == 1.0
     assert payload["summary"]["all_passed"] is True
     assert payload["summary"]["failed_cases"] == []
@@ -44,6 +45,13 @@ async def test_replanner_eval_cases_all_pass_offline() -> None:
     assert resume_metrics["trace_decision_recorded_rate"] == 1.0
 
     result_by_id = {result["id"]: result for result in payload["cases"]}
+    assert result_by_id["llm_adds_registered_read_only_steps"]["actual_decision_source"] == (
+        "llm_structured"
+    )
+    assert result_by_id["llm_adds_registered_read_only_steps"]["actual_plan_tools"] == [
+        "query_metrics",
+        "query_redis_status",
+    ]
     assert result_by_id["llm_adds_read_only_trace_step"]["actual_plan_tools"] == [
         "query_metrics",
         "query_redis_status"
@@ -61,9 +69,11 @@ async def test_replanner_eval_cases_all_pass_offline() -> None:
     assert result_by_id["failed_tool_retry_skips_llm_decision"]["first_step_id"] == "s3-retry"
 
     summary_text = render_summary(payload)
-    assert "Replanner eval: 4/4 cases passed" in summary_text
+    assert "Replanner eval: 5/5 cases passed" in summary_text
     assert "guardrail=100%" in summary_text
+    assert "llm_structured=100%" in summary_text
 
     markdown = render_markdown_summary(payload)
-    assert "Replanner 评测通过率：4/4 (100%)" in markdown
+    assert "Replanner 评测通过率：5/5 (100%)" in markdown
+    assert "LLM structured 正向路径命中率：100%" in markdown
     assert "`llm_adds_read_only_trace_step`" in markdown

@@ -91,6 +91,7 @@ def test_required_live_sources_hit_rejects_fixture_sources() -> None:
 
     assert required_live_sources_hit([good], golden) is True
     assert required_live_sources_hit([bad], golden) is False
+    assert required_live_sources_hit([bad], golden, enforce=False) is True
 
 
 def test_golden_boundary_metrics_require_runtime_and_approval_explanations() -> None:
@@ -205,6 +206,10 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert payload["summary"]["rag_passed_count"] == 30
     assert payload["summary"]["p95_latency_ms"] >= 0.0
     assert payload["summary"]["failed_cases"] == []
+    assert payload["summary"]["fixed_demo_chains"]["all_passed"] is True
+    assert payload["summary"]["fixed_demo_chains"]["case_count"] == 3
+    assert payload["summary"]["negative_boundaries"]["all_passed"] is True
+    assert payload["summary"]["negative_boundaries"]["case_count"] == 4
     assert payload["run"]["started_at"]
     assert payload["run"]["ended_at"]
     assert payload["rag"]["summary"]["case_count"] == 30
@@ -280,6 +285,12 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert "RAG case：30 个" in markdown
     assert "引用覆盖率 100%" in markdown
     assert "混淆 case 通过率 100%" in markdown
+    assert "## 固定演示链路" in markdown
+    assert "redis_maxclients_timeout | PASS" in markdown
+    assert "mysql_slow_query_latency | PASS" in markdown
+    assert "## 负例边界" in markdown
+    assert "runbook_no_answer_rejection | PASS | needs_human" in markdown
+    assert "k8s_permission_denied_incomplete_report | PASS | degraded" in markdown
     assert "无失败 case" in markdown
 
     failed_payload = deepcopy(payload)

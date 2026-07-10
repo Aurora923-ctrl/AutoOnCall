@@ -111,9 +111,9 @@ def test_runtime_paths_are_loaded_from_central_config() -> None:
     assert "UPLOAD_DIR = Path(config.upload_dir)" in upload_api
     assert "ALLOWED_EXTENSIONS = config.upload_allowed_extension_list" in upload_api
     assert "MAX_FILE_SIZE = config.upload_max_file_size" in upload_api
-    assert "EVAL_SUMMARY_PATH = Path(config.eval_summary_path)" in evaluations_api
-    assert "EVAL_BACKLOG_PATH = Path(config.eval_backlog_path)" in evaluations_api
-    assert "ADAPTER_VERIFICATION_PATH = Path(config.adapter_verification_path)" in evaluations_api
+    assert "return EVAL_SUMMARY_PATH or Path(config.eval_summary_path)" in evaluations_api
+    assert "return EVAL_BACKLOG_PATH or Path(config.eval_backlog_path)" in evaluations_api
+    assert "return ADAPTER_VERIFICATION_PATH or Path(config.adapter_verification_path)" in evaluations_api
     assert "DEFAULT_LEXICAL_INDEX_PATH = Path(config.rag_lexical_index_path)" in lexical_index
 
 
@@ -195,6 +195,10 @@ def test_hygiene_check_detects_generated_artifacts(tmp_path) -> None:
     assert ".coverage" in issue_paths
     assert not any(issue.path.startswith(".git/") for issue in issues)
     assert hygiene_main(["--root", str(tmp_path), "--json"]) == 1
+
+
+def test_hygiene_check_respects_gitignore_for_tracked_generated_dirs() -> None:
+    assert not any(issue.path == "logs" for issue in find_hygiene_issues(ROOT))
 
 
 def test_hygiene_check_passes_clean_repository_tree(tmp_path) -> None:

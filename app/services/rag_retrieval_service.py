@@ -543,7 +543,10 @@ def _rrf_fusion_score(
     base_rank: int,
     k: int = 60,
 ) -> float:
-    ranks = [_coerce_rank(metadata.get("_vector_rank")), _coerce_rank(metadata.get("_lexical_rank"))]
+    ranks = [
+        _coerce_rank(metadata.get("_vector_rank")),
+        _coerce_rank(metadata.get("_lexical_rank")),
+    ]
     ranks.append(max(base_rank, 1))
     return sum(1 / (k + rank) for rank in ranks if rank is not None)
 
@@ -688,7 +691,11 @@ def build_retrieval_mode(
     """Return a stable retrieval-mode label for observability and eval reports."""
     strategy = normalize_fusion_strategy(fusion_strategy)
     if hybrid_search_enabled and rerank_enabled:
-        return "hybrid_vector_lexical_rrf_rerank" if strategy == "rrf" else "hybrid_vector_lexical_rerank"
+        return (
+            "hybrid_vector_lexical_rrf_rerank"
+            if strategy == "rrf"
+            else "hybrid_vector_lexical_rerank"
+        )
     if hybrid_search_enabled:
         return "hybrid_vector_lexical_rrf" if strategy == "rrf" else "hybrid_vector_lexical"
     if rerank_enabled:

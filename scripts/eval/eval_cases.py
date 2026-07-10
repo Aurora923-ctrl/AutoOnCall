@@ -344,13 +344,21 @@ async def evaluate_cases(
     include_rag: bool = True,
     rag_cases_path: str | Path = DEFAULT_RAG_CASES_PATH,
     rag_docs_dir: str | Path = DEFAULT_RAG_DOCS_DIR,
+    use_live_golden_adapters: bool = False,
 ) -> dict[str, Any]:
     """Evaluate all cases and return aggregate metrics."""
     started_at = datetime.now(UTC)
     started_timer = time.perf_counter()
     cases = load_cases(cases_path)
     generator = ReportGenerator(report_path or DEFAULT_REPORT_PATH)
-    results = [await evaluate_case_safely(case, generator) for case in cases]
+    results = [
+        await evaluate_case_safely(
+            case,
+            generator,
+            use_live_golden_adapters=use_live_golden_adapters,
+        )
+        for case in cases
+    ]
     rag_payload = evaluate_rag_cases(rag_cases_path, docs_dir=rag_docs_dir) if include_rag else None
     ended_at = datetime.now(UTC)
     summary = build_summary(results, rag_payload=rag_payload)
@@ -360,10 +368,11 @@ async def evaluate_cases(
             "ended_at": ended_at.isoformat(),
             "duration_ms": round((time.perf_counter() - started_timer) * 1000, 2),
             "evaluation_scope": (
-                "offline deterministic regression; golden Redis/MySQL cases use live configured "
-                "Docker adapters when REDIS/MYSQL settings are present, other AIOps tools use "
-                "deterministic fixtures, and RAG uses local lexical retrieval, not live LLM"
+                "offline deterministic regression by default; pass --live-golden to require "
+                "Redis/MySQL golden cases to consume configured Docker adapters, while other "
+                "AIOps tools use deterministic fixtures and RAG uses local lexical retrieval"
             ),
+            "live_golden_adapters": use_live_golden_adapters,
             "cases_path": str(Path(cases_path)),
             "report_path": str(report_path or DEFAULT_REPORT_PATH),
             "rag_cases_path": str(Path(rag_cases_path)) if include_rag else "",
@@ -382,18 +391,29 @@ async def evaluate_cases(
 async def evaluate_case_safely(
     case: dict[str, Any],
     generator: ReportGenerator,
+    *,
+    use_live_golden_adapters: bool = False,
 ) -> dict[str, Any]:
     """Evaluate one case and convert unexpected exceptions into failed case records."""
     started = time.perf_counter()
     try:
-        result = await evaluate_case(case, generator)
+        result = await evaluate_case(
+            case,
+            generator,
+            use_live_golden_adapters=use_live_golden_adapters,
+        )
     except Exception as exc:  # pragma: no cover - defensive path for malformed eval cases
         result = build_exception_result(case, exc)
     result["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
     return result
 
 
-async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dict[str, Any]:
+async def evaluate_case(
+    case: dict[str, Any],
+    generator: ReportGenerator,
+    *,
+    use_live_golden_adapters: bool = False,
+) -> dict[str, Any]:
     """Evaluate one deterministic incident case."""
     incident = build_eval_incident(case)
     state = create_initial_aiops_state(
@@ -402,7 +422,10 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
         incident=incident,
     )
     plan_steps = build_fallback_plan(state["input"], state["incident"])
-    registry = create_eval_tool_registry(case)
+    registry = create_eval_tool_registry(
+        case,
+        use_live_golden_adapters=use_live_golden_adapters,
+    )
     risk_decisions = [
         assess_plan_step(step, tool_registry=registry, incident=state["incident"])
         for step in plan_steps
@@ -537,7 +560,12 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
         "incident_field_hit": incident_field_hit(case, state["incident"]),
         "evidence_fields_hit": evidence_fields_hit(evidence, golden),
         "golden_signal_hit": golden_signal_hit(tool_calls, golden),
-        "required_live_sources_hit": required_live_sources_hit(tool_calls, golden, case=case),
+        "required_live_sources_hit": required_live_sources_hit(
+            tool_calls,
+            golden,
+            case=case,
+            enforce=use_live_golden_adapters,
+        ),
         "report_structure_hit": report_structure_hit(report, golden),
         "evidence_sufficiency_hit": evidence_sufficiency_hit(report, golden),
         "runtime_vs_incident_boundary_hit": runtime_vs_incident_boundary_hit(
@@ -592,11 +620,17 @@ async def evaluate_case(case: dict[str, Any], generator: ReportGenerator) -> dic
             report=report,
             metrics=metrics,
             risk_policy=risk_policy,
+            use_live_golden_adapters=use_live_golden_adapters,
         ),
+        "live_golden_adapters": use_live_golden_adapters,
     }
 
 
-def create_eval_tool_registry(case: dict[str, Any] | None = None) -> ToolRegistry:
+def create_eval_tool_registry(
+    case: dict[str, Any] | None = None,
+    *,
+    use_live_golden_adapters: bool = False,
+) -> ToolRegistry:
     """Create an eval registry with live Redis/MySQL golden adapters when configured."""
     case = case or {}
     registry = ToolRegistry()
@@ -608,7 +642,7 @@ def create_eval_tool_registry(case: dict[str, Any] | None = None) -> ToolRegistr
     registry.register(EvalRunbookTool(should_reject=bool(case.get("runbook_should_reject"))))
     registry.register(SearchHistoryTicketTool())
     registry.register(SuggestRemediationTool())
-    apply_tool_fixtures(registry, case)
+    apply_tool_fixtures(registry, case, use_live_golden_adapters=use_live_golden_adapters)
     return registry
 
 
@@ -647,6 +681,7 @@ def build_golden_chain_summary(
     report: Any,
     metrics: dict[str, bool],
     risk_policy: str,
+    use_live_golden_adapters: bool,
 ) -> dict[str, Any]:
     """Return the full golden-path checklist used by reviewers and eval artifacts."""
     golden = golden_expectations(case)
@@ -712,6 +747,7 @@ def build_golden_chain_summary(
         "report_must_contain": case.get("report_must_contain", []),
         "eval_case_id": case.get("id", ""),
         "live_source_requirements": golden.get("required_live_sources", {}),
+        "live_source_enforced": use_live_golden_adapters,
         "evidence_mode": golden_evidence_mode(golden),
         "source_boundary": golden.get("source_boundary", ""),
         "acceptance_metrics": {
@@ -821,12 +857,15 @@ def required_live_sources_hit(
     golden: dict[str, Any],
     *,
     case: dict[str, Any] | None = None,
+    enforce: bool = True,
 ) -> bool:
     """Verify golden Redis/MySQL adapter calls came from configured live data sources."""
     if not golden:
         return True
     requirements = dict(golden.get("required_live_sources") or {})
     if not requirements:
+        return True
+    if not enforce:
         return True
     by_tool = {
         record.tool_name: record.output for record in tool_calls if record.status == "success"
@@ -975,9 +1014,17 @@ def approval_boundary_hit(report: Any, golden: dict[str, Any], risk_policy: str)
     return diagnosis_boundary_ok and remediation_boundary_ok
 
 
-def apply_tool_fixtures(registry: ToolRegistry, case: dict[str, Any]) -> None:
+def apply_tool_fixtures(
+    registry: ToolRegistry,
+    case: dict[str, Any],
+    *,
+    use_live_golden_adapters: bool = False,
+) -> None:
     """Apply per-case output overrides and failure injections."""
-    outputs = default_tool_output_specs(case)
+    outputs = default_tool_output_specs(
+        case,
+        use_live_golden_adapters=use_live_golden_adapters,
+    )
     outputs.update(tool_output_specs(case))
     for tool_name, output in outputs.items():
         tool = registry.get(tool_name)
@@ -996,7 +1043,11 @@ def tool_output_specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(name): dict(value) for name, value in raw.items()} if isinstance(raw, dict) else {}
 
 
-def default_tool_output_specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def default_tool_output_specs(
+    case: dict[str, Any],
+    *,
+    use_live_golden_adapters: bool = False,
+) -> dict[str, dict[str, Any]]:
     """Return deterministic outputs, excluding live Redis/MySQL golden adapters when configured."""
     incident = dict(case.get("incident") or {})
     service_name = str(incident.get("service_name") or "unknown-service")
@@ -1016,7 +1067,8 @@ def default_tool_output_specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]
         "query_mysql_status": _eval_mysql_output(service_name, text),
         "search_history_ticket": _eval_ticket_output(service_name, text),
     }
-    for tool_name in live_golden_tools(case):
+    live_tools = live_golden_tools(case) if use_live_golden_adapters else set()
+    for tool_name in live_tools:
         outputs.pop(tool_name, None)
     return outputs
 
@@ -1379,6 +1431,8 @@ def build_summary(
     summary["pass_rate"] = ratio(summary["passed_count"], summary["case_count"])
     summary["categories"] = build_category_metrics(results, metric_summary, rag_payload=rag_payload)
     summary["resume_metrics"] = build_resume_metrics(summary, rag_payload=rag_payload)
+    summary["fixed_demo_chains"] = build_fixed_demo_chain_summary(results)
+    summary["negative_boundaries"] = build_negative_boundary_summary(results)
     return summary
 
 
@@ -1412,6 +1466,72 @@ def build_rag_failed_cases(rag_payload: dict[str, Any] | None) -> list[dict[str,
         }
         for item in failed_cases
     ]
+
+
+def build_fixed_demo_chain_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the fixed Redis/MySQL/K8s demo cases without adding new scenarios."""
+    fixed_ids = ["redis_maxclients_timeout", "mysql_slow_query_latency", "pod_crashloop"]
+    by_id = {str(result.get("id")): result for result in results}
+    rows: list[dict[str, Any]] = []
+    for case_id in fixed_ids:
+        result = by_id.get(case_id, {})
+        metrics = result.get("metrics", {}) if isinstance(result.get("metrics"), dict) else {}
+        rows.append(
+            {
+                "id": case_id,
+                "present": bool(result),
+                "passed": bool(result.get("passed")),
+                "report_status": str(result.get("report_status") or "missing"),
+                "evidence_mode": str(result.get("evidence_mode") or "offline_fixture"),
+                "required_live_sources_hit": bool(metrics.get("required_live_sources_hit")),
+                "evidence_sufficiency_hit": bool(metrics.get("evidence_sufficiency_hit")),
+                "runtime_vs_incident_boundary_hit": bool(
+                    metrics.get("runtime_vs_incident_boundary_hit")
+                ),
+                "approval_boundary_hit": bool(metrics.get("approval_boundary_hit")),
+            }
+        )
+    passed_count = sum(1 for row in rows if row["present"] and row["passed"])
+    return {
+        "case_count": len(rows),
+        "passed_count": passed_count,
+        "all_passed": passed_count == len(rows),
+        "cases": rows,
+    }
+
+
+def build_negative_boundary_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize existing under-evidenced and failed-tool boundary cases."""
+    boundary_ids = [
+        "logs_timeout_graceful_degradation",
+        "metrics_timeout_redis_degradation",
+        "k8s_permission_denied_incomplete_report",
+        "runbook_no_answer_rejection",
+    ]
+    by_id = {str(result.get("id")): result for result in results}
+    rows: list[dict[str, Any]] = []
+    for case_id in boundary_ids:
+        result = by_id.get(case_id, {})
+        rows.append(
+            {
+                "id": case_id,
+                "present": bool(result),
+                "passed": bool(result.get("passed")),
+                "report_status": str(result.get("report_status") or "missing"),
+                "failed_tools": [str(item) for item in result.get("failed_tools") or []],
+                "runbook_rejected": bool(result.get("runbook_rejected")),
+                "expected_failed_tools": [
+                    str(item) for item in result.get("expected_failed_tools") or []
+                ],
+            }
+        )
+    passed_count = sum(1 for row in rows if row["present"] and row["passed"])
+    return {
+        "case_count": len(rows),
+        "passed_count": passed_count,
+        "all_passed": passed_count == len(rows),
+        "cases": rows,
+    }
 
 
 def build_category_metrics(
@@ -1749,6 +1869,8 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     resume = summary["resume_metrics"]
     rag = payload.get("rag", {}).get("summary", {})
     failed_cases = summary["failed_cases"]
+    fixed_demo = summary.get("fixed_demo_chains", {})
+    negative_boundaries = summary.get("negative_boundaries", {})
 
     lines = [
         "# AutoOnCall 离线评测摘要",
@@ -1773,6 +1895,18 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- RAG case：{resume['rag_case_count']} 个，recall@{categories['rag']['top_k']} {resume['rag_recall_at_k']:.0%}，MRR {resume['rag_mrr']:.2f}，引用覆盖率 {resume['rag_citation_coverage_rate']:.0%}，混淆 case 通过率 {resume['rag_confusion_case_pass_rate']:.0%}，无答案拒答率 {resume['rag_no_answer_rejection_rate']:.0%}",
         "",
         "> 诊断链路指标用于验证离线 case 中的工具选择、证据、假设排序、风控、报告和 Trace 闭环，不代表线上根因准确率。",
+        "",
+        "## 固定演示链路",
+        f"- 固定 case：{fixed_demo.get('passed_count', 0)}/{fixed_demo.get('case_count', 0)}",
+        "| Case | 结果 | 报告状态 | 证据模式 | live source | 证据充分性 | runtime 边界 | 审批边界 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        *_fixed_demo_rows(fixed_demo.get("cases", [])),
+        "",
+        "## 负例边界",
+        f"- 边界 case：{negative_boundaries.get('passed_count', 0)}/{negative_boundaries.get('case_count', 0)}",
+        "| Case | 结果 | 报告状态 | 失败工具 | Runbook 拒答 |",
+        "| --- | --- | --- | --- | --- |",
+        *_negative_boundary_rows(negative_boundaries.get("cases", [])),
         "",
         "## 分类指标",
         "| 分类 | 指标 | 数值 |",
@@ -1866,6 +2000,50 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _fixed_demo_rows(rows: Any) -> list[str]:
+    if not isinstance(rows, list) or not rows:
+        return ["| missing | CHECK | missing | - | - | - | - | - |"]
+    rendered: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rendered.append(
+            "| "
+            f"{row.get('id', 'unknown')} | "
+            f"{'PASS' if row.get('passed') else 'CHECK'} | "
+            f"{row.get('report_status', 'missing')} | "
+            f"{row.get('evidence_mode', '-')} | "
+            f"{_bool_text(row.get('required_live_sources_hit'))} | "
+            f"{_bool_text(row.get('evidence_sufficiency_hit'))} | "
+            f"{_bool_text(row.get('runtime_vs_incident_boundary_hit'))} | "
+            f"{_bool_text(row.get('approval_boundary_hit'))} |"
+        )
+    return rendered or ["| missing | CHECK | missing | - | - | - | - | - |"]
+
+
+def _negative_boundary_rows(rows: Any) -> list[str]:
+    if not isinstance(rows, list) or not rows:
+        return ["| missing | CHECK | missing | - | - |"]
+    rendered: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        failed_tools = ", ".join(str(item) for item in row.get("failed_tools") or []) or "-"
+        rendered.append(
+            "| "
+            f"{row.get('id', 'unknown')} | "
+            f"{'PASS' if row.get('passed') else 'CHECK'} | "
+            f"{row.get('report_status', 'missing')} | "
+            f"{failed_tools} | "
+            f"{_bool_text(row.get('runbook_rejected'))} |"
+        )
+    return rendered or ["| missing | CHECK | missing | - | - |"]
+
+
+def _bool_text(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
 def write_eval_artifacts(
     payload: dict[str, Any],
     *,
@@ -1907,6 +2085,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional KEY=VALUE env file loaded before creating live adapters.",
     )
     parser.add_argument("--skip-rag", action="store_true", help="Skip embedded RAG eval metrics")
+    parser.add_argument(
+        "--live-golden",
+        action="store_true",
+        help=(
+            "Require Redis/MySQL golden cases to use configured live adapters. "
+            "Without this flag the full eval remains deterministic offline."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     return parser.parse_args()
 
@@ -1922,6 +2108,7 @@ def main() -> int:
             include_rag=not args.skip_rag,
             rag_cases_path=args.rag_cases,
             rag_docs_dir=args.rag_docs_dir,
+            use_live_golden_adapters=args.live_golden,
         )
     )
     payload["run"]["command"] = " ".join(sys.argv)

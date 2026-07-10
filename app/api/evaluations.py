@@ -20,39 +20,57 @@ from app.services.evaluation_read_models import (
 
 router = APIRouter()
 
-EVAL_SUMMARY_PATH = Path(config.eval_summary_path)
-EVAL_BACKLOG_PATH = Path(config.eval_backlog_path)
-ADAPTER_VERIFICATION_PATH = Path(config.adapter_verification_path)
-RAGAS_SUMMARY_PATH = Path(config.ragas_eval_summary_path)
+EVAL_SUMMARY_PATH: Path | None = None
+EVAL_BACKLOG_PATH: Path | None = None
+ADAPTER_VERIFICATION_PATH: Path | None = None
+RAGAS_SUMMARY_PATH: Path | None = None
+
+
+def _eval_summary_path() -> Path:
+    return EVAL_SUMMARY_PATH or Path(config.eval_summary_path)
+
+
+def _eval_backlog_path() -> Path:
+    return EVAL_BACKLOG_PATH or Path(config.eval_backlog_path)
+
+
+def _adapter_verification_path() -> Path:
+    return ADAPTER_VERIFICATION_PATH or Path(config.adapter_verification_path)
+
+
+def _ragas_summary_path() -> Path:
+    return RAGAS_SUMMARY_PATH or Path(config.ragas_eval_summary_path)
 
 
 @router.get("/eval/summary", dependencies=[Depends(require_scope(EVAL_SCOPE))])
 async def get_eval_summary() -> dict[str, Any]:
     """Return the latest offline evaluation summary for the frontend dashboard."""
-    if not EVAL_SUMMARY_PATH.exists():
+    summary_path = _eval_summary_path()
+    backlog_path = _eval_backlog_path()
+    if not summary_path.exists():
         return build_eval_unavailable_payload(
             "evaluation summary has not been generated",
-            summary_path=EVAL_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
     try:
-        raw_payload = json.loads(EVAL_SUMMARY_PATH.read_text(encoding="utf-8"))
+        raw_payload = json.loads(summary_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return build_eval_unavailable_payload(
             "evaluation summary is unreadable",
-            summary_path=EVAL_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
     if not isinstance(raw_payload, dict):
         return build_eval_unavailable_payload(
             "evaluation summary has an invalid format",
-            summary_path=EVAL_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
     return build_eval_summary_payload(
         raw_payload,
-        summary_path=EVAL_SUMMARY_PATH,
-        backlog_payload=load_eval_backlog_payload(EVAL_BACKLOG_PATH),
+        summary_path=summary_path,
+        backlog_payload=load_eval_backlog_payload(backlog_path),
     )
 
 
@@ -63,27 +81,28 @@ async def get_eval_summary() -> dict[str, Any]:
 )
 async def get_ragas_summary() -> dict[str, Any]:
     """Return the latest optional RAGAS quality report for RAG answers."""
-    if not RAGAS_SUMMARY_PATH.exists():
+    summary_path = _ragas_summary_path()
+    if not summary_path.exists():
         return build_ragas_unavailable_payload(
             "RAGAS quality summary has not been generated",
-            summary_path=RAGAS_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
     try:
-        raw_payload = json.loads(RAGAS_SUMMARY_PATH.read_text(encoding="utf-8"))
+        raw_payload = json.loads(summary_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return build_ragas_unavailable_payload(
             "RAGAS quality summary is unreadable",
-            summary_path=RAGAS_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
     if not isinstance(raw_payload, dict):
         return build_ragas_unavailable_payload(
             "RAGAS quality summary has an invalid format",
-            summary_path=RAGAS_SUMMARY_PATH,
+            summary_path=summary_path,
         )
 
-    return build_ragas_summary_payload(raw_payload, summary_path=RAGAS_SUMMARY_PATH)
+    return build_ragas_summary_payload(raw_payload, summary_path=summary_path)
 
 
 @router.get(
@@ -99,24 +118,25 @@ async def get_ragas_summary_alias() -> dict[str, Any]:
 @router.get("/eval/adapter-verification", dependencies=[Depends(require_scope(EVAL_SCOPE))])
 async def get_adapter_verification() -> dict[str, Any]:
     """Return the latest full-stack adapter verification payload for the frontend."""
-    if not ADAPTER_VERIFICATION_PATH.exists():
+    adapter_path = _adapter_verification_path()
+    if not adapter_path.exists():
         return build_adapter_unavailable_payload(
             "adapter verification has not been generated",
-            adapter_path=ADAPTER_VERIFICATION_PATH,
+            adapter_path=adapter_path,
         )
 
     try:
-        raw_payload = json.loads(ADAPTER_VERIFICATION_PATH.read_text(encoding="utf-8"))
+        raw_payload = json.loads(adapter_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return build_adapter_unavailable_payload(
             "adapter verification is unreadable",
-            adapter_path=ADAPTER_VERIFICATION_PATH,
+            adapter_path=adapter_path,
         )
 
     if not isinstance(raw_payload, dict):
         return build_adapter_unavailable_payload(
             "adapter verification has an invalid format",
-            adapter_path=ADAPTER_VERIFICATION_PATH,
+            adapter_path=adapter_path,
         )
 
     return {
@@ -133,7 +153,7 @@ async def get_adapter_verification() -> dict[str, Any]:
 )
 async def get_eval_backlog() -> dict[str, Any]:
     """Return reviewable eval-backlog drafts generated from feedback and failed evals."""
-    payload = load_eval_backlog_payload(EVAL_BACKLOG_PATH)
+    payload = load_eval_backlog_payload(_eval_backlog_path())
     if payload is None:
         return {
             "available": False,

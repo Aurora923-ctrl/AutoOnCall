@@ -333,21 +333,23 @@ class AIOpsService:
                 status=terminal_status,
                 metadata={"session_id": session_id},
             )
-            yield _attach_trace_event(progress_event_payload(complete_progress), complete_trace_event)
+            yield _attach_trace_event(
+                progress_event_payload(complete_progress), complete_trace_event
+            )
             yield attach_progress(
                 {
-                "type": "complete",
-                "stage": "complete",
-                "status": terminal_status,
-                "message": "任务执行完成",
-                "response": final_response,
-                "incident_id": incident_id,
-                "trace_id": trace_id,
-                "trace_event_id": complete_trace_event.event_id,
-                "trace_event": complete_trace_event.model_dump(mode="json"),
-                "pending_approval": pending_approval,
-                "risk_assessment": risk_assessment,
-                "structured_report": structured_report,
+                    "type": "complete",
+                    "stage": "complete",
+                    "status": terminal_status,
+                    "message": "任务执行完成",
+                    "response": final_response,
+                    "incident_id": incident_id,
+                    "trace_id": trace_id,
+                    "trace_event_id": complete_trace_event.event_id,
+                    "trace_event": complete_trace_event.model_dump(mode="json"),
+                    "pending_approval": pending_approval,
+                    "risk_assessment": risk_assessment,
+                    "structured_report": structured_report,
                 },
                 complete_progress,
             )
@@ -389,13 +391,13 @@ class AIOpsService:
             yield _attach_trace_event(progress_event_payload(error_progress), error_trace_event)
             yield attach_progress(
                 {
-                "type": "error",
-                "stage": "error",
-                "status": "failed",
-                "message": public_message,
-                "trace_id": error_trace_event.trace_id,
-                "trace_event_id": error_trace_event.event_id,
-                "trace_event": error_trace_event.model_dump(mode="json"),
+                    "type": "error",
+                    "stage": "error",
+                    "status": "failed",
+                    "message": public_message,
+                    "trace_id": error_trace_event.trace_id,
+                    "trace_event_id": error_trace_event.event_id,
+                    "trace_event": error_trace_event.model_dump(mode="json"),
                 },
                 error_progress,
             )
@@ -592,16 +594,16 @@ class AIOpsService:
         yield _attach_trace_event(progress_event_payload(resume_progress), resume_event)
         yield attach_progress(
             {
-            "type": "status",
-            "stage": "diagnosis_resumed",
-            "status": "running",
-            "message": "审批已通过，正在记录人工决策并更新诊断报告；Agent 不会自动执行生产变更",
-            "incident_id": incident_id,
-            "trace_id": trace_id,
-            "trace_event_id": resume_event.event_id,
-            "trace_event": resume_event.model_dump(mode="json"),
-            "resume_source": resume_source,
-            "execution_boundary": "agent_does_not_execute_production_change",
+                "type": "status",
+                "stage": "diagnosis_resumed",
+                "status": "running",
+                "message": "审批已通过，正在记录人工决策并更新诊断报告；Agent 不会自动执行生产变更",
+                "incident_id": incident_id,
+                "trace_id": trace_id,
+                "trace_event_id": resume_event.event_id,
+                "trace_event": resume_event.model_dump(mode="json"),
+                "resume_source": resume_source,
+                "execution_boundary": "agent_does_not_execute_production_change",
             },
             resume_progress,
         )
@@ -705,18 +707,18 @@ class AIOpsService:
         yield _attach_trace_event(progress_event_payload(report_progress), report_event)
         yield attach_progress(
             {
-            "type": "report",
-            "stage": "resumed_report",
-            "status": report.status,
-            "message": "审批结果已写入诊断报告，生产动作仍需通过安全变更流程处理",
-            "incident_id": incident_id,
-            "trace_id": trace_id,
-            "trace_event_id": report_event.event_id,
-            "trace_event": report_event.model_dump(mode="json"),
-            "resume_source": resume_source,
-            "execution_boundary": "agent_does_not_execute_production_change",
-            "report": report.markdown,
-            "structured_report": report.model_dump(mode="json"),
+                "type": "report",
+                "stage": "resumed_report",
+                "status": report.status,
+                "message": "审批结果已写入诊断报告，生产动作仍需通过安全变更流程处理",
+                "incident_id": incident_id,
+                "trace_id": trace_id,
+                "trace_event_id": report_event.event_id,
+                "trace_event": report_event.model_dump(mode="json"),
+                "resume_source": resume_source,
+                "execution_boundary": "agent_does_not_execute_production_change",
+                "report": report.markdown,
+                "structured_report": report.model_dump(mode="json"),
             },
             report_progress,
         )
@@ -753,24 +755,24 @@ class AIOpsService:
         yield _attach_trace_event(progress_event_payload(complete_progress), complete_event)
         yield attach_progress(
             {
-            "type": "complete",
-            "stage": "resume_complete",
-            "status": report.status,
-            "message": "审批结果记录完成，诊断闭环已更新；Agent 未执行任何生产变更",
-            "incident_id": incident_id,
-            "trace_id": trace_id,
-            "trace_event_id": complete_event.event_id,
-            "trace_event": complete_event.model_dump(mode="json"),
-            "resume_source": resume_source,
-            "execution_boundary": "agent_does_not_execute_production_change",
-            "pending_approval": None,
-            "risk_assessment": risk_summary,
-            "structured_report": report.model_dump(mode="json"),
-            "diagnosis": {
+                "type": "complete",
+                "stage": "resume_complete",
                 "status": report.status,
-                "report": report.markdown,
+                "message": "审批结果记录完成，诊断闭环已更新；Agent 未执行任何生产变更",
+                "incident_id": incident_id,
+                "trace_id": trace_id,
+                "trace_event_id": complete_event.event_id,
+                "trace_event": complete_event.model_dump(mode="json"),
+                "resume_source": resume_source,
+                "execution_boundary": "agent_does_not_execute_production_change",
+                "pending_approval": None,
+                "risk_assessment": risk_summary,
                 "structured_report": report.model_dump(mode="json"),
-            },
+                "diagnosis": {
+                    "status": report.status,
+                    "report": report.markdown,
+                    "structured_report": report.model_dump(mode="json"),
+                },
             },
             complete_progress,
         )

@@ -125,6 +125,31 @@ async def test_eval_summary_api_returns_unavailable_when_missing(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_eval_summary_api_reads_config_path_at_request_time(monkeypatch, tmp_path) -> None:
+    evaluations_api = importlib.import_module("app.api.evaluations")
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    first_path.write_text(
+        json.dumps({"summary": {"overall_case_count": 1, "overall_passed_count": 1}}),
+        encoding="utf-8",
+    )
+    second_path.write_text(
+        json.dumps({"summary": {"overall_case_count": 2, "overall_passed_count": 2}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(evaluations_api, "EVAL_SUMMARY_PATH", None)
+    monkeypatch.setattr(evaluations_api, "EVAL_BACKLOG_PATH", None)
+
+    monkeypatch.setattr(evaluations_api.config, "eval_summary_path", str(first_path))
+    first_payload = await evaluations_api.get_eval_summary()
+    monkeypatch.setattr(evaluations_api.config, "eval_summary_path", str(second_path))
+    second_payload = await evaluations_api.get_eval_summary()
+
+    assert first_payload["summary"]["overall_case_count"] == 1
+    assert second_payload["summary"]["overall_case_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_eval_summary_api_returns_unavailable_for_invalid_json(
     monkeypatch,
     tmp_path,

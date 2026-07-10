@@ -21,7 +21,18 @@ DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "interview_eval_summary.json"
 DEFAULT_OUTPUT_MD = REPO_ROOT / "logs" / "interview_eval_summary.md"
 
 CORE_CASE_IDS = ["redis_maxclients_timeout", "mysql_slow_query_latency", "pod_crashloop"]
+NEGATIVE_BOUNDARY_CASE_IDS = [
+    "runbook_no_answer_rejection",
+    "k8s_permission_denied_incomplete_report",
+]
 CORE_MODULES = ["adapter_verification", "live_aiops_eval", "rag_eval"]
+INTERVIEW_GATE_MODULES = [
+    "adapter_verification",
+    "live_aiops_eval",
+    "rag_eval",
+    "safe_change_eval",
+    "replanner_eval",
+]
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
@@ -118,6 +129,7 @@ def build_summary(
         "replanner_eval": replanner_status,
     }
     core_passed = all(modules[name]["passed"] for name in CORE_MODULES)
+    interview_gate_passed = all(modules[name]["passed"] for name in INTERVIEW_GATE_MODULES)
 
     return {
         "run": {
@@ -141,8 +153,9 @@ def build_summary(
             ),
         },
         "summary": {
-            "status": "passed" if core_passed else "failed",
+            "status": "passed" if interview_gate_passed else "failed",
             "core_modules_passed": core_passed,
+            "interview_gate_passed": interview_gate_passed,
             "modules": modules,
             "portfolio_chains": {
                 "redis_maxclients_timeout": _chain_summary(redis),
@@ -158,15 +171,32 @@ def build_summary(
                 },
             },
             "conclusion_alignment": _conclusion_alignment_summary([redis, mysql]),
+            "negative_boundaries": _negative_boundary_summary(
+                live_payload,
+                NEGATIVE_BOUNDARY_CASE_IDS,
+            ),
             "rag_metrics": _rag_metrics(rag_payload),
+            "rag_mainline_support": _rag_mainline_support_summary(rag_payload),
             "ragas_quality": _ragas_quality(ragas_payload),
             "milvus_multisource": _milvus_summary(milvus_payload),
+            "resume_metrics": _resume_metrics(
+                live_payload=live_payload,
+                rag_payload=rag_payload,
+                ragas_payload=ragas_payload,
+                change_status=change_status,
+                replanner_status=replanner_status,
+            ),
             "adapter_sources": {
                 "status": (adapter_payload or {}).get("status", "missing"),
                 "data_sources": (adapter_payload or {}).get("data_sources", []),
                 "mock_fallback_detected": (adapter_payload or {}).get("mock_fallback_detected"),
                 "missing_sources": (adapter_payload or {}).get("missing_sources", []),
                 "failed_tools": (adapter_payload or {}).get("failed_tools", []),
+                "golden_chains": (adapter_payload or {}).get("golden_chains", {}),
+                "passed_golden_chain_count": (adapter_payload or {}).get(
+                    "passed_golden_chain_count", 0
+                ),
+                "golden_chain_count": (adapter_payload or {}).get("golden_chain_count", 0),
             },
             "interview_boundaries": [
                 "Redis/MySQL are live adapter golden chains backed by the local Docker stack.",
@@ -204,6 +234,101 @@ def _rag_metrics(payload: dict[str, Any] | None) -> dict[str, Any]:
         "citation_coverage_rate": float(summary.get("citation_coverage_rate", 0.0) or 0.0),
         "no_answer_rejection_rate": float(summary.get("no_answer_rejection_rate", 0.0) or 0.0),
         "confusion_case_pass_rate": float(summary.get("confusion_case_pass_rate", 0.0) or 0.0),
+    }
+
+
+def _negative_boundary_summary(
+    payload: dict[str, Any] | None,
+    case_ids: list[str],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for case_id in case_ids:
+        case = _case_by_id(payload, case_id)
+        expected_status = _expected_negative_status(case_id)
+        rows.append(
+            {
+                "id": case_id,
+                "passed": bool(case.get("passed")),
+                "report_status": str(case.get("report_status") or "missing"),
+                "expected_status": expected_status,
+                "status_hit": str(case.get("report_status") or "") == expected_status,
+                "runbook_rejected": bool(case.get("runbook_rejected")),
+                "failed_tools": [str(item) for item in case.get("failed_tools") or []],
+                "boundary": _negative_boundary_text(case_id),
+            }
+        )
+    passed_count = sum(1 for row in rows if row["passed"] and row["status_hit"])
+    return {
+        "case_count": len(rows),
+        "passed_count": passed_count,
+        "all_passed": passed_count == len(rows) if rows else False,
+        "cases": rows,
+    }
+
+
+def _expected_negative_status(case_id: str) -> str:
+    if case_id == "runbook_no_answer_rejection":
+        return "needs_human"
+    if case_id == "k8s_permission_denied_incomplete_report":
+        return "degraded"
+    return "incomplete"
+
+
+def _negative_boundary_text(case_id: str) -> str:
+    if case_id == "runbook_no_answer_rejection":
+        return "No trusted Runbook/history reference means remediation is under-grounded."
+    if case_id == "k8s_permission_denied_incomplete_report":
+        return "K8s RBAC denial prevents pod/event evidence, so metrics cannot prove K8s RCA."
+    return "Under-evidenced RCA must not be reported as completed."
+
+
+def _rag_mainline_support_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    expected = {
+        "redis": {
+            "cases": ["pdf_postmortem_loader_metadata", "redis_ticket_retry_loop_history"],
+            "sources": ["redis_postmortem.pdf", "tickets.csv"],
+            "role": "Redis RCA uses PDF postmortem plus ticket table history as knowledge/history backing.",
+        },
+        "mysql": {
+            "cases": [
+                "html_wiki_loader_heading",
+                "xlsx_deploy_history_row_citation",
+                "mysql_xlsx_rc4_remediation_history",
+            ],
+            "sources": ["payment_wiki.html", "tickets.xlsx"],
+            "role": "MySQL RCA uses HTML wiki plus XLSX deploy/ticket rows as knowledge/history backing.",
+        },
+    }
+    rows: list[dict[str, Any]] = []
+    for chain, spec in expected.items():
+        cases = [_case_by_id(payload, case_id) for case_id in spec["cases"]]
+        present_cases = [case for case in cases if case]
+        retrieved_sources = sorted(
+            {
+                str(source)
+                for case in present_cases
+                for source in case.get("retrieved_sources", [])
+            }
+        )
+        expected_sources = [str(source) for source in spec["sources"]]
+        source_hit = all(source in retrieved_sources for source in expected_sources)
+        passed = bool(present_cases) and all(bool(case.get("passed")) for case in present_cases)
+        rows.append(
+            {
+                "chain": chain,
+                "passed": passed and source_hit,
+                "case_ids": [str(case.get("id")) for case in present_cases],
+                "expected_sources": expected_sources,
+                "retrieved_sources": retrieved_sources,
+                "role": spec["role"],
+            }
+        )
+    passed_count = sum(1 for row in rows if row["passed"])
+    return {
+        "chain_count": len(rows),
+        "passed_count": passed_count,
+        "all_passed": passed_count == len(rows) if rows else False,
+        "chains": rows,
     }
 
 
@@ -319,14 +444,66 @@ def _milvus_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _resume_metrics(
+    *,
+    live_payload: dict[str, Any] | None,
+    rag_payload: dict[str, Any] | None,
+    ragas_payload: dict[str, Any] | None,
+    change_status: dict[str, Any],
+    replanner_status: dict[str, Any],
+) -> dict[str, Any]:
+    live_summary = (live_payload or {}).get("summary", {})
+    live_resume = live_summary.get("resume_metrics", {})
+    if not isinstance(live_resume, dict):
+        live_resume = {}
+    rag = _rag_metrics(rag_payload)
+    ragas = _ragas_quality(ragas_payload)
+    return {
+        "scope": (
+            "resume-facing snapshot derived from current eval artifacts; use as regression "
+            "evidence, not production accuracy"
+        ),
+        "aiops_case_count": int(live_resume.get("aiops_case_count") or 0),
+        "aiops_pass_rate": float(live_resume.get("aiops_pass_rate") or 0.0),
+        "p95_latency_ms": float(live_resume.get("p95_latency_ms") or 0.0),
+        "root_cause_hit_rate": float(live_resume.get("root_cause_hit_rate") or 0.0),
+        "tool_hit_rate": float(live_resume.get("tool_hit_rate") or 0.0),
+        "report_generation_rate": float(live_resume.get("report_generation_rate") or 0.0),
+        "approval_recall": float(live_resume.get("approval_recall") or 0.0),
+        "forbidden_action_block_rate": float(
+            live_resume.get("forbidden_action_block_rate") or 0.0
+        ),
+        "evidence_sufficiency_rate": float(
+            live_resume.get("diagnostic_evidence_sufficiency") or 0.0
+        ),
+        "runtime_boundary_rate": float(
+            live_resume.get("diagnostic_runtime_vs_incident_boundary") or 0.0
+        ),
+        "rag_case_count": rag["case_count"],
+        "rag_recall_at_k": rag["recall_at_k"],
+        "rag_citation_coverage_rate": rag["citation_coverage_rate"],
+        "rag_no_answer_rejection_rate": rag["no_answer_rejection_rate"],
+        "ragas_available": bool(ragas["available"]),
+        "ragas_profile": ragas["profile"],
+        "ragas_pass_rate": ragas["pass_rate"],
+        "ragas_oncall_actionability": ragas["oncall_actionability_avg"],
+        "ragas_refusal_boundary_rate": ragas["refusal_boundary_rate"],
+        "safe_change_pass_rate": float(change_status.get("pass_rate") or 0.0),
+        "replanner_pass_rate": float(replanner_status.get("pass_rate") or 0.0),
+    }
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     modules = summary["modules"]
     chains = summary["portfolio_chains"]
     rag = summary["rag_metrics"]
+    rag_support = summary["rag_mainline_support"]
     ragas = summary["ragas_quality"]
     alignment = summary["conclusion_alignment"]
+    negative = summary["negative_boundaries"]
     milvus = summary["milvus_multisource"]
+    resume = summary["resume_metrics"]
     adapter = summary["adapter_sources"]
 
     lines = [
@@ -383,6 +560,15 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- no-answer rejection: `{_ratio_percent(rag['no_answer_rejection_rate'])}`",
             f"- confusion case pass: `{_ratio_percent(rag['confusion_case_pass_rate'])}`",
             "",
+            "## RAG Mainline Support",
+            "",
+            f"- Mainline support: `{rag_support['passed_count']}/{rag_support['chain_count']} chains`",
+            "- Purpose: prove multi-source RAG supports Redis/MySQL RCA, not just standalone QA.",
+            "",
+            "| Chain | Status | Expected sources | Retrieved sources | RCA role |",
+            "| --- | --- | --- | --- | --- |",
+            *_rag_support_rows(rag_support["chains"]),
+            "",
             "## RAGAS Quality Snapshot",
             "",
             f"- RAGAS quality: `{ragas['passed_count']}/{ragas['case_count']} passed`",
@@ -412,12 +598,59 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "| --- | --- | --- | --- | ---: |",
             *_alignment_markdown_rows(alignment["fields"]),
             "",
+            "## Negative Boundaries",
+            "",
+            f"- Boundary cases: `{negative['passed_count']}/{negative['case_count']} passed`",
+            "- Purpose: prove the system downgrades under-evidenced RCA instead of forcing a completed report.",
+            "",
+            "| Case | Status | Expected | Signals | Boundary |",
+            "| --- | --- | --- | --- | --- |",
+            *_negative_boundary_rows(negative["cases"]),
+            "",
             "## Milvus Multi-Source Snapshot",
             "",
             f"- Status: `{milvus['status']}`",
             f"- Inserted chunks: `{milvus['inserted_chunks']}`",
             f"- Probe pass rate: `{milvus['passed_probe_count']}/{milvus['probe_count']}`",
             f"- Source files: `{', '.join(milvus['source_counts'].keys()) or 'missing'}`",
+            "",
+            "## Resume Metrics Snapshot",
+            "",
+            f"- Scope: {resume['scope']}",
+            (
+                f"- AIOps eval: `{resume['aiops_case_count']} cases`, "
+                f"pass rate `{_ratio_percent(resume['aiops_pass_rate'])}`, "
+                f"p95 latency `{resume['p95_latency_ms']:.2f} ms`"
+            ),
+            (
+                f"- Diagnosis: root cause `{_ratio_percent(resume['root_cause_hit_rate'])}`, "
+                f"tool hit `{_ratio_percent(resume['tool_hit_rate'])}`, "
+                f"report generation `{_ratio_percent(resume['report_generation_rate'])}`"
+            ),
+            (
+                f"- Safety and evidence: approval recall "
+                f"`{_ratio_percent(resume['approval_recall'])}`, forbidden block "
+                f"`{_ratio_percent(resume['forbidden_action_block_rate'])}`, "
+                f"evidence sufficiency `{_ratio_percent(resume['evidence_sufficiency_rate'])}`, "
+                f"runtime boundary `{_ratio_percent(resume['runtime_boundary_rate'])}`"
+            ),
+            (
+                f"- RAG eval: `{resume['rag_case_count']} cases`, recall "
+                f"`{_ratio_percent(resume['rag_recall_at_k'])}`, citation "
+                f"`{_ratio_percent(resume['rag_citation_coverage_rate'])}`, no-answer "
+                f"`{_ratio_percent(resume['rag_no_answer_rejection_rate'])}`"
+            ),
+            (
+                f"- RAGAS quality: profile `{resume['ragas_profile'] or 'missing'}`, "
+                f"pass rate `{_ratio_percent(resume['ragas_pass_rate'])}`, OnCall "
+                f"actionability `{_ratio_percent(resume['ragas_oncall_actionability'])}`, "
+                f"refusal boundary `{_ratio_percent(resume['ragas_refusal_boundary_rate'])}`"
+            ),
+            (
+                f"- Change/Replanner gates: safe change "
+                f"`{_ratio_percent(resume['safe_change_pass_rate'])}`, replanner "
+                f"`{_ratio_percent(resume['replanner_pass_rate'])}`"
+            ),
             "",
             "## Adapter Snapshot",
             "",
@@ -426,6 +659,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- mock_fallback_detected: `{adapter['mock_fallback_detected']}`",
             f"- missing_sources: `{adapter['missing_sources']}`",
             f"- failed_tools: `{adapter['failed_tools']}`",
+            f"- Redis/MySQL golden chains: "
+            f"`{adapter.get('passed_golden_chain_count', 0)}/{adapter.get('golden_chain_count', 0)}`",
+            "",
+            "| Chain | Status | Observed sources | Missing sources | Failed tools |",
+            "| --- | --- | --- | --- | --- |",
+            *_adapter_golden_chain_rows(adapter.get("golden_chains")),
             "",
             "## Interview Boundaries",
             "",
@@ -441,6 +680,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "- `logs/rag_eval_summary_current.md`: standalone RAG retrieval result.",
             "- `logs/ragas_eval_summary.md`: optional RAGAS answer quality result.",
             "- `logs/milvus_multisource_verification.md`: Milvus storage proof for PDF/HTML/CSV/XLSX chunks.",
+            "- `logs/change_eval_summary.md`: safe-change pre-check, dry-run, rollback, and manual-record gate.",
+            "- `logs/replanner_eval_summary.md`: replanner decision and guardrail gate.",
             "- `logs/full_stack_adapter_verification.json`: real adapter source proof.",
             "",
         ]
@@ -493,6 +734,51 @@ def _alignment_markdown_rows(rows: list[dict[str, Any]]) -> list[str]:
     return rendered or ["| `missing` | `missing` | `needs_human` | - | 0 |"]
 
 
+def _rag_support_rows(rows: list[dict[str, Any]]) -> list[str]:
+    rendered = []
+    for row in rows:
+        status = "PASS" if row["passed"] else "CHECK"
+        expected = ", ".join(row["expected_sources"]) or "-"
+        retrieved = ", ".join(row["retrieved_sources"]) or "-"
+        rendered.append(
+            f"| `{row['chain']}` | `{status}` | {expected} | {retrieved} | {row['role']} |"
+        )
+    return rendered or ["| `missing` | `CHECK` | - | - | no RAG support artifact |"]
+
+
+def _negative_boundary_rows(rows: list[dict[str, Any]]) -> list[str]:
+    rendered = []
+    for row in rows:
+        signals = []
+        if row["runbook_rejected"]:
+            signals.append("runbook_rejected=true")
+        if row["failed_tools"]:
+            signals.append("failed_tools=" + ",".join(row["failed_tools"]))
+        signal_text = "; ".join(signals) or "-"
+        rendered.append(
+            f"| `{row['id']}` | `{row['report_status']}` | "
+            f"`{row['expected_status']}` | {signal_text} | {row['boundary']} |"
+        )
+    return rendered or ["| `missing` | `missing` | `incomplete` | - | no negative boundary artifact |"]
+
+
+def _adapter_golden_chain_rows(value: Any) -> list[str]:
+    if not isinstance(value, dict) or not value:
+        return ["| `missing` | `CHECK` | - | - | - |"]
+    rows: list[str] = []
+    for chain_name, raw_chain in sorted(value.items()):
+        chain = raw_chain if isinstance(raw_chain, dict) else {}
+        rows.append(
+            "| "
+            f"`{chain_name}` | "
+            f"`{'PASS' if chain.get('passed') else 'CHECK'}` | "
+            f"{', '.join(str(item) for item in chain.get('observed_sources') or []) or '-'} | "
+            f"{', '.join(str(item) for item in chain.get('missing_sources') or []) or '-'} | "
+            f"{', '.join(str(item) for item in chain.get('failed_tools') or []) or '-'} |"
+        )
+    return rows or ["| `missing` | `CHECK` | - | - | - |"]
+
+
 def _compact_evidence_links(evidence_ids: list[str]) -> str:
     if not evidence_ids:
         return "-"
@@ -521,6 +807,14 @@ def write_outputs(payload: dict[str, Any], json_path: Path, md_path: Path) -> No
     md_path.write_text(render_markdown(payload), encoding="utf-8")
 
 
+def _artifact_path(value: str) -> str:
+    path = Path(value)
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live-summary", default=str(DEFAULT_LIVE_SUMMARY))
@@ -547,13 +841,13 @@ def main(argv: list[str] | None = None) -> int:
         change_payload=load_json(Path(args.change_summary)),
         replanner_payload=load_json(Path(args.replanner_summary)),
         source_artifacts={
-            "live_aiops": args.live_summary,
-            "rag": args.rag_summary,
-            "ragas": args.ragas_summary,
-            "adapter_verification": args.adapter_summary,
-            "milvus_multisource": args.milvus_summary,
-            "safe_change": args.change_summary,
-            "replanner": args.replanner_summary,
+            "live_aiops": _artifact_path(args.live_summary),
+            "rag": _artifact_path(args.rag_summary),
+            "ragas": _artifact_path(args.ragas_summary),
+            "adapter_verification": _artifact_path(args.adapter_summary),
+            "milvus_multisource": _artifact_path(args.milvus_summary),
+            "safe_change": _artifact_path(args.change_summary),
+            "replanner": _artifact_path(args.replanner_summary),
         },
     )
     write_outputs(payload, Path(args.summary_json), Path(args.summary_md))
@@ -565,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{payload['summary']['status']}; "
             f"md={args.summary_md}; json={args.summary_json}"
         )
-    return 0 if payload["summary"]["core_modules_passed"] else 1
+    return 0 if payload["summary"]["interview_gate_passed"] else 1
 
 
 if __name__ == "__main__":

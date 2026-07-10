@@ -1,9 +1,9 @@
-name: autooncall-full
+name: autooncall
 
 services:
   mysql:
     image: mysql:8.0
-    container_name: autooncall-full-mysql
+    container_name: autooncall-mysql
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -19,36 +19,19 @@ services:
     ports:
       - "127.0.0.1:13306:3306"
     volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/mysql8/data:/var/lib/mysql
+      - D:/AppDataStorage/DockerData/autooncall/mysql8/data:/var/lib/mysql
       - ../adapters/mysql-init:/docker-entrypoint-initdb.d:ro
     networks:
-      - autooncall-full-net
+      - autooncall-net
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p123456"]
       interval: 10s
       timeout: 5s
       retries: 30
 
-  mysql-business-seed:
-    image: mysql:8.0
-    container_name: autooncall-full-mysql-business-seed
-    command:
-      [
-        "sh",
-        "-c",
-        "mysql -hmysql -uroot -p123456 autooncall < /seed/001_init.sql",
-      ]
-    volumes:
-      - ../adapters/mysql-init:/seed:ro
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - autooncall-full-net
-
   redis:
     image: redis:7-alpine
-    container_name: autooncall-full-redis
+    container_name: autooncall-redis
     command:
       - redis-server
       - --appendonly
@@ -62,40 +45,25 @@ services:
     ports:
       - "127.0.0.1:16379:6379"
     volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/redis7/data:/data
+      - D:/AppDataStorage/DockerData/autooncall/redis7/data:/data
     networks:
-      - autooncall-full-net
+      - autooncall-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 30
 
-  redis-business-seed:
-    image: redis:7-alpine
-    container_name: autooncall-full-redis-business-seed
-    command:
-      [
-        "sh",
-        "-c",
-        "redis-cli -h redis HSET autooncall:incident:order-service:redis-maxclients service order-service severity P1 symptom 'Redis connection timeout and 5xx spike' dependency redis-cluster-prod connected_clients 9940 maxclients 10000 blocked_clients 37 slowlog_len 40 used_memory_human 12.4G maxmemory_human 16G root_cause 'Redis connected_clients reached maxclients and application connection pool timed out' approval_required true source live-redis-seed updated_at 2026-07-06T10:00:00Z && redis-cli -h redis ZADD autooncall:hotkeys:local-dev 100 order:detail:10001 80 user:session:10001",
-      ]
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - autooncall-full-net
-
   metrics-exporter:
     image: python:3.11-alpine
-    container_name: autooncall-full-metrics-exporter
+    container_name: autooncall-metrics-exporter
     command: ["python", "/app/metrics_exporter.py"]
     ports:
       - "127.0.0.1:19108:9108"
     volumes:
       - ../adapters/metrics_exporter.py:/app/metrics_exporter.py:ro
     networks:
-      - autooncall-full-net
+      - autooncall-net
     healthcheck:
       test:
         [
@@ -108,7 +76,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.54.1
-    container_name: autooncall-full-prometheus
+    container_name: autooncall-prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -119,12 +87,12 @@ services:
     volumes:
       - ${PROMETHEUS_CONFIG_FILE:-../adapters/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
       - ../adapters/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/prometheus:/prometheus
+      - D:/AppDataStorage/DockerData/autooncall/prometheus:/prometheus
     depends_on:
       metrics-exporter:
         condition: service_healthy
     networks:
-      - autooncall-full-net
+      - autooncall-net
     healthcheck:
       test:
         [
@@ -137,19 +105,19 @@ services:
 
   loki:
     image: grafana/loki:2.9.10
-    container_name: autooncall-full-loki
+    container_name: autooncall-loki
     command: ["-config.file=/etc/loki/local-config.yml"]
     ports:
       - "127.0.0.1:13100:3100"
     volumes:
       - ../adapters/loki-config.yml:/etc/loki/local-config.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/loki:/loki
+      - D:/AppDataStorage/DockerData/autooncall/loki:/loki
     networks:
-      - autooncall-full-net
+      - autooncall-net
 
   loki-log-emitter:
     image: python:3.11-alpine
-    container_name: autooncall-full-loki-log-emitter
+    container_name: autooncall-loki-log-emitter
     command: ["python", "/app/loki_log_emitter.py"]
     environment:
       LOKI_PUSH_URL: "http://loki:3100/loki/api/v1/push"
@@ -159,8 +127,8 @@ services:
     depends_on:
       - loki
     networks:
-      - autooncall-full-net
+      - autooncall-net
 
 networks:
-  autooncall-full-net:
-    name: autooncall-full-net
+  autooncall-net:
+    name: autooncall-net

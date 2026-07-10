@@ -1,4 +1,50 @@
 cases:
+  - id: llm_adds_registered_read_only_steps
+    title: LLM structured decision can add registered read-only diagnostics
+    input: order-service Redis connection timeout，需要补充指标和 Redis 状态
+    incident:
+      service_name: order-service
+      severity: P2
+      environment: prod
+      symptom: Redis connection timeout in logs
+    evidence:
+      - tool_name: query_logs
+        step_id: s1
+        output:
+          summary: Redis connection timeout in application logs
+    llm_decision:
+      decision: add_steps
+      reason: 日志提示 Redis timeout，补充指标和 Redis 只读状态
+      new_steps:
+        - step_id: llm-metrics
+          tool_name: query_metrics
+          purpose: 查询 order-service 最近 10 分钟 QPS、P95 和错误率
+          input_args:
+            service_name: order-service
+            time_range: 10m
+            interval: 1m
+          expected_evidence: 确认服务是否存在延迟和错误率异常
+          risk_level: low
+        - step_id: llm-redis
+          tool_name: query_redis_status
+          purpose: 查询 Redis connected_clients、maxclients 和慢日志
+          input_args:
+            service_name: order-service
+            time_range: 10m
+          expected_evidence: 判断 Redis 是否连接数耗尽或慢命令异常
+          risk_level: low
+    expected_decision: add_steps
+    expected_decision_source: llm_structured
+    expected_plan_tools:
+      - query_metrics
+      - query_redis_status
+    forbidden_plan_tools:
+      - delete_pod
+      - restart_service
+      - execute_sql
+    expected_llm_call_count: 1
+    expected_first_step_id: llm-metrics
+
   - id: llm_adds_read_only_trace_step
     title: Replanner falls back when trace tool is not registered
     input: order-service Redis connection timeout，需要补查调用链

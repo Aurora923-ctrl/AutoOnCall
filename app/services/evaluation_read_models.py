@@ -148,9 +148,7 @@ def build_ragas_dashboard(
     """Build metrics for the optional RAGAS quality dashboard."""
     profile = str(run.get("metric_profile") or "")
     judge_model = (
-        "not_required_for_id_smoke"
-        if profile == "id-smoke"
-        else str(run.get("judge_model") or "")
+        "not_required_for_id_smoke" if profile == "id-smoke" else str(run.get("judge_model") or "")
     )
     embedding_model = (
         "not_required_for_id_smoke"

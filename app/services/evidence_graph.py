@@ -222,7 +222,9 @@ def build_incident_evidence_graph(
             "evidence_count": len(evidence_by_id),
             "tool_call_count": len(tool_calls),
             "evidence_by_layer": dict(Counter(evidence_layer(item) for item in evidence)),
-            "evidence_by_stance": dict(Counter(str(item.get("stance") or "neutral") for item in evidence)),
+            "evidence_by_stance": dict(
+                Counter(str(item.get("stance") or "neutral") for item in evidence)
+            ),
         },
     }
 
@@ -293,9 +295,7 @@ def _root_cause_closure(
         for evidence_id in root_supporting_ids
         if evidence_id in evidence_by_id
     ]
-    live_ids = [
-        str(item.get("evidence_id")) for item in linked if evidence_layer(item) == "live"
-    ]
+    live_ids = [str(item.get("evidence_id")) for item in linked if evidence_layer(item) == "live"]
     knowledge_ids = [
         str(item.get("evidence_id")) for item in linked if evidence_layer(item) == "knowledge"
     ]
@@ -320,9 +320,7 @@ def _root_cause_closure(
     }
 
 
-def _tool_node_id_for_evidence(
-    evidence: dict[str, Any], tool_calls: list[dict[str, Any]]
-) -> str:
+def _tool_node_id_for_evidence(evidence: dict[str, Any], tool_calls: list[dict[str, Any]]) -> str:
     evidence_tool = str(evidence.get("source_tool") or "")
     evidence_step = str(evidence.get("step_id") or "")
     for call in tool_calls:

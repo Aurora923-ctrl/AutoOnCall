@@ -161,5 +161,3 @@ def _has_enough_successful_diagnostic_evidence(evidence: list[dict[str, Any]]) -
         ):
             successful += 1
     return successful >= 3
-
-

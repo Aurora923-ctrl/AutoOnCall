@@ -76,6 +76,26 @@ DEFAULT_CHECKS = [
         "expected_source": "ticket_api",
     },
 ]
+GOLDEN_CHAINS = {
+    "redis_maxclients": {
+        "required_tools": [
+            "query_redis_status",
+            "query_metrics",
+            "query_logs",
+            "search_history_ticket",
+        ],
+        "required_sources": ["redis_info", "prometheus", "loki", "ticket_api"],
+    },
+    "mysql_slow_query": {
+        "required_tools": [
+            "query_mysql_status",
+            "query_metrics",
+            "query_logs",
+            "search_history_ticket",
+        ],
+        "required_sources": ["mysql", "prometheus", "loki", "ticket_api"],
+    },
+}
 
 
 def load_env_file(path: Path, *, override: bool = False) -> None:
@@ -112,6 +132,7 @@ async def verify_adapters(
         }
     )
     missing_sources = sorted(set(REAL_SOURCE_BY_TOOL.values()).difference(data_sources))
+    golden_chains = _golden_chain_summary(results)
     return {
         "status": "passed" if not failed else "failed",
         "duration_ms": round((time.perf_counter() - started) * 1000, 2),
@@ -120,6 +141,9 @@ async def verify_adapters(
         "failed_tools": [item["tool_name"] for item in failed],
         "not_integrated": [],
         "mock_fallback_detected": any(item["observed_source"] == "mock" for item in results),
+        "golden_chains": golden_chains,
+        "golden_chain_count": len(golden_chains),
+        "passed_golden_chain_count": sum(1 for item in golden_chains.values() if item["passed"]),
         "checks": results,
         "summary": _summary_text(failed, data_sources, missing_sources),
     }
@@ -199,6 +223,45 @@ def _signal_failures(
     return failures
 
 
+def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_tool = {str(item.get("tool_name")): item for item in results}
+    chains: dict[str, dict[str, Any]] = {}
+    for chain_name, spec in GOLDEN_CHAINS.items():
+        required_tools = [str(item) for item in spec["required_tools"]]
+        required_sources = [str(item) for item in spec["required_sources"]]
+        tool_results = [by_tool.get(tool_name, {}) for tool_name in required_tools]
+        missing_tools = [tool for tool, item in zip(required_tools, tool_results) if not item]
+        failed_tools = [
+            str(item.get("tool_name"))
+            for item in tool_results
+            if item and not bool(item.get("passed"))
+        ]
+        observed_sources = sorted(
+            {
+                str(item.get("observed_source"))
+                for item in tool_results
+                if item.get("observed_source") and item.get("observed_source") != "unknown"
+            }
+        )
+        missing_sources = sorted(set(required_sources).difference(observed_sources))
+        mock_sources = [
+            str(item.get("tool_name"))
+            for item in tool_results
+            if item.get("observed_source") in {"mock", "not_configured"}
+        ]
+        chains[chain_name] = {
+            "passed": not missing_tools and not failed_tools and not missing_sources and not mock_sources,
+            "required_tools": required_tools,
+            "required_sources": required_sources,
+            "observed_sources": observed_sources,
+            "missing_tools": missing_tools,
+            "failed_tools": failed_tools,
+            "missing_sources": missing_sources,
+            "mock_or_unconfigured_tools": mock_sources,
+        }
+    return chains
+
+
 def _summary_text(
     failed: list[dict[str, Any]],
     data_sources: list[str],
@@ -260,6 +323,13 @@ def render_console(payload: dict[str, Any]) -> str:
             f"- {mark} {item['tool_name']} source={item['observed_source']} "
             f"expected={item['expected_source']} status={item['status']} "
             f"latency={item['latency_ms']}ms"
+        )
+    for name, chain in payload.get("golden_chains", {}).items():
+        mark = "PASS" if chain["passed"] else "FAIL"
+        lines.append(
+            f"- {mark} chain:{name} sources={','.join(chain['observed_sources']) or '-'} "
+            f"missing_sources={','.join(chain['missing_sources']) or '-'} "
+            f"failed_tools={','.join(chain['failed_tools']) or '-'}"
         )
     lines.append(payload["summary"])
     return "\n".join(lines)

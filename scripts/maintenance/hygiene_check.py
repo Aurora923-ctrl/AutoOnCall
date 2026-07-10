@@ -118,6 +118,8 @@ def _directory_reason(path: Path, root: Path) -> str:
         return GENERATED_DIR_REASONS[name]
     if name.endswith(".egg-info"):
         return "python package metadata directory"
+    if name.startswith("tmp_debug"):
+        return "temporary debug artifact directory"
     relative_parts = path.relative_to(root).parts
     if relative_parts[:1] == ("uploads",) and len(relative_parts) > 1:
         return "uploaded demo artifact directory"
@@ -143,7 +145,7 @@ def _is_git_ignored(root: Path, relative_path: str) -> bool:
     """Return True when Git ignore rules already cover a generated artifact."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "check-ignore", "--quiet", "--", relative_path],
+            ["git", "-C", str(root), "check-ignore", "--no-index", "--quiet", "--", relative_path],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
