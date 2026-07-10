@@ -49,7 +49,7 @@ make sandbox-verify
   --live-golden
 .venv\Scripts\python.exe scripts\eval\eval_rag_cases.py `
   --cases eval\rag_cases.yaml `
-  --docs-dir aiops-docs `
+  --docs-dir docs/knowledge-base `
   --summary-json logs\rag_eval_summary_current.json `
   --summary-md logs\rag_eval_summary_current.md
 .\.venv\Scripts\python.exe scripts\eval\verify_milvus_multisource_rag.py `

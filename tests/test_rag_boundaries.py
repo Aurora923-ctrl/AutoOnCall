@@ -31,10 +31,7 @@ def test_dashscope_embedding_batches_documents_and_retries(monkeypatch) -> None:
             if attempts["count"] == 1:
                 raise RuntimeError("temporary provider error")
             return SimpleNamespace(
-                data=[
-                    SimpleNamespace(embedding=[float(len(text)), 1.0])
-                    for text in batch
-                ]
+                data=[SimpleNamespace(embedding=[float(len(text)), 1.0]) for text in batch]
             )
 
     monkeypatch.setattr(embedding_module.config, "dashscope_embedding_batch_size", 2)

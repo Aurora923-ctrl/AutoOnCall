@@ -526,9 +526,7 @@ async def test_aiops_run_status_derives_progress_for_legacy_snapshot(monkeypatch
                 "incident_id": "INC-LEGACY-PROGRESS",
                 "service_name": "order-service",
             },
-            "current_plan": [
-                {"step_id": "s2", "tool_name": "query_logs", "status": "pending"}
-            ],
+            "current_plan": [{"step_id": "s2", "tool_name": "query_logs", "status": "pending"}],
             "past_steps": [
                 ({"step_id": "s1", "tool_name": "query_metrics"}, "ok"),
             ],

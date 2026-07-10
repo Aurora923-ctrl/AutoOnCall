@@ -8,7 +8,7 @@ SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
 HEALTH_LIVE_API = $(SERVER_URL)/health/live
 HEALTH_READY_API = $(SERVER_URL)/health/ready
-DOCS_DIR = aiops-docs
+DOCS_DIR = docs/knowledge-base
 DOCS_GLOBS = $(DOCS_DIR)/*.md $(DOCS_DIR)/*.markdown $(DOCS_DIR)/*.pdf $(DOCS_DIR)/*.html $(DOCS_DIR)/*.htm $(DOCS_DIR)/*.csv $(DOCS_DIR)/*.xlsx
 MILVUS_CONTAINER = milvus-standalone
 ifeq ($(OS),Windows_NT)
@@ -25,7 +25,7 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init bootstrap verify verify-local hygiene-check start stop restart check upload clean up down status wait \
+.PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         api-contract-verify security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
@@ -76,7 +76,7 @@ help:
 	@echo "  $(YELLOW)make run$(NC)          - 🏭 生产模式运行（前台）"
 	@echo ""
 	@echo "$(CYAN)【文档管理】$(NC)"
-	@echo "  $(YELLOW)make upload$(NC)       - 📤 上传 aiops-docs 目录下的文档"
+	@echo "  $(YELLOW)make upload$(NC)       - 📤 上传 docs/knowledge-base 目录下的文档"
 	@echo "  $(YELLOW)make list-docs$(NC)    - 📚 列出可上传的文档"
 	@echo "  $(YELLOW)make test-upload$(NC)  - 🧪 测试上传单个文件"
 	@echo ""
@@ -228,8 +228,8 @@ interview-status:  ## Show interview-focused Docker stack containers
 
 sandbox-verify:  ## Verify ToolRegistry consumes interview adapter sources
 	@echo "$(YELLOW)验证 AIOps 校招核心适配器数据源...$(NC)"
-	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py
-	$(PYTHON) scripts/sandbox/verify_full_stack_adapters.py
+	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py $(SANDBOX_SEED_ARGS)
+	$(PYTHON) scripts/sandbox/verify_full_stack_adapters.py $(SANDBOX_VERIFY_ARGS)
 
 sandbox-demo:  ## Run deterministic AIOps scenarios against interview adapters
 	@echo "$(YELLOW)运行 Redis/MySQL/Prometheus 真实数据流演示...$(NC)"
@@ -254,7 +254,7 @@ interview-summary:  ## Build one interview-facing eval summary from current arti
 
 interview-ragas:  ## Refresh optional RAGAS quality report for interview demos
 	@echo "$(YELLOW)馃И Refreshing interview RAGAS quality snapshot...$(NC)"
-	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
 	$(PYTHON) scripts/eval/build_interview_summary.py --ragas-summary logs/ragas_eval_summary.json
 
 # ============================================================
@@ -642,12 +642,12 @@ format:  ## 格式化代码
 
 format-check:  ## 检查格式（不修改文件）
 	@echo "$(YELLOW)🎨 检查代码格式（不修改文件）...$(NC)"
-	$(PYTHON) -m ruff format --check app/
+	$(PYTHON) -m ruff format --check app/ scripts/ tests/
 	@echo "$(GREEN)✅ 格式检查通过$(NC)"
 
 lint:  ## 代码检查
 	@echo "$(YELLOW)🔍 代码检查...$(NC)"
-	$(PYTHON) -m ruff check app/
+	$(PYTHON) -m ruff check app/ scripts/ tests/
 	@echo "$(GREEN)✅ 检查完成$(NC)"
 
 fix:  ## 自动修复代码问题
@@ -684,11 +684,11 @@ eval:  ## 运行 AIOps 离线评测
 
 eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
-	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
 
 eval-ragas:  ## Run optional RAGAS quality evaluation for RAG answers
 	@echo "$(YELLOW)🧪 Running optional RAGAS quality evaluation...$(NC)"
-	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir aiops-docs --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
 
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
@@ -710,13 +710,19 @@ hygiene-check:  ## 检查本地生成产物
 	@echo "$(YELLOW)🧼 检查本地生成产物...$(NC)"
 	$(PYTHON) scripts/maintenance/hygiene_check.py
 
+reference-check:  ## Verify Markdown links and runtime path references
+	@echo "$(YELLOW)Verifying repository links and path references...$(NC)"
+	$(PYTHON) scripts/maintenance/verify_references.py
+
 verify-local:  ## 面试前本地快速质量验证
 	@echo "$(YELLOW)✅ 运行 AutoOnCall 本地快速验证...$(NC)"
 	@$(MAKE) test-quick
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
+	@$(MAKE) eval-ragas
 	@$(MAKE) eval-change
 	@$(MAKE) eval-replanner
+	@$(MAKE) api-contract-verify
 	@echo "$(GREEN)✅ 本地快速验证完成$(NC)"
 
 verify:  ## 运行只验证门禁（不修改源码）
@@ -728,8 +734,11 @@ verify:  ## 运行只验证门禁（不修改源码）
 	@$(MAKE) test-quick
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
+	@$(MAKE) eval-ragas
 	@$(MAKE) eval-change
 	@$(MAKE) eval-replanner
+	@$(MAKE) api-contract-verify
+	@$(MAKE) reference-check
 	@$(MAKE) hygiene-check
 	@echo "$(GREEN)✅ 交付门禁通过！$(NC)"
 

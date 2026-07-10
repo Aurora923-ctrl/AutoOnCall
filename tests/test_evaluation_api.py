@@ -205,7 +205,7 @@ async def test_ragas_summary_api_returns_quality_dashboard(monkeypatch, tmp_path
                     "ended_at": "2026-07-08T10:00:00+00:00",
                     "evaluation_scope": "optional RAGAS quality regression",
                     "cases_path": "eval/rag_cases.yaml",
-                    "docs_dir": "aiops-docs",
+                    "docs_dir": "docs/knowledge-base",
                     "answer_source": "reference-fixture",
                     "metric_profile": "id-smoke",
                     "judge_model": "qwen-max",

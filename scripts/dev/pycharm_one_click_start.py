@@ -102,7 +102,9 @@ def parse_args() -> argparse.Namespace:
         "--restart-processes", action="store_true", help="Restart MCP/API if already running."
     )
     parser.add_argument(
-        "--upload-docs", action="store_true", help="Upload aiops-docs/*.md after startup."
+        "--upload-docs",
+        action="store_true",
+        help="Upload docs/knowledge-base files after startup.",
     )
     parser.add_argument("--no-open-browser", dest="open_browser", action="store_false")
     parser.add_argument("--live-timeout", type=int, default=90)
@@ -278,13 +280,13 @@ def upload_docs() -> None:
     supported_suffixes = {".md", ".markdown", ".pdf", ".html", ".htm", ".csv", ".xlsx"}
     docs = sorted(
         path
-        for path in (ROOT / "aiops-docs").iterdir()
+        for path in (ROOT / "docs" / "knowledge-base").iterdir()
         if path.is_file() and path.suffix.lower() in supported_suffixes
     )
     if not docs:
-        print("[WARN] No supported aiops-docs files found.")
+        print("[WARN] No supported docs/knowledge-base files found.")
         return
-    print(f"[RUN] Uploading {len(docs)} aiops-docs files")
+    print(f"[RUN] Uploading {len(docs)} docs/knowledge-base files")
     for path in docs:
         run(
             [

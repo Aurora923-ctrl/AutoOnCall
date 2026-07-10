@@ -110,7 +110,8 @@ def build_readiness_scorecard(package: dict[str, Any]) -> dict[str, Any]:
         ),
         _score_check(
             "reports_have_evidence",
-            bool(records) and all(int(record.get("evidence_count") or 0) >= 3 for record in records),
+            bool(records)
+            and all(int(record.get("evidence_count") or 0) >= 3 for record in records),
             1.2,
             "Reports expose enough evidence for an interview walkthrough.",
         ),
@@ -433,9 +434,7 @@ def main() -> int:
         if package["eval_artifacts"]:
             print(
                 "Eval artifacts: "
-                + ", ".join(
-                    f"{name}={path}" for name, path in package["eval_artifacts"].items()
-                )
+                + ", ".join(f"{name}={path}" for name, path in package["eval_artifacts"].items())
             )
     return 0 if package["reports"]["all_passed"] else 1
 

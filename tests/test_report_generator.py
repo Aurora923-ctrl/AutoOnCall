@@ -215,9 +215,7 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     graph_edges = report.evidence_graph["edges"]
     assert any(node["node_type"] == "incident" for node in graph_nodes)
     assert any(node["node_type"] == "hypothesis" and node["selected"] for node in graph_nodes)
-    assert any(
-        node["node_type"] == "evidence" and node["layer"] == "live" for node in graph_nodes
-    )
+    assert any(node["node_type"] == "evidence" and node["layer"] == "live" for node in graph_nodes)
     assert any(
         node["node_type"] == "evidence" and node["layer"] == "knowledge" for node in graph_nodes
     )

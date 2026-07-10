@@ -1038,7 +1038,7 @@ def _render_evidence_matrix(report: DiagnosisReport) -> str:
         ),
     ]
     closure = _as_dict(_as_dict(report.evidence_graph).get("root_cause_closure"))
-    root_support_ids = set(str(item) for item in closure.get("supporting_evidence_ids") or [])
+    root_support_ids = {str(item) for item in closure.get("supporting_evidence_ids") or []}
     lines = [
         "- Matrix rule: every root-cause conclusion should link to at least "
         "one live evidence item plus one knowledge or historical basis.",

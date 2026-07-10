@@ -17,7 +17,7 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md ./
 COPY app ./app
-COPY aiops-docs ./aiops-docs
+COPY docs/knowledge-base ./docs/knowledge-base
 COPY config ./config
 COPY static ./static
 

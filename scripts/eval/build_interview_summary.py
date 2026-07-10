@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.eval.eval_environment import (  # noqa: E402
+    assess_eval_artifact_staleness,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 
 DEFAULT_LIVE_SUMMARY = REPO_ROOT / "logs" / "live_golden_eval_summary_current.json"
 DEFAULT_RAG_SUMMARY = REPO_ROOT / "logs" / "rag_eval_summary_current.json"
@@ -70,32 +79,48 @@ def _module_status(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             "case_count": 0,
             "passed_count": 0,
             "pass_rate": 0.0,
+            "stale": True,
+            "stale_reasons": ["artifact_missing"],
         }
 
     summary = payload.get("summary", {})
+    run = payload.get("run")
+    artifact_status = (
+        assess_eval_artifact_staleness(run)
+        if isinstance(run, dict) and run
+        else {
+            "stale": False,
+            "reasons": [],
+        }
+    )
     status = payload.get("status")
     if status in {"passed", "failed"}:
-        passed = status == "passed"
+        passed = status == "passed" and not artifact_status["stale"]
         return {
             "name": name,
-            "status": status,
+            "status": "stale" if artifact_status["stale"] else status,
             "passed": passed,
             "case_count": len(payload.get("checks", [])),
             "passed_count": sum(1 for check in payload.get("checks", []) if check.get("passed")),
             "pass_rate": 1.0 if passed else 0.0,
+            "stale": artifact_status["stale"],
+            "stale_reasons": artifact_status["reasons"],
         }
 
     case_count = int(summary.get("overall_case_count") or summary.get("case_count") or 0)
     passed_count = int(summary.get("overall_passed_count") or summary.get("passed_count") or 0)
     all_passed = bool(summary.get("all_passed", passed_count == case_count and case_count > 0))
     pass_rate = float(summary.get("overall_pass_rate") or summary.get("pass_rate") or 0.0)
+    passed = all_passed and not artifact_status["stale"]
     return {
         "name": name,
-        "status": "passed" if all_passed else "failed",
-        "passed": all_passed,
+        "status": "stale" if artifact_status["stale"] else ("passed" if all_passed else "failed"),
+        "passed": passed,
         "case_count": case_count,
         "passed_count": passed_count,
         "pass_rate": pass_rate,
+        "stale": artifact_status["stale"],
+        "stale_reasons": artifact_status["reasons"],
     }
 
 
@@ -138,6 +163,7 @@ def build_summary(
                 "interview-facing rollup; live AIOps and RAG evals remain separate "
                 "source artifacts to avoid treating --skip-rag as a RAG result"
             ),
+            "environment": collect_eval_environment(suite="interview_rollup"),
             "source_artifacts": (
                 {
                     "live_aiops": str(DEFAULT_LIVE_SUMMARY.relative_to(REPO_ROOT)),
@@ -304,11 +330,7 @@ def _rag_mainline_support_summary(payload: dict[str, Any] | None) -> dict[str, A
         cases = [_case_by_id(payload, case_id) for case_id in spec["cases"]]
         present_cases = [case for case in cases if case]
         retrieved_sources = sorted(
-            {
-                str(source)
-                for case in present_cases
-                for source in case.get("retrieved_sources", [])
-            }
+            {str(source) for case in present_cases for source in case.get("retrieved_sources", [])}
         )
         expected_sources = [str(source) for source in spec["sources"]]
         source_hit = all(source in retrieved_sources for source in expected_sources)
@@ -470,9 +492,7 @@ def _resume_metrics(
         "tool_hit_rate": float(live_resume.get("tool_hit_rate") or 0.0),
         "report_generation_rate": float(live_resume.get("report_generation_rate") or 0.0),
         "approval_recall": float(live_resume.get("approval_recall") or 0.0),
-        "forbidden_action_block_rate": float(
-            live_resume.get("forbidden_action_block_rate") or 0.0
-        ),
+        "forbidden_action_block_rate": float(live_resume.get("forbidden_action_block_rate") or 0.0),
         "evidence_sufficiency_rate": float(
             live_resume.get("diagnostic_evidence_sufficiency") or 0.0
         ),
@@ -515,6 +535,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Generated at: `{payload['run']['generated_at']}`",
         "- Scope: interview-facing rollup of adapter verification, live AIOps golden eval, "
         "and standalone RAG retrieval eval.",
+        *provenance_markdown_lines(payload["run"]["environment"]),
         "",
         "## Module Results",
         "",
@@ -759,7 +780,9 @@ def _negative_boundary_rows(rows: list[dict[str, Any]]) -> list[str]:
             f"| `{row['id']}` | `{row['report_status']}` | "
             f"`{row['expected_status']}` | {signal_text} | {row['boundary']} |"
         )
-    return rendered or ["| `missing` | `missing` | `incomplete` | - | no negative boundary artifact |"]
+    return rendered or [
+        "| `missing` | `missing` | `incomplete` | - | no negative boundary artifact |"
+    ]
 
 
 def _adapter_golden_chain_rows(value: Any) -> list[str]:

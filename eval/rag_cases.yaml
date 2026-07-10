@@ -246,7 +246,7 @@ cases:
     expected_source: redis_capacity_wiki.html
     min_score: 1.0
     expected_keywords:
-      - incident-window
+      - live_info
       - maxclients
 
   - id: mysql_pdf_postmortem_pool_waiting
@@ -258,12 +258,12 @@ cases:
       - active_connections
 
   - id: redis_ticket_retry_loop_history
-    query: INC-REDIS-009 promotion lookup retry loop maxclients
+    query: INC-REDIS-009 促销查询重试循环 Redis 客户端连接槽位 maxclients
     expected_source: tickets.csv
     min_score: 1.0
     expected_keywords:
       - INC-REDIS-009
-      - retry
+      - 重试
 
   - id: mysql_xlsx_rc4_remediation_history
     query: payment-api-2026.07.06-rc4 Disabled checkout report feature flag prepared index change

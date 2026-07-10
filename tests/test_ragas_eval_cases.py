@@ -229,7 +229,7 @@ cases:
 
     payload = await evaluate_cases(
         cases_path,
-        docs_dir="aiops-docs",
+        docs_dir="docs/knowledge-base",
         answer_source="reference-fixture",
         metrics_runner=forbidden_runner,
     )
@@ -369,7 +369,7 @@ cases:
 def test_ragas_setup_failure_payload_is_structured() -> None:
     args = argparse.Namespace(
         cases="eval/rag_cases.yaml",
-        docs_dir="aiops-docs",
+        docs_dir="docs/knowledge-base",
         mode="offline",
         answer_source="context-fixture",
         metrics_profile="id-smoke",

@@ -37,9 +37,9 @@ def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
     trusted = Document(
         page_content="Redis maxclients 耗尽会导致 connection timeout。",
         metadata={
-            "_source": "aiops-docs/redis.md",
+            "_source": "docs/knowledge-base/redis.md",
             "_file_name": "redis.md",
-            "_doc_id": "aiops-docs/redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
             "_chunk_id": "redis.md#0001",
             "h1": "Redis 故障",
             "h2": "maxclients",
@@ -61,7 +61,7 @@ def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
     assert len(payload["retrieval_results"]) == 1
     assert len(payload["rejected_results"]) == 1
     chunk = payload["retrieval_results"][0]
-    assert chunk["doc_id"] == "aiops-docs/redis.md"
+    assert chunk["doc_id"] == "docs/knowledge-base/redis.md"
     assert chunk["source_file"] == "redis.md"
     assert chunk["heading_path"] == "Redis 故障 > maxclients"
     assert chunk["chunk_id"] == "redis.md#0001"
@@ -104,7 +104,7 @@ def test_structured_retrieval_rejects_when_all_scores_exceed_threshold() -> None
 
 def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path) -> None:
     index = LexicalIndexService(tmp_path / "lexical.json")
-    source = "aiops-docs/redis.md"
+    source = "docs/knowledge-base/redis.md"
     index.mark_source_stale(source, "new upload failed to index")
     monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
     document = Document(
@@ -267,13 +267,13 @@ def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) 
     document = Document(
         page_content="Redis maxclients 耗尽会导致 connection timeout，需要扩容连接数。",
         metadata={
-            "_source": "aiops-docs/redis.md",
+            "_source": "docs/knowledge-base/redis.md",
             "_file_name": "redis.md",
-            "_doc_id": "aiops-docs/redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
             "_chunk_id": "redis.md#0001",
         },
     )
-    index.upsert_source("aiops-docs/redis.md", [document])
+    index.upsert_source("docs/knowledge-base/redis.md", [document])
     monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
 
     payload = retrieve_structured_knowledge(
@@ -300,13 +300,13 @@ def test_retrieval_degrades_to_lexical_when_default_vector_store_fails(
     document = Document(
         page_content="Redis maxclients 耗尽会导致 connection timeout，需要扩容连接数。",
         metadata={
-            "_source": "aiops-docs/redis.md",
+            "_source": "docs/knowledge-base/redis.md",
             "_file_name": "redis.md",
-            "_doc_id": "aiops-docs/redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
             "_chunk_id": "redis.md#0001",
         },
     )
-    index.upsert_source("aiops-docs/redis.md", [document])
+    index.upsert_source("docs/knowledge-base/redis.md", [document])
 
     def raise_vector_unavailable():
         raise RuntimeError("milvus unavailable")
@@ -343,13 +343,13 @@ def test_lexical_only_candidate_must_pass_lexical_trust_threshold(
     document = Document(
         page_content="Redis maxclients connection timeout runbook.",
         metadata={
-            "_source": "aiops-docs/redis.md",
+            "_source": "docs/knowledge-base/redis.md",
             "_file_name": "redis.md",
-            "_doc_id": "aiops-docs/redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
             "_chunk_id": "redis.md#0001",
         },
     )
-    index.upsert_source("aiops-docs/redis.md", [document])
+    index.upsert_source("docs/knowledge-base/redis.md", [document])
     monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
     monkeypatch.setattr(config, "rag_min_lexical_trust_score", 1.1)
 
@@ -369,9 +369,9 @@ def test_unscored_vector_results_are_not_trusted_by_default() -> None:
     document = Document(
         page_content="Redis maxclients 耗尽处理 runbook",
         metadata={
-            "_source": "aiops-docs/redis.md",
+            "_source": "docs/knowledge-base/redis.md",
             "_file_name": "redis.md",
-            "_doc_id": "aiops-docs/redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
             "_chunk_id": "redis.md#0001",
         },
     )

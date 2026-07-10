@@ -28,7 +28,7 @@ from app.services.change_execution_service import ChangeExecutionService
 from app.services.change_plan_builder import build_change_plan
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "change_cases.yaml"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "change_eval_summary.json"
@@ -298,6 +298,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- rollback_recommendation_rate：{resume['rollback_recommendation_rate']:.0%}",
         f"- forbidden_change_block_rate：{resume['forbidden_change_block_rate']:.0%}",
         f"- 生成时间：{payload['run']['ended_at']}",
+        *provenance_markdown_lines(payload["run"].get("environment", {})),
         "",
         "## 用例",
         "",

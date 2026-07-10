@@ -1,2 +1,1 @@
 """Local sandbox verification scripts."""
-

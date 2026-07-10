@@ -31,7 +31,7 @@ from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
 )
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 from scripts.eval.eval_rag_cases import (
     DEFAULT_DOCS_DIR,
     DEFAULT_MIN_SCORE,
@@ -1067,6 +1067,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Embedding model: `{embedding_text}`",
         f"- RAGAS version: `{run.get('ragas_version', '')}`",
         f"- Scope: {run.get('evaluation_scope', '')}",
+        *provenance_markdown_lines(run.get("environment", {})),
         "",
         "## Metrics",
         f"- Status: `{summary['status']}`",
@@ -1124,7 +1125,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-        "## Failed Cases",
+            "## Failed Cases",
         ]
     )
     if summary["failed_cases"]:

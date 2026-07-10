@@ -24,7 +24,7 @@ cases:
           annotations:
             summary: order-service Redis connected_clients is above 99% of maxclients
             description: Redis connection timeout and 5xx spike; connected_clients=9940 maxclients=10000 blocked_clients=37
-            runbook: aiops-docs/redis_maxclients.md
+            runbook: docs/knowledge-base/redis_postmortem.pdf
           startsAt: "2026-07-06T10:00:00Z"
           generatorURL: "https://prometheus.example/graph?g0.expr=redis_connected_clients"
     golden:
@@ -111,7 +111,7 @@ cases:
           annotations:
             summary: payment-service p95 latency high with MySQL slow query and pool waiting
             description: slow query avg_ms=920 count=18; active connections=188/200; pool_waiting=6
-            runbook: aiops-docs/mysql_slow_query.md
+            runbook: docs/knowledge-base/mysql_slow_query_postmortem.pdf
           startsAt: "2026-07-06T10:05:00Z"
           generatorURL: "https://prometheus.example/graph?g0.expr=mysql_slow_queries"
     golden:
@@ -200,7 +200,7 @@ cases:
           annotations:
             summary: inventory-service Pod CrashLoopBackOff with OOMKilled last state
             description: pod restarts=12; status=CrashLoopBackOff; last_state=OOMKilled; memory near limit
-            runbook: aiops-docs/k8s_crashloop_oom.md
+            runbook: docs/knowledge-base/service_unavailable.md
           startsAt: "2026-07-06T10:10:00Z"
           generatorURL: "https://prometheus.example/graph?g0.expr=kube_pod_container_status_restarts_total"
     golden:

@@ -76,9 +76,7 @@ def test_progress_payload_exposes_stable_recovery_contract() -> None:
             "session_id": "session-progress",
             "trace_id": "trace-progress",
             "incident": {"incident_id": "inc-progress"},
-            "current_plan": [
-                {"step_id": "s2", "tool_name": "query_logs", "status": "pending"}
-            ],
+            "current_plan": [{"step_id": "s2", "tool_name": "query_logs", "status": "pending"}],
             "past_steps": [("metrics", "ok")],
             "tool_call_records": [
                 {"tool_name": "query_metrics", "status": "success"},

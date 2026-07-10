@@ -346,7 +346,7 @@ make sandbox-demo
 
 演示顺序：
 
-1. 说明文档来自 `aiops-docs/`，通过 `make upload` 调用 `/api/upload` 写入知识库。
+1. 说明文档来自 `docs/knowledge-base/`，通过 `make upload` 调用 `/api/upload` 写入知识库。
 2. 在前端或 `/api/chat` 提一个 Runbook 相关问题。
 3. 展示回答中的 citations。
 4. 故意问一个知识库没有依据的问题，说明 no-answer policy。

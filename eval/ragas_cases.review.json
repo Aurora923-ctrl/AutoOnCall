@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "description": "Review-only RAGAS bad-case drafts. Entries are promoted manually and do not modify eval/rag_cases.yaml.",
+  "items": []
+}

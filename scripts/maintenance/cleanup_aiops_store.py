@@ -20,7 +20,9 @@ from app.services.aiops_store import create_aiops_store
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Cleanup old AIOps runtime records.")
-    parser.add_argument("--database", default=None, help="SQLite database path; omit for configured backend.")
+    parser.add_argument(
+        "--database", default=None, help="SQLite database path; omit for configured backend."
+    )
     parser.add_argument("--keep-days", type=int, default=config.log_retention_days)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()

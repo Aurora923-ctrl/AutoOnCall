@@ -304,7 +304,7 @@ VALUES
                 'failure_mode', 'slow insert or connection wait increases checkout latency'
             )
         ),
-        'runbooks', JSON_ARRAY('aiops-docs/slow_response.md', 'aiops-docs/service_unavailable.md')
+        'runbooks', JSON_ARRAY('docs/knowledge-base/slow_response.md', 'docs/knowledge-base/service_unavailable.md')
     )
 ),
 (
@@ -358,7 +358,7 @@ VALUES
             )
         ),
         'slo', JSON_OBJECT('availability', '99.9%', 'p95_latency_ms', 800, 'error_rate', '1%'),
-        'runbooks', JSON_ARRAY('aiops-docs/slow_response.md', 'aiops-docs/service_unavailable.md')
+        'runbooks', JSON_ARRAY('docs/knowledge-base/slow_response.md', 'docs/knowledge-base/service_unavailable.md')
     )
 ),
 (
@@ -405,7 +405,7 @@ VALUES
             )
         ),
         'slo', JSON_OBJECT('availability', '99.95%', 'p95_latency_ms', 600, 'error_rate', '1%'),
-        'runbooks', JSON_ARRAY('aiops-docs/service_unavailable.md', 'aiops-docs/memory_high_usage.md')
+        'runbooks', JSON_ARRAY('docs/knowledge-base/service_unavailable.md', 'docs/knowledge-base/memory_high_usage.md')
     )
 )
 ON DUPLICATE KEY UPDATE

@@ -31,7 +31,7 @@ from app.models.evidence import (
 from app.models.incident import Incident
 from app.models.plan import PlanStep
 from app.tools.base import ToolExecutionResult
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 
 replanner_module = importlib.import_module("app.agent.aiops.replanner")
 
@@ -314,6 +314,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- forbidden tools avoided：{resume['forbidden_tools_avoided_rate']:.0%}",
         f"- Trace 决策记录率：{resume['trace_decision_recorded_rate']:.0%}",
         f"- 生成时间：{payload['run']['ended_at']}",
+        *provenance_markdown_lines(payload["run"].get("environment", {})),
         "",
         "## 用例",
         "",

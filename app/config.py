@@ -106,7 +106,7 @@ class Settings(BaseSettings):
 
     chunk_max_size: int = 800
     chunk_overlap: int = 100
-    index_allowed_roots: str = "uploads,aiops-docs"
+    index_allowed_roots: str = "uploads,docs/knowledge-base"
     rag_lexical_index_path: str = "data/rag_lexical_index.json"
     knowledge_indexing_report_path: str = "data/knowledge_indexing_reports.jsonl"
 

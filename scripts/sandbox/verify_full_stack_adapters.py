@@ -230,7 +230,9 @@ def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, 
         required_tools = [str(item) for item in spec["required_tools"]]
         required_sources = [str(item) for item in spec["required_sources"]]
         tool_results = [by_tool.get(tool_name, {}) for tool_name in required_tools]
-        missing_tools = [tool for tool, item in zip(required_tools, tool_results) if not item]
+        missing_tools = [
+            tool for tool, item in zip(required_tools, tool_results, strict=True) if not item
+        ]
         failed_tools = [
             str(item.get("tool_name"))
             for item in tool_results
@@ -250,7 +252,10 @@ def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, 
             if item.get("observed_source") in {"mock", "not_configured"}
         ]
         chains[chain_name] = {
-            "passed": not missing_tools and not failed_tools and not missing_sources and not mock_sources,
+            "passed": not missing_tools
+            and not failed_tools
+            and not missing_sources
+            and not mock_sources,
             "required_tools": required_tools,
             "required_sources": required_sources,
             "observed_sources": observed_sources,
@@ -303,9 +308,15 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         sys.path.insert(0, str(ROOT))
 
     from app.tools.registry import create_default_tool_registry
+    from scripts.eval.eval_environment import collect_eval_environment
 
     registry = create_default_tool_registry([])
     payload = await verify_adapters(registry, fail_on_mock=not args.allow_mock)
+    payload["run"] = {
+        "environment": collect_eval_environment(suite="adapter_verification"),
+        "env_file": str(Path(args.env_file)),
+        "scope": "live local Docker adapter verification",
+    }
     write_report(payload, Path(args.output) if args.output else None)
     return payload
 

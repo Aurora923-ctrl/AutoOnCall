@@ -181,9 +181,9 @@ def test_alert_ingestion_redacts_sensitive_labels_and_annotations(
     payload["commonLabels"]["api_token"] = "secret-token"
     payload["alerts"][0]["labels"]["password"] = "redis-password"
     payload["alerts"][0]["annotations"]["authorization"] = "Bearer secret"
-    payload["alerts"][0]["annotations"][
-        "description"
-    ] = "connected_clients above threshold token=inline-secret Authorization: Bearer bearer-secret"
+    payload["alerts"][0]["annotations"]["description"] = (
+        "connected_clients above threshold token=inline-secret Authorization: Bearer bearer-secret"
+    )
     payload["alerts"][0]["annotations"]["details"] = {
         "message": "redis dsn=mysql://user:secret@db.local access_key=access-secret"
     }
@@ -214,9 +214,9 @@ def test_alert_ingestion_redacts_sensitive_labels_and_annotations(
 def test_alert_ingestion_redacts_full_raw_payload_when_enabled(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(config, "aiops_store_raw_external_payload", True)
     payload = _alertmanager_payload()
-    payload["alerts"][0]["annotations"][
-        "description"
-    ] = "token=inline-secret Authorization: Bearer bearer-secret"
+    payload["alerts"][0]["annotations"]["description"] = (
+        "token=inline-secret Authorization: Bearer bearer-secret"
+    )
     store = AIOpsSQLiteStore(tmp_path / "aiops.db")
     service = AlertIngestionService(store)
 

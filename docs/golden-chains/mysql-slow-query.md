@@ -31,7 +31,7 @@ This is the main MySQL portfolio case for interviews. It demonstrates a live ada
     "annotations": {
       "summary": "payment-service p95 latency high with MySQL slow query and pool waiting",
       "description": "slow query avg_ms=920 count=18; active connections=188/200; pool_waiting=6",
-      "runbook": "aiops-docs/mysql_slow_query.md"
+      "runbook": "docs/knowledge-base/mysql_slow_query_postmortem.pdf"
     },
     "startsAt": "2026-07-06T10:00:00Z"
   }]

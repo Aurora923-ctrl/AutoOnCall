@@ -54,17 +54,19 @@ async def test_replanner_eval_cases_all_pass_offline() -> None:
     ]
     assert result_by_id["llm_adds_read_only_trace_step"]["actual_plan_tools"] == [
         "query_metrics",
-        "query_redis_status"
+        "query_redis_status",
     ]
     assert result_by_id["llm_adds_read_only_trace_step"]["actual_decision_source"] == (
         "evidence_analyzer_fallback"
     )
-    assert result_by_id[
-        "llm_generate_report_blocked_when_evidence_insufficient"
-    ]["actual_decision"] == "add_steps"
-    assert result_by_id[
-        "llm_unsafe_tool_falls_back_to_evidence_analyzer"
-    ]["actual_decision_source"] == "evidence_analyzer_fallback"
+    assert (
+        result_by_id["llm_generate_report_blocked_when_evidence_insufficient"]["actual_decision"]
+        == "add_steps"
+    )
+    assert (
+        result_by_id["llm_unsafe_tool_falls_back_to_evidence_analyzer"]["actual_decision_source"]
+        == "evidence_analyzer_fallback"
+    )
     assert result_by_id["failed_tool_retry_skips_llm_decision"]["llm_call_count"] == 0
     assert result_by_id["failed_tool_retry_skips_llm_decision"]["first_step_id"] == "s3-retry"
 

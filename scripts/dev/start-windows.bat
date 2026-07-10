@@ -147,10 +147,10 @@ if errorlevel 1 (
     if errorlevel 1 (
         echo [警告] 依赖尚未就绪，跳过文档上传；请启动 Milvus 后再执行 make upload 或手动上传
     ) else (
-        REM 调用 API 上传 aiops-docs 文档到向量数据库
+        REM 调用 API 上传 docs\knowledge-base 文档到向量数据库
         echo [8/8] 上传文档到向量数据库...
         set UPLOAD_FAILED=0
-        for %%f in (aiops-docs\*.md) do (
+        for %%f in (docs\knowledge-base\*.md) do (
             echo   上传: %%~nxf
             for /f %%c in ('curl -s -o nul -w "%%{http_code}" -X POST http://localhost:9900/api/upload -F "file=@%%f"') do set HTTP_CODE=%%c
             if not "!HTTP_CODE!"=="200" (

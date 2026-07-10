@@ -8,7 +8,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCS_DIR = ROOT / "aiops-docs"
+DOCS_DIR = ROOT / "docs" / "knowledge-base"
 
 
 REDIS_PDF_LINES = [
@@ -120,9 +120,7 @@ def main() -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     write_text_pdf(DOCS_DIR / "redis_postmortem.pdf", REDIS_PDF_LINES)
     write_text_pdf(DOCS_DIR / "mysql_slow_query_postmortem.pdf", MYSQL_PDF_LINES)
-    (DOCS_DIR / "redis_capacity_wiki.html").write_text(
-        REDIS_CAPACITY_WIKI_HTML, encoding="utf-8"
-    )
+    (DOCS_DIR / "redis_capacity_wiki.html").write_text(REDIS_CAPACITY_WIKI_HTML, encoding="utf-8")
     (DOCS_DIR / "payment_wiki.html").write_text(PAYMENT_WIKI_HTML, encoding="utf-8")
     write_tickets_csv(DOCS_DIR / "tickets.csv")
     write_tickets_xlsx(DOCS_DIR / "tickets.xlsx")

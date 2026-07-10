@@ -213,7 +213,7 @@ def test_generated_demo_rag_assets_are_loader_readable() -> None:
         "tickets.xlsx": "table",
     }
     for file_name, loader_type in expected.items():
-        path = Path("aiops-docs") / file_name
+        path = Path("docs/knowledge-base") / file_name
         loader = document_loader_registry.get_loader(path)
         docs, report = loader.load(path)
 

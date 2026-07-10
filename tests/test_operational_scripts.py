@@ -74,6 +74,7 @@ def test_container_delivery_files_exclude_local_runtime_artifacts() -> None:
     assert "python -m pip install ." in dockerfile
     assert "/health/live" in dockerfile
     assert "COPY app ./app" in dockerfile
+    assert "COPY docs/knowledge-base ./docs/knowledge-base" in dockerfile
     assert "COPY static ./static" in dockerfile
     assert "COPY config ./config" in dockerfile
 
@@ -113,7 +114,10 @@ def test_runtime_paths_are_loaded_from_central_config() -> None:
     assert "MAX_FILE_SIZE = config.upload_max_file_size" in upload_api
     assert "return EVAL_SUMMARY_PATH or Path(config.eval_summary_path)" in evaluations_api
     assert "return EVAL_BACKLOG_PATH or Path(config.eval_backlog_path)" in evaluations_api
-    assert "return ADAPTER_VERIFICATION_PATH or Path(config.adapter_verification_path)" in evaluations_api
+    assert (
+        "return ADAPTER_VERIFICATION_PATH or Path(config.adapter_verification_path)"
+        in evaluations_api
+    )
     assert "DEFAULT_LEXICAL_INDEX_PATH = Path(config.rag_lexical_index_path)" in lexical_index
 
 
@@ -131,7 +135,17 @@ def test_makefile_exposes_demo_reports_target() -> None:
     assert "scripts/demo/generate_demo_reports.py" in makefile
 
 
-def test_makefile_exposes_api_contract_verifier_without_forcing_verify_gate() -> None:
+def test_knowledge_base_lives_under_docs() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "DOCS_DIR = docs/knowledge-base" in makefile
+    assert 'index_allowed_roots: str = "uploads,docs/knowledge-base"' in config
+    assert "docs/knowledge-base/" in readme
+
+
+def test_makefile_exposes_api_contract_verifier_in_verify_gate() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
     assert "api-contract-verify:" in makefile
@@ -139,17 +153,17 @@ def test_makefile_exposes_api_contract_verifier_without_forcing_verify_gate() ->
 
     verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]
     verify = verify.split("check-all:", maxsplit=1)[0]
-    assert "api-contract-verify" not in verify
+    assert "@$(MAKE) api-contract-verify" in verify
 
 
 def test_readme_points_to_five_minute_interview_demo_and_core_stack() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    demo_doc = (ROOT / "docs" / "interview-5-minute-demo.md").read_text(encoding="utf-8")
+    demo_doc = (ROOT / "docs" / "interview" / "five-minute-demo.md").read_text(encoding="utf-8")
 
-    assert "docs/interview-5-minute-demo.md" in readme
+    assert "docs/interview/five-minute-demo.md" in readme
     assert "Redis/MySQL 是 live adapter golden chain" in readme
     assert "K8s CrashLoop/OOMKilled 是 offline golden regression case" in readme
-    assert "Milvus/RAG is a bonus path" in demo_doc
+    assert "Milvus/RAG 是加分项" in demo_doc
     assert "make interview-up" in demo_doc
     assert "make sandbox-verify" in demo_doc
     assert "--env-file deploy\\sandbox.env" in demo_doc
@@ -166,6 +180,9 @@ def test_makefile_verify_runs_quality_gate_targets() -> None:
     assert "@$(MAKE) type-check" in verify
     assert "@$(MAKE) security" in verify
     assert "@$(MAKE) test-quick" in verify
+    assert "@$(MAKE) eval-ragas" in verify
+    assert "@$(MAKE) api-contract-verify" in verify
+    assert "@$(MAKE) reference-check" in verify
     assert "@$(MAKE) hygiene-check" in verify
 
 

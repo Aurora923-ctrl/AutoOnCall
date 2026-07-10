@@ -75,7 +75,7 @@ from app.tools.ops_tool import (
 )
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.registry import ToolRegistry
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 from scripts.eval.eval_rag_cases import evaluate_cases as evaluate_rag_cases
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "cases.yaml"
@@ -83,7 +83,7 @@ DEFAULT_REPORT_PATH = REPO_ROOT / "logs" / "eval_reports.db"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "eval_summary.json"
 DEFAULT_SUMMARY_MD_PATH = REPO_ROOT / "logs" / "eval_summary.md"
 DEFAULT_RAG_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
-DEFAULT_RAG_DOCS_DIR = REPO_ROOT / "aiops-docs"
+DEFAULT_RAG_DOCS_DIR = REPO_ROOT / "docs" / "knowledge-base"
 DEFAULT_ENV_FILE = REPO_ROOT / "deploy" / "sandbox.env"
 
 METRIC_NAMES = [
@@ -1882,6 +1882,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- 报告数据库：`{run.get('report_path', '')}`",
         f"- 总耗时：{run.get('duration_ms', 0.0):.2f} ms",
         f"- 评测边界：{run.get('evaluation_scope', '')}",
+        *provenance_markdown_lines(run.get("environment", {})),
         f"- p95 case latency：{summary['p95_latency_ms']:.2f} ms",
         f"- 完整评测通过率：{summary['overall_passed_count']}/{summary['overall_case_count']} ({summary['overall_pass_rate']:.0%})",
         "",

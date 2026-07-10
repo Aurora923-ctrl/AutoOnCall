@@ -14,7 +14,7 @@
 - `app/integrations/` 存放 Prometheus、日志网关、Kubernetes、Redis、MySQL、工单系统等外部系统适配器。
 - `mcp_servers/` 存放 MCP 服务脚本。
 - `static/` 存放前端工作台页面；`static/app.js` 只负责按顺序加载分片，业务脚本放在 `static/js/`。
-- `aiops-docs/` 存放写入 Milvus 的 Markdown 知识库文档。
+- `docs/knowledge-base/` 存放写入 Milvus 的 Markdown 知识库文档和多格式 RAG 样例资产。
 - `deploy/` 存放生产部署与配置示例。
 
 不要提交虚拟环境、日志、覆盖率报告、临时上传文件或生成产物。
@@ -28,7 +28,7 @@
 - `make up` 使用 `deploy/compose/vector-database.yml` 启动 Milvus。
 - `make start` 启动 MCP 服务和 FastAPI。
 - `.\scripts\dev\start-windows.bat`、`.\scripts\dev\stop-windows.bat` 用于 Windows 下启动和停止服务。
-- `make upload` 将 `aiops-docs/*.md` 上传到正在运行的 API。
+- `make upload` 将 `docs/knowledge-base/` 中的可索引文档上传到正在运行的 API。
 
 ## 编码风格与命名约定
 

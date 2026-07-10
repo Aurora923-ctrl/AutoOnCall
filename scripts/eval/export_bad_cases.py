@@ -150,7 +150,11 @@ def promote_bad_cases_to_eval(
     promoted_count = mark_promoted_backlog_items(
         feedback_path=feedback_path,
         exported_feedback_ids=[
-            *[item.feedback_id for item in rag_cases if _case_id_for_item("fb_rag", item) in rag_exported],
+            *[
+                item.feedback_id
+                for item in rag_cases
+                if _case_id_for_item("fb_rag", item) in rag_exported
+            ],
             *[
                 item.feedback_id
                 for item in aiops_cases
@@ -291,15 +295,15 @@ def _load_backlog_items(path: str | Path) -> list[EvalBacklogItem]:
         return []
     try:
         raw_text = backlog_path.read_text(encoding="utf-8")
-        payload = json.loads(raw_text) if backlog_path.suffix.lower() == ".json" else yaml.safe_load(raw_text)
+        payload = (
+            json.loads(raw_text)
+            if backlog_path.suffix.lower() == ".json"
+            else yaml.safe_load(raw_text)
+        )
     except (OSError, json.JSONDecodeError, yaml.YAMLError):
         return []
     raw_items = payload.get("items", []) if isinstance(payload, dict) else []
-    return [
-        EvalBacklogItem.model_validate(item)
-        for item in raw_items
-        if isinstance(item, dict)
-    ]
+    return [EvalBacklogItem.model_validate(item) for item in raw_items if isinstance(item, dict)]
 
 
 def _rewrite_eval_backlog_statuses(
@@ -371,7 +375,9 @@ def backlog_from_eval_summary(path: str | Path | None) -> list[EvalBacklogItem]:
     ]
 
 
-def backlog_from_eval_summaries(paths: str | Path | list[str | Path] | None) -> list[EvalBacklogItem]:
+def backlog_from_eval_summaries(
+    paths: str | Path | list[str | Path] | None,
+) -> list[EvalBacklogItem]:
     """Build backlog drafts from one or more eval summary artifacts."""
     if not paths:
         return []
@@ -707,9 +713,7 @@ def build_aiops_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
         "expected_executed_tools": expected_tools,
         "forbidden_tools": forbidden_tools,
         "expected_root_keywords": _expected_keywords(item.expected_answer or item.reason)[:4],
-        "expected_risk_policy": "forbidden"
-        if item.category == "permission_denied"
-        else "allow",
+        "expected_risk_policy": "forbidden" if item.category == "permission_denied" else "allow",
         "expected_needs_approval": False,
         "expected_report_status": "completed",
         "min_evidence_count": 1,
@@ -893,4 +897,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

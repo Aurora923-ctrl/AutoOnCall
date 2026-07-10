@@ -124,7 +124,7 @@ async def index_directory(directory_path: str | None = None):
 安全边界在 `VectorIndexService._ensure_path_allowed()`：目录和单文件索引都必须位于 `config.index_allowed_roots` 允许的根目录下。默认配置是：
 
 ```python
-index_allowed_roots: str = "uploads,aiops-docs"
+index_allowed_roots: str = "uploads,docs/knowledge-base"
 ```
 
 这能避免“传一个任意本机路径让服务读取”的问题。RAG 系统很容易因为索引入口过宽而变成文件读取漏洞，这个边界在面试里值得主动讲。

@@ -31,7 +31,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
     "annotations": {
       "summary": "order-service Redis connected_clients is above 99% of maxclients",
       "description": "Redis connection timeout and 5xx spike; connected_clients=9940 maxclients=10000 blocked_clients=37",
-      "runbook": "aiops-docs/redis_maxclients.md"
+      "runbook": "docs/knowledge-base/redis_postmortem.pdf"
     },
     "startsAt": "2026-07-06T10:00:00Z"
   }]

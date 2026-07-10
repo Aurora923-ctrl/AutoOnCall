@@ -41,7 +41,7 @@ def test_rag_cases_cover_core_runbook_types_and_rejection() -> None:
 
 
 def test_rag_eval_cases_all_pass_offline() -> None:
-    payload = evaluate_cases("eval/rag_cases.yaml", docs_dir="aiops-docs")
+    payload = evaluate_cases("eval/rag_cases.yaml", docs_dir="docs/knowledge-base")
 
     assert payload["summary"]["case_count"] == 30
     assert payload["summary"]["passed_count"] == 30
@@ -112,7 +112,7 @@ def test_rag_eval_offline_strategy_comparison_can_rank_by_rrf() -> None:
 
 
 def test_rag_eval_case_failure_identifies_failed_metric() -> None:
-    index = build_offline_index("aiops-docs")
+    index = build_offline_index("docs/knowledge-base")
     result = evaluate_case(
         {
             "id": "bad_expected_source",

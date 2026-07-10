@@ -381,7 +381,7 @@ def test_index_directory_defaults_to_configured_upload_dir(monkeypatch, tmp_path
 
 def test_splitter_adds_document_version_metadata() -> None:
     docs = document_splitter_service.split_document(
-        "# Redis\n\nRedis timeout runbook", "aiops-docs/redis.md"
+        "# Redis\n\nRedis timeout runbook", "docs/knowledge-base/redis.md"
     )
 
     assert docs
@@ -395,7 +395,7 @@ def test_splitter_adds_document_version_metadata() -> None:
 def test_splitter_treats_markdown_extension_as_markdown() -> None:
     docs = document_splitter_service.split_document(
         "# Redis\n\nRedis timeout runbook",
-        "aiops-docs/redis.markdown",
+        "docs/knowledge-base/redis.markdown",
     )
 
     assert docs
@@ -407,7 +407,7 @@ def test_splitter_treats_markdown_extension_as_markdown() -> None:
 def test_splitter_does_not_merge_chunks_across_markdown_headings() -> None:
     docs = document_splitter_service.split_document(
         "# Redis\n\n## maxclients\n\n连接数耗尽处理。\n\n## latency\n\n延迟升高处理。",
-        "aiops-docs/redis.md",
+        "docs/knowledge-base/redis.md",
     )
 
     assert len(docs) == 2
@@ -655,8 +655,7 @@ def test_index_single_file_preserves_multi_source_loader_metadata(monkeypatch, t
     docs_dir.mkdir()
     html_file = docs_dir / "wiki.html"
     html_file.write_text(
-        "<h1>Payment Runbook</h1><h2>MySQL 慢查询</h2>"
-        "<p>使用 EXPLAIN 排查 slow query digest。</p>",
+        "<h1>Payment Runbook</h1><h2>MySQL 慢查询</h2><p>使用 EXPLAIN 排查 slow query digest。</p>",
         encoding="utf-8",
     )
     csv_file = docs_dir / "tickets.csv"

@@ -9,7 +9,9 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
+
+from pydantic import BaseModel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -24,6 +26,8 @@ from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.mysql_store import AIOpsMySQLStore
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,10 +75,10 @@ def main() -> int:
 
     if not args.dry_run:
         store = AIOpsMySQLStore(args.mysql_dsn)
-        for event in alert_events:
-            store.save_alert_event(event)
-        for event in traces:
-            store.save_trace_event(event)
+        for alert_event in alert_events:
+            store.save_alert_event(alert_event)
+        for trace_event in traces:
+            store.save_trace_event(trace_event)
         for approval in approvals:
             store.save_approval_request(approval)
         for execution in change_executions:
@@ -90,7 +94,7 @@ def main() -> int:
     return 0
 
 
-def _read_models(sqlite_path: Path, table: str, model_type: type) -> list[Any]:
+def _read_models(sqlite_path: Path, table: str, model_type: type[ModelT]) -> list[ModelT]:
     with sqlite3.connect(sqlite_path) as connection:
         connection.row_factory = sqlite3.Row
         try:
@@ -99,7 +103,7 @@ def _read_models(sqlite_path: Path, table: str, model_type: type) -> list[Any]:
             if "no such table" in str(exc):
                 return []
             raise
-    models = []
+    models: list[ModelT] = []
     for row in rows:
         payload = json.loads(str(row["payload"]))
         if isinstance(payload, dict):

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from scripts.eval.eval_environment import assess_eval_artifact_staleness
+
 
 def build_eval_summary_payload(
     raw_payload: dict[str, Any],
@@ -20,6 +22,7 @@ def build_eval_summary_payload(
     resume_metrics = _dict_or_empty(summary.get("resume_metrics"))
     categories = _dict_or_empty(summary.get("categories"))
     backlog = build_eval_backlog_summary(backlog_payload)
+    artifact_status = assess_eval_artifact_staleness(run)
 
     return {
         "available": True,
@@ -34,6 +37,8 @@ def build_eval_summary_payload(
         "cases": raw_payload.get("cases", []) if isinstance(raw_payload.get("cases"), list) else [],
         "failed_cases": summary.get("failed_cases", []),
         "eval_backlog": backlog,
+        "artifact_status": artifact_status,
+        "stale": artifact_status["stale"],
         "message": "evaluation summary loaded",
     }
 
@@ -59,6 +64,13 @@ def build_eval_unavailable_payload(message: str, *, summary_path: Path) -> dict[
         "cases": [],
         "failed_cases": [],
         "eval_backlog": build_eval_backlog_summary(None),
+        "artifact_status": {
+            "stale": True,
+            "reasons": ["artifact_unavailable"],
+            "generated_fingerprint": "",
+            "current_fingerprint": "",
+        },
+        "stale": True,
         "message": message,
     }
 
@@ -79,6 +91,7 @@ def build_ragas_summary_payload(
     if not isinstance(failed_cases, list):
         failed_cases = []
     dashboard = build_ragas_dashboard(run, summary, thresholds)
+    artifact_status = assess_eval_artifact_staleness(run)
     return {
         "available": True,
         "path": summary_path.name,
@@ -90,6 +103,8 @@ def build_ragas_summary_payload(
         "dashboard": dashboard,
         "case_scores": cases,
         "failed_cases": failed_cases,
+        "artifact_status": artifact_status,
+        "stale": artifact_status["stale"],
         "message": "RAGAS quality summary loaded",
     }
 
@@ -114,6 +129,13 @@ def build_ragas_unavailable_payload(message: str, *, summary_path: Path) -> dict
         },
         "case_scores": [],
         "failed_cases": [],
+        "artifact_status": {
+            "stale": True,
+            "reasons": ["artifact_unavailable"],
+            "generated_fingerprint": "",
+            "current_fingerprint": "",
+        },
+        "stale": True,
         "message": message,
     }
 
@@ -239,7 +261,7 @@ def _ragas_command_hint(run: dict[str, Any]) -> str:
     profile = str(run.get("metric_profile") or "id-smoke")
     answer_source = str(run.get("answer_source") or "product-offline")
     cases_path = str(run.get("cases_path") or "eval/rag_cases.yaml")
-    docs_dir = str(run.get("docs_dir") or "aiops-docs")
+    docs_dir = str(run.get("docs_dir") or "docs/knowledge-base")
     return (
         "python scripts/eval/eval_ragas_cases.py "
         f"--cases {cases_path} --docs-dir {docs_dir} "

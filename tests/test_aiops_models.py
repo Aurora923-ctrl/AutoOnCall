@@ -165,6 +165,7 @@ def test_planner_retrieval_query_focuses_on_incident_not_report_template() -> No
     assert "connected_clients=9940" in query
     assert "Markdown ????" not in query
 
+
 def test_aiops_domain_models_are_json_dumpable() -> None:
     incident = Incident(service_name="order-service", symptom="high 5xx")
     step = PlanStep(

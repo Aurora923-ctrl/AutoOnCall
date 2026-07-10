@@ -267,7 +267,10 @@ async def test_executor_runs_adjacent_read_only_evidence_steps_as_ordered_fanout
         "query_metrics",
         "query_logs",
     ]
-    assert [item["raw_data"]["metadata"]["evidence_batch"]["batch_index"] for item in update["gathered_evidence"]] == [1, 2]
+    assert [
+        item["raw_data"]["metadata"]["evidence_batch"]["batch_index"]
+        for item in update["gathered_evidence"]
+    ] == [1, 2]
     assert all(
         item["raw_data"]["metadata"]["evidence_batch"]["execution_mode"]
         == "bounded_read_only_fanout"

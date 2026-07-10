@@ -205,7 +205,9 @@ async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> No
     assert update["evidence_analysis"]["decision"] == "add_steps"
     assert fake_prompt.payload is not None
     assert "query_redis_status" in fake_prompt.payload["tools_description"]
-    assert any("Evidence Analyzer 摘要" in content for _, content in fake_prompt.payload["messages"])
+    assert any(
+        "Evidence Analyzer 摘要" in content for _, content in fake_prompt.payload["messages"]
+    )
 
 
 @pytest.mark.asyncio

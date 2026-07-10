@@ -36,6 +36,7 @@ from app.models.change_plan import ChangePlan
 from app.models.incident import Incident
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 
 DEFAULT_OUTPUT_JSON = ROOT / "logs" / "api_contract_verification.json"
 DEFAULT_OUTPUT_MD = ROOT / "logs" / "api_contract_verification.md"
@@ -846,7 +847,9 @@ async def _check_aiops_stream(client: httpx.AsyncClient) -> dict[str, Any]:
     )
     complete = payloads[-1]
     _require(complete.get("type") == "complete", "last AIOps event must be complete")
-    structured_report = _require_dict(complete.get("structured_report"), "complete.structured_report")
+    structured_report = _require_dict(
+        complete.get("structured_report"), "complete.structured_report"
+    )
     _require(complete.get("status") == structured_report.get("status"), "terminal status mismatch")
     diagnosis = _require_dict(complete.get("diagnosis"), "complete.diagnosis")
     _require(
@@ -1026,7 +1029,9 @@ async def _check_ragas_contract(client: httpx.AsyncClient) -> dict[str, Any]:
     _require(isinstance(metrics, list) and metrics, "ragas.dashboard.metrics must be non-empty")
     metric_keys = {str(item.get("key") or "") for item in metrics if isinstance(item, dict)}
     for required_metric in ["ragas_id_recall", "ragas_actionability", "ragas_refusal_boundary"]:
-        _require(required_metric in metric_keys, f"missing RAGAS dashboard metric {required_metric}")
+        _require(
+            required_metric in metric_keys, f"missing RAGAS dashboard metric {required_metric}"
+        )
     case_scores = payload.get("case_scores")
     _require(isinstance(case_scores, list) and case_scores, "ragas.case_scores must be non-empty")
     _require(summary.get("status") == "passed", "RAGAS fixture should pass")
@@ -1221,7 +1226,7 @@ def _write_eval_contract_fixtures(temp_path: Path) -> tuple[Path, Path, Path]:
                     "ended_at": "2026-07-08T00:00:00Z",
                     "evaluation_scope": "api_contract_ragas_fixture",
                     "cases_path": "eval/rag_cases.yaml",
-                    "docs_dir": "aiops-docs",
+                    "docs_dir": "docs/knowledge-base",
                     "answer_source": "reference-fixture",
                     "metric_profile": "id-smoke",
                     "judge_model": "qwen-max",
@@ -1373,6 +1378,7 @@ def _build_payload(checks: list[CheckResult]) -> dict[str, Any]:
                 "fake services only, no external dependencies"
             ),
             "external_dependencies": False,
+            "environment": collect_eval_environment(suite="api_contract"),
         },
         "summary": {
             "status": "passed" if not failed else "failed",
@@ -1403,6 +1409,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Checks: `{summary['passed_check_count']}/{summary['check_count']}`",
         f"- External dependencies: `{payload['run']['external_dependencies']}`",
         f"- Scope: {payload['run']['scope']}",
+        *provenance_markdown_lines(payload["run"]["environment"]),
         "",
         "## Checks",
         "",

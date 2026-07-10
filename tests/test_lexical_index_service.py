@@ -8,14 +8,14 @@ from app.services.lexical_index_service import LexicalIndexService
 def test_lexical_index_upsert_search_filter_and_delete(tmp_path) -> None:
     service = LexicalIndexService(tmp_path / "lexical.json")
     service.upsert_source(
-        "aiops-docs/redis.md",
+        "docs/knowledge-base/redis.md",
         [
             Document(
                 page_content="Redis maxclients connection timeout runbook",
                 metadata={
-                    "_source": "aiops-docs/redis.md",
+                    "_source": "docs/knowledge-base/redis.md",
                     "_file_name": "redis.md",
-                    "_doc_id": "aiops-docs/redis.md",
+                    "_doc_id": "docs/knowledge-base/redis.md",
                     "_chunk_id": "redis.md#0001",
                     "_document_version": "v1",
                 },
@@ -37,13 +37,13 @@ def test_lexical_index_upsert_search_filter_and_delete(tmp_path) -> None:
         == []
     )
 
-    assert service.delete_source("aiops-docs/redis.md") == 1
+    assert service.delete_source("docs/knowledge-base/redis.md") == 1
     assert service.search("Redis maxclients timeout", top_k=3) == []
 
 
 def test_lexical_index_stale_source_is_excluded_until_reindexed(tmp_path) -> None:
     service = LexicalIndexService(tmp_path / "lexical.json")
-    source = "aiops-docs/redis.md"
+    source = "docs/knowledge-base/redis.md"
     document = Document(
         page_content="Redis maxclients connection timeout runbook",
         metadata={"_source": source, "_chunk_id": "redis.md#0001"},
@@ -66,11 +66,11 @@ def test_lexical_index_writes_json_atomically_without_temp_leftovers(tmp_path) -
     service = LexicalIndexService(index_path)
 
     service.upsert_source(
-        "aiops-docs/cpu.md",
+        "docs/knowledge-base/cpu.md",
         [
             Document(
                 page_content="CPU high usage runbook",
-                metadata={"_source": "aiops-docs/cpu.md", "_chunk_id": "cpu.md#0001"},
+                metadata={"_source": "docs/knowledge-base/cpu.md", "_chunk_id": "cpu.md#0001"},
             )
         ],
     )

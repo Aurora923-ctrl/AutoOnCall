@@ -60,6 +60,7 @@ def test_slow_response_fallback_plan_uses_core_evidence() -> None:
     assert "query_logs" in tool_names
     assert "query_deploy_history" in tool_names
 
+
 def test_topology_prioritizes_mysql_for_order_service_sql_timeout() -> None:
     steps = build_fallback_plan(
         input_text="order-service SQL timeout，接口响应慢",

@@ -267,7 +267,7 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
 
 def test_interview_docs_keep_single_rollup_and_grounding_boundaries() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    demo_doc = (ROOT / "docs" / "interview-5-minute-demo.md").read_text(encoding="utf-8")
+    demo_doc = (ROOT / "docs" / "interview" / "five-minute-demo.md").read_text(encoding="utf-8")
     sandbox = (ROOT / "deploy" / "sandbox.md").read_text(encoding="utf-8")
     redis_doc = (ROOT / "docs" / "golden-chains" / "redis-maxclients.md").read_text(
         encoding="utf-8"
@@ -285,7 +285,7 @@ def test_interview_docs_keep_single_rollup_and_grounding_boundaries() -> None:
     assert "RAGAS" in demo_doc
     assert "logs/milvus_multisource_verification.md" in readme
     assert "--skip-rag" in demo_doc
-    assert "K8s CrashLoop/OOMKilled is currently an offline golden regression case" in demo_doc
+    assert "K8s CrashLoop/OOMKilled 当前是离线黄金回归用例" in demo_doc
     assert "Conclusion Alignment" in redis_doc
     assert "Conclusion Alignment" in mysql_doc
     assert "Evidence Matrix" in redis_doc

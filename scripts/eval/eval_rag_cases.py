@@ -23,10 +23,10 @@ if str(REPO_ROOT) not in sys.path:
 from app.services.document_loaders import document_loader_registry
 from app.services.document_splitter_service import document_splitter_service
 from app.services.rag_retrieval_service import document_to_retrieval_chunk
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
-DEFAULT_DOCS_DIR = REPO_ROOT / "aiops-docs"
+DEFAULT_DOCS_DIR = REPO_ROOT / "docs" / "knowledge-base"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "rag_eval_summary.json"
 DEFAULT_SUMMARY_MD_PATH = REPO_ROOT / "logs" / "rag_eval_summary.md"
 DEFAULT_TOP_K = 3
@@ -422,7 +422,9 @@ def search_offline(
             )
         )
     else:
-        scored.sort(key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"]))
+        scored.sort(
+            key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"])
+        )
     return scored[:top_k]
 
 
@@ -475,7 +477,9 @@ def _strategy_case_payload(
         "citation_hit": _retrieved_has_valid_citation(retrieved),
         "rejection_hit": len(retrieved) == 0,
         "retrieved_sources": [item["source_file"] for item in retrieved],
-        "doc_types": [_doc_type_from_source(str(item.get("source_file") or "")) for item in retrieved],
+        "doc_types": [
+            _doc_type_from_source(str(item.get("source_file") or "")) for item in retrieved
+        ],
     }
 
 
@@ -564,7 +568,6 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     run = payload["run"]
     summary = payload["summary"]
     failed_cases = summary["failed_cases"]
-    environment = run.get("environment", {})
     lines = [
         "# AutoOnCall RAG 离线评测摘要",
         "",
@@ -574,8 +577,8 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- 文档目录：`{run.get('docs_dir', '')}`",
         f"- 总耗时：{run.get('duration_ms', 0.0):.2f} ms",
         f"- 评测边界：{run.get('evaluation_scope', '')}",
-        f"- Git commit：`{environment.get('git_commit', '')}`",
-        f"- Python：`{environment.get('python_version', '')}`",
+        *provenance_markdown_lines(run.get("environment", {})),
+        f"- Python：`{run.get('environment', {}).get('python_version', '')}`",
         f"- RAG top_k：{run.get('top_k', summary.get('top_k', 0))}",
         "",
         "## 核心指标",
@@ -602,7 +605,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-        "## 失败定位",
+            "## 失败定位",
         ]
     )
     if failed_cases:

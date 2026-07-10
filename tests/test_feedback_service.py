@@ -507,9 +507,7 @@ def test_backlog_from_eval_summary_routes_ragas_and_change_failures(tmp_path) ->
                         {
                             "id": "mysql_safe_change_missing_rollback",
                             "failed_metrics": ["rollback_recommendation_rate"],
-                            "failure_reasons": {
-                                "rollback_recommendation_rate": "rollback missing"
-                            },
+                            "failure_reasons": {"rollback_recommendation_rate": "rollback missing"},
                         }
                     ]
                 },

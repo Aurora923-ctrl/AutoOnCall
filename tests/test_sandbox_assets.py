@@ -55,7 +55,10 @@ def test_interview_stack_defaults_to_core_aiops_without_milvus() -> None:
     assert "make up && make upload" in makefile
     assert "Redis, MySQL, metrics-exporter, Prometheus, Loki, and loki-log-emitter" in sandbox_doc
     assert "starts only the six core services" in sandbox_doc
-    assert "K8s CrashLoop/OOMKilled is intentionally treated as an offline golden regression case" in sandbox_doc
+    assert (
+        "K8s CrashLoop/OOMKilled is intentionally treated as an offline golden regression case"
+        in sandbox_doc
+    )
 
 
 def test_sandbox_env_disables_mock_and_wires_adapters() -> None:
@@ -163,15 +166,15 @@ def test_mysql_redis_golden_seed_uses_live_sources() -> None:
     mysql_seed = (ROOT / "deploy" / "adapters" / "mysql-init" / "001_init.sql").read_text(
         encoding="utf-8"
     )
-    compose = (ROOT / "deploy" / "compose" / "interview-stack.yml").read_text(
-        encoding="utf-8"
-    )
+    compose = (ROOT / "deploy" / "compose" / "interview-stack.yml").read_text(encoding="utf-8")
     seed_script = (ROOT / "scripts" / "sandbox" / "seed_live_incident_evidence.py").read_text(
         encoding="utf-8"
     )
 
     assert "live-redis-seed" in seed_script
     assert "autooncall:incident:order-service:redis-maxclients" in seed_script
+    assert "$(SANDBOX_SEED_ARGS)" in (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "$(SANDBOX_VERIFY_ARGS)" in (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "live-mysql-seed" in mysql_seed
     assert "live-redis-seed" not in compose
     assert "demo-seed" not in mysql_seed

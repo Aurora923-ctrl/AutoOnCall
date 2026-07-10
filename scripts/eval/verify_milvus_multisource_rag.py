@@ -5,25 +5,32 @@ It is a storage/provenance proof for PDF/HTML/CSV/XLSX chunks entering Milvus, n
 semantic-quality benchmark. Retrieval quality remains covered by eval_rag_cases.py.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import math
+import sys
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, connections, utility
 
 from app.config import config
 from app.services.document_loaders import document_loader_registry
 from app.services.document_splitter_service import document_splitter_service
+from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DOCS_DIR = REPO_ROOT / "aiops-docs"
+DEFAULT_DOCS_DIR = REPO_ROOT / "docs" / "knowledge-base"
 DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "milvus_multisource_verification.json"
 DEFAULT_OUTPUT_MD = REPO_ROOT / "logs" / "milvus_multisource_verification.md"
 COLLECTION_NAME = "autooncall_interview_multisource"
@@ -221,6 +228,7 @@ def summarize(records: list[dict[str, Any]], probes: list[dict[str, Any]]) -> di
                 "Milvus storage/provenance verification for multi-source RAG assets; "
                 "deterministic local vectors are used to avoid cloud embedding dependency."
             ),
+            "environment": collect_eval_environment(suite="milvus_multisource"),
         },
         "summary": {
             "status": "passed" if passed == len(probes) else "failed",
@@ -247,6 +255,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Inserted chunks: `{summary['inserted_chunks']}`",
         f"- Probe pass rate: `{summary['passed_probe_count']}/{summary['probe_count']}`",
         f"- Scope: {payload['run']['scope']}",
+        *provenance_markdown_lines(payload["run"]["environment"]),
         "",
         "## Source Coverage",
         "",
@@ -255,7 +264,15 @@ def render_markdown(payload: dict[str, Any]) -> str:
     ]
     for source, count in summary["source_counts"].items():
         lines.append(f"| `{source}` | {count} |")
-    lines.extend(["", "## Probe Results", "", "| Probe | Expected source | Status | Top sources |", "| --- | --- | --- | --- |"])
+    lines.extend(
+        [
+            "",
+            "## Probe Results",
+            "",
+            "| Probe | Expected source | Status | Top sources |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
     for probe in payload["probes"]:
         top_sources = ", ".join(
             str(item.get("source_file")) for item in probe.get("retrieved", [])[:3]

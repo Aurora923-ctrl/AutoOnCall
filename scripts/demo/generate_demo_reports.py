@@ -232,9 +232,9 @@ def render_index(summary: dict[str, Any]) -> str:
         "",
         "> These reports are offline demo artifacts for interview walkthroughs. "
         "They prove the diagnosis chain is reproducible; "
-            "they are not production RCA accuracy claims. A DEMO_PASS with eval_failed_metrics "
-            "means the report is usable for walkthrough but a stricter live/eval gate still "
-            "needs its own artifact.",
+        "they are not production RCA accuracy claims. A DEMO_PASS with eval_failed_metrics "
+        "means the report is usable for walkthrough but a stricter live/eval gate still "
+        "needs its own artifact.",
         "",
         "## Mainline",
         "",

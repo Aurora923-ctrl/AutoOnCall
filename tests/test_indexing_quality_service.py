@@ -192,4 +192,3 @@ def test_build_indexing_quality_report_flags_low_quality_files() -> None:
     assert report["summary"]["total_records"] == 0
     assert report["by_doc_type"] == []
     assert report["low_quality_files"] == []
-

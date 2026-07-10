@@ -9,8 +9,7 @@ from scripts.demo.generate_demo_reports import (
     safe_slug,
     select_cases,
 )
-from scripts.demo.run_interview_demo import build_interview_demo_package
-from scripts.demo.run_interview_demo import build_readiness_scorecard
+from scripts.demo.run_interview_demo import build_interview_demo_package, build_readiness_scorecard
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -111,8 +110,14 @@ def test_render_index_explains_mainline_and_boundaries() -> None:
     assert "Evidence Analyzer" in markdown
     assert "Boundary Statement" in markdown
     assert "production accuracy claim" in markdown
-    assert "| Case | Demo result | Eval result | Service | RCA closure | Evidence layers | Confidence | Risk | Report |" in markdown
-    assert "redis_maxclients_timeout | DEMO_PASS | EVAL_PASS | order-service | closed | history=1, knowledge=1, live=3" in markdown
+    assert (
+        "| Case | Demo result | Eval result | Service | RCA closure | Evidence layers | Confidence | Risk | Report |"
+        in markdown
+    )
+    assert (
+        "redis_maxclients_timeout | DEMO_PASS | EVAL_PASS | order-service | closed | history=1, knowledge=1, live=3"
+        in markdown
+    )
     assert "by_stance: supporting=4, unknown=1" in markdown
     assert "RCA Evidence Closure" in markdown
     assert "ev-redis, ev-metrics" in markdown
@@ -155,9 +160,7 @@ def test_readiness_scorecard_passes_complete_interview_package() -> None:
 
     assert scorecard["score"] >= 9.0
     assert scorecard["verdict"] == "ready_for_main_project_demo"
-    assert not [
-        check["name"] for check in scorecard["checks"] if not check["passed"]
-    ]
+    assert not [check["name"] for check in scorecard["checks"] if not check["passed"]]
 
 
 def test_readiness_scorecard_caps_score_without_eval_artifacts() -> None:

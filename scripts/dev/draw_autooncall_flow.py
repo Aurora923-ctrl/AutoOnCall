@@ -3,11 +3,10 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
-OUT_SVG = ROOT / "docs" / "autooncall-flow.svg"
-OUT_HTML = ROOT / "docs" / "autooncall-flow.html"
-OUT_PNG = ROOT / "docs" / "autooncall-flow.png"
+OUT_SVG = ROOT / "docs" / "架构图" / "自动值守诊断流程图.svg"
+OUT_HTML = ROOT / "docs" / "架构图" / "自动值守诊断流程图.html"
+OUT_PNG = ROOT / "docs" / "架构图" / "自动值守诊断流程图.png"
 
 
 W = 2400
@@ -171,25 +170,82 @@ def marker_defs() -> str:
 
 def build_svg() -> str:
     main_cards = [
-        (80, 250, 310, 190, "告警接入", ["Alertmanager", "Webhook 输入", "fingerprint 去重"], "#2563eb"),
-        (450, 250, 310, 190, "API / SSE", ["FastAPI 路由", "/api/alerts / aiops", "流式诊断事件"], "#7c3aed"),
-        (820, 250, 310, 190, "Planner", ["Runbook 检索", "LLM 结构化计划", "PlanStep 队列"], "#059669"),
-        (1190, 250, 310, 190, "Executor", ["Tool Registry", "风险门禁", "只读工具取证"], "#d97706"),
-        (1560, 250, 310, 190, "Evidence", ["ToolCallRecord", "Evidence Matrix", "Trace 可回放"], "#2563eb"),
-        (1930, 250, 390, 190, "Replanner", ["Evidence Analyzer", "补查 / 审批 / 报告", "证据不足则降级"], "#dc2626"),
+        (80, 250, 310, 190, "告警接入", ["告警管理器", "回调输入", "指纹去重"], "#2563eb"),
+        (
+            450,
+            250,
+            310,
+            190,
+            "接口 / 事件流",
+            ["FastAPI 路由", "/api/alerts / aiops", "流式诊断事件"],
+            "#7c3aed",
+        ),
+        (
+            820,
+            250,
+            310,
+            190,
+            "计划器",
+            ["运行手册检索", "模型结构化计划", "计划步骤队列"],
+            "#059669",
+        ),
+        (1190, 250, 310, 190, "执行器", ["工具注册表", "风险门禁", "只读工具取证"], "#d97706"),
+        (1560, 250, 310, 190, "证据", ["工具调用记录", "证据矩阵", "轨迹可回放"], "#2563eb"),
+        (
+            1930,
+            250,
+            390,
+            190,
+            "重规划器",
+            ["证据分析器", "补查 / 审批 / 报告", "证据不足则降级"],
+            "#dc2626",
+        ),
     ]
     cards_svg = "\n".join(card(*item[:6], accent=item[6]) for item in main_cards)
-    arrows_svg = "\n".join(
-        arrow(x, 345, x + 60, 345)
-        for x in [390, 760, 1130, 1500, 1870]
-    )
+    arrows_svg = "\n".join(arrow(x, 345, x + 60, 345) for x in [390, 760, 1130, 1500, 1870])
 
     outcomes = "\n".join(
         [
-            card(120, 1110, 430, 210, "继续补查 / 降级", ["缺指标、缺日志、缺 Runbook", "追加只读步骤或重试", "incomplete / degraded"], accent="#dc2626", fill="#fffafa"),
-            card(650, 1110, 430, 210, "人工审批", ["中高风险动作暂停", "生成 ApprovalRequest", "审批后仍不自动写生产"], accent="#d97706", fill="#fffdf5"),
-            card(1180, 1110, 430, 210, "报告与 Trace", ["RCA、影响范围、关键证据", "Evidence back-links", "可复盘诊断时间线"], accent="#2563eb", fill="#f8fbff"),
-            card(1710, 1110, 430, 210, "离线评测", ["AIOps golden cases", "RAG eval / RAGAS", "回归门禁防退化"], accent="#059669", fill="#f7fffb"),
+            card(
+                120,
+                1110,
+                430,
+                210,
+                "继续补查 / 降级",
+                ["缺指标、缺日志、缺运行手册", "追加只读步骤或重试", "不完整 / 已降级"],
+                accent="#dc2626",
+                fill="#fffafa",
+            ),
+            card(
+                650,
+                1110,
+                430,
+                210,
+                "人工审批",
+                ["中高风险动作暂停", "生成审批请求", "审批后仍不自动写生产"],
+                accent="#d97706",
+                fill="#fffdf5",
+            ),
+            card(
+                1180,
+                1110,
+                430,
+                210,
+                "报告与轨迹",
+                ["根因、影响范围、关键证据", "证据回链", "可复盘诊断时间线"],
+                accent="#2563eb",
+                fill="#f8fbff",
+            ),
+            card(
+                1710,
+                1110,
+                430,
+                210,
+                "离线评测",
+                ["智能运维黄金用例", "检索增强评测 / RAGAS", "回归门禁防退化"],
+                accent="#059669",
+                fill="#f7fffb",
+            ),
         ]
     )
 
@@ -214,7 +270,7 @@ def build_svg() -> str:
 <text x="80" y="88" font-size="62" font-weight="820" fill="#0f172a">AutoOnCall 诊断闭环流程图</text>
 <text x="82" y="140" font-size="30" font-weight="500" fill="#64748b">从告警到诊断报告：LLM 只负责计划与表达，后端用工具契约、证据链、审批和评测约束行为</text>
 <rect x="1810" y="58" width="510" height="70" rx="35" fill="#ffffff" stroke="#d6dee8" stroke-width="2"/>
-<text x="1844" y="103" font-size="26" font-weight="760" fill="#334155">核心主线：AIOps Agent + RAG Evidence</text>
+<text x="1844" y="103" font-size="26" font-weight="760" fill="#334155">核心主线：智能运维智能体 + 检索证据</text>
 
 <g filter="url(#softShadow)">
 {cards_svg}
@@ -222,11 +278,11 @@ def build_svg() -> str:
 {arrows_svg}
 
 <g filter="url(#softShadow)">
-{lane(120, 560, 980, 270, "RAG / Runbook 知识链路", ["文档上传：Markdown / PDF / HTML / CSV / XLSX", "结构化切分 -> Embedding -> Milvus + 词法检索", "rerank + trust gate + citation guard", "无可信来源时拒答"], accent="#059669", tag="给 Planner / Executor 提供可引用知识依据", fill="#f7fffb")}
-{lane(1300, 560, 980, 250, "外部系统适配器 / 工具层", ["Prometheus 指标、Loki / 日志网关、Trace、Kubernetes", "Redis、MySQL、CMDB、发布历史、历史工单", "工具输出统一归一化为 Evidence，失败也写入报告"], accent="#d97706", tag="不是模型自由操作生产", fill="#fffdf5")}
+{lane(120, 560, 980, 270, "检索增强 / 运行手册知识链路", ["文档上传：Markdown / PDF / HTML / CSV / XLSX", "结构化切分 -> 向量化 -> Milvus + 词法检索", "重排序 + 可信门控 + 引用保护", "无可信来源时拒答"], accent="#059669", tag="为计划器和执行器提供可引用知识依据", fill="#f7fffb")}
+{lane(1300, 560, 980, 250, "外部系统适配器 / 工具层", ["Prometheus 指标、Loki / 日志网关、调用链、Kubernetes", "Redis、MySQL、配置管理库、发布历史、历史工单", "工具输出统一归一化为证据，失败也写入报告"], accent="#d97706", tag="不是模型自由操作生产", fill="#fffdf5")}
 </g>
 
-{elbow([(970, 560), (970, 500), (1345, 500), (1345, 442)], color="#059669", width=5, label="Runbook 命中", label_pos=(1020, 490))}
+{elbow([(970, 560), (970, 500), (1345, 500), (1345, 442)], color="#059669", width=5, label="运行手册命中", label_pos=(1020, 490))}
 {elbow([(1790, 560), (1790, 500), (1345, 500), (1345, 442)], color="#d97706", width=5, label="工具取证", label_pos=(1650, 490))}
 
 <g filter="url(#softShadow)">
@@ -247,7 +303,7 @@ def build_svg() -> str:
 {elbow([(1355, 1005), (1925, 1005), (1925, 1110)], color="#059669", width=5, label="回归验证", label_pos=(1660, 995))}
 
 <rect x="120" y="1375" width="2160" height="66" rx="28" fill="#ffffff" stroke="#d6dee8" stroke-width="2"/>
-<text x="158" y="1418" font-size="28" font-weight="650" fill="#334155">面试表达：模型不直接改生产；所有结论必须回链 Evidence / citation；中高风险只进入审批、dry-run、sandbox 或人工记录。</text>
+<text x="158" y="1418" font-size="28" font-weight="650" fill="#334155">面试表达：模型不直接改生产；所有结论必须回链证据或引用；中高风险只进入审批、演练、沙箱或人工记录。</text>
 </svg>"""
 
 
@@ -258,7 +314,7 @@ def write_files() -> None:
     OUT_HTML.write_text(
         f"""<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>AutoOnCall Flow</title>
+<head><meta charset="utf-8"><title>自动值守诊断流程图</title>
 <style>html,body{{margin:0;background:#f8fafc}} svg{{display:block;width:100vw;height:auto}}</style></head>
 <body>{svg}</body>
 </html>""",
