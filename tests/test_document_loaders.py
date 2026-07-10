@@ -201,7 +201,14 @@ def test_compact_retrieval_chunk_exposes_source_specific_locators() -> None:
     assert compact["primary_key"] == "ticket_id=INC-REDIS-001"
 
 
-def test_generated_demo_rag_assets_are_loader_readable() -> None:
+def test_generated_demo_rag_assets_are_loader_readable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "scripts.data.generate_demo_rag_assets.DOCS_DIR",
+        tmp_path,
+    )
     generate_demo_rag_assets()
 
     expected = {
@@ -213,7 +220,7 @@ def test_generated_demo_rag_assets_are_loader_readable() -> None:
         "tickets.xlsx": "table",
     }
     for file_name, loader_type in expected.items():
-        path = Path("docs/knowledge-base") / file_name
+        path = tmp_path / file_name
         loader = document_loader_registry.get_loader(path)
         docs, report = loader.load(path)
 
