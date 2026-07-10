@@ -19,6 +19,8 @@ LOCAL_FULL_STACK_ENV = {
     "PORT": str(LOCAL_DEMO_PORT),
     "MILVUS_HOST": LOCAL_DEMO_HOST,
     "MILVUS_PORT": "19530",
+    "AIOPS_STORAGE_BACKEND": "sqlite",
+    "AIOPS_SQLITE_PATH": "data/aiops_state.db",
     "AIOPS_MOCK_FALLBACK_ENABLED": "false",
     "PROMETHEUS_BASE_URL": "http://127.0.0.1:19090",
     "LOG_GATEWAY_URL": "http://127.0.0.1:13100",

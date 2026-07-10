@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from collections.abc import Awaitable
@@ -23,6 +24,15 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+CONTRACT_RUNTIME_DIR = Path(tempfile.mkdtemp(prefix="autooncall-contract-"))
+os.environ.setdefault("AIOPS_STORAGE_BACKEND", "sqlite")
+os.environ.setdefault("AIOPS_SQLITE_PATH", str(CONTRACT_RUNTIME_DIR / "aiops_state.db"))
+os.environ.setdefault("AIOPS_FEEDBACK_PATH", str(CONTRACT_RUNTIME_DIR / "aiops_feedback.jsonl"))
+os.environ.setdefault(
+    "AIOPS_TOOL_OUTPUT_ARTIFACT_DIR",
+    str(CONTRACT_RUNTIME_DIR / "aiops_tool_artifacts"),
+)
 
 import httpx
 from fastapi import FastAPI

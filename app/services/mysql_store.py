@@ -49,6 +49,35 @@ _RETENTION_SQL: dict[str, tuple[str, str]] = {
         "DELETE FROM incident_states WHERE updated_at < %s",
     ),
 }
+_RUNTIME_RESET_SQL = (
+    (
+        "change_executions",
+        "SELECT COUNT(*) AS count FROM change_executions",
+        "DELETE FROM change_executions",
+    ),
+    (
+        "approval_requests",
+        "SELECT COUNT(*) AS count FROM approval_requests",
+        "DELETE FROM approval_requests",
+    ),
+    (
+        "diagnosis_reports",
+        "SELECT COUNT(*) AS count FROM diagnosis_reports",
+        "DELETE FROM diagnosis_reports",
+    ),
+    ("trace_events", "SELECT COUNT(*) AS count FROM trace_events", "DELETE FROM trace_events"),
+    (
+        "aiops_sessions",
+        "SELECT COUNT(*) AS count FROM aiops_sessions",
+        "DELETE FROM aiops_sessions",
+    ),
+    (
+        "incident_states",
+        "SELECT COUNT(*) AS count FROM incident_states",
+        "DELETE FROM incident_states",
+    ),
+    ("alert_events", "SELECT COUNT(*) AS count FROM alert_events", "DELETE FROM alert_events"),
+)
 
 
 class AIOpsMySQLStore:
@@ -685,6 +714,17 @@ class AIOpsMySQLStore:
                     """)
                 rows = cursor.fetchall()
         return [DiagnosisReport.model_validate(_load_payload(row)) for row in rows]
+
+    def reset_runtime_data(self) -> dict[str, int]:
+        """Delete all AIOps runtime records while preserving the database schema."""
+        deleted: dict[str, int] = {}
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                for table, count_sql, delete_sql in _RUNTIME_RESET_SQL:
+                    cursor.execute(count_sql)
+                    deleted[table] = int(cursor.fetchone()["count"])
+                    cursor.execute(delete_sql)
+        return deleted
 
     def cleanup_older_than(self, *, keep_days: int, dry_run: bool = False) -> dict[str, Any]:
         """Delete runtime records older than the retention window."""

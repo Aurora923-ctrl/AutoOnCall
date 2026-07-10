@@ -26,7 +26,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
+        install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         api-contract-verify security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
@@ -44,6 +44,7 @@ help:
 	@echo "  $(YELLOW)make init$(NC)         - 🚀 一键初始化（Docker → 服务 → 上传文档）"
 	@echo "  $(YELLOW)make bootstrap$(NC)    - 📦 安装项目和开发工具"
 	@echo "  $(YELLOW)make seed-demo$(NC)    - 🎬 生成诊断回放工作台样例数据"
+	@echo "  $(YELLOW)make reset-demo-data$(NC) - 清空运行态并恢复 4 条面试演示 Incident"
 	@echo "  $(YELLOW)make demo$(NC)         - 🎬 生成样例数据并启动本地演示服务"
 	@echo "  $(YELLOW)make interview-demo-all$(NC) - 生成面试演示包和统一 eval 摘要"
 	@echo "  $(YELLOW)make verify-local$(NC) - ✅ 快速测试 + AIOps/RAG/安全变更评测"
@@ -509,6 +510,11 @@ seed-demo:
 	@echo "$(YELLOW)🎬 生成 AIOps 诊断回放工作台样例数据...$(NC)"
 	$(PYTHON) scripts/data/seed_demo_data.py
 	@echo "$(GREEN)✅ 样例数据已写入 data/aiops_state.db，评测摘要已写入 logs/eval_summary.json$(NC)"
+
+reset-demo-data:
+	@echo "$(YELLOW)Resetting AIOps runtime data to the curated interview dataset...$(NC)"
+	$(PYTHON) scripts/maintenance/reset_demo_data.py
+	@echo "$(GREEN)Demo data reset complete: 4 incidents and 4 matching alerts.$(NC)"
 
 # 一键演示：生成样例数据并前台启动服务
 demo: seed-demo

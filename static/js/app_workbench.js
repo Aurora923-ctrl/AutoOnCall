@@ -670,7 +670,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     async refreshIncidents() {
         try {
-            const data = await this.apiGet(`${this.apiBaseUrl}/incidents?limit=50`);
+            const data = await this.apiGet(`${this.apiBaseUrl}/incidents?limit=5`);
             this.setDashboardItems('incidents', data.items);
             if (!this.selectedIncidentId && this.dashboardState.incidents.length > 0) {
                 this.selectedIncidentId = this.dashboardState.incidents[0].incident_id;

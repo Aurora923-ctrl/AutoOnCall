@@ -62,6 +62,9 @@ def main() -> int:
             ROOT / "deploy" / "compose" / "interview-stack.yml",
         )
 
+    if not args.skip_demo_reset:
+        reset_demo_data(python_cmd)
+
     start_mcp_servers(python_cmd, restart=args.restart_processes)
     start_api(python_cmd, restart=args.restart_processes)
 
@@ -100,6 +103,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--restart-processes", action="store_true", help="Restart MCP/API if already running."
+    )
+    parser.add_argument(
+        "--skip-demo-reset",
+        action="store_true",
+        help="Keep current AIOps runtime records instead of restoring the interview dataset.",
     )
     parser.add_argument(
         "--upload-docs",
@@ -178,6 +186,15 @@ def compose_up(label: str, compose_file: Path) -> None:
     command = ["docker", "compose"]
     command.extend(["-f", str(compose_file), "up", "-d", "--remove-orphans"])
     run(command, label=f"docker compose {label}")
+
+
+def reset_demo_data(python_cmd: str) -> None:
+    print("[RUN] Resetting AIOps runtime data to the curated interview dataset")
+    run(
+        [python_cmd, str(ROOT / "scripts" / "maintenance" / "reset_demo_data.py"), "--quiet"],
+        label="reset demo data",
+        env=runtime_env(),
+    )
 
 
 def start_mcp_servers(python_cmd: str, *, restart: bool) -> None:

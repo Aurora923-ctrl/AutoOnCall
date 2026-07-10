@@ -81,6 +81,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "buildIncidentFromAlertEvent" in script
     assert "summarizeAlertRawPayload" in script
     assert "/alerts?limit=20" in script
+    assert "/incidents?limit=5" in script
     assert "raw_payload" in script
     assert "renderAIOpsRunHistory" in script
     assert "buildAIOpsRunHistoryQuery" in script

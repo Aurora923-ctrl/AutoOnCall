@@ -149,6 +149,8 @@ def test_makefile_exposes_api_contract_verifier_in_verify_gate() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
     assert "api-contract-verify:" in makefile
+    assert "reset-demo-data:" in makefile
+    assert "scripts/maintenance/reset_demo_data.py" in makefile
     assert "scripts/eval/verify_api_contracts.py" in makefile
 
     verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]

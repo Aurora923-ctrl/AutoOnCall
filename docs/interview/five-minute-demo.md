@@ -20,6 +20,7 @@ Milvus/RAG 是加分项。只有在讲解带引用的运行手册问答时，再
 ## 固定命令顺序
 
 ```powershell
+make reset-demo-data
 make interview-up
 make sandbox-verify
 .venv\Scripts\python.exe scripts\eval\eval_cases.py `

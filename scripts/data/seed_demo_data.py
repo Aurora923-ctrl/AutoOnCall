@@ -37,8 +37,8 @@ from app.models.incident import utc_now
 from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.demo_incidents import build_demo_incident
-from app.services.sqlite_store import AIOpsSQLiteStore
 
 DEMO_EVAL_CASE_IDS = {
     "INC-REDIS-001": "redis_maxclients_timeout",
@@ -49,6 +49,7 @@ DEMO_EVAL_CASE_IDS = {
 
 DEFAULT_EVAL_SUMMARY = Path("logs/eval_summary.json")
 DEFAULT_ADAPTER_SUMMARY = Path("logs/full_stack_adapter_verification.json")
+DEMO_INCIDENT_IDS = tuple(DEMO_EVAL_CASE_IDS)
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,7 @@ def _plan_step(
 
 
 def _save_common_records(
-    store: AIOpsSQLiteStore,
+    store: AIOpsStateStore,
     *,
     incident_key: str,
     trace_id: str,
@@ -399,7 +400,7 @@ def _report(
     )
 
 
-def _seed_redis(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
+def _seed_redis(store: AIOpsStateStore, base_time: datetime) -> SeededCase:
     incident_id = "INC-REDIS-001"
     trace_id = "trace-demo-redis-maxclients"
     session_id = "session-demo-redis-maxclients"
@@ -798,7 +799,7 @@ def _seed_redis(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
     )
 
 
-def _seed_mysql(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
+def _seed_mysql(store: AIOpsStateStore, base_time: datetime) -> SeededCase:
     incident_id = "INC-MYSQL-001"
     trace_id = "trace-demo-mysql-slow-query"
     session_id = "session-demo-mysql-slow-query"
@@ -1001,7 +1002,7 @@ def _seed_mysql(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
     )
 
 
-def _seed_k8s(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
+def _seed_k8s(store: AIOpsStateStore, base_time: datetime) -> SeededCase:
     incident_id = "INC-K8S-001"
     trace_id = "trace-demo-k8s-crashloop"
     session_id = "session-demo-k8s-crashloop"
@@ -1075,8 +1076,11 @@ def _seed_k8s(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
         service_name="checkout-worker",
         severity="P2",
         env="prod",
-        status="completed",
-        summary="Replanner 在日志不足时追加 K8s Event，最终确认 OOMKilled。",
+        status="degraded",
+        summary=(
+            "Offline fixture reproduces CrashLoopBackOff and OOMKilled evidence; "
+            "the interview stack does not claim live Kubernetes connectivity."
+        ),
         root_cause=root_cause,
         evidence=evidence,
         tool_calls=tool_calls,
@@ -1194,8 +1198,8 @@ def _seed_k8s(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
         tool_calls=tool_calls,
         final_diagnosis=root_cause,
         remediation=remediation,
-        status="completed",
-        status_reason="追加证据后完成诊断",
+        status="degraded",
+        status_reason="Offline Kubernetes fixture; live cluster access is intentionally unavailable",
         base_time=_dt(base_time, -110),
     )
     return SeededCase(
@@ -1219,7 +1223,7 @@ def _seed_k8s(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
     )
 
 
-def _seed_forbidden_sql(store: AIOpsSQLiteStore, base_time: datetime) -> SeededCase:
+def _seed_forbidden_sql(store: AIOpsStateStore, base_time: datetime) -> SeededCase:
     incident_id = "INC-SQL-001"
     trace_id = "trace-demo-forbidden-sql"
     session_id = "session-demo-forbidden-sql"
@@ -1621,15 +1625,28 @@ def _print_summary(result: dict[str, Any]) -> None:
 def seed_demo_data(
     *,
     database_path: Path | str | None = None,
+    backend: str | None = None,
     eval_summary_path: Path | str = DEFAULT_EVAL_SUMMARY,
     adapter_summary_path: Path | str = DEFAULT_ADAPTER_SUMMARY,
+    reset: bool = True,
 ) -> dict[str, Any]:
-    database = Path(database_path or config.aiops_sqlite_path)
     eval_summary = Path(eval_summary_path)
     adapter_summary = Path(adapter_summary_path)
-    database.parent.mkdir(parents=True, exist_ok=True)
+    if database_path is not None:
+        database = Path(database_path)
+        database.parent.mkdir(parents=True, exist_ok=True)
+        store = create_aiops_store(database)
+        store_label = str(database)
+    else:
+        selected_backend = (backend or config.aiops_storage_backend or "sqlite").strip().lower()
+        store = create_aiops_store(backend=selected_backend)
+        store_label = (
+            getattr(store, "storage_path", None)
+            or getattr(store, "database_path", None)
+            or selected_backend
+        )
+    deleted = store.reset_runtime_data() if reset else {}
     base_time = utc_now().replace(microsecond=0)
-    store = AIOpsSQLiteStore(database)
     cases = [
         _seed_redis(store, base_time),
         _seed_mysql(store, base_time),
@@ -1643,7 +1660,12 @@ def seed_demo_data(
     _write_json(adapter_summary, adapter)
     status_counts = Counter(case.report_status for case in cases)
     return {
-        "database": str(database),
+        "database": str(store_label),
+        "backend": "sqlite"
+        if database_path is not None
+        else backend or config.aiops_storage_backend,
+        "reset": reset,
+        "deleted": deleted,
         "eval_summary": str(eval_summary),
         "adapter_summary": str(adapter_summary),
         "incident_count": len(cases),
@@ -1657,8 +1679,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--database",
         type=Path,
-        default=Path(config.aiops_sqlite_path),
-        help="SQLite database path. Defaults to the configured local AIOps store.",
+        default=None,
+        help="Explicit SQLite database path. Omit to use the configured AIOps backend.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("sqlite", "mysql"),
+        default=config.aiops_storage_backend,
+        help="Configured backend used when --database is omitted.",
     )
     parser.add_argument(
         "--eval-summary",
@@ -1672,6 +1700,11 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_ADAPTER_SUMMARY,
         help="Path for the full-stack adapter verification JSON.",
     )
+    parser.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="Upsert the four demo incidents without clearing existing runtime records.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Do not print the human summary.")
     return parser.parse_args()
 
@@ -1680,8 +1713,10 @@ def main() -> None:
     args = _parse_args()
     result = seed_demo_data(
         database_path=args.database,
+        backend=args.backend,
         eval_summary_path=args.eval_summary,
         adapter_summary_path=args.adapter_summary,
+        reset=not args.no_reset,
     )
     if not args.quiet:
         _print_summary(result)

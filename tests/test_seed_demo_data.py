@@ -72,3 +72,58 @@ def test_seed_demo_data_is_idempotent(tmp_path):
 
     assert len(store.list_trace_events(incident_id="INC-REDIS-001")) == first_event_count
     assert len(store.list_latest_reports()) == first_report_count
+
+
+def test_seed_demo_data_resets_unrelated_runtime_records(tmp_path):
+    database = tmp_path / "aiops_state.db"
+    eval_summary = tmp_path / "eval_summary.json"
+    adapter_summary = tmp_path / "adapter_summary.json"
+
+    seed_demo_data(
+        database_path=database,
+        eval_summary_path=eval_summary,
+        adapter_summary_path=adapter_summary,
+    )
+    store = AIOpsSQLiteStore(database)
+    extra = store.get_incident_state("INC-REDIS-001").model_copy(
+        update={
+            "incident_id": "INC-STALE-001",
+            "title": "Stale incident",
+            "service_name": "unknown-service",
+        }
+    )
+    store.save_incident_state(extra)
+
+    result = seed_demo_data(
+        database_path=database,
+        eval_summary_path=eval_summary,
+        adapter_summary_path=adapter_summary,
+    )
+
+    states = {state.incident_id: state for state in store.list_incident_states()}
+    alerts = store.list_alert_events(limit=20)
+    assert result["reset"] is True
+    assert set(states) == set(DEMO_EVAL_CASE_IDS)
+    assert len(alerts) == 4
+    assert {alert.incident_id for alert in alerts} == set(DEMO_EVAL_CASE_IDS)
+    assert all(state.service_name != "unknown-service" for state in states.values())
+    assert all(state.summary for state in states.values())
+    assert states["INC-K8S-001"].status == "degraded"
+
+
+def test_store_reset_runtime_data_clears_all_runtime_tables(tmp_path):
+    database = tmp_path / "aiops_state.db"
+    seed_demo_data(
+        database_path=database,
+        eval_summary_path=tmp_path / "eval_summary.json",
+        adapter_summary_path=tmp_path / "adapter_summary.json",
+    )
+    store = AIOpsSQLiteStore(database)
+
+    deleted = store.reset_runtime_data()
+
+    assert deleted["incident_states"] == 4
+    assert deleted["alert_events"] == 4
+    assert store.list_incident_states() == []
+    assert store.list_alert_events(limit=20) == []
+    assert store.list_latest_reports() == []
