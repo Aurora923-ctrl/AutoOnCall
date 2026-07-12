@@ -75,6 +75,75 @@ def build_eval_unavailable_payload(message: str, *, summary_path: Path) -> dict[
     }
 
 
+def build_interview_scorecard_payload(
+    raw_payload: dict[str, Any],
+    *,
+    scorecard_path: Path,
+) -> dict[str, Any]:
+    """Expose one-run interview scorecard data without merging current artifacts."""
+    run = _dict_or_empty(raw_payload.get("run"))
+    summary = _dict_or_empty(raw_payload.get("summary"))
+    modules = raw_payload.get("modules")
+    module_rows = modules if isinstance(modules, list) else []
+    run_id = str(run.get("run_id") or "")
+    environment = _dict_or_empty(run.get("environment"))
+    artifact_status = assess_eval_artifact_staleness(
+        {"environment": environment} if environment else {}
+    )
+    invalid_run_rows = [
+        str(item.get("key") or "unknown")
+        for item in module_rows
+        if isinstance(item, dict) and str(item.get("run_id") or "") != run_id
+    ]
+    return {
+        "available": bool(run_id) and not invalid_run_rows and not artifact_status["stale"],
+        "path": scorecard_path.name,
+        "artifact": scorecard_path.name,
+        "run": run,
+        "summary": summary,
+        "modules": module_rows,
+        "single_run_valid": bool(run_id) and not invalid_run_rows,
+        "invalid_run_modules": invalid_run_rows,
+        "artifact_status": artifact_status,
+        "stale": artifact_status["stale"],
+        "message": (
+            "interview scorecard loaded"
+            if run_id and not invalid_run_rows and not artifact_status["stale"]
+            else (
+                "interview scorecard is stale"
+                if artifact_status["stale"]
+                else "interview scorecard contains mixed or missing run ids"
+            )
+        ),
+    }
+
+
+def build_interview_scorecard_unavailable_payload(
+    message: str,
+    *,
+    scorecard_path: Path,
+) -> dict[str, Any]:
+    """Return a stable unavailable scorecard shape."""
+    return {
+        "available": False,
+        "path": scorecard_path.name,
+        "artifact": scorecard_path.name,
+        "run": None,
+        "summary": None,
+        "modules": [],
+        "single_run_valid": False,
+        "invalid_run_modules": [],
+        "artifact_status": {
+            "stale": True,
+            "reasons": ["artifact_unavailable"],
+            "generated_fingerprint": "",
+            "current_fingerprint": "",
+        },
+        "stale": True,
+        "message": message,
+    }
+
+
 def build_ragas_summary_payload(
     raw_payload: dict[str, Any],
     *,

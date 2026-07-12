@@ -113,7 +113,17 @@ VALUES
     (1, 1, 'payment_requested', JSON_OBJECT('channel', 'card')),
     (2, 2, 'payment_succeeded', JSON_OBJECT('channel', 'wallet')),
     (3, 3, 'payment_failed', JSON_OBJECT('reason', 'timeout')),
-    (4, 2, 'mysql_slow_query', JSON_OBJECT('query_ms', 920, 'sql_hash', '9f3a-pay-report'))
+    (
+        4,
+        2,
+        'mysql_slow_query',
+        JSON_OBJECT(
+            'query_ms', 2280,
+            'sql_hash', '9f3a-pay-report',
+            'feature_flag', 'PAYMENT_REPORT_ENABLED=true',
+            'change_id', 'CHG-10087'
+        )
+    )
 ON DUPLICATE KEY UPDATE
     order_id = VALUES(order_id),
     event_type = VALUES(event_type),
@@ -192,9 +202,10 @@ VALUES
     'P2',
     'MySQL slow query increased connection pool wait time',
     JSON_OBJECT(
-        'metrics', 'P95 latency over 2200ms',
-        'logs', 'Slow query and pool waiting signals',
-        'mysql', 'Slow_queries increased and Threads_connected is elevated',
+        'metrics', 'P95 latency is 2280ms while 5xx is only 1.2%; CPU is elevated but treated as a concurrent symptom',
+        'logs', 'Slow query digest 9f3a-pay-report overlaps with pool_waiting=6',
+        'mysql', 'Slow query held connections; active_connections=188/200 and pool_waiting=6',
+        'release', 'CHG-10087 enabled PAYMENT_REPORT_ENABLED=true and introduced the report date-range query',
         'approval', 'SQL, index, and config changes require human approval'
     ),
     'live-mysql-seed',

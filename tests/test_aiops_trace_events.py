@@ -52,6 +52,19 @@ async def test_executor_records_tool_call_trace(monkeypatch, tmp_path) -> None:
         "get_mcp_client_with_retry",
         fake_get_mcp_client_with_retry,
     )
+    original_registry_factory = executor_module.create_default_tool_registry
+
+    def registry_without_redis(*args, **kwargs):
+        registry = original_registry_factory(*args, **kwargs)
+        original_get = registry.get
+        registry.get = lambda name: None if name == "query_redis_status" else original_get(name)
+        return registry
+
+    monkeypatch.setattr(
+        executor_module,
+        "create_default_tool_registry",
+        registry_without_redis,
+    )
     step = PlanStep(
         step_id="s1",
         tool_name="query_redis_status",
@@ -71,7 +84,7 @@ async def test_executor_records_tool_call_trace(monkeypatch, tmp_path) -> None:
     assert events[0].tool_name == "query_redis_status"
     assert events[0].step_id == "s1"
     assert events[0].status == "failed"
-    assert events[0].metadata["data_source"] == "not_configured"
+    assert events[0].metadata["data_source"] == "failed"
 
 
 @pytest.mark.asyncio

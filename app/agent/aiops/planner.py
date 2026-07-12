@@ -27,7 +27,12 @@ from app.tools.registry import create_default_tool_registry
 from app.utils.log_safety import summarize_text_for_log
 
 from .plan_fallback import (
+    append_incident_requested_action_step,
     build_fallback_plan,
+    build_golden_dependency_plan,
+    infer_dependency_hint,
+    infer_service_name,
+    infer_symptom,
     normalize_plan_steps,
 )
 from .state import PlanExecuteState, normalize_plan_state_update
@@ -244,9 +249,13 @@ async def planner(
         else:
             raw_steps = []
 
-        structured_steps = _merge_runbook_steps(
-            runbook_steps,
-            normalize_plan_steps(raw_steps, input_text, incident),
+        structured_steps = _stabilize_interview_golden_plan(
+            _merge_runbook_steps(
+                runbook_steps,
+                normalize_plan_steps(raw_steps, input_text, incident),
+            ),
+            input_text=input_text,
+            incident=incident,
         )
         logger.info(f"结构化计划已生成，共 {len(structured_steps)} 个步骤")
         for i, step in enumerate(structured_steps, 1):
@@ -263,9 +272,15 @@ async def planner(
 
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
-        structured_steps = _merge_runbook_steps(
-            _extract_runbook_sop_steps(locals().get("experience_docs", ""), input_text, incident),
-            build_fallback_plan(input_text=input_text, incident=incident),
+        structured_steps = _stabilize_interview_golden_plan(
+            _merge_runbook_steps(
+                _extract_runbook_sop_steps(
+                    locals().get("experience_docs", ""), input_text, incident
+                ),
+                build_fallback_plan(input_text=input_text, incident=incident),
+            ),
+            input_text=input_text,
+            incident=incident,
         )
         return {
             **normalize_plan_state_update(structured_steps),
@@ -404,4 +419,36 @@ def _merge_runbook_steps(
     return [
         step.model_copy(update={"step_id": f"s{index}", "status": "pending"})
         for index, step in enumerate(merged, 1)
+    ]
+
+
+def _stabilize_interview_golden_plan(
+    steps: list[PlanStep],
+    *,
+    input_text: str,
+    incident: dict[str, Any],
+) -> list[PlanStep]:
+    """Keep interview golden incidents on a stable evidence and risk path."""
+    raw_alert = incident.get("raw_alert")
+    if not isinstance(raw_alert, dict):
+        return steps
+
+    service_name = infer_service_name(input_text, incident)
+    symptom = infer_symptom(input_text, incident)
+    dependency_hint = infer_dependency_hint(service_name, symptom.lower())
+    golden_steps = build_golden_dependency_plan(
+        service_name,
+        symptom,
+        dependency_hint,
+        has_raw_alert=True,
+    )
+    if not golden_steps:
+        return steps
+
+    by_tool = {step.tool_name: step for step in steps}
+    stabilized = [by_tool.get(step.tool_name, step) for step in golden_steps]
+    stabilized = append_incident_requested_action_step(stabilized, incident)
+    return [
+        step.model_copy(update={"step_id": f"s{index}", "status": "pending"})
+        for index, step in enumerate(stabilized, 1)
     ]

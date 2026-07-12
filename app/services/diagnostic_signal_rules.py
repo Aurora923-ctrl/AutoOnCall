@@ -154,11 +154,19 @@ def infer_evidence_stance(
             else "neutral"
         )
     if evidence_type == "change":
-        return (
-            "supporting"
-            if mentions_any(text, ["deploy", "发布", "change", "变更", "rollback"])
-            else "neutral"
-        )
+        if mentions_any(
+            text,
+            [
+                "payment_report_enabled=true",
+                "reconciliation report",
+                "report feature",
+                "feature flag",
+                "slow query dashboard",
+                "date-range query",
+            ],
+        ):
+            return "supporting"
+        return "neutral"
     if evidence_type == "alert":
         return (
             "supporting"
@@ -217,7 +225,11 @@ def build_confidence_reason(
     if evidence_type == "service_context":
         return "服务依赖和责任人上下文已确认"
     if evidence_type == "change":
-        return "发布/变更记录用于时间线关联"
+        return (
+            "发布记录命中报表 Feature Flag 或查询路径变更，用于提高慢 SQL 假设排序"
+            if stance == "supporting"
+            else "发布记录仅提供时间线背景，不能单独证明根因"
+        )
     if evidence_type == "risk":
         return "风险策略规则命中"
     if stance == "unknown":
@@ -287,7 +299,19 @@ def evidence_matches_category(
         if candidate["category"] == category:
             category_type = str(candidate["evidence_type"])
             break
-    return evidence_type == category_type or mentions_any(text, keywords)
+    if evidence_type == category_type:
+        return True
+    auxiliary_types = {
+        "redis_maxclients": {"log", "metric", "ticket", "runbook", "change"},
+        "mysql_slow_query": {"log", "metric", "ticket", "runbook", "change"},
+        "k8s_crashloop": {"log", "metric", "change"},
+        "k8s_oomkilled": {"log", "metric"},
+        "cpu_hot_loop": set(),
+        "memory_leak": {"log", "k8s"},
+        "disk_capacity": {"metric", "k8s"},
+        "dependency_timeout": {"log"},
+    }
+    return evidence_type in auxiliary_types.get(category, set()) and mentions_any(text, keywords)
 
 
 def missing_tools_from_context(successful_tools: set[str], context: str) -> list[str]:
@@ -380,9 +404,24 @@ def has_log_timeout_signal(evidence_items: list[Any], joined_text: str) -> bool:
 def has_mysql_signal(evidence_items: list[Any], joined_text: str) -> bool:
     for evidence in evidence_items:
         output = evidence_output(evidence)
-        if isinstance(output, dict) and output.get("slow_queries"):
+        if not isinstance(output, dict):
+            continue
+        if output.get("slow_queries"):
             return True
-    return mentions_any(joined_text, ["mysql", "slow query", "慢查询", "lock_wait"])
+        signals = output.get("signals")
+        if isinstance(signals, dict) and (
+            _positive_number(signals.get("slow_query_count"))
+            or _positive_number(signals.get("pool_waiting"))
+        ):
+            return True
+    return mentions_any(
+        joined_text,
+        ["mysql", "slow query", "慢查询", "lock_wait", "pool_waiting", "sql digest"],
+    )
+
+
+def _positive_number(value: Any) -> bool:
+    return isinstance(value, int | float) and value > 0
 
 
 def has_k8s_signal(evidence_items: list[Any], joined_text: str) -> bool:

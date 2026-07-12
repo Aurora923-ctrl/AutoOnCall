@@ -228,7 +228,10 @@ def summarize(records: list[dict[str, Any]], probes: list[dict[str, Any]]) -> di
                 "Milvus storage/provenance verification for multi-source RAG assets; "
                 "deterministic local vectors are used to avoid cloud embedding dependency."
             ),
-            "environment": collect_eval_environment(suite="milvus_multisource"),
+            "environment": collect_eval_environment(
+                suite="milvus_multisource",
+                evidence_level="local_live",
+            ),
         },
         "summary": {
             "status": "passed" if passed == len(probes) else "failed",

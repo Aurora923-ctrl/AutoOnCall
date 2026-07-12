@@ -107,6 +107,55 @@ def test_analyzer_marks_redis_maxclients_evidence_as_report_ready() -> None:
     assert any("阈值" in reason for reason in analysis.confidence_reasons)
 
 
+def test_redis_golden_incident_waits_for_runbook_and_history_before_report() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout and 5xx",
+        session_id="analysis-redis-golden",
+    )
+    state["incident"].update(
+        {
+            "service_name": "order-service",
+            "raw_alert": {
+                "alertname": "RedisMaxClientsNearLimit",
+                "dependency": "redis-order",
+            },
+        }
+    )
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_metrics",
+            {
+                "summary": "P95=3250ms, 5xx=8.20%",
+                "p95_latency_ms": {"status": "high"},
+                "error_rate": {"status": "high"},
+            },
+            "s1",
+        ),
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "Redis connection timeout in /api/order/create"},
+            "s2",
+        ),
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "connected_clients=9940/10000",
+                "connected_clients": 9940,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.994,
+                "alert_info": {"triggered": True},
+            },
+            "s3",
+        ),
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert analysis.decision == "add_steps"
+    assert analysis.evidence_sufficient is False
+    assert {"search_runbook", "search_history_ticket"} <= set(analysis.missing_evidence)
+
+
 def test_analyzer_caps_unknown_successful_evidence_sources() -> None:
     state = create_initial_aiops_state(
         "order-service Redis connection timeout and 5xx",
@@ -355,3 +404,53 @@ def test_analyzer_ranks_mysql_slow_query_hypothesis() -> None:
     assert analysis.hypothesis_ranking[0].category == "mysql_slow_query"
     assert "MySQL" in analysis.hypothesis_ranking[0].title
     assert analysis.hypothesis_ranking[0].supporting_evidence_ids
+
+
+def test_mysql_golden_incident_requires_release_and_reference_evidence() -> None:
+    state = create_initial_aiops_state(
+        "payment-service MySQL slow query latency",
+        session_id="analysis-mysql-golden",
+    )
+    state["incident"].update(
+        {
+            "service_name": "payment-service",
+            "raw_alert": {
+                "alertname": "MySQLSlowQueryLatency",
+                "dependency": "payment-mysql",
+            },
+        }
+    )
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_mysql_status",
+            {
+                "summary": "slow query digest=9f3a-pay-report, pool_waiting=6",
+                "slow_queries": [{"sql_digest": "9f3a-pay-report", "avg_ms": 2280}],
+                "signals": {"slow_query_count": 18, "pool_waiting": 6},
+            },
+            "s1",
+        ),
+        evidence_from_tool(
+            "query_metrics",
+            {
+                "summary": "P95=2280ms, 5xx=1.2%, CPU=78.5%",
+                "p95_latency_ms": {"status": "high"},
+                "error_rate": {"status": "high"},
+            },
+            "s2",
+        ),
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "slow query digest=9f3a-pay-report pool_waiting=6"},
+            "s3",
+        ),
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert analysis.decision == "add_steps"
+    assert {
+        "query_deploy_history",
+        "search_runbook",
+        "search_history_ticket",
+    } <= set(analysis.missing_evidence)

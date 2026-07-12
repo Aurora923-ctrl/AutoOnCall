@@ -24,6 +24,7 @@ class DiagnosisReport(BaseModel):
     hypotheses: list[str] = Field(default_factory=list)
     hypothesis_ranking: list[dict[str, Any]] = Field(default_factory=list)
     selected_root_cause_id: str = ""
+    selected_root_cause_category: str = "unknown"
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     key_findings: list[str] = Field(default_factory=list)
     confirmed_facts: list[str] = Field(default_factory=list)

@@ -7,7 +7,7 @@ from typing import Any
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.redis_info import RedisInfoAdapter
 from app.services.service_topology import get_primary_dependency_instance
-from app.tools.base import AIOpsTool, clamp_duration
+from app.tools.base import AIOpsTool, ToolRetryPolicy, clamp_duration
 
 
 class QueryRedisStatusTool(AIOpsTool):
@@ -27,6 +27,11 @@ class QueryRedisStatusTool(AIOpsTool):
     risk_level = "low"
     read_only = True
     timeout_seconds = 8.0
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["Redis INFO", "Redis incident evidence keys", "service topology"]
     degradation_strategy = (
         "Use Redis INFO and configured Redis evidence keys when available; otherwise return "

@@ -1,0 +1,215 @@
+{
+    "schema_version":  "controlled_fault_plan.v1",
+    "experiments":  [
+                        {
+                            "experiment_id":  "cf-redis-01",
+                            "fault_type":  "redis_capacity",
+                            "target":  "autooncall-redis",
+                            "parameters":  {
+                                               "maxclients":  16,
+                                               "hold_seconds":  0.2,
+                                               "connection_count":  12
+                                           },
+                            "ground_truth":  "redis_maxclients_capacity_pressure"
+                        },
+                        {
+                            "experiment_id":  "cf-redis-02",
+                            "fault_type":  "redis_capacity",
+                            "target":  "autooncall-redis",
+                            "parameters":  {
+                                               "maxclients":  18,
+                                               "hold_seconds":  0.2,
+                                               "connection_count":  14
+                                           },
+                            "ground_truth":  "redis_maxclients_capacity_pressure"
+                        },
+                        {
+                            "experiment_id":  "cf-redis-03",
+                            "fault_type":  "redis_capacity",
+                            "target":  "autooncall-redis",
+                            "parameters":  {
+                                               "maxclients":  20,
+                                               "hold_seconds":  0.2,
+                                               "connection_count":  16
+                                           },
+                            "ground_truth":  "redis_maxclients_capacity_pressure"
+                        },
+                        {
+                            "experiment_id":  "cf-redis-04",
+                            "fault_type":  "redis_capacity",
+                            "target":  "autooncall-redis",
+                            "parameters":  {
+                                               "maxclients":  22,
+                                               "hold_seconds":  0.2,
+                                               "connection_count":  18
+                                           },
+                            "ground_truth":  "redis_maxclients_capacity_pressure"
+                        },
+                        {
+                            "experiment_id":  "cf-redis-05",
+                            "fault_type":  "redis_capacity",
+                            "target":  "autooncall-redis",
+                            "parameters":  {
+                                               "maxclients":  24,
+                                               "hold_seconds":  0.2,
+                                               "connection_count":  20
+                                           },
+                            "ground_truth":  "redis_maxclients_capacity_pressure"
+                        },
+                        {
+                            "experiment_id":  "cf-mysql-01",
+                            "fault_type":  "mysql_slow_query",
+                            "target":  "autooncall-mysql",
+                            "parameters":  {
+                                               "sleep_seconds":  0.1,
+                                               "hold_seconds":  0.1,
+                                               "concurrency":  2
+                                           },
+                            "ground_truth":  "mysql_bounded_slow_query"
+                        },
+                        {
+                            "experiment_id":  "cf-mysql-02",
+                            "fault_type":  "mysql_slow_query",
+                            "target":  "autooncall-mysql",
+                            "parameters":  {
+                                               "sleep_seconds":  0.15,
+                                               "hold_seconds":  0.1,
+                                               "concurrency":  3
+                                           },
+                            "ground_truth":  "mysql_bounded_slow_query"
+                        },
+                        {
+                            "experiment_id":  "cf-mysql-03",
+                            "fault_type":  "mysql_slow_query",
+                            "target":  "autooncall-mysql",
+                            "parameters":  {
+                                               "sleep_seconds":  0.2,
+                                               "hold_seconds":  0.1,
+                                               "concurrency":  4
+                                           },
+                            "ground_truth":  "mysql_bounded_slow_query"
+                        },
+                        {
+                            "experiment_id":  "cf-mysql-04",
+                            "fault_type":  "mysql_slow_query",
+                            "target":  "autooncall-mysql",
+                            "parameters":  {
+                                               "sleep_seconds":  0.25,
+                                               "hold_seconds":  0.1,
+                                               "concurrency":  5
+                                           },
+                            "ground_truth":  "mysql_bounded_slow_query"
+                        },
+                        {
+                            "experiment_id":  "cf-mysql-05",
+                            "fault_type":  "mysql_slow_query",
+                            "target":  "autooncall-mysql",
+                            "parameters":  {
+                                               "sleep_seconds":  0.3,
+                                               "hold_seconds":  0.1,
+                                               "concurrency":  6
+                                           },
+                            "ground_truth":  "mysql_bounded_slow_query"
+                        },
+                        {
+                            "experiment_id":  "cf-downstream-01",
+                            "fault_type":  "downstream_http",
+                            "target":  "127.0.0.1",
+                            "parameters":  {
+                                               "delay_ms":  100,
+                                               "status_code":  500,
+                                               "hold_seconds":  0.1
+                                           },
+                            "ground_truth":  "downstream_dependency_latency_or_5xx"
+                        },
+                        {
+                            "experiment_id":  "cf-downstream-02",
+                            "fault_type":  "downstream_http",
+                            "target":  "127.0.0.1",
+                            "parameters":  {
+                                               "delay_ms":  150,
+                                               "status_code":  502,
+                                               "hold_seconds":  0.1
+                                           },
+                            "ground_truth":  "downstream_dependency_latency_or_5xx"
+                        },
+                        {
+                            "experiment_id":  "cf-downstream-03",
+                            "fault_type":  "downstream_http",
+                            "target":  "127.0.0.1",
+                            "parameters":  {
+                                               "delay_ms":  200,
+                                               "status_code":  503,
+                                               "hold_seconds":  0.1
+                                           },
+                            "ground_truth":  "downstream_dependency_latency_or_5xx"
+                        },
+                        {
+                            "experiment_id":  "cf-downstream-04",
+                            "fault_type":  "downstream_http",
+                            "target":  "127.0.0.1",
+                            "parameters":  {
+                                               "delay_ms":  250,
+                                               "status_code":  504,
+                                               "hold_seconds":  0.1
+                                           },
+                            "ground_truth":  "downstream_dependency_latency_or_5xx"
+                        },
+                        {
+                            "experiment_id":  "cf-downstream-05",
+                            "fault_type":  "downstream_http",
+                            "target":  "127.0.0.1",
+                            "parameters":  {
+                                               "delay_ms":  300,
+                                               "status_code":  429,
+                                               "hold_seconds":  0.1
+                                           },
+                            "ground_truth":  "downstream_dependency_latency_or_5xx"
+                        },
+                        {
+                            "experiment_id":  "cf-evidence-01",
+                            "fault_type":  "evidence_backend_outage",
+                            "target":  "autooncall-prometheus",
+                            "parameters":  {
+                                               "hold_seconds":  0.2
+                                           },
+                            "ground_truth":  "prometheus_or_loki_evidence_degraded"
+                        },
+                        {
+                            "experiment_id":  "cf-evidence-02",
+                            "fault_type":  "evidence_backend_outage",
+                            "target":  "autooncall-loki",
+                            "parameters":  {
+                                               "hold_seconds":  0.2
+                                           },
+                            "ground_truth":  "prometheus_or_loki_evidence_degraded"
+                        },
+                        {
+                            "experiment_id":  "cf-evidence-03",
+                            "fault_type":  "evidence_backend_outage",
+                            "target":  "autooncall-prometheus",
+                            "parameters":  {
+                                               "hold_seconds":  0.3
+                                           },
+                            "ground_truth":  "prometheus_or_loki_evidence_degraded"
+                        },
+                        {
+                            "experiment_id":  "cf-evidence-04",
+                            "fault_type":  "evidence_backend_outage",
+                            "target":  "autooncall-loki",
+                            "parameters":  {
+                                               "hold_seconds":  0.3
+                                           },
+                            "ground_truth":  "prometheus_or_loki_evidence_degraded"
+                        },
+                        {
+                            "experiment_id":  "cf-evidence-05",
+                            "fault_type":  "evidence_backend_outage",
+                            "target":  "autooncall-prometheus",
+                            "parameters":  {
+                                               "hold_seconds":  0.4
+                                           },
+                            "ground_truth":  "prometheus_or_loki_evidence_degraded"
+                        }
+                    ]
+}

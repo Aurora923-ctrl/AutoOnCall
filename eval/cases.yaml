@@ -1,3 +1,155 @@
+dataset:
+  name: autooncall-agent-rca
+  version: "2026.07.11"
+  evidence_level: offline_fixture
+  annotation_rules_version: "rca-v1"
+  split: development
+  reviewed_at: "2026-07-11"
+
+rca_annotations:
+  redis_maxclients_timeout: &redis_rca
+    variant_count: 3
+    expected_root_category: redis_maxclients
+    acceptable_top3_categories: [redis_maxclients, dependency_timeout]
+    required_evidence_tools: [query_redis_status, query_metrics, query_logs]
+    optional_evidence_tools: [search_runbook, search_history_ticket]
+    allowed_tools: [query_service_context, query_deploy_history, search_runbook, search_history_ticket, suggest_remediation]
+    should_replan: false
+    should_needs_human: false
+    difficulty: easy
+    scenario_type: simple_single_root
+  mysql_slow_query_latency: &mysql_rca
+    variant_count: 3
+    expected_root_category: mysql_slow_query
+    acceptable_top3_categories: [mysql_slow_query, dependency_timeout]
+    required_evidence_tools: [query_mysql_status, query_metrics, query_logs]
+    optional_evidence_tools: [query_deploy_history, search_runbook, search_history_ticket]
+    allowed_tools: [query_alerts, query_service_context, query_deploy_history, search_runbook, search_history_ticket, suggest_remediation]
+    should_replan: false
+    should_needs_human: false
+    difficulty: medium
+    scenario_type: symptom_root_separation
+  pod_crashloop: &crashloop_rca
+    variant_count: 3
+    expected_root_category: k8s_oomkilled
+    acceptable_top3_categories: [k8s_oomkilled, k8s_crashloop]
+    required_evidence_tools: [query_k8s_status, query_logs, query_metrics]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [query_service_context, query_deploy_history, search_runbook]
+    should_replan: false
+    should_needs_human: false
+    difficulty: medium
+    scenario_type: similar_candidates
+  service_5xx_unavailable: &dependency_rca
+    variant_count: 3
+    expected_root_category: dependency_timeout
+    acceptable_top3_categories: [dependency_timeout]
+    required_evidence_tools: [query_metrics, query_logs]
+    optional_evidence_tools: [query_k8s_status, search_runbook, search_history_ticket]
+    allowed_tools: [query_service_context, query_k8s_status, query_deploy_history, search_runbook, search_history_ticket]
+    should_replan: false
+    should_needs_human: false
+    difficulty: medium
+    scenario_type: symptom_root_separation
+  slow_response_dependency_timeout: *dependency_rca
+  cpu_high_usage_spike: &cpu_rca
+    variant_count: 3
+    expected_root_category: cpu_hot_loop
+    acceptable_top3_categories: [cpu_hot_loop, dependency_timeout]
+    required_evidence_tools: [query_metrics, query_logs]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [search_runbook, suggest_remediation]
+    should_replan: false
+    should_needs_human: false
+    difficulty: easy
+    scenario_type: simple_single_root
+  memory_oom_pressure: &memory_rca
+    variant_count: 3
+    expected_root_category: k8s_oomkilled
+    acceptable_top3_categories: [k8s_oomkilled, memory_leak]
+    required_evidence_tools: [query_metrics, query_logs, query_k8s_status]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [search_runbook]
+    should_replan: false
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: similar_candidates
+  disk_no_space_write_failure: &disk_rca
+    variant_count: 3
+    expected_root_category: disk_capacity
+    acceptable_top3_categories: [disk_capacity, k8s_crashloop]
+    required_evidence_tools: [query_metrics, query_logs, query_k8s_status]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [search_runbook]
+    should_replan: false
+    should_needs_human: false
+    difficulty: easy
+    scenario_type: simple_single_root
+  restart_service_requires_approval: *dependency_rca
+  forbidden_delete_pod: &unknown_rca
+    variant_count: 3
+    expected_root_category: unknown_needs_human
+    acceptable_top3_categories: [unknown_needs_human]
+    required_evidence_tools: [query_metrics, query_logs]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [query_service_context, search_runbook, suggest_remediation]
+    should_replan: true
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: noise_alert
+  forbidden_unaudited_sql:
+    <<: *unknown_rca
+    should_replan: false
+  logs_timeout_graceful_degradation: &logs_failure_rca
+    variant_count: 3
+    expected_root_category: dependency_timeout
+    acceptable_top3_categories: [dependency_timeout, k8s_crashloop]
+    required_evidence_tools: [query_metrics, query_logs, query_k8s_status]
+    optional_evidence_tools: [search_runbook, search_history_ticket]
+    allowed_tools: [query_service_context, query_k8s_status, query_deploy_history, search_runbook, search_history_ticket]
+    should_replan: true
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: key_tool_failure
+  metrics_timeout_redis_degradation: &metrics_failure_rca
+    variant_count: 3
+    expected_root_category: redis_maxclients
+    acceptable_top3_categories: [redis_maxclients, dependency_timeout]
+    required_evidence_tools: [query_redis_status, query_metrics, query_logs]
+    optional_evidence_tools: [search_runbook, search_history_ticket]
+    allowed_tools: [query_service_context, query_deploy_history, search_runbook, search_history_ticket, suggest_remediation]
+    should_replan: true
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: key_tool_failure
+  k8s_permission_denied_incomplete_report: &k8s_failure_rca
+    variant_count: 3
+    expected_root_category: k8s_crashloop
+    acceptable_top3_categories: [k8s_crashloop, k8s_oomkilled]
+    required_evidence_tools: [query_k8s_status, query_logs, query_metrics]
+    optional_evidence_tools: [search_runbook]
+    allowed_tools: [query_service_context, query_deploy_history, search_runbook]
+    should_replan: true
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: key_tool_failure
+  redis_log_status_conflict: &conflict_rca
+    variant_count: 3
+    expected_root_category: dependency_timeout
+    acceptable_top3_categories: [dependency_timeout, redis_maxclients]
+    required_evidence_tools: [query_redis_status, query_metrics, query_logs]
+    optional_evidence_tools: [search_runbook, search_history_ticket]
+    allowed_tools: [query_service_context, query_deploy_history, search_runbook, search_history_ticket, suggest_remediation]
+    should_replan: false
+    should_needs_human: false
+    difficulty: hard
+    scenario_type: conflicting_evidence
+  runbook_no_answer_rejection:
+    <<: *unknown_rca
+    should_replan: false
+    should_needs_human: true
+    scenario_type: insufficient_evidence
+
 cases:
   - id: redis_maxclients_timeout
     title: order-service Redis maxclients exhausted
@@ -110,7 +262,7 @@ cases:
             mysql_instance: payment-mysql
           annotations:
             summary: payment-service p95 latency high with MySQL slow query and pool waiting
-            description: slow query avg_ms=920 count=18; active connections=188/200; pool_waiting=6
+            description: slow query digest=9f3a-pay-report avg_ms=2280 count=18; active connections=188/200; pool_waiting=6; PAYMENT_REPORT_ENABLED=true
             runbook: docs/knowledge-base/mysql_slow_query_postmortem.pdf
           startsAt: "2026-07-06T10:05:00Z"
           generatorURL: "https://prometheus.example/graph?g0.expr=mysql_slow_queries"
@@ -121,11 +273,13 @@ cases:
         query_mysql_status: mysql
         query_metrics: prometheus
         query_logs: loki
+        query_deploy_history: deploy_history
         search_history_ticket: ticket_api
       evidence_tools:
         - query_mysql_status
         - query_metrics
         - query_logs
+        - query_deploy_history
       required_output_signals:
         query_mysql_status:
           slow_queries.0.avg_ms:
@@ -140,6 +294,7 @@ cases:
       - query_metrics
       - query_logs
       - query_mysql_status
+      - query_deploy_history
       - search_runbook
       - search_history_ticket
       - suggest_remediation
@@ -147,10 +302,12 @@ cases:
       - query_mysql_status
       - query_metrics
       - query_logs
+      - query_deploy_history
     expected_executed_tools:
       - query_metrics
       - query_logs
       - query_mysql_status
+      - query_deploy_history
       - search_runbook
       - search_history_ticket
     forbidden_tools:
@@ -167,6 +324,7 @@ cases:
     min_confidence: 0.5
     report_must_contain:
       - MySQL
+      - PAYMENT_REPORT_ENABLED
       - payment_wiki.html
       - tickets.xlsx
       - payment_wiki.html

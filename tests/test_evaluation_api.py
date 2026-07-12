@@ -349,3 +349,86 @@ async def test_eval_backlog_api_returns_unavailable_when_missing(monkeypatch, tm
     assert payload["available"] is False
     assert payload["summary"]["total"] == 0
     assert payload["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_scorecard_api_reads_only_latest_run(monkeypatch, tmp_path) -> None:
+    evaluations_api = importlib.import_module("app.api.evaluations")
+    benchmark_root = tmp_path / "logs" / "benchmarks"
+    run_dir = benchmark_root / "run-001"
+    run_dir.mkdir(parents=True)
+    manifest_path = run_dir / "baseline_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    (run_dir / "interview_scorecard.json").write_text(
+        json.dumps(
+            {
+                "run": {"run_id": "run-001", "single_run_enforced": True},
+                "summary": {"status": "passed", "production_status": "not_enough_data"},
+                "modules": [
+                    {
+                        "key": "rag_retrieval",
+                        "run_id": "run-001",
+                        "evidence_level": "offline_fixture",
+                        "sample_count": 80,
+                        "failed_case_count": 1,
+                        "artifact_path": "logs/benchmarks/run-001/rag.json",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest = benchmark_root / "latest.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "run_id": "run-001",
+                "manifest_json": str(manifest_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(evaluations_api, "BENCHMARK_LATEST_PATH", latest)
+    monkeypatch.setattr(
+        evaluations_api,
+        "build_interview_scorecard_payload",
+        lambda raw_payload, scorecard_path: {
+            "available": True,
+            "single_run_valid": True,
+            "run": raw_payload["run"],
+            "summary": raw_payload["summary"],
+            "modules": raw_payload["modules"],
+        },
+    )
+
+    payload = await evaluations_api.get_interview_scorecard()
+
+    assert payload["available"] is True
+    assert payload["single_run_valid"] is True
+    assert payload["run"]["run_id"] == "run-001"
+    assert payload["summary"]["production_status"] == "not_enough_data"
+    assert payload["modules"][0]["sample_count"] == 80
+
+
+@pytest.mark.asyncio
+async def test_scorecard_api_rejects_scorecard_from_another_run(monkeypatch, tmp_path) -> None:
+    evaluations_api = importlib.import_module("app.api.evaluations")
+    run_dir = tmp_path / "logs" / "benchmarks" / "run-001"
+    run_dir.mkdir(parents=True)
+    manifest_path = run_dir / "baseline_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    (run_dir / "interview_scorecard.json").write_text(
+        json.dumps({"run": {"run_id": "run-old"}, "summary": {}, "modules": []}),
+        encoding="utf-8",
+    )
+    latest = run_dir.parent / "latest.json"
+    latest.write_text(
+        json.dumps({"run_id": "run-001", "manifest_json": str(manifest_path)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(evaluations_api, "BENCHMARK_LATEST_PATH", latest)
+
+    payload = await evaluations_api.get_interview_scorecard()
+
+    assert payload["available"] is False
+    assert "does not belong" in payload["message"]

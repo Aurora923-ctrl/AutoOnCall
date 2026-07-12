@@ -24,11 +24,23 @@ class FakeRegistry:
     async def arun(self, name: str, input_args: dict):
         source = self.sources.get(name, "mock")
         status = "failed" if source == "failed" else "success"
+        is_payment = input_args.get("service_name") == "payment-service"
         output = {
             "source": source,
             "summary": f"{name} returned {source}",
             "signals": {
                 "fixture": 1,
+                "connected_clients": 9940,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.994,
+                "blocked_clients": 37,
+                "p95_latency_ms": 2280 if is_payment else 3250,
+                "error_rate": 0.012 if is_payment else 0.082,
+                "cpu_usage_percent": 78.5,
+                "log_count": 12,
+                "ticket_count": 1,
+                "deployment_count": 1,
+                "feature_flag_change": True,
                 "slow_query_count": 18,
                 "pool_waiting": 6,
                 "active_connections": 188,
@@ -74,6 +86,8 @@ async def test_verify_adapters_passes_when_all_real_sources_match() -> None:
         "loki",
         "ticket_api",
     ]
+    assert payload["golden_chains"]["redis_maxclients"]["signal_failures"] == []
+    assert payload["golden_chains"]["mysql_slow_query"]["signal_failures"] == []
 
 
 @pytest.mark.asyncio

@@ -59,9 +59,9 @@ class CMDBAdapter:
                 "dependency_count": len(dependencies),
                 "has_owner": bool(service.get("owner")),
                 "has_business_context": bool(business_context),
-                "critical_endpoint_count": len(critical_endpoints)
-                if isinstance(critical_endpoints, list)
-                else 0,
+                "critical_endpoint_count": (
+                    len(critical_endpoints) if isinstance(critical_endpoints, list) else 0
+                ),
             },
             raw=payload,
             service_name=service_name,
@@ -122,6 +122,7 @@ class DeployHistoryAdapter:
             for item in deployments
             if str(item.get("risk") or "").lower() in {"high", "critical"}
         ]
+        release_correlation = _release_correlation(service_name, recent_change)
         return adapter_success(
             source="deploy_history",
             summary=(
@@ -132,6 +133,7 @@ class DeployHistoryAdapter:
                 "deployment_count": len(deployments),
                 "latest_status": recent_change.get("status", ""),
                 "high_risk_change_count": len(high_risk_changes),
+                "feature_flag_change": bool(release_correlation),
             },
             raw=payload,
             service_name=service_name,
@@ -139,7 +141,62 @@ class DeployHistoryAdapter:
             deployments=deployments,
             recent_change=recent_change,
             high_risk_changes=high_risk_changes,
+            release_correlation=release_correlation,
+            fact=_release_fact(recent_change),
+            inference=_release_inference(release_correlation),
+            uncertainty=(
+                "Release timing is supporting context. It raises the matching SQL-path "
+                "hypothesis but cannot prove root cause without slow-query and pool evidence."
+            ),
         )
+
+
+def _release_correlation(service_name: str, recent_change: dict[str, Any]) -> dict[str, Any]:
+    text = " ".join(
+        [
+            str(recent_change.get("summary") or ""),
+            str(recent_change.get("business_reason") or ""),
+            " ".join(str(item) for item in recent_change.get("related_config", []) if item),
+        ]
+    ).lower()
+    if service_name != "payment-service":
+        return {}
+    if not any(
+        token in text
+        for token in [
+            "payment_report_enabled=true",
+            "reconciliation report",
+            "date-range query",
+            "report",
+        ]
+    ):
+        return {}
+    return {
+        "change_id": recent_change.get("change_id", ""),
+        "feature_flag": "PAYMENT_REPORT_ENABLED=true",
+        "changed_path": "payment reconciliation report date-range query",
+        "root_cause_role": "supporting_correlation",
+    }
+
+
+def _release_fact(recent_change: dict[str, Any]) -> str:
+    if not recent_change:
+        return "No recent deployment record was returned."
+    return (
+        f"Recent change {recent_change.get('change_id', 'unknown')} "
+        f"({recent_change.get('status', 'unknown')}): "
+        f"{recent_change.get('summary', 'no summary')}."
+    )
+
+
+def _release_inference(release_correlation: dict[str, Any]) -> str:
+    if release_correlation:
+        return (
+            "The report Feature Flag introduced a matching date-range query path shortly "
+            "before the incident, so the slow-report-SQL hypothesis should rank above a "
+            "generic CPU explanation."
+        )
+    return "The release record provides timeline context but does not materially change ranking."
 
 
 async def _get_json(

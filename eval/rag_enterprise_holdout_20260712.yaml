@@ -1,0 +1,136 @@
+schema_version: "2.0"
+dataset_version: "2026.07.12-enterprise"
+annotation_version: "1.0"
+description: "Frozen unseen enterprise troubleshooting acceptance set. Do not tune against results."
+cases:
+  - id: enterprise_cpu_stack_01
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "订单服务 CPU 长时间高位，怎样从进程热点继续定位到线程栈？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0003, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+  - id: enterprise_memory_limit_01
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "工作负载接近 memory limit 并被系统杀死，首轮证据应从哪里取？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0003, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存]
+  - id: enterprise_disk_inode_01
+    split: holdout
+    category: disk
+    difficulty: medium
+    query: "节点仍有少量容量但应用无法创建文件，如何联合检查 inode 和占用目录？"
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0003, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [磁盘]
+  - id: enterprise_service_impact_01
+    split: holdout
+    category: service_unavailable
+    difficulty: medium
+    query: "实例看似存活但用户请求大量失败，标准服务不可用排障顺序是什么？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0003, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [服务]
+  - id: enterprise_redis_capacity_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "缓存节点拒绝建立连接且客户端数逼近配置上限，应查哪段官方客户端限制说明？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: enterprise_redis_latency_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "怀疑 Redis 主机本身存在延迟，官方建议用什么本地基线命令验证？"
+    relevant_chunks: [{chunk_id: official_redis_latency.md#0003, relevance: 3}]
+    required_sources: [official_redis_latency.md]
+    expected_keywords: [latency]
+  - id: enterprise_mysql_evidence_01
+    split: holdout
+    category: mysql
+    difficulty: hard
+    query: "支付链路连接池排队并出现慢查询，哪份事故材料记录了当时的数据库证据？"
+    relevant_chunks: [{chunk_id: mysql_slow_query_postmortem.pdf#0001, relevance: 3}]
+    required_sources: [mysql_slow_query_postmortem.pdf]
+    expected_keywords: [MySQL]
+  - id: enterprise_k8s_backend_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "ClusterIP 可解析但流量没有落到工作负载，如何核对 selector、Pod 和 EndpointSlice？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_services.md#0015, relevance: 3}]
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [Pod]
+  - id: enterprise_loki_discard_01
+    split: holdout
+    category: loki
+    difficulty: hard
+    query: "日志入口发生丢弃时，Loki 官方文档要求观察哪些 discarded samples 与 bytes 指标？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_ingest.md]
+    expected_keywords: [loki_discarded]
+  - id: enterprise_prometheus_runtime_01
+    split: holdout
+    category: prometheus
+    difficulty: medium
+    query: "如何在 Prometheus 运行时确认一条规则正处于 pending 或 firing？"
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0006, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [alerts]
+  - id: enterprise_redis_cross_source_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    query: "缓存连接容量耗尽时，如何用官方客户端上限和历史事故时间线相互印证？"
+    relevant_chunks:
+      - {chunk_id: official_redis_clients.md#0004, relevance: 3}
+      - {chunk_id: redis_postmortem.pdf#0001, relevance: 2}
+    required_sources: [official_redis_clients.md, redis_postmortem.pdf]
+    expected_keywords: [maxclients]
+  - id: enterprise_observe_cross_source_01
+    split: holdout
+    category: observability
+    difficulty: hard
+    case_type: multi_source
+    query: "日志摄取被拒绝时，怎样把 Loki 丢弃信号转化为面向用户影响的告警？"
+    relevant_chunks:
+      - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+      - {chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 2}
+    required_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    expected_keywords: [loki_discarded]
+  - id: enterprise_refusal_hr_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "请说明公司的调休申请规则。"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_refusal_admin_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "行政采购新电脑需要走哪些审批步骤？"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_refusal_legal_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "劳动合同发生争议时应该如何起诉公司？"
+    relevant_chunks: []
+    required_sources: []

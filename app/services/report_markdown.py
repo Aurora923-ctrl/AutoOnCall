@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.models.report import DiagnosisReport
@@ -29,10 +30,10 @@ def render_markdown(report: DiagnosisReport) -> str:
         f"# {report.title}",
         "",
         "## 1. 故障摘要",
-        report.summary or "暂无摘要。",
+        _render_incident_summary(report),
         "",
-        "## 2. 影响范围",
-        report.impact or "暂无影响范围信息。",
+        "## 2. 用户影响",
+        report.impact or "暂无用户影响信息。",
         "",
         "## 3. 初步根因",
         _render_root_cause_with_evidence(report),
@@ -47,24 +48,15 @@ def render_markdown(report: DiagnosisReport) -> str:
         _render_risk_action_judgement(report),
         "",
         "## 7. 建议处置",
-        report.remediation_suggestion or "暂无处理建议。",
+        _render_recommendation(report),
         "",
-        "## 8. 回滚 / 观察指标",
+        "## 8. 回滚与观察指标",
         _render_rollback_and_observation(report),
         "",
         "## 9. 未确认事项",
         _render_unconfirmed_items(report),
         "",
-        f"> 置信度原因：{report.confidence_reason}",
-        f"> 报告置信度：{report.confidence:.2f}",
-        "",
-        "## 附录 A. 面试速览",
-        _render_interview_snapshot(report),
-        "",
-        "## 附录 B. 证据审计",
-        "### 根因判断",
-        report.root_cause or "暂未形成明确根因。",
-        "",
+        "## 附录 A. Evidence、Graph 与 Citation",
         "### 根因假设矩阵",
         _render_hypothesis_ranking(report),
         "",
@@ -73,9 +65,6 @@ def render_markdown(report: DiagnosisReport) -> str:
         "",
         "### 推断结论",
         _render_bullets(report.inferred_conclusions),
-        "",
-        "### 关键证据明细",
-        _render_bullets(report.key_findings),
         "",
         "### 证据质量",
         _render_evidence_quality(report),
@@ -88,6 +77,9 @@ def render_markdown(report: DiagnosisReport) -> str:
         "",
         "### Incident Evidence Graph",
         _render_incident_evidence_graph(report),
+        "",
+        "### Citation / Runbook 引用",
+        _render_runbook_references(report.evidence),
         "",
         "### 数据源边界",
         _render_data_source_boundaries(report),
@@ -104,14 +96,8 @@ def render_markdown(report: DiagnosisReport) -> str:
         "### 运行告警",
         _render_bullets(report.warnings) if report.warnings else "- 暂无",
         "",
-        "### 下一步建议",
-        _render_bullets(report.next_steps),
-        "",
-        "## 附录 C. 工具、Trace 与 Runbook",
-        "### Runbook 引用",
-        _render_runbook_references(report.evidence),
-        "",
-        "### 工具调用摘要",
+        "## 附录 B. ToolCall 与 Trace",
+        "### ToolCall 摘要",
         _render_tool_calls(report.tool_calls),
         "",
         "### Trace 摘要",
@@ -119,7 +105,7 @@ def render_markdown(report: DiagnosisReport) -> str:
         f"- 事件数：{report.trace_summary.get('event_count', 0)}",
         f"- 异常或阻断事件数：{report.trace_summary.get('failed_or_blocked_count', 0)}",
         "",
-        "## 附录 D. 风险、审批与变更",
+        "## 附录 C. 风险、审批与变更",
         "### 风险与审批",
         f"- 风险等级：{risk_level}",
         f"- 策略：{risk_policy}",
@@ -152,64 +138,37 @@ def render_markdown(report: DiagnosisReport) -> str:
     return "\n".join(sections)
 
 
-def _render_interview_snapshot(report: DiagnosisReport) -> str:
-    """Render a compact top-of-report section for interview walkthroughs."""
-    risk_level = report.risk_summary.get("risk_level", "low")
-    risk_policy = report.risk_summary.get("policy", "allow")
-    profile = report.evidence_profile or {}
-    by_stance = _as_dict(profile.get("by_stance"))
-    by_type = _as_dict(profile.get("by_type"))
-    by_data_source = _as_dict(profile.get("by_data_source"))
-
-    lines = [
-        f"- Status: {report.status}",
-        f"- Selected root cause: {report.root_cause or 'unknown'}",
-        f"- Confidence: {report.confidence:.2f}",
-        f"- Confidence reason: {report.confidence_reason or 'not recorded'}",
-        f"- Evidence stance: {_render_counter(by_stance)}",
-        f"- Evidence types: {_render_counter(by_type)}",
-        f"- Data sources: {_render_counter(by_data_source)}",
-        f"- Risk boundary: policy={risk_policy}, level={risk_level}, "
-        f"manual_action_required={str(report.manual_action_required).lower()}",
-        "- Safety statement: the Agent can produce diagnosis, plans, approvals, dry-run "
-        "records, sandbox execution, or manual records; it does not directly perform "
-        "production write actions.",
-        "",
-        "### Tool Call Table",
-        _render_tool_call_table(report.tool_calls),
-        "",
-        "### Evidence Quick View",
-        _render_evidence_quick_view(report.evidence),
-    ]
-    return "\n".join(lines)
-
-
-def _render_root_cause_with_evidence_legacy(report: DiagnosisReport) -> str:
-    root = report.root_cause or "暂未形成明确根因。"
-    evidence_ids = _selected_root_cause_evidence_ids(report)
-    lines = [f"- 判断：{root}"]
-    if evidence_ids:
-        lines.append(f"- 证据回链：{', '.join(evidence_ids)}")
-    else:
-        lines.append("- 证据回链：未记录到明确 evidence_id，需结合下方关键证据复核。")
-    lines.append(f"- 置信度：{report.confidence:.2f}；原因：{report.confidence_reason or '未记录'}")
-    return "\n".join(lines)
+def _render_incident_summary(report: DiagnosisReport) -> str:
+    """Keep service, impact, root cause, and confidence visible without scrolling."""
+    return "\n".join(
+        [
+            "| 服务 | 环境 | 级别 | 状态 | 置信度 |",
+            "| --- | --- | --- | --- | ---: |",
+            f"| {_md_cell(report.service_name)} | {_md_cell(report.environment)} | "
+            f"{_md_cell(report.severity)} | {_md_cell(report.status)} | {report.confidence:.2f} |",
+            "",
+            f"- 摘要：{_limit_sentences(report.summary or '暂无摘要。', maximum=2)}",
+            f"- 用户影响：{_limit_sentences(report.impact or '暂无用户影响信息。', maximum=1)}",
+            f"- 初步根因：{_limit_sentences(report.root_cause or '尚未形成明确根因。', maximum=3)}",
+            f"- 置信度依据：{_limit_sentences(report.confidence_reason or '未记录', maximum=1)}",
+        ]
+    )
 
 
 def _render_key_evidence_for_review(report: DiagnosisReport) -> str:
-    if not report.evidence:
+    evidence = _select_review_evidence(report)
+    if not evidence:
         return "- 无关键证据。"
     lines = [
-        "| Evidence | Tool | Source | Stance | Fact | Inference | Uncertainty |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Evidence | Tool / Source | Fact | Inference | Uncertainty |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for item in report.evidence[:8]:
+    for item in evidence:
         lines.append(
             "| "
             f"{_md_cell(item.get('evidence_id', 'unknown'))} | "
-            f"{_md_cell(item.get('source_tool', 'unknown'))} | "
+            f"{_md_cell(item.get('source_tool', 'unknown'))} / "
             f"{_md_cell(item.get('data_source', 'unknown'))} | "
-            f"{_md_cell(item.get('stance', 'neutral'))} | "
             f"{_md_cell(item.get('fact') or item.get('summary') or '')} | "
             f"{_md_cell(item.get('inference') or '')} | "
             f"{_md_cell(item.get('uncertainty') or '')} |"
@@ -218,18 +177,21 @@ def _render_key_evidence_for_review(report: DiagnosisReport) -> str:
 
 
 def _render_investigation_process(report: DiagnosisReport) -> str:
-    if report.timeline:
-        lines = []
-        for item in report.timeline[:10]:
-            lines.append(
-                "- "
-                f"{item.get('event_type', 'step')} "
-                f"node={item.get('node_name', 'unknown')} "
-                f"status={item.get('status', 'unknown')} "
-                f"summary={item.get('summary') or '未记录'}"
-            )
-        return "\n".join(lines)
-    return _render_tool_calls(report.tool_calls)
+    if not report.tool_calls:
+        return "- 未记录工具调用。"
+    lines = [
+        "| # | Tool | Source | Status | Latency | Result |",
+        "| ---: | --- | --- | --- | ---: | --- |",
+    ]
+    for index, call in enumerate(_select_review_tool_calls(report.tool_calls), 1):
+        status = str(call.get("status") or "unknown")
+        result = call.get("error_message") if status == "failed" else call.get("output_summary")
+        lines.append(
+            f"| {index} | {_md_cell(call.get('tool_name', 'unknown'))} | "
+            f"{_md_cell(call.get('data_source', 'unknown'))} | {_md_cell(status)} | "
+            f"{call.get('latency_ms', 0)} ms | {_md_cell(result or '未记录')} |"
+        )
+    return "\n".join(lines)
 
 
 def _render_risk_action_judgement(report: DiagnosisReport) -> str:
@@ -251,16 +213,69 @@ def _render_risk_action_judgement(report: DiagnosisReport) -> str:
     return "\n".join(lines)
 
 
-def _render_rollback_and_observation(report: DiagnosisReport) -> str:
-    lines = [
-        "- 观察指标：错误率、P95 延迟、QPS、相关依赖连接数/等待数、关键日志错误量。",
-        "- 回滚边界：若处置后错误率或延迟未恢复，停止继续扩大变更并回滚最近高风险改动。",
-    ]
+def _render_recommendation(report: DiagnosisReport) -> str:
     plan = report.change_plan or {}
-    rollback_steps = plan.get("rollback_steps")
-    if isinstance(rollback_steps, list) and rollback_steps:
-        lines.append("- 计划内回滚步骤：")
-        lines.extend(f"  - {item}" for item in rollback_steps)
+    playbook = _as_dict(plan.get("remediation_playbook"))
+    prechecks = _compact_list(playbook.get("pre_check") or plan.get("pre_checklist"), limit=2)
+    dry_run = _compact_list(playbook.get("dry_run"), limit=2)
+    observations = _compact_list(
+        playbook.get("observe_metrics") or plan.get("observe_metrics"),
+        limit=5,
+    )
+    rollback = _compact_list(playbook.get("rollback") or plan.get("rollback_steps"), limit=2)
+    policy = report.risk_summary.get("policy")
+    approval = (
+        "禁止自动执行，必须转人工变更流程。"
+        if policy == "forbidden"
+        else (
+            "生产写操作必须完成人工审批；诊断和证据采集保持只读。"
+            if report.manual_action_required
+            or report.risk_summary.get("need_approval")
+            or policy == "approval_required"
+            else "当前只读诊断无需审批；进入生产写操作前必须重新进行风险判断和审批。"
+        )
+    )
+    return "\n".join(
+        [
+            _limit_sentences(report.remediation_suggestion or "暂无处理建议。", maximum=3),
+            "",
+            f"- 前置检查：{_inline_or_default(prechecks, '复核当前证据、影响面和变更窗口。')}",
+            f"- 审批边界：{approval}",
+            f"- Dry-run：{_inline_or_default(dry_run, '仅生成动作预览并校验目标、参数和影响范围，不执行生产写操作。')}",
+            f"- 观察：{_inline_or_default(observations, '按第 8 节观察核心指标和错误日志。')}",
+            f"- 回滚：{_inline_or_default(rollback, '指标未恢复或出现新告警时停止动作并恢复变更前状态。')}",
+        ]
+    )
+
+
+def _render_rollback_and_observation(report: DiagnosisReport) -> str:
+    plan = report.change_plan or {}
+    playbook = _as_dict(plan.get("remediation_playbook"))
+    metrics = _compact_list(
+        playbook.get("observe_metrics") or plan.get("observe_metrics"),
+        limit=6,
+    )
+    rollback_steps = _compact_list(
+        playbook.get("rollback") or plan.get("rollback_steps"),
+        limit=4,
+    )
+    stop_conditions = _compact_list(playbook.get("stop_conditions"), limit=3)
+    lines = [
+        "- 观察指标：",
+        *[f"  - {item}" for item in (metrics or _default_observation_metrics(report))],
+        "- 停止 / 回滚条件：",
+        *[
+            f"  - {item}"
+            for item in (stop_conditions or ["核心指标未恢复、继续恶化或出现新的高严重级别告警。"])
+        ],
+        "- 回滚步骤：",
+        *[
+            f"  - {item}"
+            for item in (
+                rollback_steps or ["停止后续动作，恢复变更前状态，并重新采集指标、日志和依赖状态。"]
+            )
+        ],
+    ]
     return "\n".join(lines)
 
 
@@ -279,6 +294,91 @@ def _render_unconfirmed_items(report: DiagnosisReport) -> str:
     if cap is not None:
         items.append(f"当前置信度上限：{float(cap):.2f}")
     return _render_bullets(_dedupe_inline([str(item) for item in items if str(item).strip()]))
+
+
+def _select_review_evidence(report: DiagnosisReport) -> list[dict[str, Any]]:
+    """Select at most five non-duplicated items for the operator-facing body."""
+    root_ids = set(_selected_root_cause_evidence_ids(report))
+    candidates = sorted(
+        [item for item in report.evidence if isinstance(item, dict)],
+        key=lambda item: (
+            0 if str(item.get("evidence_id") or "") in root_ids else 1,
+            0 if item.get("stance") == "supporting" else 1,
+            -float(item.get("confidence") or 0.0),
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    seen_facts: set[str] = set()
+    for item in candidates:
+        fact = _normalized_evidence_text(item.get("fact") or item.get("summary") or "")
+        if fact and fact in seen_facts:
+            continue
+        selected.append(item)
+        if fact:
+            seen_facts.add(fact)
+        if len(selected) == 5:
+            break
+    return selected
+
+
+def _select_review_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the main investigation readable while never hiding a failed call."""
+    selected = list(tool_calls[:8])
+    selected_ids = {
+        (call.get("step_id"), call.get("tool_name"), call.get("status")) for call in selected
+    }
+    for call in tool_calls:
+        identity = (call.get("step_id"), call.get("tool_name"), call.get("status"))
+        if call.get("status") == "failed" and identity not in selected_ids:
+            selected.append(call)
+            selected_ids.add(identity)
+    return selected
+
+
+def _normalized_evidence_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").lower()).strip()
+    return re.sub(r"\b\d+(?:\.\d+)?\b", "#", text)
+
+
+def _default_observation_metrics(report: DiagnosisReport) -> list[str]:
+    root = report.root_cause.lower()
+    if "redis" in root:
+        return [
+            "redis_connected_clients / maxclients",
+            "redis_rejected_connections",
+            "service_5xx_rate",
+            "service_p95_latency_ms",
+            "redis_timeout_log_count",
+        ]
+    if "mysql" in root or "sql" in root:
+        return [
+            "mysql_slow_query_count",
+            "mysql_threads_running / active_connections",
+            "connection_pool_waiting",
+            "service_p95_latency_ms",
+            "service_5xx_rate",
+        ]
+    return ["service_p95_latency_ms", "service_5xx_rate", "error_log_count"]
+
+
+def _compact_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return _dedupe_inline([str(item).strip() for item in value if str(item).strip()])[:limit]
+
+
+def _inline_or_default(items: list[str], default: str) -> str:
+    return "；".join(items) if items else default
+
+
+def _limit_sentences(value: str, *, maximum: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    sentences = [item.strip() for item in re.split(r"(?<=[。！？.!?])\s*", text) if item.strip()]
+    if not sentences:
+        return text[:360]
+    return " ".join(sentences[:maximum])[:480]
 
 
 def _selected_root_cause_evidence_ids(report: DiagnosisReport) -> list[str]:
@@ -959,20 +1059,20 @@ HISTORY_DOC_SUFFIXES = (
 
 
 def _render_root_cause_with_evidence(report: DiagnosisReport) -> str:
-    root = report.root_cause or "unknown root cause"
-    evidence_ids = _selected_root_cause_evidence_ids(report)
-    lines = [f"- Root cause: {root}"]
+    root = _limit_sentences(report.root_cause or "暂未形成明确根因。", maximum=3)
+    evidence_ids = _selected_root_cause_evidence_ids(report)[:5]
+    lines = [
+        root,
+        "",
+        f"- 置信度：{report.confidence:.2f}",
+        f"- 判断依据：{_limit_sentences(report.confidence_reason or '未记录', maximum=1)}",
+    ]
     if evidence_ids:
         lines.append(f"- Evidence back-links: {', '.join(evidence_ids)}")
     else:
         lines.append(
             "- Evidence back-links: no stable evidence_id recorded; review key evidence below."
         )
-    lines.extend(_root_cause_minimum_evidence_links(report, evidence_ids))
-    lines.append(
-        f"- Confidence: {report.confidence:.2f}; "
-        f"reason: {report.confidence_reason or 'not recorded'}"
-    )
     return "\n".join(lines)
 
 

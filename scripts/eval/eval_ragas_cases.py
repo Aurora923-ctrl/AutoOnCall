@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import math
+import statistics
 import sys
 import time
 from collections.abc import Callable
@@ -44,6 +45,7 @@ from scripts.eval.eval_rag_cases import (
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / config.ragas_eval_summary_path
 DEFAULT_SUMMARY_MD_PATH = REPO_ROOT / "logs" / "ragas_eval_summary.md"
+DEFAULT_HUMAN_REVIEW_PATH = REPO_ROOT / "eval" / "ragas_cases.review.json"
 CORE_TAG = "core_interview"
 REFUSAL_TAG = "refusal_boundary"
 SUPPORTED_MODES = {"offline", "runtime"}
@@ -59,10 +61,29 @@ DEFAULT_ANSWER_SOURCE = "product-offline"
 RAGAS_METRICS = [
     "faithfulness",
     "answer_relevancy",
+    "judge_oncall_actionability",
+    "answer_completeness",
     "id_based_context_precision",
     "id_based_context_recall",
 ]
 RAGAS_ID_METRICS = ["id_based_context_precision", "id_based_context_recall"]
+JUDGE_METRICS = [
+    "faithfulness",
+    "answer_relevancy",
+    "judge_oncall_actionability",
+    "answer_completeness",
+]
+JUDGE_PROMPT_VERSION = "stage3-ragas-judge-v1"
+HUMAN_REVIEW_SCHEMA_VERSION = 3
+HUMAN_REVIEW_DIMENSIONS = [
+    "faithfulness",
+    "relevancy",
+    "citation_support",
+    "citation_correctness",
+    "actionability",
+    "completeness",
+    "boundary_safety",
+]
 
 MetricRunner = Callable[[list["RagasCaseSample"], dict[str, Any]], dict[str, dict[str, float]]]
 
@@ -95,6 +116,8 @@ async def evaluate_cases(
     max_cases: int | None = None,
     metric_profile: Literal["id-smoke", "full"] = DEFAULT_METRIC_PROFILE,
     metrics_runner: MetricRunner | None = None,
+    repeat_count: int = 1,
+    human_review_path: str | Path | None = DEFAULT_HUMAN_REVIEW_PATH,
 ) -> dict[str, Any]:
     """Evaluate RAG cases with optional RAGAS LLM-as-judge metrics."""
     if mode not in SUPPORTED_MODES:
@@ -108,31 +131,21 @@ async def evaluate_cases(
             f"Unsupported metric_profile={metric_profile}; "
             f"supported={sorted(SUPPORTED_METRIC_PROFILES)}"
         )
+    if repeat_count <= 0:
+        raise ValueError("repeat_count must be greater than zero")
 
     started_at = datetime.now(UTC)
     timer = time.perf_counter()
     cases = _select_cases(load_cases(cases_path), max_cases=max_cases)
+    judge_status = judge_execution_status(metric_profile)
+    human_reviews = load_human_reviews(human_review_path)
+
     offline_index = build_offline_index(docs_dir) if mode == "offline" else None
     agent = (
         RagAgentService(streaming=False)
         if answer_source in {"product-offline", "context-fixture", "runtime"}
         else None
     )
-    samples = [
-        await build_case_sample(
-            case,
-            agent=agent,
-            offline_index=offline_index,
-            mode=mode,
-            answer_source=answer_source,
-            top_k=top_k,
-            min_score=min_score,
-        )
-        for case in cases
-    ]
-
-    refusal_samples = [sample for sample in samples if is_refusal_case(sample.case)]
-    quality_samples = [sample for sample in samples if not is_refusal_case(sample.case)]
     runner_context = build_runner_context(
         mode=mode,
         answer_source=answer_source,
@@ -140,23 +153,84 @@ async def evaluate_cases(
         min_score=min_score,
         metric_profile=metric_profile,
     )
-    metric_runner = metrics_runner or metric_runner_for_profile(metric_profile)
-    metric_scores = metric_runner(quality_samples, runner_context) if quality_samples else {}
-    results = [
-        build_case_result(
-            sample,
-            metric_scores.get(str(sample.case.get("id")), {}),
-            metric_profile=metric_profile,
+    judge_requested = metric_profile == "full"
+    judge_available = judge_status["status"] == "ready"
+    effective_metric_profile = "full" if judge_available else "id-smoke"
+    metric_runner = metrics_runner or metric_runner_for_profile(effective_metric_profile)
+    repeated_results: list[list[dict[str, Any]]] = []
+    first_samples: list[RagasCaseSample] = []
+    for repeat_index in range(1, repeat_count + 1):
+        samples = [
+            await build_case_sample(
+                case,
+                agent=agent,
+                offline_index=offline_index,
+                mode=mode,
+                answer_source=answer_source,
+                top_k=top_k,
+                min_score=min_score,
+            )
+            for case in cases
+        ]
+        if repeat_index == 1:
+            first_samples = samples
+        quality_samples_for_run = [sample for sample in samples if not is_refusal_case(sample.case)]
+        try:
+            metric_scores = (
+                metric_runner(quality_samples_for_run, runner_context)
+                if quality_samples_for_run
+                else {}
+            )
+        except Exception as exc:
+            if not judge_requested:
+                raise
+            judge_status = {
+                **judge_status,
+                "status": "failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "exception_type": type(exc).__name__,
+            }
+            judge_available = False
+            metric_scores = {
+                str(sample.case.get("id")): deterministic_id_scores(sample)
+                for sample in quality_samples_for_run
+            }
+        repeated_results.append(
+            [
+                {
+                    **build_case_result(
+                        sample,
+                        metric_scores.get(str(sample.case.get("id")), {}),
+                        metric_profile=metric_profile,
+                        judge_metrics_available=judge_available,
+                    ),
+                    "repeat_index": repeat_index,
+                }
+                for sample in samples
+            ]
         )
-        for sample in samples
-    ]
+
+    refusal_samples = [sample for sample in first_samples if is_refusal_case(sample.case)]
+    quality_samples = [sample for sample in first_samples if not is_refusal_case(sample.case)]
+    results = aggregate_repeated_results(repeated_results)
     summary = build_summary(
         results, quality_samples=quality_samples, refusal_samples=refusal_samples
     )
+    summary["deterministic_status"] = summary["status"]
+    summary["judge_status"] = judge_status["status"]
+    if judge_requested and judge_status["status"] == "not_run":
+        summary["status"] = "not_run"
+        summary["not_run_reason"] = judge_status["reason"]
+    elif judge_requested and judge_status["status"] == "failed":
+        summary["status"] = "failed"
+        summary["judge_failure_reason"] = judge_status["reason"]
+    summary["stability"] = build_run_stability(results, repeat_count=repeat_count)
+    summary["human_review"] = compare_human_reviews(results, human_reviews)
     quality_contract = build_quality_contract(
         summary,
         results,
         metric_profile=metric_profile,
+        judge_status=judge_status["status"],
     )
 
     return {
@@ -173,6 +247,30 @@ async def evaluate_cases(
             "mode": mode,
             "answer_source": answer_source,
             "metric_profile": metric_profile,
+            "repeat_count": repeat_count,
+            "target_shape": {
+                "recommended_core_case_count": 30,
+                "recommended_repeat_count": 3,
+                "selected_case_count": len(cases),
+            },
+            "judge_execution": judge_status,
+            "judge_prompt_version": JUDGE_PROMPT_VERSION,
+            "judge_temperature": 0,
+            "judge_token_usage": {
+                "status": (
+                    "not_run"
+                    if judge_status["status"] == "not_run"
+                    else (
+                        "unavailable_from_ragas_result"
+                        if judge_status["status"] == "ready"
+                        else "failed" if judge_status["status"] == "failed" else "not_required"
+                    )
+                ),
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+            },
+            "human_review_path": str(human_review_path) if human_review_path else "",
             "top_k": top_k,
             "min_score": min_score,
             "case_ids": [str(case.get("id", "")) for case in cases],
@@ -188,6 +286,7 @@ async def evaluate_cases(
         "thresholds": ragas_thresholds(),
         "summary": summary,
         "quality_contract": quality_contract,
+        "human_review_comparison": summary["human_review"],
         "case_scores": results,
     }
 
@@ -473,12 +572,23 @@ def run_ragas_metrics(
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
         from ragas import EvaluationDataset, evaluate
         from ragas.dataset_schema import SingleTurnSample
-        from ragas.metrics import (
-            Faithfulness,
-            IDBasedContextPrecision,
-            IDBasedContextRecall,
-            ResponseRelevancy,
-        )
+
+        try:
+            from ragas.metrics.collections import (
+                AspectCritic,
+                Faithfulness,
+                IDBasedContextPrecision,
+                IDBasedContextRecall,
+                ResponseRelevancy,
+            )
+        except ImportError:
+            from ragas.metrics import (
+                _AspectCritic as AspectCritic,
+                _Faithfulness as Faithfulness,
+                _IDBasedContextPrecision as IDBasedContextPrecision,
+                _IDBasedContextRecall as IDBasedContextRecall,
+                _ResponseRelevancy as ResponseRelevancy,
+            )
     except Exception as exc:
         raise RuntimeError(f"RAGAS dependencies are unavailable: {exc}") from exc
 
@@ -518,7 +628,23 @@ def run_ragas_metrics(
         dataset,
         metrics=[
             Faithfulness(),
-            ResponseRelevancy(),
+            ResponseRelevancy(strictness=1),
+            AspectCritic(
+                name="judge_oncall_actionability",
+                definition=(
+                    "The response gives concrete incident evidence checks and bounded OnCall "
+                    "actions, preserving approval, dry-run, rollback, and human takeover boundaries."
+                ),
+                strictness=3,
+            ),
+            AspectCritic(
+                name="answer_completeness",
+                definition=(
+                    "The response covers the important facts, evidence checks, citations, "
+                    "remediation options, and safety boundaries needed to answer the user."
+                ),
+                strictness=3,
+            ),
             IDBasedContextPrecision(),
             IDBasedContextRecall(),
         ],
@@ -530,7 +656,7 @@ def run_ragas_metrics(
     rows = result.to_pandas().to_dict(orient="records")
     return {
         str(sample.case.get("id")): {
-            metric: safe_float(row.get(metric))
+            metric: optional_metric_float(row.get(metric))
             for metric in RAGAS_METRICS
             if row.get(metric) is not None
         }
@@ -625,11 +751,436 @@ def deterministic_id_scores(sample: RagasCaseSample) -> dict[str, float]:
     }
 
 
+def judge_execution_status(metric_profile: str) -> dict[str, str]:
+    """Describe whether judge-backed metrics can run without hiding missing credentials."""
+    if metric_profile == "id-smoke":
+        return {
+            "status": "not_required",
+            "reason": "id-smoke uses deterministic ID and business metrics",
+        }
+    if not config.dashscope_api_key:
+        return {
+            "status": "not_run",
+            "reason": "DASHSCOPE_API_KEY is not configured; full judge metrics were not executed",
+        }
+    return {
+        "status": "ready",
+        "reason": "judge credentials are configured",
+        "model": config.effective_ragas_eval_model,
+        "prompt_version": JUDGE_PROMPT_VERSION,
+        "temperature": "0",
+    }
+
+
+def build_not_run_payload(
+    *,
+    cases: list[dict[str, Any]],
+    cases_path: str | Path,
+    docs_dir: str | Path,
+    mode: str,
+    answer_source: str,
+    top_k: int,
+    min_score: float,
+    metric_profile: str,
+    repeat_count: int,
+    human_review_path: str | Path | None,
+    human_reviews: dict[str, list[dict[str, Any]]],
+    started_at: datetime,
+    timer: float,
+    judge_status: dict[str, str],
+) -> dict[str, Any]:
+    """Return an honest artifact when a requested full judge run cannot execute."""
+    summary = {
+        "status": "not_run",
+        "case_count": len(cases),
+        "quality_case_count": sum(1 for case in cases if not is_refusal_case(case)),
+        "refusal_case_count": sum(1 for case in cases if is_refusal_case(case)),
+        "passed_count": 0,
+        "pass_rate": None,
+        "core_case_count": sum(1 for case in cases if is_core_case(case)),
+        "core_case_pass_rate": None,
+        "refusal_boundary_rate": None,
+        "faithfulness_avg": None,
+        "response_relevancy_avg": None,
+        "id_context_precision_avg": None,
+        "id_context_recall_avg": None,
+        "oncall_actionability_avg": None,
+        "citation_grounding_rate": None,
+        "citation_existence_rate": None,
+        "citation_support_rate": None,
+        "citation_correctness_rate": None,
+        "factual_error_rate": None,
+        "severe_hallucination_rate": None,
+        "incident_boundary_rate": None,
+        "confusion_disambiguation_rate": None,
+        "stability": {
+            "repeat_count": repeat_count,
+            "status": "not_run",
+            "reason": judge_status["reason"],
+        },
+        "human_review": compare_human_reviews([], human_reviews),
+        "failed_cases": [],
+        "not_run_reason": judge_status["reason"],
+    }
+    return {
+        "run": {
+            "started_at": started_at.isoformat(),
+            "ended_at": datetime.now(UTC).isoformat(),
+            "duration_ms": round((time.perf_counter() - timer) * 1000, 2),
+            "evaluation_scope": "full RAGAS judge evaluation was requested but not executed",
+            "cases_path": str(Path(cases_path)),
+            "docs_dir": str(Path(docs_dir)),
+            "mode": mode,
+            "answer_source": answer_source,
+            "metric_profile": metric_profile,
+            "repeat_count": repeat_count,
+            "target_shape": {
+                "recommended_core_case_count": 30,
+                "recommended_repeat_count": 3,
+                "selected_case_count": len(cases),
+            },
+            "judge_execution": judge_status,
+            "human_review_path": str(human_review_path) if human_review_path else "",
+            "top_k": top_k,
+            "min_score": min_score,
+            "case_ids": [str(case.get("id", "")) for case in cases],
+            "metrics": metrics_for_profile(metric_profile),
+            "supported_metrics": RAGAS_METRICS,
+            "ragas_version": safe_package_version("ragas"),
+            "datasets_version": safe_package_version("datasets"),
+            "judge_model": config.effective_ragas_eval_model,
+            "embedding_model": config.effective_ragas_eval_embedding_model,
+            "temperature": 0,
+            "environment": collect_eval_environment(suite="ragas"),
+        },
+        "thresholds": ragas_thresholds(),
+        "summary": summary,
+        "quality_contract": {
+            "name": "AutoOnCall RAGAS business quality contract",
+            "status": "not_run",
+            "profile": metric_profile,
+            "hard_gates": [],
+            "watch_metrics": [],
+            "risk_register": [],
+            "interview_talk_track": [
+                "The full judge profile is reported as not_run when credentials are absent; "
+                "it is never converted into a zero score or a false pass."
+            ],
+        },
+        "human_review_comparison": summary["human_review"],
+        "case_scores": [],
+    }
+
+
+def aggregate_repeated_results(
+    repeated_results: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Aggregate repeated case executions while retaining every raw result."""
+    if not repeated_results:
+        return []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for run_results in repeated_results:
+        for result in run_results:
+            case_id = str(result.get("id") or "unknown")
+            if case_id not in grouped:
+                grouped[case_id] = []
+                order.append(case_id)
+            grouped[case_id].append(result)
+
+    aggregated = []
+    for case_id in order:
+        runs = grouped[case_id]
+        base = dict(runs[0])
+        base.pop("repeat_index", None)
+        pass_values = [1.0 if run.get("passed") else 0.0 for run in runs]
+        metric_names = sorted(
+            {
+                name
+                for run in runs
+                for name, value in (run.get("metrics") or {}).items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        )
+        metric_stability = {
+            name: optional_numeric_stability([(run.get("metrics") or {}).get(name) for run in runs])
+            for name in metric_names
+        }
+        base["passed"] = all(bool(run.get("passed")) for run in runs)
+        base["failed_metrics"] = sorted(
+            {metric for run in runs for metric in run.get("failed_metrics", [])}
+        )
+        base["failure_reasons"] = quality_failure_reasons(base["failed_metrics"])
+        base["metrics"] = {
+            name: (metric_stability[name]["mean"] if metric_stability[name] is not None else None)
+            for name in metric_names
+        } | {
+            name: value
+            for name, value in (runs[0].get("metrics") or {}).items()
+            if isinstance(value, bool)
+        }
+        base["repeat_results"] = runs
+        base["stability"] = {
+            "repeat_count": len(runs),
+            "pass_rate": round(sum(pass_values) / len(pass_values), 4),
+            "all_pass": base["passed"],
+            "metrics": metric_stability,
+        }
+        aggregated.append(base)
+    return aggregated
+
+
+def numeric_stability(values: list[float]) -> dict[str, float]:
+    """Return mean, population standard deviation, and worst observed value."""
+    if not values:
+        return {"mean": 0.0, "std": 0.0, "worst": 0.0}
+    return {
+        "mean": round(statistics.fmean(values), 4),
+        "std": round(statistics.pstdev(values), 4) if len(values) > 1 else 0.0,
+        "worst": round(min(values), 4),
+    }
+
+
+def optional_numeric_stability(values: list[Any]) -> dict[str, float] | None:
+    """Return stability only when a metric was actually executed."""
+    numeric = [safe_float(value) for value in values if value is not None]
+    return numeric_stability(numeric) if numeric else None
+
+
+def build_run_stability(
+    results: list[dict[str, Any]],
+    *,
+    repeat_count: int,
+) -> dict[str, Any]:
+    """Summarize repeat stability across all selected cases."""
+    pass_rates = [
+        safe_float((result.get("stability") or {}).get("pass_rate")) for result in results
+    ]
+    return {
+        "repeat_count": repeat_count,
+        "case_count": len(results),
+        "all_cases_all_pass": all(
+            bool((result.get("stability") or {}).get("all_pass")) for result in results
+        ),
+        "case_pass_rate": numeric_stability(pass_rates),
+        "unstable_case_ids": [
+            result["id"]
+            for result in results
+            if safe_float((result.get("stability") or {}).get("pass_rate")) not in {0.0, 1.0}
+        ],
+    }
+
+
+def load_human_reviews(path: str | Path | None) -> dict[str, list[dict[str, Any]]]:
+    """Load optional human rubric scores keyed by case id."""
+    if not path:
+        return {}
+    review_path = Path(path)
+    if not review_path.exists():
+        return {}
+    payload = json.loads(review_path.read_text(encoding="utf-8"))
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    reviews: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            reviews.setdefault(case_id, []).append(item)
+    return reviews
+
+
+def compare_human_reviews(
+    results: list[dict[str, Any]],
+    human_reviews: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Compare deterministic/LLM results with imported human rubric decisions."""
+    result_by_id = {str(result.get("id")): result for result in results}
+    comparisons = []
+    reviewer_ids: set[str] = set()
+    for case_id, reviews_value in human_reviews.items():
+        result = result_by_id.get(case_id)
+        if result is None:
+            continue
+        reviews = reviews_value if isinstance(reviews_value, list) else [reviews_value]
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            human_pass = human_review_pass(review)
+            auto_pass = bool(result.get("passed"))
+            reviewer = str(review.get("reviewer") or "").strip()
+            if reviewer:
+                reviewer_ids.add(reviewer)
+            comparisons.append(
+                {
+                    "case_id": case_id,
+                    "run_index": int(review.get("run_index") or 1),
+                    "reviewer": reviewer,
+                    "human_pass": human_pass,
+                    "automatic_pass": auto_pass,
+                    "agreement": human_pass == auto_pass if human_pass is not None else None,
+                    "rubric_scores": review.get("rubric_scores", {}),
+                    "factual_errors": review.get("factual_errors", []),
+                    "severe_hallucination": bool(review.get("severe_hallucination")),
+                    "notes": str(review.get("notes") or ""),
+                }
+            )
+    decidable = [item for item in comparisons if item["agreement"] is not None]
+    reviewer_count = len(reviewer_ids)
+    return {
+        "status": "available" if decidable else "not_run",
+        "reviewed_case_count": len(decidable),
+        "reviewed_unique_case_count": len({item["case_id"] for item in decidable}),
+        "available_review_count": sum(
+            len(items) if isinstance(items, list) else 1 for items in human_reviews.values()
+        ),
+        "reviewer_count": reviewer_count,
+        "automatic_agreement_rate": (
+            ratio(
+                sum(1 for item in decidable if item["agreement"]),
+                len(decidable),
+            )
+            if decidable
+            else None
+        ),
+        "agreement_rate": (
+            ratio(
+                sum(1 for item in decidable if item["agreement"]),
+                len(decidable),
+            )
+            if decidable
+            else None
+        ),
+        "inter_rater_agreement": {
+            "status": "not_applicable" if reviewer_count < 2 else "not_computed",
+            "reason": (
+                "Only one reviewer is present; no inter-rater agreement is claimed."
+                if reviewer_count < 2
+                else "Multiple reviewers are present; pairwise review assignment is required."
+            ),
+            "cohens_kappa": None,
+        },
+        "comparisons": comparisons,
+    }
+
+
+def human_review_pass(review: dict[str, Any]) -> bool | None:
+    """Derive a human pass decision from an explicit decision or rubric scores."""
+    decision = str(review.get("decision") or "").strip().lower()
+    if decision in {"pass", "passed", "approve", "approved"}:
+        return True
+    if decision in {"fail", "failed", "reject", "rejected"}:
+        return False
+    scores = review.get("rubric_scores")
+    if not isinstance(scores, dict) or not scores:
+        return None
+    numeric = [
+        float(value)
+        for value in scores.values()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if not numeric:
+        return None
+    max_score = int(review.get("rubric_max_score") or 2)
+    if max_score not in {2, 3} or any(value < 0 or value > max_score for value in numeric):
+        return None
+    if review.get("severe_hallucination") or review.get("factual_errors"):
+        return False
+    return statistics.fmean(numeric) / max_score >= 0.8
+
+
+def build_human_review_template(
+    payload: dict[str, Any],
+    *,
+    reviewer: str = "",
+    max_items: int = 30,
+) -> dict[str, Any]:
+    """Export blind rubric items without automatic or judge scores."""
+    items: list[dict[str, Any]] = []
+    for result in payload.get("case_scores", []):
+        if len(items) >= max_items:
+            break
+        repeats = result.get("repeat_results") or [result]
+        for repeat in repeats:
+            if len(items) >= max_items:
+                break
+            items.append(
+                {
+                    "case_id": str(result.get("id") or ""),
+                    "run_index": int(repeat.get("repeat_index") or 1),
+                    "reviewer": reviewer,
+                    "reviewed_at": "",
+                    "query": str(repeat.get("query") or result.get("query") or ""),
+                    "answer": str(repeat.get("answer") or ""),
+                    "retrieved_contexts": repeat.get("retrieved_contexts", []),
+                    "citations": repeat.get("citations", []),
+                    "decision": "",
+                    "rubric_max_score": 2,
+                    "rubric_scores": dict.fromkeys(HUMAN_REVIEW_DIMENSIONS),
+                    "factual_errors": [],
+                    "severe_hallucination": False,
+                    "notes": "",
+                }
+            )
+    return {
+        "schema_version": HUMAN_REVIEW_SCHEMA_VERSION,
+        "description": (
+            "Blind human answer-quality review. Automatic and Judge scores are intentionally "
+            "excluded from each item."
+        ),
+        "source_run": {
+            "started_at": payload.get("run", {}).get("started_at"),
+            "metric_profile": payload.get("run", {}).get("metric_profile"),
+            "answer_source": payload.get("run", {}).get("answer_source"),
+            "repeat_count": payload.get("run", {}).get("repeat_count"),
+            "prompt_version": payload.get("run", {}).get(
+                "judge_prompt_version", JUDGE_PROMPT_VERSION
+            ),
+        },
+        "rubric": {
+            "scale": "0-2",
+            "labels": {
+                "0": "fails or is unsafe",
+                "1": "partially meets the criterion",
+                "2": "fully meets the criterion",
+            },
+            "dimensions": HUMAN_REVIEW_DIMENSIONS,
+            "pass_rule": (
+                "Explicit decision wins; otherwise mean score must be at least 80%, "
+                "with no factual error and no severe hallucination."
+            ),
+        },
+        "items": items,
+    }
+
+
+def write_human_review_template(
+    payload: dict[str, Any],
+    path: str | Path,
+    *,
+    reviewer: str = "",
+    max_items: int = 30,
+) -> str:
+    """Write a blind human review artifact into eval/ or another explicit path."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            build_human_review_template(payload, reviewer=reviewer, max_items=max_items),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return str(output_path)
+
+
 def build_case_result(
     sample: RagasCaseSample,
     scores: dict[str, float],
     *,
     metric_profile: str = "full",
+    judge_metrics_available: bool = True,
 ) -> dict[str, Any]:
     """Build one case score record and apply AutoOnCall gates."""
     case = sample.case
@@ -649,6 +1200,7 @@ def build_case_result(
         )
         return {
             "id": case_id,
+            "query": str(case.get("query") or ""),
             "case_type": str(case.get("case_type") or "negative"),
             "tags": ragas_tags(case),
             "core_case": is_core_case(case),
@@ -657,10 +1209,21 @@ def build_case_result(
             "metrics": {
                 "refusal_boundary_hit": refusal_hit,
                 "citation_grounding_hit": len(sample.citations) == 0,
+                "citation_existence_hit": 1.0 if not sample.citations else 0.0,
+                "citation_support_score": 1.0 if not sample.citations else 0.0,
+                "citation_correctness_score": 1.0 if not sample.citations else 0.0,
+                "factual_error_hit": 0.0,
+                "severe_hallucination_hit": (
+                    1.0 if deterministic_severe_hallucination(sample) else 0.0
+                ),
             },
             "failed_metrics": failed_metrics,
             "failure_reasons": failure_reasons,
             "answer_policy": sample.answer_policy,
+            "answer": sample.answer,
+            "retrieved_contexts": sample.retrieved_contexts,
+            "citations": sample.citations,
+            "prompt_version": JUDGE_PROMPT_VERSION,
             "retrieved_context_ids": sample.retrieved_context_ids,
             "reference_context_ids": sample.reference_context_ids,
             "retrieved_sources": retrieved_sources(sample),
@@ -670,21 +1233,53 @@ def build_case_result(
 
     business_scores = business_metric_scores(sample)
     metrics = {
-        **{metric: safe_float(scores.get(metric)) for metric in RAGAS_METRICS},
+        **{
+            metric: (
+                optional_metric_float(scores.get(metric))
+                if metric not in JUDGE_METRICS or judge_metrics_available
+                else None
+            )
+            for metric in RAGAS_METRICS
+        },
         **business_scores,
     }
-    failed_metrics = failed_quality_metrics(metrics, sample, metric_profile=metric_profile)
+    failed_metrics = failed_quality_metrics(
+        metrics,
+        sample,
+        metric_profile=metric_profile,
+        judge_metrics_available=judge_metrics_available,
+    )
+    unavailable_judge_metrics = [
+        metric
+        for metric in JUDGE_METRICS
+        if metric_profile == "full" and judge_metrics_available and metrics.get(metric) is None
+    ]
+    failed_metrics.extend(
+        f"{metric}_unavailable"
+        for metric in unavailable_judge_metrics
+        if f"{metric}_unavailable" not in failed_metrics
+    )
     return {
         "id": case_id,
+        "query": str(case.get("query") or ""),
         "case_type": str(case.get("case_type") or "positive"),
         "tags": ragas_tags(case),
         "core_case": is_core_case(case),
         "should_reject": False,
         "passed": not failed_metrics,
+        "judge_metrics_status": (
+            "failed"
+            if unavailable_judge_metrics
+            else "available" if judge_metrics_available else "not_run"
+        ),
         "metrics": metrics,
         "failed_metrics": failed_metrics,
         "failure_reasons": quality_failure_reasons(failed_metrics),
         "answer_policy": sample.answer_policy,
+        "answer": sample.answer,
+        "retrieved_contexts": sample.retrieved_contexts,
+        "citations": sample.citations,
+        "prompt_version": JUDGE_PROMPT_VERSION,
         "retrieved_context_ids": sample.retrieved_context_ids,
         "reference_context_ids": sample.reference_context_ids,
         "retrieved_sources": retrieved_sources(sample),
@@ -734,8 +1329,12 @@ def build_summary(
             sum(1 for result in refusal_results if result["passed"]),
             len(refusal_results),
         ),
-        "faithfulness_avg": average_metric(quality_results, "faithfulness"),
-        "response_relevancy_avg": average_metric(quality_results, "answer_relevancy"),
+        "faithfulness_avg": average_optional_metric(quality_results, "faithfulness"),
+        "response_relevancy_avg": average_optional_metric(quality_results, "answer_relevancy"),
+        "judge_oncall_actionability_avg": average_optional_metric(
+            quality_results, "judge_oncall_actionability"
+        ),
+        "answer_completeness_avg": average_optional_metric(quality_results, "answer_completeness"),
         "id_context_precision_avg": average_metric(
             quality_results,
             "id_based_context_precision",
@@ -743,6 +1342,11 @@ def build_summary(
         "id_context_recall_avg": average_metric(quality_results, "id_based_context_recall"),
         "oncall_actionability_avg": average_metric(quality_results, "oncall_actionability_score"),
         "citation_grounding_rate": average_metric(quality_results, "citation_grounding_hit"),
+        "citation_existence_rate": average_metric(quality_results, "citation_existence_hit"),
+        "citation_support_rate": average_metric(quality_results, "citation_support_score"),
+        "citation_correctness_rate": average_metric(quality_results, "citation_correctness_score"),
+        "factual_error_rate": average_metric(quality_results, "factual_error_hit"),
+        "severe_hallucination_rate": average_metric(quality_results, "severe_hallucination_hit"),
         "incident_boundary_rate": average_metric(quality_results, "incident_boundary_hit"),
         "confusion_disambiguation_rate": average_metric(
             quality_results,
@@ -757,6 +1361,7 @@ def build_quality_contract(
     results: list[dict[str, Any]],
     *,
     metric_profile: str,
+    judge_status: str = "ready",
 ) -> dict[str, Any]:
     """Translate RAGAS metrics into AutoOnCall business quality gates."""
     thresholds = ragas_thresholds()
@@ -825,7 +1430,7 @@ def build_quality_contract(
             applicable=refusal_count > 0,
         ),
     ]
-    if metric_profile == "full":
+    if metric_profile == "full" and judge_status == "ready":
         hard_gates.extend(
             [
                 quality_gate(
@@ -847,6 +1452,24 @@ def build_quality_contract(
                     applicable=quality_count > 0,
                 ),
                 quality_gate(
+                    "judge_oncall_actionability",
+                    "Judge OnCall actionability",
+                    summary.get("judge_oncall_actionability_avg"),
+                    thresholds["oncall_actionability"],
+                    "summary.judge_oncall_actionability_avg",
+                    "LLM-as-judge check for concrete, bounded incident actions.",
+                    applicable=quality_count > 0,
+                ),
+                quality_gate(
+                    "answer_completeness",
+                    "Judge answer completeness",
+                    summary.get("answer_completeness_avg"),
+                    1.0,
+                    "summary.answer_completeness_avg",
+                    "LLM-as-judge check that evidence, citations, actions, and boundaries are covered.",
+                    applicable=quality_count > 0,
+                ),
+                quality_gate(
                     "id_context_precision",
                     "Trusted-source precision",
                     summary.get("id_context_precision_avg"),
@@ -857,11 +1480,19 @@ def build_quality_contract(
                 ),
             ]
         )
-    watch_metrics = build_watch_metrics(summary, metric_profile=metric_profile)
+    watch_metrics = build_watch_metrics(
+        summary,
+        metric_profile=metric_profile,
+        judge_status=judge_status,
+    )
     contract_passed = all(gate["status"] in {"passed", "not_applicable"} for gate in hard_gates)
     return {
         "name": "AutoOnCall RAGAS business quality contract",
-        "status": "passed" if summary.get("status") == "passed" and contract_passed else "failed",
+        "status": (
+            "not_run"
+            if metric_profile == "full" and judge_status == "not_run"
+            else "passed" if summary.get("status") == "passed" and contract_passed else "failed"
+        ),
         "profile": metric_profile,
         "case_mix": {
             "total": int(summary.get("case_count", 0) or 0),
@@ -890,9 +1521,52 @@ def build_quality_contract(
     }
 
 
-def build_watch_metrics(summary: dict[str, Any], *, metric_profile: str) -> list[dict[str, Any]]:
+def build_watch_metrics(
+    summary: dict[str, Any],
+    *,
+    metric_profile: str,
+    judge_status: str = "ready",
+) -> list[dict[str, Any]]:
     """Return reported metrics that are not hard gates in the current profile."""
     thresholds = ragas_thresholds()
+    if metric_profile == "full" and judge_status != "ready":
+        reason = str(summary.get("not_run_reason") or summary.get("judge_failure_reason") or "")
+        return [
+            watch_metric(
+                metric,
+                label,
+                None,
+                threshold,
+                source,
+                f"Judge metric {judge_status}: {reason}",
+            )
+            for metric, label, threshold, source in [
+                (
+                    "faithfulness",
+                    "Faithfulness",
+                    thresholds["faithfulness"],
+                    "summary.faithfulness_avg",
+                ),
+                (
+                    "response_relevancy",
+                    "Response relevancy",
+                    thresholds["response_relevancy"],
+                    "summary.response_relevancy_avg",
+                ),
+                (
+                    "judge_oncall_actionability",
+                    "Judge OnCall actionability",
+                    thresholds["oncall_actionability"],
+                    "summary.judge_oncall_actionability_avg",
+                ),
+                (
+                    "answer_completeness",
+                    "Answer completeness",
+                    1.0,
+                    "summary.answer_completeness_avg",
+                ),
+            ]
+        ]
     if metric_profile != "id-smoke":
         return []
     return [
@@ -1019,14 +1693,22 @@ def render_summary(payload: dict[str, Any]) -> str:
     run = payload["run"]
     summary = payload["summary"]
     contract = payload.get("quality_contract", {})
+    if summary.get("status") == "not_run":
+        return (
+            "RAGAS eval: status=not_run "
+            f"profile={run.get('metric_profile', 'unknown')} "
+            f"deterministic={summary.get('deterministic_status', 'unknown')} "
+            f"cases={summary.get('passed_count', 0)}/{summary.get('case_count', 0)} "
+            f"reason={summary.get('not_run_reason', 'judge unavailable')}"
+        )
     lines = [
         (
             f"RAGAS eval: {summary['passed_count']}/{summary['case_count']} cases passed "
             f"profile={run.get('metric_profile', 'unknown')} "
             f"status={summary['status']} "
             f"contract={contract.get('status', 'unknown')} "
-            f"faith={summary['faithfulness_avg']:.2f} "
-            f"relevancy={summary['response_relevancy_avg']:.2f} "
+            f"faith={format_contract_value(summary['faithfulness_avg'])} "
+            f"relevancy={format_contract_value(summary['response_relevancy_avg'])} "
             f"id_precision={summary['id_context_precision_avg']:.2f} "
             f"id_recall={summary['id_context_recall_avg']:.2f} "
             f"actionability={summary['oncall_actionability_avg']:.2f} "
@@ -1055,6 +1737,32 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         if run.get("metric_profile") == "id-smoke"
         else str(run.get("embedding_model", ""))
     )
+    if summary.get("status") == "not_run":
+        return "\n".join(
+            [
+                "# AutoOnCall RAGAS Quality Summary",
+                "",
+                "## Run",
+                f"- Generated at: `{run.get('ended_at', '')}`",
+                f"- Metric profile: `{run.get('metric_profile', '')}`",
+                "- Status: `not_run`",
+                f"- Reason: {summary.get('not_run_reason', '')}",
+                f"- Selected cases: `{summary.get('case_count', 0)}`",
+                f"- Repeat count: `{run.get('repeat_count', 1)}`",
+                f"- Deterministic status: `{summary.get('deterministic_status', '')}`",
+                (
+                    "- Deterministic cases: "
+                    f"`{summary.get('passed_count', 0)}/{summary.get('case_count', 0)}`"
+                ),
+                f"- Human review status: `{summary.get('human_review', {}).get('status', '')}`",
+                "",
+                (
+                    "> Deterministic rules still ran. Missing judge credentials never become "
+                    "a zero score or a false pass."
+                ),
+                "",
+            ]
+        )
     lines = [
         "# AutoOnCall RAGAS Quality Summary",
         "",
@@ -1063,6 +1771,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Mode: `{run.get('mode', '')}`",
         f"- Answer source: `{run.get('answer_source', '')}`",
         f"- Metric profile: `{run.get('metric_profile', '')}`",
+        f"- Repeat count: `{run.get('repeat_count', 1)}`",
         f"- Judge model: `{judge_text}`",
         f"- Embedding model: `{embedding_text}`",
         f"- RAGAS version: `{run.get('ragas_version', '')}`",
@@ -1073,12 +1782,33 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Status: `{summary['status']}`",
         f"- Cases: `{summary['passed_count']}/{summary['case_count']}`",
         f"- Core case pass rate: `{summary['core_case_pass_rate']:.0%}`",
-        f"- Faithfulness avg: `{summary['faithfulness_avg']:.2f}`",
-        f"- Response relevancy avg: `{summary['response_relevancy_avg']:.2f}`",
+        f"- Faithfulness avg: `{format_contract_value(summary['faithfulness_avg'])}`",
+        (
+            "- Response relevancy avg: "
+            f"`{format_contract_value(summary['response_relevancy_avg'])}`"
+        ),
+        (
+            "- Judge OnCall actionability avg: "
+            f"`{format_contract_value(summary.get('judge_oncall_actionability_avg'))}`"
+        ),
+        (
+            "- Answer completeness avg: "
+            f"`{format_contract_value(summary.get('answer_completeness_avg'))}`"
+        ),
         f"- ID context precision avg: `{summary['id_context_precision_avg']:.2f}`",
         f"- ID context recall avg: `{summary['id_context_recall_avg']:.2f}`",
         f"- OnCall actionability avg: `{summary['oncall_actionability_avg']:.2f}`",
+        f"- Citation existence rate: `{summary.get('citation_existence_rate', 0.0):.0%}`",
+        f"- Citation support rate: `{summary.get('citation_support_rate', 0.0):.0%}`",
+        f"- Citation correctness rate: `{summary.get('citation_correctness_rate', 0.0):.0%}`",
+        f"- Factual error rate: `{summary.get('factual_error_rate', 0.0):.0%}`",
+        f"- Severe hallucination rate: `{summary.get('severe_hallucination_rate', 0.0):.0%}`",
         f"- Refusal boundary rate: `{summary['refusal_boundary_rate']:.0%}`",
+        f"- All repeats pass: `{summary.get('stability', {}).get('all_cases_all_pass', False)}`",
+        (
+            "- Human/automatic agreement: "
+            f"`{format_contract_value(summary.get('human_review', {}).get('agreement_rate'))}`"
+        ),
         "",
         "> RAGAS results are fixed-case quality regressions, not online accuracy claims.",
         "",
@@ -1320,7 +2050,7 @@ def business_metric_scores(sample: RagasCaseSample) -> dict[str, float]:
     """Compute deterministic business-aware guard metrics."""
     answer = sample.answer.lower()
     rubric_items = [str(item).lower() for item in sample.case.get("business_rubric", []) or []]
-    actionability_hits = sum(1 for item in rubric_items if business_token_overlap(item, answer))
+    actionability_hits = sum(1 for item in rubric_items if business_requirement_hit(item, answer))
     actionability = ratio(actionability_hits, len(rubric_items)) if rubric_items else 1.0
     domain_hit = business_domain_hit(sample)
     evidence_hit = business_evidence_hit(answer)
@@ -1330,7 +2060,7 @@ def business_metric_scores(sample: RagasCaseSample) -> dict[str, float]:
             actionability,
             ratio(sum([domain_hit, evidence_hit, operation_hit]), 3),
         )
-    citation_grounding = 1.0 if has_answer_citation(sample) else 0.0
+    citation_quality = citation_quality_scores(sample)
     incident_boundary = 1.0
     if any(term in answer for term in ["redis", "mysql", "incident-window", "runbook"]):
         incident_boundary = 1.0 if boundary_language_hit(answer) else 0.0
@@ -1342,15 +2072,114 @@ def business_metric_scores(sample: RagasCaseSample) -> dict[str, float]:
         "business_domain_hit": 1.0 if domain_hit else 0.0,
         "business_evidence_hit": 1.0 if evidence_hit else 0.0,
         "business_operation_hit": 1.0 if operation_hit else 0.0,
-        "citation_grounding_hit": citation_grounding,
+        **citation_quality,
+        "factual_error_hit": 1.0 if deterministic_factual_error(sample) else 0.0,
+        "severe_hallucination_hit": 1.0 if deterministic_severe_hallucination(sample) else 0.0,
         "incident_boundary_hit": incident_boundary,
         "confusion_disambiguation_hit": confusion,
     }
 
 
+def citation_quality_scores(sample: RagasCaseSample) -> dict[str, float]:
+    """Measure citation existence, retrieved-context support, and expected-source correctness."""
+    valid = [
+        item
+        for item in sample.citations
+        if str(item.get("source_file") or "").strip() and str(item.get("chunk_id") or "").strip()
+    ]
+    existence = 1.0 if valid and has_answer_citation(sample) else 0.0
+    retrieved_ids = set(sample.retrieved_context_ids)
+    expected_ids = set(sample.reference_context_ids)
+    cited_ids = {
+        normalize_context_id(item.get("source_file") or item.get("chunk_id")) for item in valid
+    }
+    cited_ids.discard("")
+    support = ratio(len(cited_ids & retrieved_ids), len(cited_ids)) if cited_ids else 0.0
+    correctness = ratio(len(cited_ids & expected_ids), len(cited_ids)) if cited_ids else 0.0
+    return {
+        "citation_grounding_hit": existence,
+        "citation_existence_hit": existence,
+        "citation_support_score": support,
+        "citation_correctness_score": correctness,
+    }
+
+
+def deterministic_factual_error(sample: RagasCaseSample) -> bool:
+    """Flag explicit expected/forbidden fact violations without pretending to be a judge."""
+    answer = sample.answer.lower()
+    required = [
+        str(item).strip().lower()
+        for item in sample.case.get("required_facts", []) or []
+        if str(item).strip()
+    ]
+    forbidden = [
+        str(item).strip().lower()
+        for item in sample.case.get("forbidden_facts", []) or []
+        if str(item).strip()
+    ]
+    return any(item not in answer for item in required) or any(item in answer for item in forbidden)
+
+
+def deterministic_severe_hallucination(sample: RagasCaseSample) -> bool:
+    """Flag severe deterministic failures: unsupported remediation or false live evidence."""
+    if is_refusal_case(sample.case):
+        return hallucinated_remediation(sample.answer)
+    answer = sample.answer.lower()
+    unsupported_live_claim = any(
+        marker in answer
+        for marker in [
+            "currently at",
+            "current value is",
+            "live metric shows",
+            "实时指标显示",
+            "当前值为",
+        ]
+    ) and not any(marker in answer for marker in ["incident-window", "live evidence", "实时证据"])
+    unsupported_action = any(
+        marker in answer
+        for marker in ["kubectl delete", "drop table", "flushall", "直接重启", "立即删除"]
+    ) and not any(marker in answer for marker in ["approval", "dry-run", "审批"])
+    return unsupported_live_claim or unsupported_action
+
+
 def business_token_overlap(requirement: str, answer: str) -> bool:
     """Return true when rubric domain terms or CJK ngrams appear in the answer."""
     return any(token in answer for token in extract_business_tokens(requirement))
+
+
+def business_requirement_hit(requirement: str, answer: str) -> bool:
+    """Match rubric intent conservatively across equivalent OnCall wording."""
+    if business_token_overlap(requirement, answer):
+        return True
+    groups = (
+        (
+            {"区分", "诊断证据", "处置动作", "不直接执行"},
+            {"evidence", "incident-window", "check", "confirm"},
+            {"approval", "dry-run", "rollback", "审批", "回滚"},
+        ),
+        (
+            {"审批", "回滚边界", "安全变更", "不越过", "不自动执行"},
+            {"approval", "dry-run", "rollback", "审批", "回滚", "安全变更"},
+        ),
+        (
+            {"告警", "用户可见", "症状"},
+            {"alert", "symptom", "user", "visible", "告警", "症状", "用户可见"},
+        ),
+        (
+            {"历史", "当前事件", "实时", "incident-window"},
+            {"history", "incident-window", "历史", "当前", "实时", "evidence"},
+        ),
+        (
+            {"相关性", "根因", "直接当作"},
+            {"结合", "判断", "evidence", "current impact", "当前影响"},
+        ),
+    )
+    for requirement_terms, *answer_term_groups in groups:
+        if any(term in requirement for term in requirement_terms) and all(
+            any(term in answer for term in answer_terms) for answer_terms in answer_term_groups
+        ):
+            return True
+    return False
 
 
 def business_domain_hit(sample: RagasCaseSample) -> bool:
@@ -1520,20 +2349,23 @@ def confusion_target_hit(sample: RagasCaseSample) -> bool:
 
 
 def failed_quality_metrics(
-    metrics: dict[str, float],
+    metrics: dict[str, Any],
     sample: RagasCaseSample,
     *,
     metric_profile: str,
+    judge_metrics_available: bool = True,
 ) -> list[str]:
     """Return failed metrics using configured thresholds."""
     thresholds = ragas_thresholds()
     failed = []
     checks = {}
-    if metric_profile == "full":
+    if metric_profile == "full" and judge_metrics_available:
         checks.update(
             {
                 "faithfulness": thresholds["faithfulness"],
                 "answer_relevancy": thresholds["response_relevancy"],
+                "judge_oncall_actionability": thresholds["oncall_actionability"],
+                "answer_completeness": 1.0,
             }
         )
     checks.update(
@@ -1548,11 +2380,25 @@ def failed_quality_metrics(
     if metric_profile == "full":
         checks["id_based_context_precision"] = thresholds["id_context_precision"]
     for metric, threshold in checks.items():
-        if metrics.get(metric, 0.0) < threshold:
+        value = metrics.get(metric)
+        if value is None:
+            continue
+        if value < threshold:
             failed.append(metric)
-    if metric_profile == "full" and is_core_case(sample.case):
-        for metric in ["faithfulness", "answer_relevancy", "oncall_actionability_score"]:
-            if metric not in failed and metrics.get(metric, 0.0) < checks[metric]:
+    if metrics.get("factual_error_hit", 0.0) > 0:
+        failed.append("factual_error")
+    if metrics.get("severe_hallucination_hit", 0.0) > 0:
+        failed.append("severe_hallucination")
+    if metric_profile == "full" and judge_metrics_available and is_core_case(sample.case):
+        for metric in [
+            "faithfulness",
+            "answer_relevancy",
+            "judge_oncall_actionability",
+            "answer_completeness",
+            "oncall_actionability_score",
+        ]:
+            value = metrics.get(metric)
+            if value is not None and metric not in failed and value < checks[metric]:
                 failed.append(metric)
     return failed
 
@@ -1562,10 +2408,26 @@ def quality_failure_reasons(failed_metrics: list[str]) -> dict[str, str]:
     reasons = {
         "faithfulness": "Answer is not sufficiently supported by retrieved Runbook context.",
         "answer_relevancy": "Answer does not stay focused on the user's OnCall question.",
+        "judge_oncall_actionability": "Judge found the OnCall actions insufficiently concrete or bounded.",
+        "answer_completeness": "Judge found missing evidence, citations, actions, or safety boundaries.",
+        "faithfulness_unavailable": "Judge faithfulness metric did not return a finite score.",
+        "answer_relevancy_unavailable": (
+            "Judge answer relevancy metric did not return a finite score."
+        ),
+        "judge_oncall_actionability_unavailable": (
+            "Judge OnCall actionability metric did not return a finite score."
+        ),
+        "answer_completeness_unavailable": (
+            "Judge answer completeness metric did not return a finite score."
+        ),
         "id_based_context_precision": "Retrieved context ids include too many non-reference chunks.",
         "id_based_context_recall": "Retrieved context ids miss expected reference chunks.",
         "oncall_actionability_score": "Answer misses required OnCall actionability rubric items.",
         "citation_grounding_hit": "Answer lacks auditable source_file + chunk_id citations.",
+        "citation_support_score": "One or more citations are not present in retrieved context.",
+        "citation_correctness_score": "One or more citations do not match expected sources.",
+        "factual_error": "Answer violates deterministic required/forbidden fact checks.",
+        "severe_hallucination": "Answer makes an unsupported live claim or unsafe action claim.",
         "incident_boundary_hit": "Answer does not separate Runbook knowledge from live incident evidence.",
         "confusion_disambiguation_hit": "Answer does not select the expected primary fault domain.",
     }
@@ -1665,6 +2527,16 @@ def average_metric(results: list[dict[str, Any]], metric: str) -> float:
     return round(sum(values) / len(values), 4) if values else 0.0
 
 
+def average_optional_metric(results: list[dict[str, Any]], metric: str) -> float | None:
+    """Average a metric only when it was actually executed."""
+    values = [
+        safe_float(value)
+        for result in results
+        if (value := result.get("metrics", {}).get(metric)) is not None
+    ]
+    return round(sum(values) / len(values), 4) if values else None
+
+
 def ratio(numerator: int | float, denominator: int | float) -> float:
     """Return a rounded ratio with stable zero-denominator behavior."""
     if not denominator:
@@ -1680,6 +2552,17 @@ def safe_float(value: Any) -> float:
         return 0.0
     if not math.isfinite(numeric):
         return 0.0
+    return round(numeric, 4)
+
+
+def optional_metric_float(value: Any) -> float | None:
+    """Return a finite metric value without turning evaluator failures into zero scores."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
     return round(numeric, 4)
 
 
@@ -1720,6 +2603,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     parser.add_argument("--max-cases", type=int)
+    parser.add_argument(
+        "--repeat-count",
+        type=int,
+        default=1,
+        help="Repeat every selected case; use 3 for the interview answer-quality run.",
+    )
+    parser.add_argument(
+        "--human-review",
+        default=str(DEFAULT_HUMAN_REVIEW_PATH),
+        help="Optional JSON rubric review file compared with automatic decisions.",
+    )
+    parser.add_argument(
+        "--export-human-review-template",
+        help=(
+            "Write a blind 0-2 rubric template after evaluation. "
+            "Use eval/ragas_cases.review.json for the formal review artifact."
+        ),
+    )
+    parser.add_argument("--reviewer", default="", help="Reviewer id stored in exported items.")
+    parser.add_argument(
+        "--human-review-items",
+        type=int,
+        default=30,
+        help="Maximum answer runs exported for blind human review.",
+    )
     parser.add_argument("--summary-json", default=str(DEFAULT_SUMMARY_JSON_PATH))
     parser.add_argument("--summary-md", default=str(DEFAULT_SUMMARY_MD_PATH))
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
@@ -1740,6 +2648,8 @@ def main(argv: list[str] | None = None) -> int:
                 min_score=args.min_score,
                 max_cases=args.max_cases,
                 metric_profile=args.metrics_profile,
+                repeat_count=args.repeat_count,
+                human_review_path=args.human_review,
             )
         )
     except Exception as exc:
@@ -1749,13 +2659,24 @@ def main(argv: list[str] | None = None) -> int:
         summary_json_path=args.summary_json,
         summary_md_path=args.summary_md,
     )
+    if args.export_human_review_template:
+        written["human_review_template"] = write_human_review_template(
+            payload,
+            args.export_human_review_template,
+            reviewer=args.reviewer,
+            max_items=args.human_review_items,
+        )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(render_summary(payload))
         if written:
             print("Artifacts: " + ", ".join(f"{key}={value}" for key, value in written.items()))
-    return 0 if payload["summary"]["status"] == "passed" else 1
+    summary = payload["summary"]
+    success = summary["status"] == "passed" or (
+        summary["status"] == "not_run" and summary.get("deterministic_status") == "passed"
+    )
+    return 0 if success else 1
 
 
 def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
@@ -1773,6 +2694,12 @@ def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, 
             "mode": args.mode,
             "answer_source": args.answer_source,
             "metric_profile": getattr(args, "metrics_profile", DEFAULT_METRIC_PROFILE),
+            "repeat_count": getattr(args, "repeat_count", 1),
+            "judge_execution": {
+                "status": "failed",
+                "reason": reason,
+            },
+            "human_review_path": str(getattr(args, "human_review", "")),
             "top_k": args.top_k,
             "min_score": args.min_score,
             "case_ids": [],
@@ -1815,6 +2742,13 @@ def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, 
                     "judge_model": config.effective_ragas_eval_model,
                 }
             ],
+        },
+        "human_review_comparison": {
+            "status": "not_run",
+            "reviewed_case_count": 0,
+            "available_review_count": 0,
+            "agreement_rate": None,
+            "comparisons": [],
         },
         "case_scores": [],
     }

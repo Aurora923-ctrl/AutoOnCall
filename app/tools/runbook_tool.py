@@ -7,7 +7,7 @@ from typing import Any
 
 from app.services.rag_read_models import build_runbook_summary, compact_retrieval_payload
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
-from app.tools.base import AIOpsTool, clamp_int
+from app.tools.base import AIOpsTool, ToolRetryPolicy, clamp_int
 
 
 class SearchRunbookTool(AIOpsTool):
@@ -27,6 +27,11 @@ class SearchRunbookTool(AIOpsTool):
     risk_level = "low"
     read_only = True
     timeout_seconds = 12.0
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["Milvus knowledge base", "lexical index"]
     degradation_strategy = "知识库不可用或可信度不足时拒绝强答，并返回 no_answer/failed 检索结果"
 

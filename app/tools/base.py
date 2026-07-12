@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.integrations.base import classify_adapter_error
 from app.utils.public_errors import public_exception_message
 
 ToolStatus = Literal["success", "failed"]
@@ -84,33 +85,162 @@ class AIOpsTool:
         )
 
     async def arun(self, input_args: dict[str, Any]) -> ToolExecutionResult:
-        """Run the tool with timeout and structured error handling."""
+        """Run the tool within one total timeout budget and an explicit retry policy."""
         started_at = time.perf_counter()
         safe_args = dict(input_args or {})
+        retry_policy = _normalized_retry_policy(self.retry_policy)
+        max_attempts = retry_policy.max_attempts if self.read_only else 1
+        retry_on = {item.strip().lower() for item in retry_policy.retry_on if item.strip()}
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        attempts: list[dict[str, Any]] = []
+        final_output: Any = None
+        final_error: str | None = None
+        stop_reason = "completed"
 
-        try:
-            output = await asyncio.wait_for(self._call(safe_args), timeout=self.timeout_seconds)
-            status: ToolStatus = "failed" if is_failed_tool_output(output) else "success"
-            return ToolExecutionResult(
-                tool_name=self.name,
-                status=status,
-                input_args=safe_args,
-                output=output,
-                latency_ms=elapsed_ms(started_at),
-                risk_level=self.risk_level,
-                read_only=self.read_only,
-                error_message=extract_tool_error_message(output) if status == "failed" else None,
-            )
-        except Exception as exc:
-            return ToolExecutionResult(
-                tool_name=self.name,
-                status="failed",
-                input_args=safe_args,
-                latency_ms=elapsed_ms(started_at),
-                risk_level=self.risk_level,
-                read_only=self.read_only,
-                error_message=public_exception_message(exc),
-            )
+        for attempt in range(1, max_attempts + 1):
+            attempt_started = time.perf_counter()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                final_error = public_exception_message(TimeoutError())
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "failed",
+                        "failure_kind": "timeout",
+                        "latency_ms": elapsed_ms(attempt_started),
+                    }
+                )
+                stop_reason = "total_timeout_exhausted"
+                break
+
+            try:
+                output = await asyncio.wait_for(self._call(safe_args), timeout=remaining)
+                failed = is_failed_tool_output(output)
+                failure_kind = failure_kind_from_output(output) if failed else ""
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "failed" if failed else "success",
+                        "failure_kind": failure_kind,
+                        "latency_ms": elapsed_ms(attempt_started),
+                    }
+                )
+                if not failed:
+                    return self._execution_result(
+                        status="success",
+                        input_args=safe_args,
+                        output=output,
+                        started_at=started_at,
+                        attempts=attempts,
+                        max_attempts=max_attempts,
+                        stop_reason="success",
+                    )
+
+                final_output = output
+                final_error = extract_tool_error_message(output)
+                if not _should_retry(
+                    read_only=self.read_only,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    failure_kind=failure_kind,
+                    retry_on=retry_on,
+                    output=output,
+                ):
+                    stop_reason = _retry_stop_reason(
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        failure_kind=failure_kind,
+                        retry_on=retry_on,
+                    )
+                    break
+            except TimeoutError as exc:
+                failure_kind = "timeout"
+                final_error = public_exception_message(exc)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "failed",
+                        "failure_kind": failure_kind,
+                        "latency_ms": elapsed_ms(attempt_started),
+                    }
+                )
+                stop_reason = "total_timeout_exhausted"
+                break
+            except Exception as exc:
+                failure_kind = classify_adapter_error(exc)
+                final_error = public_exception_message(exc)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "failed",
+                        "failure_kind": failure_kind,
+                        "latency_ms": elapsed_ms(attempt_started),
+                    }
+                )
+                if not _should_retry(
+                    read_only=self.read_only,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    failure_kind=failure_kind,
+                    retry_on=retry_on,
+                ):
+                    stop_reason = _retry_stop_reason(
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        failure_kind=failure_kind,
+                        retry_on=retry_on,
+                    )
+                    break
+
+            if not await _sleep_within_budget(retry_policy.backoff_seconds, deadline):
+                final_error = public_exception_message(TimeoutError())
+                stop_reason = "total_timeout_exhausted"
+                break
+
+        return self._execution_result(
+            status="failed",
+            input_args=safe_args,
+            output=final_output,
+            started_at=started_at,
+            attempts=attempts,
+            max_attempts=max_attempts,
+            stop_reason=stop_reason,
+            error_message=final_error,
+        )
+
+    def _execution_result(
+        self,
+        *,
+        status: ToolStatus,
+        input_args: dict[str, Any],
+        output: Any,
+        started_at: float,
+        attempts: list[dict[str, Any]],
+        max_attempts: int,
+        stop_reason: str,
+        error_message: str | None = None,
+    ) -> ToolExecutionResult:
+        attempt_count = len(attempts)
+        retry_metadata = {
+            "attempt_count": attempt_count,
+            "max_attempts": max_attempts,
+            "retried": attempt_count > 1,
+            "retry_exhausted": status == "failed" and attempt_count >= max_attempts > 1,
+            "stop_reason": stop_reason,
+            "attempts": attempts,
+            "total_timeout_seconds": self.timeout_seconds,
+        }
+        return ToolExecutionResult(
+            tool_name=self.name,
+            status=status,
+            input_args=input_args,
+            output=output,
+            latency_ms=elapsed_ms(started_at),
+            risk_level=self.risk_level,
+            read_only=self.read_only,
+            error_message=error_message,
+            metadata={"retry": retry_metadata},
+        )
 
     async def run(self, input_args: dict[str, Any]) -> ToolExecutionResult:
         """Alias kept for callers that expect a run method."""
@@ -239,3 +369,56 @@ def extract_tool_error_message(output: Any) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def failure_kind_from_output(output: Any) -> str:
+    """Return the stable failure category advertised by a structured tool output."""
+    if not isinstance(output, dict):
+        return "structured_failure"
+    return str(
+        output.get("error_type") or output.get("failure_kind") or "structured_failure"
+    ).lower()
+
+
+def _normalized_retry_policy(value: ToolRetryPolicy | dict[str, Any]) -> ToolRetryPolicy:
+    return value if isinstance(value, ToolRetryPolicy) else ToolRetryPolicy(**dict(value or {}))
+
+
+def _should_retry(
+    *,
+    read_only: bool,
+    attempt: int,
+    max_attempts: int,
+    failure_kind: str,
+    retry_on: set[str],
+    output: Any = None,
+) -> bool:
+    if not read_only or attempt >= max_attempts or failure_kind not in retry_on:
+        return False
+    if isinstance(output, dict) and output.get("retryable") is False:
+        return False
+    return True
+
+
+def _retry_stop_reason(
+    *,
+    attempt: int,
+    max_attempts: int,
+    failure_kind: str,
+    retry_on: set[str],
+) -> str:
+    if attempt >= max_attempts and max_attempts > 1:
+        return "attempts_exhausted"
+    if failure_kind not in retry_on:
+        return "non_retryable_failure"
+    return "retry_disabled"
+
+
+async def _sleep_within_budget(backoff_seconds: float, deadline: float) -> bool:
+    if backoff_seconds <= 0:
+        return asyncio.get_running_loop().time() < deadline
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= backoff_seconds:
+        return False
+    await asyncio.sleep(backoff_seconds)
+    return True

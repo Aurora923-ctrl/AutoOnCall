@@ -55,6 +55,7 @@ dev = [
     "ipython>=8.20.0",
     "ipdb>=0.13.13",
     "playwright>=1.45.0",
+    "locust>=2.32.0",
 ]
 
 [build-system]

@@ -43,6 +43,7 @@ class AutoOnCallApp {
             },
             health: null,
             evalSummary: null,
+            interviewScorecard: null,
             ragasSummary: null,
             adapterVerification: null,
             toolContracts: [],
@@ -244,6 +245,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
     initializeElements() {
         // 侧边栏元素
         this.sidebar = document.querySelector('.sidebar');
+        this.mobileMenuBtn = document.getElementById('mobileMenuBtn');
+        this.sidebarBackdrop = document.getElementById('sidebarBackdrop');
         this.newChatBtn = document.getElementById('newChatBtn');
         this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
         this.aiOpsPresetSelect = document.getElementById('aiOpsPresetSelect');
@@ -346,6 +349,26 @@ Object.assign(window.AutoOnCallApp.prototype, {
     // 绑定事件监听器
 ,
     bindEvents() {
+        if (this.mobileMenuBtn) {
+            this.mobileMenuBtn.addEventListener('click', () => this.toggleMobileSidebar());
+        }
+
+        if (this.sidebarBackdrop) {
+            this.sidebarBackdrop.addEventListener('click', () => this.closeMobileSidebar());
+        }
+
+        window.addEventListener('resize', () => {
+            if (window.innerWidth > 768) {
+                this.closeMobileSidebar();
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                this.closeMobileSidebar();
+            }
+        });
+
         // 新建对话
         if (this.newChatBtn) {
             this.newChatBtn.addEventListener('click', () => this.newChat());

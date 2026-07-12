@@ -1,0 +1,112 @@
+schema_version: "2.0"
+dataset_version: "2026.07.12-enterprise-c"
+annotation_version: "1.0"
+description: "Third frozen unseen enterprise troubleshooting acceptance set. Do not tune against results."
+cases:
+  - id: enterprise_c_cpu_01
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "应用核数被单个进程吃满后，Runbook 建议如何定位具体线程？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0003, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+  - id: enterprise_c_memory_01
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "容器出现 OOM 错误后，应从哪段排查步骤开始收集日志和指标？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0003, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存]
+  - id: enterprise_c_service_01
+    split: holdout
+    category: service_unavailable
+    difficulty: medium
+    query: "所有健康探针失败时，服务不可用手册的排查步骤在哪里？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0003, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [服务]
+  - id: enterprise_c_redis_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "Redis 新客户端因连接槽位耗尽而失败，应引用哪份最大连接数说明？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: enterprise_c_mysql_01
+    split: holdout
+    category: mysql
+    difficulty: hard
+    query: "支付接口延迟伴随 pool_waiting 和 active_connections 上升，应查哪份支付 Runbook？"
+    relevant_chunks: [{chunk_id: payment_wiki.html#0001, relevance: 3}]
+    required_sources: [payment_wiki.html]
+    expected_keywords: [MySQL]
+  - id: enterprise_c_k8s_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "Service selector 无法选中工作负载时，EndpointSlice 排障章节在哪里？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_services.md#0013, relevance: 3}]
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [EndpointSlices]
+  - id: enterprise_c_loki_01
+    split: holdout
+    category: loki
+    difficulty: hard
+    query: "Loki 写入链路出现 discarded samples 时，应查看哪段 ingestion 指标说明？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_ingest.md]
+    expected_keywords: [loki_discarded]
+  - id: enterprise_c_observe_multi_01
+    split: holdout
+    category: observability
+    difficulty: hard
+    case_type: multi_source
+    query: "日志写入异常如何结合 ingestion 指标和用户可见症状告警原则？"
+    relevant_chunks:
+      - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+      - {chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 2}
+    required_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    expected_keywords: [loki_discarded]
+  - id: enterprise_c_redis_multi_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    query: "Redis maxclients 问题如何结合官方客户端文档和事故复盘证据？"
+    relevant_chunks:
+      - {chunk_id: official_redis_clients.md#0004, relevance: 3}
+      - {chunk_id: redis_postmortem.pdf#0001, relevance: 2}
+    required_sources: [official_redis_clients.md, redis_postmortem.pdf]
+    expected_keywords: [maxclients]
+  - id: enterprise_c_refusal_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "请介绍公司的差旅报销标准。"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_c_refusal_02
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "帮我规划一次日本自由行。"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_c_refusal_03
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "写一首关于毕业季的诗。"
+    relevant_chunks: []
+    required_sources: []

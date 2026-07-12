@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.config import config
-from app.tools.base import AIOpsTool
+from app.tools.base import AIOpsTool, ToolRetryPolicy
 from app.tools.registry import ToolRegistry, create_default_tool_registry
 
 
@@ -53,6 +55,98 @@ class RestartServiceTool(AIOpsTool):
         return {"status": "success", "summary": "restarted"}
 
 
+class TransientReadOnlyTool(AIOpsTool):
+    name = "transient_read"
+    read_only = True
+    timeout_seconds = 1.0
+    retry_policy = ToolRetryPolicy(
+        max_attempts=3,
+        backoff_seconds=0,
+        retry_on=["timeout"],
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def _call(self, input_args: dict):
+        self.calls += 1
+        if self.calls < 3:
+            return {
+                "status": "failed",
+                "error_type": "timeout",
+                "retryable": True,
+                "summary": "temporary timeout",
+            }
+        return {"status": "success", "summary": "recovered"}
+
+
+class PermissionDeniedTool(AIOpsTool):
+    name = "permission_denied_read"
+    read_only = True
+    retry_policy = ToolRetryPolicy(
+        max_attempts=3,
+        backoff_seconds=0,
+        retry_on=["timeout", "connection_error"],
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def _call(self, input_args: dict):
+        self.calls += 1
+        return {
+            "status": "failed",
+            "error_type": "permission_denied",
+            "retryable": False,
+            "summary": "permission denied",
+        }
+
+
+class RetryingWriteTool(AIOpsTool):
+    name = "retrying_write"
+    read_only = False
+    retry_policy = ToolRetryPolicy(
+        max_attempts=3,
+        backoff_seconds=0,
+        retry_on=["timeout"],
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def _call(self, input_args: dict):
+        self.calls += 1
+        return {
+            "status": "failed",
+            "error_type": "timeout",
+            "retryable": True,
+            "summary": "write timed out",
+        }
+
+
+class TotalBudgetTimeoutTool(AIOpsTool):
+    name = "total_budget_timeout"
+    read_only = True
+    timeout_seconds = 0.03
+    retry_policy = ToolRetryPolicy(
+        max_attempts=3,
+        backoff_seconds=0,
+        retry_on=["timeout"],
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def _call(self, input_args: dict):
+        self.calls += 1
+        await asyncio.sleep(0.1)
+        return {"status": "success"}
+
+
 def test_registry_registers_standard_aiops_tools() -> None:
     registry = create_default_tool_registry([])
     names = {item["name"] for item in registry.list_tools()}
@@ -79,7 +173,12 @@ def test_registry_exposes_auditable_tool_contracts() -> None:
     assert redis_contract["risk_level"] == "low"
     assert "Redis INFO" in redis_contract["data_sources"]
     assert "structured unavailable payload" in redis_contract["degradation_strategy"]
-    assert redis_contract["retry_policy"]["max_attempts"] == 1
+    assert redis_contract["retry_policy"]["max_attempts"] == 2
+    assert redis_contract["retry_policy"]["retry_on"] == [
+        "timeout",
+        "connection_error",
+        "server_error",
+    ]
 
     assert "mock" not in {source.lower() for source in metrics_contract["data_sources"]}
     assert "synthesizing metric evidence" in metrics_contract["degradation_strategy"]
@@ -120,6 +219,64 @@ async def test_query_metrics_uses_mcp_like_tools_when_available() -> None:
     assert "p95_latency_ms" not in result.output
     assert "error_rate" not in result.output
     assert "synthetic_fields" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_read_only_tool_retries_transient_failure_and_records_attempts() -> None:
+    tool = TransientReadOnlyTool()
+
+    result = await tool.arun({"service_name": "order-service"})
+
+    assert result.status == "success"
+    assert tool.calls == 3
+    retry = result.metadata["retry"]
+    assert retry["attempt_count"] == 3
+    assert retry["retried"] is True
+    assert retry["retry_exhausted"] is False
+    assert retry["stop_reason"] == "success"
+    assert [item["failure_kind"] for item in retry["attempts"][:2]] == [
+        "timeout",
+        "timeout",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_does_not_retry_non_retryable_failure() -> None:
+    tool = PermissionDeniedTool()
+
+    result = await tool.arun({})
+
+    assert result.status == "failed"
+    assert tool.calls == 1
+    assert result.metadata["retry"]["attempt_count"] == 1
+    assert result.metadata["retry"]["stop_reason"] == "non_retryable_failure"
+
+
+@pytest.mark.asyncio
+async def test_non_read_only_tool_never_retries_automatically() -> None:
+    tool = RetryingWriteTool()
+
+    result = await tool.arun({})
+
+    assert result.status == "failed"
+    assert tool.calls == 1
+    assert result.metadata["retry"]["max_attempts"] == 1
+    assert result.metadata["retry"]["retried"] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_uses_total_budget_without_starting_phantom_retry() -> None:
+    tool = TotalBudgetTimeoutTool()
+
+    result = await tool.arun({})
+
+    assert result.status == "failed"
+    assert tool.calls == 1
+    retry = result.metadata["retry"]
+    assert retry["attempt_count"] == 1
+    assert retry["attempts"][0]["failure_kind"] == "timeout"
+    assert retry["stop_reason"] == "total_timeout_exhausted"
+    assert retry["retry_exhausted"] is False
 
 
 @pytest.mark.asyncio

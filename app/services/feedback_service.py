@@ -649,9 +649,9 @@ def _evidence_snapshot(item: BadCaseFeedback) -> dict[str, Any]:
 
 def _truncate_bad_case_answer(answer: str) -> str:
     """Keep feedback bad-case payloads bounded while the full report stays queryable."""
-    if len(answer) <= MAX_BAD_CASE_ANSWER_CHARS:
-        return answer
     suffix = "\n\n[truncated for eval backlog; full diagnosis report is available by report_id]"
+    if len(answer) + len(suffix) <= MAX_BAD_CASE_ANSWER_CHARS:
+        return answer + suffix
     return answer[: MAX_BAD_CASE_ANSWER_CHARS - len(suffix)] + suffix
 
 

@@ -86,12 +86,14 @@ class RedisInfoAdapter:
             "message": (
                 "Redis incident evidence shows connected_clients close to maxclients"
                 if incident_evidence and usage >= 0.9
-                else "Redis connected_clients is close to maxclients"
-                if usage >= 0.9
                 else (
-                    "Redis has slowlog or memory risk"
-                    if alert_triggered
-                    else "Redis connection usage is normal"
+                    "Redis connected_clients is close to maxclients"
+                    if usage >= 0.9
+                    else (
+                        "Redis has slowlog or memory risk"
+                        if alert_triggered
+                        else "Redis connection usage is normal"
+                    )
                 )
             ),
         }

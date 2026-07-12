@@ -11,11 +11,18 @@ from scripts.eval.eval_ragas_cases import (
     RagasCaseSample,
     build_case_result,
     build_failed_payload,
+    build_human_review_template,
     build_quality_contract,
+    business_requirement_hit,
     business_token_overlap,
+    citation_quality_scores,
+    compare_human_reviews,
     context_ids_from_retrieval,
     evaluate_cases,
     extract_business_tokens,
+    judge_execution_status,
+    load_cases,
+    load_human_reviews,
     parse_args,
     reference_context_ids,
     safe_float,
@@ -86,7 +93,39 @@ def test_ragas_nan_metric_fails_instead_of_passing() -> None:
 
     assert safe_float(math.nan) == 0.0
     assert result["passed"] is False
-    assert "faithfulness" in result["failed_metrics"]
+    assert result["metrics"]["faithfulness"] is None
+    assert "faithfulness_unavailable" in result["failed_metrics"]
+
+
+def test_full_profile_marks_missing_judge_metric_as_unavailable() -> None:
+    sample = RagasCaseSample(
+        case={"id": "core", "ragas_tags": ["core_interview"]},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["cpu_high_usage.md"],
+        reference_context_ids=["cpu_high_usage.md"],
+        answer="answer source_file cpu_high_usage.md chunk_id chunk-1",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[{"source_file": "cpu_high_usage.md", "chunk_id": "chunk-1"}],
+        retrieval={},
+    )
+
+    result = build_case_result(
+        sample,
+        {
+            "faithfulness": 1.0,
+            "answer_relevancy": None,
+            "judge_oncall_actionability": 1.0,
+            "answer_completeness": 1.0,
+            "id_based_context_precision": 1.0,
+            "id_based_context_recall": 1.0,
+        },
+        metric_profile="full",
+    )
+
+    assert result["metrics"]["answer_relevancy"] is None
+    assert result["judge_metrics_status"] == "failed"
+    assert "answer_relevancy_unavailable" in result["failed_metrics"]
 
 
 def test_ragas_default_cli_uses_reproducible_smoke_profile() -> None:
@@ -94,6 +133,31 @@ def test_ragas_default_cli_uses_reproducible_smoke_profile() -> None:
 
     assert args.metrics_profile == "id-smoke"
     assert args.answer_source == "product-offline"
+    assert args.repeat_count == 1
+
+
+def test_stage3_core_dataset_has_reviewable_enterprise_shape() -> None:
+    cases = load_cases("eval/ragas_stage3_core_cases.yaml")
+
+    assert 10 <= len(cases) <= 15
+    assert sum(bool(case.get("should_reject")) for case in cases) >= 2
+    assert all("core_interview" in case.get("ragas_tags", []) for case in cases)
+    assert all(case.get("business_rubric") and case.get("reference_answer") for case in cases)
+    assert any(len(reference_context_ids(case)) > 1 for case in cases)
+
+
+def test_business_requirement_hit_understands_oncall_boundary_paraphrases() -> None:
+    answer = (
+        "Check incident-window metric and log evidence first, then keep approval, "
+        "dry-run, and rollback boundaries before remediation."
+    )
+
+    assert business_requirement_hit("区分诊断证据和处置动作", answer)
+    assert business_requirement_hit("处置动作保留审批或回滚边界", answer)
+    assert business_requirement_hit(
+        "不把相关性直接当作根因",
+        "应结合慢查询、连接池等待和当前影响判断。",
+    )
 
 
 def test_ragas_quality_contract_explains_id_smoke_watch_metrics() -> None:
@@ -260,6 +324,10 @@ cases:
   - id: payment_mysql_smoke
     query: Payment MySQL pool_waiting active_connections approval
     expected_source: payment_wiki.md
+    required_sources:
+      - payment_wiki.md
+    relevant_chunks:
+      - payment_wiki.md
     reference_answer: >
       Payment MySQL slow query should be checked with EXPLAIN, pool_waiting,
       active_connections, incident-window metrics, and approval before rollback.
@@ -320,6 +388,10 @@ cases:
   - id: redis_core
     query: Redis maxclients connected_clients approval
     expected_source: redis_postmortem.md
+    required_sources:
+      - redis_postmortem.md
+    relevant_chunks:
+      - redis_postmortem.md
     reference_answer: >
       Redis maxclients should check connected_clients, incident-window evidence,
       and approval before limit or scale actions.
@@ -383,3 +455,201 @@ def test_ragas_setup_failure_payload_is_structured() -> None:
     assert payload["summary"]["failed_cases"][0]["id"] == "ragas_setup"
     assert payload["run"]["ragas_version"]
     assert payload["thresholds"]["core_case_pass_rate"] == 1.0
+
+
+def test_citation_quality_separates_existence_support_and_correctness() -> None:
+    sample = RagasCaseSample(
+        case={"id": "citation", "expected_source": "expected.md"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["expected.md", "extra.md"],
+        reference_context_ids=["expected.md"],
+        answer="source_file extra.md chunk_id extra.md#0001",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[{"source_file": "extra.md", "chunk_id": "extra.md#0001"}],
+        retrieval={},
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["citation_existence_hit"] == 1.0
+    assert metrics["citation_support_score"] == 1.0
+    assert metrics["citation_correctness_score"] == 0.0
+
+    result = build_case_result(
+        sample,
+        {
+            "id_based_context_precision": 0.5,
+            "id_based_context_recall": 1.0,
+        },
+        metric_profile="id-smoke",
+    )
+    assert "citation_correctness_score" not in result["failed_metrics"]
+
+
+def test_human_review_comparison_reports_agreement() -> None:
+    comparison = compare_human_reviews(
+        [{"id": "case-a", "passed": True}, {"id": "case-b", "passed": False}],
+        {
+            "case-a": {"case_id": "case-a", "reviewer": "sre", "decision": "pass"},
+            "case-b": {"case_id": "case-b", "reviewer": "sre", "decision": "pass"},
+        },
+    )
+
+    assert comparison["status"] == "available"
+    assert comparison["reviewed_case_count"] == 2
+    assert comparison["agreement_rate"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_ragas_repeat_count_retains_raw_runs_and_stability(tmp_path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "redis.md").write_text(
+        "Redis maxclients connected_clients incident-window evidence approval.",
+        encoding="utf-8",
+    )
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: redis_repeat
+    query: Redis maxclients connected_clients approval
+    expected_source: redis.md
+    required_sources:
+      - redis.md
+    relevant_chunks:
+      - redis.md
+    reference_context_ids:
+      - redis.md
+    reference_answer: Redis maxclients needs connected_clients evidence and approval.
+    business_rubric:
+      - Redis maxclients evidence
+      - approval action
+""",
+        encoding="utf-8",
+    )
+
+    payload = await evaluate_cases(
+        cases_path,
+        docs_dir=docs_dir,
+        answer_source="reference-fixture",
+        top_k=1,
+        min_score=0.1,
+        repeat_count=3,
+        human_review_path=None,
+    )
+
+    assert payload["run"]["repeat_count"] == 3
+    assert len(payload["case_scores"][0]["repeat_results"]) == 3
+    assert payload["case_scores"][0]["stability"]["all_pass"] is True
+    assert payload["summary"]["stability"]["all_cases_all_pass"] is True
+    assert payload["case_scores"][0]["stability"]["metrics"]["id_based_context_recall"] == {
+        "mean": 1.0,
+        "std": 0.0,
+        "worst": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_full_profile_without_judge_key_is_not_run(monkeypatch, tmp_path) -> None:
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: one
+    query: Redis incident-window evidence approval
+    expected_source: redis.md
+    required_sources:
+      - redis.md
+    relevant_chunks:
+      - redis.md
+    reference_context_ids:
+      - redis.md
+    reference_answer: Check Redis incident-window evidence and require approval.
+    business_rubric:
+      - Redis incident evidence
+      - approval boundary
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "redis.md").write_text(
+        "Redis incident-window evidence approval source_file chunk_id.",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.eval.eval_ragas_cases.config.dashscope_api_key", "")
+
+    payload = await evaluate_cases(
+        cases_path,
+        docs_dir=tmp_path,
+        answer_source="reference-fixture",
+        metric_profile="full",
+        repeat_count=3,
+        human_review_path=None,
+    )
+
+    assert judge_execution_status("full")["status"] == "not_run"
+    assert payload["summary"]["status"] == "not_run"
+    assert payload["summary"]["deterministic_status"] == "passed"
+    assert payload["summary"]["faithfulness_avg"] is None
+    assert len(payload["case_scores"]) == 1
+    assert payload["case_scores"][0]["judge_metrics_status"] == "not_run"
+
+
+def test_human_review_template_is_blind_and_uses_zero_to_two_scale() -> None:
+    payload = {
+        "run": {
+            "started_at": "2026-07-11T00:00:00+00:00",
+            "metric_profile": "id-smoke",
+            "answer_source": "reference-fixture",
+            "repeat_count": 3,
+        },
+        "case_scores": [
+            {
+                "id": "case-a",
+                "query": "Redis maxclients?",
+                "passed": True,
+                "metrics": {"faithfulness": 1.0},
+                "repeat_results": [
+                    {
+                        "repeat_index": 1,
+                        "query": "Redis maxclients?",
+                        "answer": "Check connected_clients.",
+                        "retrieved_contexts": ["runbook"],
+                        "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#1"}],
+                        "metrics": {"faithfulness": 1.0},
+                    }
+                ],
+            }
+        ],
+    }
+
+    template = build_human_review_template(payload, reviewer="sre", max_items=30)
+
+    assert template["rubric"]["scale"] == "0-2"
+    assert template["items"][0]["rubric_max_score"] == 2
+    assert "metrics" not in template["items"][0]
+    assert "passed" not in template["items"][0]
+    assert "automatic" not in str(template["items"][0]).lower()
+
+
+def test_load_human_reviews_preserves_two_reviewers_for_same_case(tmp_path) -> None:
+    path = tmp_path / "reviews.json"
+    path.write_text(
+        """
+{
+  "items": [
+    {"case_id": "case-a", "reviewer": "one", "decision": "pass"},
+    {"case_id": "case-a", "reviewer": "two", "decision": "fail"}
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+
+    reviews = load_human_reviews(path)
+    comparison = compare_human_reviews([{"id": "case-a", "passed": True}], reviews)
+
+    assert len(reviews["case-a"]) == 2
+    assert comparison["reviewer_count"] == 2
+    assert comparison["inter_rater_agreement"]["status"] == "not_computed"

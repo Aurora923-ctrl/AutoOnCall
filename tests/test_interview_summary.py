@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from scripts.eval.build_interview_summary import build_summary, render_markdown
+from scripts.eval.build_interview_summary import (
+    build_scorecard_from_manifest,
+    build_summary,
+    render_markdown,
+    render_scorecard_markdown,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -227,6 +232,8 @@ def test_interview_summary_rolls_up_live_aiops_rag_and_adapter_status() -> None:
     assert payload["summary"]["negative_boundaries"]["all_passed"] is True
     assert payload["summary"]["ragas_quality"]["passed_count"] == 8
     assert payload["summary"]["ragas_quality"]["profile"] == "id-smoke"
+    assert payload["summary"]["ragas_quality"]["full_judge_metrics_run"] is False
+    assert payload["summary"]["ragas_quality"]["full_judge_status"] == "not_run"
     assert payload["summary"]["milvus_multisource"]["inserted_chunks"] == 18
     assert payload["summary"]["resume_metrics"]["aiops_case_count"] == 16
     assert payload["summary"]["resume_metrics"]["p95_latency_ms"] == 321.5
@@ -291,3 +298,68 @@ def test_interview_docs_keep_single_rollup_and_grounding_boundaries() -> None:
     assert "Evidence Matrix" in redis_doc
     assert "Evidence Matrix" in mysql_doc
     assert "全句事实核查" in readme
+
+
+def test_scorecard_uses_one_manifest_run_and_exposes_production_boundary(tmp_path) -> None:
+    run_dir = tmp_path / "run-001"
+    run_dir.mkdir()
+    rag_path = run_dir / "rag.json"
+    rag_path.write_text(
+        """{"summary":{"case_count":30,"passed_count":29,"pass_rate":0.9667,
+        "failed_cases":[{"id":"rag-hard-01"}],"recall_at_3":0.95}}""",
+        encoding="utf-8",
+    )
+    manifest_path = run_dir / "baseline_manifest.json"
+    manifest = {
+        "run": {
+            "run_id": "run-001",
+            "started_at": "2026-07-11T10:00:00+00:00",
+            "ended_at": "2026-07-11T10:10:00+00:00",
+            "environment": {"git_commit": "abc123"},
+        },
+        "summary": {
+            "status": "failed",
+            "baseline_status": "candidate_dirty_worktree",
+            "official_baseline": False,
+            "module_count": 1,
+            "failed_module_count": 1,
+            "official_block_reasons": ["dirty_worktree", "rag:failed"],
+        },
+        "modules": [
+            {
+                "id": "rag",
+                "status": "failed",
+                "evidence_level": "offline_fixture",
+                "json_path": str(rag_path),
+                "summary": {
+                    "case_count": 30,
+                    "passed_count": 29,
+                    "pass_rate": 0.9667,
+                    "failed_cases": [{"id": "rag-hard-01"}],
+                    "recall_at_3": 0.95,
+                },
+            }
+        ],
+    }
+
+    payload = build_scorecard_from_manifest(manifest, manifest_path=manifest_path)
+    markdown = render_scorecard_markdown(payload)
+    rag = next(item for item in payload["modules"] if item["key"] == "rag_retrieval")
+    production = next(item for item in payload["modules"] if item["key"] == "production")
+
+    assert payload["run"]["run_id"] == "run-001"
+    assert payload["run"]["single_run_enforced"] is True
+    assert all(item["run_id"] == "run-001" for item in payload["modules"])
+    assert rag["sample_count"] == 30
+    assert rag["failed_case_count"] == 1
+    assert rag["failed_cases"][0]["id"] == "rag-hard-01"
+    assert rag["artifact_path"] == str(rag_path)
+    assert production["status"] == "not_enough_data"
+    assert production["evidence_level"] == "production"
+    assert "Controlled-fault" in payload["summary"]["production_boundary"]
+    assert "production: `not_enough_data`" not in markdown
+    assert "Production: `not_enough_data`" in markdown
+    assert (
+        next(item for item in payload["modules"] if item["key"] == "performance")["status"]
+        == "missing"
+    )

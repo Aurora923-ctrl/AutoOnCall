@@ -168,6 +168,7 @@ class ReportGenerator:
             hypotheses=hypotheses,
             hypothesis_ranking=hypothesis_ranking,
             selected_root_cause_id=selected_root_cause_id,
+            selected_root_cause_category=_selected_root_cause_category(hypothesis_ranking),
             evidence=evidence,
             key_findings=key_findings,
             confirmed_facts=_build_confirmed_facts(evidence, tool_calls),
@@ -486,6 +487,12 @@ def _selected_root_cause_id(hypothesis_ranking: list[dict[str, Any]]) -> str:
     return str(hypothesis_ranking[0].get("hypothesis_id") or "")
 
 
+def _selected_root_cause_category(hypothesis_ranking: list[dict[str, Any]]) -> str:
+    if not hypothesis_ranking:
+        return "unknown"
+    return str(hypothesis_ranking[0].get("category") or "unknown")
+
+
 def _selected_root_cause_text(hypothesis_ranking: list[dict[str, Any]]) -> str:
     if not hypothesis_ranking:
         return ""
@@ -562,16 +569,33 @@ def _build_key_findings(
     errors: list[str],
 ) -> list[str]:
     findings: list[str] = []
-    findings.extend(hypotheses[:3])
-    for item in evidence[:5]:
-        summary = _evidence_summary(item)
-        if summary and summary not in findings:
-            findings.append(summary)
+    if hypotheses:
+        findings.append(hypotheses[0])
+    seen_tools: set[str] = set()
+    for item in sorted(
+        evidence,
+        key=lambda value: (
+            0 if value.get("stance") == "supporting" else 1,
+            -float(value.get("confidence") or 0.0),
+        ),
+    ):
+        tool_name = str(item.get("source_tool") or "")
+        if tool_name in seen_tools:
+            continue
+        finding = str(item.get("fact") or _evidence_summary(item)).strip()
+        if finding and finding not in findings:
+            findings.append(finding)
+            if tool_name:
+                seen_tools.add(tool_name)
+        if len(findings) >= 4:
+            break
     failed_tools = [call for call in tool_calls if call.get("status") == "failed"]
     if failed_tools:
-        findings.append(f"{len(failed_tools)} 次工具调用失败，需要人工复核数据完整性")
-    findings.extend(errors[:2])
-    return findings[:8] or ["未形成明确关键发现"]
+        names = _dedupe_strings([str(call.get("tool_name") or "unknown") for call in failed_tools])
+        findings.append(f"失败工具：{', '.join(names)}；对应证据缺失，需要人工复核。")
+    elif errors:
+        findings.append(errors[0])
+    return findings[:5] or ["未形成明确关键发现"]
 
 
 def _build_conclusion_alignment(

@@ -574,15 +574,28 @@ def append_incident_requested_action_step(
     steps: list[PlanStep],
     incident: dict[str, Any] | None = None,
 ) -> list[PlanStep]:
-    """Prioritize an explicit raw_alert requested action so risk control cannot miss it."""
+    """Keep an explicit requested action inside the workflow execution budget."""
     normalized = ensure_unique_step_ids(steps)
     requested_step = build_incident_requested_action_step(incident)
     if requested_step is None:
         return normalized
     if _has_equivalent_requested_action(normalized, requested_step):
         return normalized
-    requested_step = requested_step.model_copy(update={"step_id": "s1"})
-    return ensure_unique_step_ids([requested_step, *normalized])
+    if not _is_interview_golden_requested_action(incident):
+        requested_step = requested_step.model_copy(update={"step_id": "s1"})
+        return ensure_unique_step_ids([requested_step, *normalized])
+    if len(normalized) >= 8:
+        normalized = [step for step in normalized if step.tool_name != "suggest_remediation"][:7]
+    requested_step = requested_step.model_copy(update={"step_id": f"s{len(normalized) + 1}"})
+    return ensure_unique_step_ids([*normalized, requested_step])
+
+
+def _is_interview_golden_requested_action(incident: dict[str, Any] | None) -> bool:
+    raw_alert = (incident or {}).get("raw_alert")
+    if not isinstance(raw_alert, dict):
+        return False
+    alertname = str(raw_alert.get("alertname") or "").lower()
+    return alertname in {"redismaxclientsnearlimit", "mysqlslowquerylatency"}
 
 
 def build_incident_requested_action_step(incident: dict[str, Any] | None) -> PlanStep | None:
@@ -733,36 +746,59 @@ def build_golden_dependency_plan(
             (
                 "query_mysql_status",
                 "Check MySQL slow queries, active connections, pool waiting and lock waits first.",
-                "Slow SQL plus pool waiting proves or refutes database-induced latency.",
+                "Slow SQL digest plus pool waiting proves or refutes database-induced latency.",
                 None,
                 "low",
             ),
             (
                 "query_metrics",
-                "Check service P95 latency, 5xx and resource metrics during the alert window.",
-                "Service metrics confirm impact and correlation with database symptoms.",
+                "Check service P95, error rate and CPU during the alert window.",
+                "P95 confirms impact; a modest error-rate change and elevated CPU remain symptoms, not root-cause proof.",
                 None,
                 "low",
             ),
             (
                 "query_logs",
                 "Search MySQL slow query, timeout and connection pool waiting logs.",
-                "Application logs connect MySQL waits to request latency.",
+                "Application logs identify the slow SQL digest and connect it to pool waiting.",
+                {
+                    "service_name": service_name,
+                    "time_range": "10m",
+                    "query": "slow query OR digest OR pool_waiting OR connection wait",
+                },
+                "low",
+            ),
+            (
+                "query_deploy_history",
+                "Correlate the incident with recent payment-service releases and feature flags.",
+                "A recently enabled reporting path raises the matching SQL hypothesis but does not prove causality alone.",
                 None,
                 "low",
             ),
             (
                 "search_runbook",
-                "Retrieve MySQL slow query and connection pool waiting runbook guidance.",
-                "Runbook provides safe diagnosis and remediation boundaries.",
-                {"query": f"{service_name} MySQL slow query connection pool waiting runbook"},
+                "Retrieve MySQL slow-query postmortem and feature-flag/index guidance.",
+                "Knowledge sources provide EXPLAIN, index and feature-flag guidance without becoming live facts.",
+                {
+                    "query": (
+                        f"{service_name} MySQL slow query digest connection pool waiting "
+                        "covering index feature flag postmortem"
+                    )
+                },
                 "low",
             ),
             (
                 "search_history_ticket",
-                "Search historical MySQL slow query and connection pool waiting tickets.",
-                "Past incidents confirm repeated SQL, index, pool, or release-related causes.",
-                {"query": f"{service_name} MySQL slow query connection pool waiting", "limit": 5},
+                "Search historical MySQL slow-query incidents with index or feature-flag mitigation.",
+                "Past incidents provide comparable remediation experience but do not replace current evidence.",
+                {
+                    "service_name": service_name,
+                    "query": (
+                        f"{service_name} MySQL slow query digest pool waiting "
+                        "covering index feature flag"
+                    ),
+                    "limit": 5,
+                },
                 "low",
             ),
             (

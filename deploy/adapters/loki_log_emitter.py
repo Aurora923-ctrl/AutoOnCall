@@ -40,8 +40,9 @@ LOG_TEMPLATES = [
         "endpoint": "POST /api/payments",
         "incident_id": "INC-MYSQL-001",
         "message": (
-            "ERROR payment-service slow query digest=9f3a-pay-report avg_ms=1840 "
-            "pool_waiting=18 endpoint=POST /api/payments"
+            "WARN payment-service slow query digest=9f3a-pay-report avg_ms=2280 "
+            "pool_waiting=6 active_connections=188/200 feature_flag=PAYMENT_REPORT_ENABLED "
+            "endpoint=POST /api/payments"
         ),
     },
     {

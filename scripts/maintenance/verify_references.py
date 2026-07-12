@@ -26,6 +26,22 @@ IGNORED_REFERENCE_PREFIXES = (
     "/health/",
     "/static/",
 )
+VERBATIM_EXTERNAL_ASSET_PREFIXES = (
+    "/docs/",
+    "/media/",
+    "/llms",
+)
+VERBATIM_EXTERNAL_ASSET_NAMES = {
+    "official_kubernetes_debug_pods.md",
+    "official_kubernetes_debug_services.md",
+    "official_kubernetes_pod_failure_reason.md",
+    "official_loki_troubleshoot_ingest.md",
+    "official_loki_troubleshoot_query.md",
+    "official_prometheus_alerting_practices.md",
+    "official_prometheus_alerting_rules.md",
+    "official_redis_clients.md",
+    "official_redis_latency.md",
+}
 TEXT_REFERENCE_FILES = (
     "README.md",
     "AGENTS.md",
@@ -76,17 +92,24 @@ def find_reference_issues(root: Path = REPO_ROOT) -> list[ReferenceIssue]:
         for line_number, line in enumerate(content.splitlines(), 1):
             if path.suffix.lower() == ".md":
                 for match in MARKDOWN_LINK_RE.finditer(line):
+                    raw_target = match.group(1).strip()
+                    if path.name in VERBATIM_EXTERNAL_ASSET_NAMES:
+                        continue
                     issue = _validate_markdown_target(
                         root=root,
                         source_path=path,
                         source_label=relative_source,
                         line_number=line_number,
-                        target=match.group(1).strip(),
+                        target=raw_target,
                     )
                     if issue:
                         issues.append(issue)
             for match in ASCII_RUNTIME_PATH_RE.finditer(line):
                 reference = match.group(0)
+                if path.name == "knowledge-base-official-sources.md" or (
+                    path.name in VERBATIM_EXTERNAL_ASSET_NAMES
+                ):
+                    continue
                 if not (root / reference).exists():
                     issues.append(
                         ReferenceIssue(

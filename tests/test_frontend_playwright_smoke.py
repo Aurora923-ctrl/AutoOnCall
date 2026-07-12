@@ -67,6 +67,33 @@ def test_static_workbench_renders_in_browser(tmp_path) -> None:
             page.locator('[data-workbench-view="system"]').click()
             page.locator("#toolContractSummary").wait_for(state="visible", timeout=5000)
             page.screenshot(path=str(tmp_path / "autooncall-workbench.png"), full_page=False)
+
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.locator("#mobileMenuBtn").wait_for(state="visible", timeout=5000)
+            assert (
+                page.locator("#appSidebar").evaluate(
+                    "(element) => getComputedStyle(element).position"
+                )
+                == "fixed"
+            )
+            assert (
+                page.locator(".main-content").evaluate(
+                    "(element) => Math.round(element.getBoundingClientRect().width)"
+                )
+                >= 389
+            )
+            page.locator("#mobileMenuBtn").click()
+            assert page.locator("#mobileMenuBtn").get_attribute("aria-expanded") == "true"
+            page.wait_for_function(
+                "() => getComputedStyle(document.querySelector('#appSidebar')).transform "
+                "=== 'matrix(1, 0, 0, 1, 0, 0)'"
+            )
+            page.locator('[data-workbench-view="incidents"]').click()
+            assert page.locator("#mobileMenuBtn").get_attribute("aria-expanded") == "false"
+            assert page.evaluate(
+                "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+            )
+            page.screenshot(path=str(tmp_path / "autooncall-workbench-mobile.png"), full_page=False)
             browser.close()
 
         relevant_errors = [

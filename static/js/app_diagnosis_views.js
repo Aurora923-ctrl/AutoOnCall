@@ -580,8 +580,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
                         <button class="action-btn primary" data-diagnosis-resume data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}">更新诊断闭环</button>
                         ${canStartChange ? `
                             <button class="action-btn" data-change-resume data-change-mode="dry_run_only" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">安全变更 dry-run</button>
-                            <button class="action-btn" data-change-resume data-change-mode="sandbox" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">沙箱验证</button>
-                            <button class="action-btn" data-change-resume data-change-mode="manual_record" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">记录人工变更</button>
+                            <button hidden data-change-resume data-change-mode="sandbox" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">沙箱验证</button>
+                            <button hidden data-change-resume data-change-mode="manual_record" data-incident-id="${this.escapeHtml(approval.incident_id)}" data-approval-id="${this.escapeHtml(approval.approval_id)}" data-change-plan-id="${this.escapeHtml(changePlan.change_plan_id)}">记录人工变更</button>
                         ` : ''}
                     </div>
                 ` : ''}
@@ -758,8 +758,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     async refreshEvalSummary() {
         try {
-            const [evalResult, ragasResult] = await Promise.allSettled([
+            const [evalResult, scorecardResult, ragasResult] = await Promise.allSettled([
                 this.apiGet(`${this.apiBaseUrl}/eval/summary`),
+                this.apiGet(`${this.apiBaseUrl}/eval/scorecard`),
                 this.apiGet(`${this.apiBaseUrl}/eval/ragas`)
             ]);
             if (evalResult.status === 'fulfilled') {
@@ -770,6 +771,14 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     message: evalResult.reason?.message || '离线评测摘要不可用'
                 });
             }
+            if (scorecardResult.status === 'fulfilled') {
+                this.setDashboardState('interviewScorecard', scorecardResult.value);
+            } else {
+                this.setDashboardState('interviewScorecard', {
+                    available: false,
+                    message: scorecardResult.reason?.message || '面试 scorecard 不可用'
+                });
+            }
             if (ragasResult.status === 'fulfilled') {
                 this.setDashboardState('ragasSummary', ragasResult.value);
             } else {
@@ -778,7 +787,11 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     message: ragasResult.reason?.message || 'RAGAS 质量摘要不可用'
                 });
             }
-            this.renderEvalSummary(this.dashboardState.evalSummary, this.dashboardState.ragasSummary);
+            this.renderEvalSummary(
+                this.dashboardState.evalSummary,
+                this.dashboardState.ragasSummary,
+                this.dashboardState.interviewScorecard
+            );
         } catch (error) {
             if (this.evalStatus) this.evalStatus.textContent = '不可用';
             if (this.evalSummary) {
@@ -1075,14 +1088,19 @@ Object.assign(window.AutoOnCallApp.prototype, {
         `;
     }
 ,
-    renderEvalSummary(payload, ragasPayload = this.dashboardState.ragasSummary) {
+    renderEvalSummary(
+        payload,
+        ragasPayload = this.dashboardState.ragasSummary,
+        scorecardPayload = this.dashboardState.interviewScorecard
+    ) {
         const available = Boolean(payload && payload.available);
         const ragasAvailable = Boolean(ragasPayload && ragasPayload.available);
+        const scorecardAvailable = Boolean(scorecardPayload && scorecardPayload.available);
         if (this.evalStatus) {
-            this.evalStatus.textContent = available || ragasAvailable ? '已加载' : '未生成';
+            this.evalStatus.textContent = available || ragasAvailable || scorecardAvailable ? '已加载' : '未生成';
         }
         if (!this.evalSummary) return;
-        if (!available && !ragasAvailable) {
+        if (!available && !ragasAvailable && !scorecardAvailable) {
             this.evalSummary.innerHTML = `<div class="empty-state">${this.escapeHtml(payload?.message || '暂无评测摘要')}</div>`;
             return;
         }
@@ -1099,6 +1117,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             ? failedCases.map((caseId) => `<span class="source-pill error">${this.escapeHtml(String(caseId))}</span>`).join('')
             : '<span class="source-pill success">无失败用例</span>';
         this.evalSummary.innerHTML = `
+            ${this.renderInterviewScorecard(scorecardPayload)}
             <div class="metric-grid">
                 ${metrics.map((metric) => `
                     <div class="metric-tile">
@@ -1131,6 +1150,92 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 </div>
             </div>
             ${this.renderRagasQualityPanel(ragasPayload)}
+        `;
+    }
+,
+    renderInterviewScorecard(payload) {
+        if (!payload || payload.available === false) {
+            return `
+                <div class="eval-detail-panel interview-scorecard-panel">
+                    <div>
+                        <span>面试 Scorecard</span>
+                        <p>${this.escapeHtml(payload?.message || '暂无同一 run 的 scorecard，请运行 make interview-summary')}</p>
+                    </div>
+                </div>
+            `;
+        }
+        const run = payload.run || {};
+        const summary = payload.summary || {};
+        const modules = Array.isArray(payload.modules) ? payload.modules : [];
+        const moduleRows = modules.map((item) => {
+            const failed = Array.isArray(item.failed_cases) ? item.failed_cases : [];
+            const failureText = failed.length > 0
+                ? (failed[0].id || failed[0].key || String(failed[0]))
+                : '-';
+            const metric = Array.isArray(item.metrics) && item.metrics.length > 0
+                ? item.metrics[0]
+                : null;
+            const ratio = metric?.numerator !== undefined && metric?.denominator !== undefined
+                ? `${metric.numerator}/${metric.denominator}`
+                : '';
+            const ci = metric?.confidence_interval || {};
+            const ciText = ci.lower !== undefined && ci.upper !== undefined
+                ? `${this.formatPercent(ci.lower)}-${this.formatPercent(ci.upper)}`
+                : '-';
+            const metricText = metric
+                ? `${metric.key}=${this.formatEvalMetric({
+                    value: metric.value,
+                    value_type: String(metric.key || '').includes('latency') ? 'duration_ms' : 'percent'
+                })}${ratio ? ` (${ratio})` : ''}`
+                : '-';
+            return `
+                <tr>
+                    <td>${this.escapeHtml(item.label || item.key || '模块')}</td>
+                    <td><span class="meta-pill">${this.escapeHtml(item.evidence_level || 'unknown')}</span></td>
+                    <td>${this.escapeHtml(String(item.sample_count ?? 0))}</td>
+                    <td><span class="meta-pill ${this.statusTone(item.status)}">${this.escapeHtml(item.status || 'missing')}</span></td>
+                    <td>${this.escapeHtml(metricText)}</td>
+                    <td>${this.escapeHtml(ciText)}</td>
+                    <td>${this.escapeHtml(String(item.failed_case_count ?? 0))}</td>
+                    <td><code>${this.escapeHtml(item.artifact_path || '-')}</code></td>
+                    <td>${this.escapeHtml(failureText)}</td>
+                </tr>
+            `;
+        }).join('');
+        return `
+            <div class="eval-detail-panel interview-scorecard-panel">
+                <div>
+                    <span>面试 Scorecard</span>
+                    <div class="source-strip">
+                        <span class="source-pill ${this.statusTone(summary.status)}">${this.escapeHtml(summary.status || 'unknown')}</span>
+                        <span class="source-pill">run=${this.escapeHtml(run.run_id || 'missing')}</span>
+                        <span class="source-pill">baseline=${this.escapeHtml(summary.baseline_status || 'missing')}</span>
+                        <span class="source-pill warning">production=${this.escapeHtml(summary.production_status || 'not_enough_data')}</span>
+                        <span class="source-pill">commit=${this.escapeHtml(run.environment?.git_commit || 'missing')}</span>
+                    </div>
+                    <p>${this.escapeHtml(summary.production_boundary || 'Production 指标仅在真实生产样本充分时展示。')}</p>
+                </div>
+                <div class="tool-call-table compact-tool-contracts scorecard-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>模块</th>
+                                <th>证据</th>
+                                <th>样本</th>
+                                <th>状态</th>
+                                <th>核心指标</th>
+                                <th>95% CI</th>
+                                <th>失败</th>
+                                <th>原始产物</th>
+                                <th>失败 Case</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${moduleRows || '<tr><td colspan="9">暂无 scorecard 模块</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         `;
     }
 ,

@@ -1,0 +1,269 @@
+schema_version: "2.0"
+dataset_version: "2026.07.12"
+annotation_version: "1.0"
+description: "Frozen unseen stage-2 acceptance set. Labels were fixed before the first run."
+cases:
+  - id: fresh_cpu_01
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "CPU 告警后怎样按进程、线程和调用栈逐层取证？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0003, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+  - id: fresh_memory_01
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "容器逼近内存上限并出现 OOMKilled 时，标准排查入口在哪里？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0003, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存]
+  - id: fresh_disk_01
+    split: holdout
+    category: disk
+    difficulty: medium
+    query: "磁盘写入失败时如何先确认空间、inode 与大目录？"
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0003, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [磁盘]
+  - id: fresh_service_01
+    split: holdout
+    category: service
+    difficulty: medium
+    query: "接口持续返回 503 时，服务不可用 Runbook 的取证顺序是什么？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0003, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [服务]
+  - id: fresh_latency_01
+    split: holdout
+    category: latency
+    difficulty: medium
+    query: "P95 突然升高时，如何检查下游、数据库和线程池？"
+    relevant_chunks: [{chunk_id: slow_response.md#0003, relevance: 3}]
+    required_sources: [slow_response.md]
+    expected_keywords: [响应]
+  - id: fresh_redis_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "Redis 拒绝新客户端连接时，应优先核对 maxclients 还是延迟诊断？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: fresh_redis_02
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "Redis 服务端延迟基线应该使用哪种 redis-cli 测试？"
+    relevant_chunks: [{chunk_id: official_redis_latency.md#0003, relevance: 3}]
+    required_sources: [official_redis_latency.md]
+    expected_keywords: [latency]
+  - id: fresh_mysql_01
+    split: holdout
+    category: mysql
+    difficulty: hard
+    query: "支付接口变慢且连接池等待上升时，应引用哪份 MySQL 复盘证据？"
+    relevant_chunks: [{chunk_id: mysql_slow_query_postmortem.pdf#0001, relevance: 3}]
+    required_sources: [mysql_slow_query_postmortem.pdf]
+    expected_keywords: [MySQL]
+  - id: fresh_k8s_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "Pod 状态异常时，官方文档建议先 describe 并检查哪些状态？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}]
+    required_sources: [official_kubernetes_debug_pods.md]
+    expected_keywords: [Pod]
+  - id: fresh_k8s_02
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "Service 后端不匹配时，应该怎样验证 Pod 与 EndpointSlice？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_services.md#0015, relevance: 3}]
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [Pod]
+  - id: fresh_loki_01
+    split: holdout
+    category: loki
+    difficulty: hard
+    query: "Loki 写入数据被丢弃时，应监控哪两个 discarded 指标？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_ingest.md]
+    expected_keywords: [loki_discarded]
+  - id: fresh_loki_02
+    split: holdout
+    category: loki
+    difficulty: hard
+    query: "Loki 查询超时后，官方 READ 排障文档建议如何缩小查询范围？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_query.md#0018, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_query.md]
+    expected_keywords: [timeout]
+  - id: fresh_prometheus_01
+    split: holdout
+    category: prometheus
+    difficulty: medium
+    query: "Prometheus 告警规则的 expr、for、labels 和 annotations 在哪里定义？"
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0002, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [expr]
+  - id: fresh_prometheus_02
+    split: holdout
+    category: prometheus
+    difficulty: hard
+    query: "告警设计为什么应优先关注用户可见症状而不是所有底层原因？"
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 3}]
+    required_sources: [official_prometheus_alerting_practices.md]
+    expected_keywords: [symptoms]
+  - id: fresh_table_01
+    split: holdout
+    category: incident
+    difficulty: medium
+    query: "INC-REDIS-009 的历史处置记录存在哪类表格资产中？"
+    relevant_chunks: [{chunk_id: tickets.csv#0004, relevance: 3}]
+    required_sources: [tickets.csv]
+    expected_keywords: [INC-REDIS-009]
+  - id: fresh_multi_redis_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    query: "Redis 连接容量问题如何结合官方限制说明与事故复盘？"
+    relevant_chunks:
+      - {chunk_id: official_redis_clients.md#0004, relevance: 3}
+      - {chunk_id: redis_postmortem.pdf#0001, relevance: 2}
+    required_sources: [official_redis_clients.md, redis_postmortem.pdf]
+    expected_keywords: [maxclients]
+  - id: fresh_multi_mysql_01
+    split: holdout
+    category: mysql
+    difficulty: hard
+    case_type: multi_source
+    query: "MySQL 慢查询应怎样联合支付 Runbook 与事故复盘取证？"
+    relevant_chunks:
+      - {chunk_id: payment_wiki.html#0001, relevance: 3}
+      - {chunk_id: mysql_slow_query_postmortem.pdf#0001, relevance: 2}
+    required_sources: [payment_wiki.html, mysql_slow_query_postmortem.pdf]
+    expected_keywords: [MySQL]
+  - id: fresh_multi_k8s_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    case_type: multi_source
+    query: "Kubernetes 请求不通时，如何同时完成 Pod triage 与 Service backend 验证？"
+    relevant_chunks:
+      - {chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}
+      - {chunk_id: official_kubernetes_debug_services.md#0015, relevance: 2}
+    required_sources:
+      - official_kubernetes_debug_pods.md
+      - official_kubernetes_debug_services.md
+    expected_keywords: [Pod]
+  - id: fresh_multi_observe_01
+    split: holdout
+    category: observability
+    difficulty: hard
+    case_type: multi_source
+    query: "日志写入异常时，如何结合 Loki 丢弃指标与 Prometheus 症状告警原则？"
+    relevant_chunks:
+      - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+      - {chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 2}
+    required_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    expected_keywords: [loki_discarded]
+  - id: fresh_multi_redis_02
+    split: holdout
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    query: "Redis maxclients 故障有哪些官方文档和容量 Wiki 可以交叉验证？"
+    relevant_chunks:
+      - {chunk_id: official_redis_clients.md#0004, relevance: 3}
+      - {chunk_id: redis_capacity_wiki.html#0001, relevance: 2}
+    required_sources: [official_redis_clients.md, redis_capacity_wiki.html]
+    expected_keywords: [maxclients]
+  - id: fresh_alias_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "k8s 容器失败后如何读取 termination message？"
+    relevant_chunks: [{chunk_id: official_kubernetes_pod_failure_reason.md#0003, relevance: 3}]
+    required_sources: [official_kubernetes_pod_failure_reason.md]
+    expected_keywords: [termination]
+  - id: fresh_alias_02
+    split: holdout
+    category: loki
+    difficulty: hard
+    query: "LogQL read path 超时应查看哪份 query troubleshooting 指南？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_query.md#0018, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_query.md]
+    expected_keywords: [timeout]
+  - id: fresh_alias_03
+    split: holdout
+    category: prometheus
+    difficulty: medium
+    query: "PromQL alert rule 如何配置持续时间和通知标签？"
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0002, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [labels]
+  - id: fresh_alias_04
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "connected_clients 接近上限时应引用哪份 client handling 文档？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: fresh_alias_05
+    split: holdout
+    category: mysql
+    difficulty: medium
+    query: "pool_waiting 上升并伴随 slow SQL 时应查哪份支付知识页？"
+    relevant_chunks: [{chunk_id: payment_wiki.html#0001, relevance: 3}]
+    required_sources: [payment_wiki.html]
+    expected_keywords: [MySQL]
+  - id: fresh_refusal_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "帮我比较两款游戏主机并给出购买建议。"
+    relevant_chunks: []
+    required_sources: []
+  - id: fresh_refusal_02
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "写一首关于夏天旅行的诗。"
+    relevant_chunks: []
+    required_sources: []
+  - id: fresh_refusal_03
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "预测下个月黄金价格走势。"
+    relevant_chunks: []
+    required_sources: []
+  - id: fresh_refusal_04
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "制定一周家庭健身计划。"
+    relevant_chunks: []
+    required_sources: []
+  - id: fresh_refusal_05
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "帮我润色一封求职感谢信。"
+    relevant_chunks: []
+    required_sources: []

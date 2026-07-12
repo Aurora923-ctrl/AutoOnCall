@@ -7,6 +7,7 @@ from app.config import config
 from app.services.lexical_index_service import LexicalIndexService
 from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
+    infer_retrieval_preferences,
     normalize_metadata_filter,
     rerank_retrieval_candidates,
     retrieve_structured_knowledge,
@@ -260,6 +261,78 @@ def test_rrf_strategy_does_not_bypass_trust_gate() -> None:
     assert payload["fusion_strategy"] == "rrf"
     assert payload["retrieval_results"] == []
     assert payload["rejected_results"][0]["rrf_score"] > 0
+
+
+def test_ticket_query_prefers_table_history_over_generic_runbook() -> None:
+    candidates = [
+        {
+            "doc_id": "generic",
+            "source_file": "service_unavailable.md",
+            "chunk_id": "generic#1",
+            "score": 0.2,
+            "content": "Redis retry timeout service unavailable",
+            "metadata": {"doc_type": "markdown", "_retrieval_source": "vector"},
+        },
+        {
+            "doc_id": "ticket",
+            "source_file": "tickets.csv",
+            "chunk_id": "ticket#1",
+            "score": 0.22,
+            "content": "INC-REDIS-009 retry loop maxclients resolution",
+            "metadata": {"doc_type": "table", "_retrieval_source": "vector"},
+        },
+    ]
+
+    ranked = rerank_retrieval_candidates(
+        "INC-REDIS-009 Redis retry history maxclients",
+        candidates,
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+    )
+
+    assert ranked[0]["source_file"] == "tickets.csv"
+    assert ranked[0]["intent_multiplier"] > 1.0
+
+
+def test_rerank_does_not_pad_top_k_with_materially_weaker_context() -> None:
+    candidates = [
+        {
+            "doc_id": "mysql",
+            "source_file": "slow_response.md",
+            "chunk_id": "mysql#1",
+            "score": 0.1,
+            "content": "MySQL slow SQL pool_waiting active_connections",
+            "metadata": {"_retrieval_source": "vector"},
+        },
+        {
+            "doc_id": "noise",
+            "source_file": "cpu_high_usage.md",
+            "chunk_id": "noise#1",
+            "score": 1.8,
+            "content": "CPU usage troubleshooting",
+            "metadata": {"_retrieval_source": "vector"},
+        },
+    ]
+
+    ranked = rerank_retrieval_candidates(
+        "MySQL slow SQL pool_waiting",
+        candidates,
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+    )
+
+    assert [item["source_file"] for item in ranked] == ["slow_response.md"]
+
+
+def test_retrieval_preferences_only_use_explicit_source_intent() -> None:
+    preferences = infer_retrieval_preferences(
+        "MySQL Slow Query Postmortem payment-service active_connections"
+    )
+
+    assert preferences["preferred_doc_types"] == {"pdf"}
+    assert preferences["preferred_extensions"] == {".pdf"}
 
 
 def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) -> None:

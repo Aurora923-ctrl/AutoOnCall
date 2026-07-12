@@ -27,10 +27,10 @@ NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
-        api-contract-verify security pre-commit-install pre-commit check-all coverage docs shell \
+        api-contract-verify knowledge-quality benchmark-baseline official-baseline performance-smoke performance-real-model controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
-        interview-up interview-down interview-status sandbox-verify sandbox-demo
+        interview-up interview-down interview-status sandbox-verify sandbox-demo refresh-quality-artifacts
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -101,6 +101,7 @@ help:
 	@echo "  $(YELLOW)make eval-change$(NC)  - 🧪 运行安全变更离线评测"
 	@echo "  $(YELLOW)make eval-replanner$(NC) - 🧪 运行 Replanner LLM 决策评测"
 	@echo "  $(YELLOW)make api-contract-verify$(NC) - 离线验证 API/SSE/ToolContract 契约"
+	@echo "  $(YELLOW)make full-gate$(NC)     - 完整质量门禁，含 benchmark scorecard"
 	@echo "  $(YELLOW)make verify$(NC)       - ✅ 运行只验证门禁（不修改源码）"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 兼容入口，等同 make verify"
 	@echo ""
@@ -257,6 +258,15 @@ interview-ragas:  ## Refresh optional RAGAS quality report for interview demos
 	@echo "$(YELLOW)馃И Refreshing interview RAGAS quality snapshot...$(NC)"
 	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
 	$(PYTHON) scripts/eval/build_interview_summary.py --ragas-summary logs/ragas_eval_summary.json
+
+refresh-quality-artifacts:  ## Refresh reproducible local eval artifacts; live Docker proof remains explicit
+	@echo "$(YELLOW)Refreshing reproducible AutoOnCall quality artifacts...$(NC)"
+	$(PYTHON) scripts/eval/eval_cases.py --cases eval/cases.yaml --env-file deploy/sandbox.env --report-path logs/eval_reports.db --summary-json logs/eval_summary.json --summary-md logs/eval_summary.md
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary_current.json --summary-md logs/rag_eval_summary_current.md
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
+	$(PYTHON) scripts/eval/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
+	$(PYTHON) scripts/eval/eval_replanner_cases.py --cases eval/replanner_cases.yaml --summary-json logs/replanner_eval_summary.json --summary-md logs/replanner_eval_summary.md
+	@echo "$(YELLOW)Local artifacts refreshed. Run make sandbox-verify and the live-golden command before interview-summary.$(NC)"
 
 # ============================================================
 # MCP 服务管理
@@ -690,7 +700,7 @@ eval:  ## 运行 AIOps 离线评测
 
 eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
-	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_relevance_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
 
 eval-ragas:  ## Run optional RAGAS quality evaluation for RAG answers
 	@echo "$(YELLOW)🧪 Running optional RAGAS quality evaluation...$(NC)"
@@ -703,6 +713,25 @@ eval-change:  ## 运行安全变更离线评测
 eval-replanner:  ## 运行 Replanner LLM 决策离线评测
 	@echo "$(YELLOW)🧪 运行 Replanner LLM 决策离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_replanner_cases.py --cases eval/replanner_cases.yaml --summary-json logs/replanner_eval_summary.json --summary-md logs/replanner_eval_summary.md
+
+knowledge-quality:  ## Measure all knowledge assets and temporary Milvus CRUD consistency
+	$(PYTHON) scripts/eval/eval_knowledge_quality.py --docs-dir $(DOCS_DIR) --summary-json logs/knowledge_quality.json --summary-md logs/knowledge_quality.md
+
+benchmark-baseline:  ## Run one timestamped local benchmark without overwriting history
+	$(PYTHON) scripts/eval/run_benchmark_baseline.py
+
+official-baseline:  ## Publish an official baseline only from a clean committed worktree
+	$(PYTHON) -c "import subprocess,sys; dirty=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True,check=True).stdout.strip(); commit=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True,check=True).stdout.strip(); sys.exit('official baseline requires a clean worktree' if dirty else 'official baseline requires a commit' if not commit else 0)"
+	$(PYTHON) scripts/eval/run_benchmark_baseline.py
+
+performance-smoke:  ## Run a bounded performance evaluator smoke check
+	$(PYTHON) scripts/eval/eval_performance.py --limit 50 --summary-json logs/performance.json --summary-md logs/performance.md
+
+performance-real-model:  ## Evaluate persisted real-model traces for the stage-6 minimum
+	$(PYTHON) scripts/performance/run_real_model_acceptance.py --rag-requests 20 --aiops-requests 10 --summary-json logs/performance_real_model.json --summary-md logs/performance_real_model.md
+
+controlled-fault-readiness:  ## Verify controlled-fault implementation and summary tests
+	$(PYTHON) -m pytest tests/test_controlled_fault.py -q
 
 export-bad-cases:  ## Export high-value feedback into reviewable eval backlog drafts
 	@echo "$(YELLOW)Exporting bad cases into reviewable eval backlog drafts...$(NC)"
@@ -750,6 +779,28 @@ verify:  ## 运行只验证门禁（不修改源码）
 
 check-all:  ## 兼容入口：等同 make verify
 	@$(MAKE) verify
+
+full-gate:  ## Stage-8 full quality gate; expensive live experiments remain explicit
+	@echo "$(YELLOW)Running AutoOnCall full gate...$(NC)"
+	@$(MAKE) format-check
+	@$(MAKE) lint
+	@$(MAKE) type-check
+	@$(MAKE) security
+	$(PYTHON) -m pytest tests/ --cov=app --cov-report=term
+	@$(MAKE) api-contract-verify
+	@$(MAKE) knowledge-quality
+	@$(MAKE) eval-rag
+	@$(MAKE) eval
+	@$(MAKE) eval-ragas
+	@$(MAKE) eval-change
+	@$(MAKE) eval-replanner
+	@$(MAKE) performance-smoke
+	@$(MAKE) controlled-fault-readiness
+	@$(MAKE) reference-check
+	@$(MAKE) hygiene-check
+	@$(MAKE) benchmark-baseline
+	@$(MAKE) interview-summary
+	@echo "$(GREEN)Full gate complete. Scorecard is in the latest benchmark run directory.$(NC)"
 
 pre-commit-install:  ## 安装 pre-commit hooks
 	@echo "$(YELLOW)🔗 安装 pre-commit hooks...$(NC)"

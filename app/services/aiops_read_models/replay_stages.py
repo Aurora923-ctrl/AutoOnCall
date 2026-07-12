@@ -58,9 +58,11 @@ def build_replay_stages(
         replay_stage_card(
             "executor",
             "Executor 工具取证",
-            "completed"
-            if diagnosis_chain.get("tool_calls") or events_by_stage["executor"]
-            else "pending",
+            (
+                "completed"
+                if diagnosis_chain.get("tool_calls") or events_by_stage["executor"]
+                else "pending"
+            ),
             _stage_summary_from_latest(latest_by_stage.get("executor"), "已执行工具取证"),
             events_by_stage,
             failed_by_stage,

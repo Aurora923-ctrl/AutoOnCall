@@ -19,9 +19,7 @@ def build_replay_approval_flow(approvals: list[ApprovalRequest]) -> dict[str, An
     before = (
         f"等待人工审批：{latest.action}"
         if latest and latest.status == "pending"
-        else f"触发审批：{latest.action}"
-        if latest
-        else "未触发审批"
+        else f"触发审批：{latest.action}" if latest else "未触发审批"
     )
     after = replay_approval_after_text(latest)
     return {

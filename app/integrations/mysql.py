@@ -471,9 +471,7 @@ class MySQLStatusAdapter:
         suffix = (
             f" from MySQL live incident evidence ({seed_source})"
             if incident_evidence and seed_source
-            else " from MySQL live incident evidence"
-            if incident_evidence
-            else ""
+            else " from MySQL live incident evidence" if incident_evidence else ""
         )
         return (
             f"{service_name} MySQL active_connections={active}/{connection_max}, "

@@ -8,6 +8,7 @@ from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.prometheus import PrometheusMetricsAdapter
 from app.tools.base import (
     AIOpsTool,
+    ToolRetryPolicy,
     clamp_duration,
     invoke_langchain_tool,
     is_failed_tool_output,
@@ -33,6 +34,11 @@ class QueryMetricsTool(AIOpsTool):
     risk_level = "low"
     read_only = True
     timeout_seconds = 12.0
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["MCP monitor", "Prometheus"]
     degradation_strategy = (
         "Use MCP monitor tools or Prometheus when configured; otherwise return a structured "

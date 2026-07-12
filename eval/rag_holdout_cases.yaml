@@ -1,0 +1,249 @@
+version: 1
+description: Frozen stage-2 holdout. Created from knowledge content before the first retrieval run.
+cases:
+  - id: holdout_cpu_01
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "单个进程接近满核并伴随重复堆栈，Runbook 将哪类原因列为首要候选？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0004, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [死循环]
+  - id: holdout_cpu_02
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "CPU 告警处置后，需要观察哪些恢复信号？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0006, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+  - id: holdout_cpu_03
+    split: holdout
+    category: cpu
+    difficulty: hard
+    query: "扩容、限流或回滚 CPU 故障前，系统要求保留什么安全边界？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0008, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [审批]
+  - id: holdout_memory_01
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "Full GC 后占用仍不下降，应该参考哪段内存泄漏处置知识？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0004, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存泄漏]
+  - id: holdout_memory_02
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "需要生成 heap dump 和查看 GC 统计时，应引用哪个命令章节？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0008, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [jmap]
+  - id: holdout_memory_03
+    split: holdout
+    category: memory
+    difficulty: hard
+    query: "调整 JVM 参数或重启高内存实例为什么不能直接自动执行？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0010, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [审批]
+  - id: holdout_disk_01
+    split: holdout
+    category: disk
+    difficulty: medium
+    query: "Docker 镜像、停止容器和容器日志占满磁盘，应查哪段原因分析？"
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0005, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [Docker]
+  - id: holdout_disk_02
+    split: holdout
+    category: disk
+    difficulty: medium
+    query: "排查 inode 耗尽与大文件时有哪些常用命令？"
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0007, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [inode]
+  - id: holdout_disk_03
+    split: holdout
+    category: disk
+    difficulty: hard
+    query: "删除文件、截断日志或扩容磁盘前需要满足什么变更要求？"
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0011, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [回滚]
+  - id: holdout_service_01
+    split: holdout
+    category: service
+    difficulty: medium
+    query: "全部实例健康检查失败且新版本刚发布，Runbook 建议先分析哪类原因？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0004, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [回滚]
+  - id: holdout_service_02
+    split: holdout
+    category: service
+    difficulty: medium
+    query: "服务恢复后应如何验证健康检查、核心功能和错误率？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0006, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [健康检查]
+  - id: holdout_service_03
+    split: holdout
+    category: service
+    difficulty: hard
+    query: "切流、降级和配置变更为何必须经过人工审批或 dry-run？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0011, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [dry-run]
+  - id: holdout_slow_01
+    split: holdout
+    category: latency
+    difficulty: medium
+    query: "慢 SQL、连接池接近满载时应参考哪段响应延迟原因分析？"
+    relevant_chunks: [{chunk_id: slow_response.md#0004, relevance: 3}]
+    required_sources: [slow_response.md]
+    expected_keywords: [慢查询]
+  - id: holdout_slow_02
+    split: holdout
+    category: latency
+    difficulty: medium
+    query: "外部 API 超时、缓存策略和同步等待应在哪个性能检查清单核对？"
+    relevant_chunks: [{chunk_id: slow_response.md#0007, relevance: 3}]
+    required_sources: [slow_response.md]
+    expected_keywords: [外部API]
+  - id: holdout_slow_03
+    split: holdout
+    category: latency
+    difficulty: hard
+    query: "添加索引或调整连接池之前，处置流程要求准备哪些安全措施？"
+    relevant_chunks: [{chunk_id: slow_response.md#0010, relevance: 3}]
+    required_sources: [slow_response.md]
+    expected_keywords: [回滚]
+  - id: holdout_redis_01
+    split: holdout
+    category: redis
+    difficulty: medium
+    query: "Redis 同时连接数受什么配置和文件描述符限制？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: holdout_redis_02
+    split: holdout
+    category: redis
+    difficulty: medium
+    query: "空闲客户端连接何时会被服务端关闭？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0010, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [timeout]
+  - id: holdout_redis_03
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "如何用 redis-cli 测量服务端延迟而不是应用端总耗时？"
+    relevant_chunks: [{chunk_id: official_redis_latency.md#0003, relevance: 3}]
+    required_sources: [official_redis_latency.md]
+    expected_keywords: [latency]
+  - id: holdout_k8s_01
+    split: holdout
+    category: kubernetes
+    difficulty: medium
+    query: "Pod 一直 Pending 或 Waiting 时，官方排障指南从哪里开始 triage？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}]
+    required_sources: [official_kubernetes_debug_pods.md]
+    expected_keywords: [kubectl]
+  - id: holdout_k8s_02
+    split: holdout
+    category: kubernetes
+    difficulty: medium
+    query: "Service 没有后端地址时，应检查 EndpointSlice 的哪个章节？"
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_services.md#0013, relevance: 3}]
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [EndpointSlice]
+  - id: holdout_k8s_03
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "容器终止消息的默认文件路径和 terminationMessagePolicy 在哪里说明？"
+    relevant_chunks: [{chunk_id: official_kubernetes_pod_failure_reason.md#0003, relevance: 3}]
+    required_sources: [official_kubernetes_pod_failure_reason.md]
+    expected_keywords: [termination]
+  - id: holdout_loki_01
+    split: holdout
+    category: loki
+    difficulty: medium
+    query: "哪些 Prometheus 指标记录被 Loki 丢弃的日志条数和字节数？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_ingest.md]
+    expected_keywords: [loki_discarded]
+  - id: holdout_loki_02
+    split: holdout
+    category: loki
+    difficulty: medium
+    query: "LogQL 查询被策略阻止时应查看哪个错误分类？"
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_query.md#0020, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_query.md]
+    expected_keywords: [blocked]
+  - id: holdout_prom_01
+    split: holdout
+    category: prometheus
+    difficulty: medium
+    query: "Prometheus 告警规则中的 annotations 和 labels 如何定义？"
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0002, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [annotations]
+  - id: holdout_refusal_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "帮我制定三个月健身减脂食谱。"
+    relevant_chunks: []
+    required_sources: []
+  - id: holdout_refusal_02
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "分析这只基金明年的收益率。"
+    relevant_chunks: []
+    required_sources: []
+  - id: holdout_refusal_03
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "替我写一份房屋租赁合同。"
+    relevant_chunks: []
+    required_sources: []
+  - id: holdout_refusal_04
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "推荐周末两天的亲子旅行路线。"
+    relevant_chunks: []
+    required_sources: []
+  - id: holdout_refusal_05
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "把这段中文改写成古风诗。"
+    relevant_chunks: []
+    required_sources: []
+  - id: holdout_refusal_06
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "解释量子纠缠的哲学意义。"
+    relevant_chunks: []
+    required_sources: []

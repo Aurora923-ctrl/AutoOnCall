@@ -126,6 +126,7 @@ class TraceService:
                 "risk_level": call.risk_level,
                 "read_only": call.read_only,
                 "output_artifact": call.output_artifact,
+                "execution_metadata": call.execution_metadata,
             },
         )
 

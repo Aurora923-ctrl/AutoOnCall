@@ -19,9 +19,9 @@ SERVICES = {
     },
     "payment-service": {
         "qps": 640.0,
-        "error_rate": 0.027,
-        "p95_ms": 1840.0,
-        "cpu": 66.5,
+        "error_rate": 0.012,
+        "p95_ms": 2280.0,
+        "cpu": 78.5,
         "memory": 512_000_000,
         "business_success_rate": 0.964,
         "dependency_timeout_rate": 0.018,

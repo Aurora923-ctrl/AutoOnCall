@@ -72,6 +72,35 @@ async def test_deploy_history_adapter_exposes_change_risk_and_version() -> None:
 
 
 @pytest.mark.asyncio
+async def test_payment_deploy_history_marks_report_feature_flag_as_supporting_context() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: _json_response(
+            {
+                "service_name": "payment-service",
+                "current_version": "2026.06.27-0910",
+                "recent_deployments": [
+                    {
+                        "change_id": "CHG-10087",
+                        "status": "succeeded",
+                        "risk": "medium",
+                        "summary": "Enabled payment reconciliation report with a new date-range query.",
+                        "related_config": ["PAYMENT_REPORT_ENABLED=true"],
+                    }
+                ],
+            }
+        )
+    )
+    adapter = DeployHistoryAdapter(url="http://deploy-history", transport=transport)
+
+    payload = await adapter.query_deployments("payment-service")
+
+    assert payload["signals"]["feature_flag_change"] is True
+    assert payload["release_correlation"]["change_id"] == "CHG-10087"
+    assert payload["release_correlation"]["root_cause_role"] == "supporting_correlation"
+    assert "cannot prove root cause" in payload["uncertainty"]
+
+
+@pytest.mark.asyncio
 async def test_ticketing_adapter_filters_and_preserves_replay_context() -> None:
     transport = httpx.MockTransport(
         lambda _request: _json_response(

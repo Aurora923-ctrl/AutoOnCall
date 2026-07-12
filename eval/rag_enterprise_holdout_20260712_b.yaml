@@ -1,0 +1,114 @@
+schema_version: "2.0"
+dataset_version: "2026.07.12-enterprise-b"
+annotation_version: "1.0"
+description: "Second frozen unseen enterprise troubleshooting acceptance set. Do not tune against results."
+cases:
+  - id: enterprise_b_cpu_01
+    split: holdout
+    category: cpu
+    difficulty: medium
+    query: "网关进程占满核心后，应该怎样继续收集线程级热点证据？"
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0003, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+  - id: enterprise_b_memory_01
+    split: holdout
+    category: memory
+    difficulty: medium
+    query: "服务发生内存溢出并重启，标准 Runbook 的取证步骤在哪一节？"
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0003, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存]
+  - id: enterprise_b_service_01
+    split: holdout
+    category: service_unavailable
+    difficulty: medium
+    query: "健康检查连续失败且业务中断时，应按照哪段步骤开展诊断？"
+    relevant_chunks: [{chunk_id: service_unavailable.md#0003, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [服务]
+  - id: enterprise_b_redis_clients_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "Redis 客户端连接配额即将耗尽，官方文档在哪一节解释并发连接上限？"
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [maxclients]
+  - id: enterprise_b_redis_latency_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    query: "怎样用 redis-cli 测出服务端延迟，而不是只看应用请求耗时？"
+    relevant_chunks: [{chunk_id: official_redis_latency.md#0003, relevance: 3}]
+    required_sources: [official_redis_latency.md]
+    expected_keywords: [latency]
+  - id: enterprise_b_mysql_01
+    split: holdout
+    category: mysql
+    difficulty: hard
+    query: "数据库连接逼近 200 且查询变慢，支付服务知识页提供了哪些排查依据？"
+    relevant_chunks: [{chunk_id: payment_wiki.html#0001, relevance: 3}]
+    required_sources: [payment_wiki.html]
+    expected_keywords: [MySQL]
+  - id: enterprise_b_k8s_01
+    split: holdout
+    category: kubernetes
+    difficulty: hard
+    query: "Service 已创建但没有可用后端时，官方流程如何验证 EndpointSlice 和 Pod？"
+    relevant_chunks:
+      - {chunk_id: official_kubernetes_debug_services.md#0013, relevance: 3}
+      - {chunk_id: official_kubernetes_debug_services.md#0015, relevance: 2}
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [EndpointSlices]
+  - id: enterprise_b_observe_01
+    split: holdout
+    category: observability
+    difficulty: hard
+    case_type: multi_source
+    query: "Loki 摄取错误应如何结合丢弃指标与面向症状的 Prometheus 告警？"
+    relevant_chunks:
+      - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+      - {chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 2}
+    required_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    expected_keywords: [loki_discarded]
+  - id: enterprise_b_redis_multi_01
+    split: holdout
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    query: "如何交叉验证 Redis 最大连接限制与容量知识页中的审批边界？"
+    relevant_chunks:
+      - {chunk_id: official_redis_clients.md#0004, relevance: 3}
+      - {chunk_id: redis_capacity_wiki.html#0001, relevance: 2}
+    required_sources: [official_redis_clients.md, redis_capacity_wiki.html]
+    expected_keywords: [maxclients]
+  - id: enterprise_b_refusal_hr_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "公司年假未休完是否可以折现？"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_b_refusal_admin_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "会议室预订冲突应该找哪个行政人员？"
+    relevant_chunks: []
+    required_sources: []
+  - id: enterprise_b_refusal_medical_01
+    split: holdout
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    query: "持续头痛应该服用什么药物？"
+    relevant_chunks: []
+    required_sources: []

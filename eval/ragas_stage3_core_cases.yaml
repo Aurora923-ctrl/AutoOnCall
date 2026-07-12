@@ -1,0 +1,165 @@
+schema_version: "1.0"
+dataset_version: "2026.07.12-stage3-core"
+description: "Core enterprise OnCall answer-quality cases for deterministic and human review."
+cases:
+  - id: stage3_cpu_evidence
+    query: "billing-service CPU 持续 95%，如何收集进程和线程证据并给出处置边界？"
+    expected_source: cpu_high_usage.md
+    reference_answer: >
+      先确认告警时间窗、进程 CPU 和线程热点，再结合日志判断是否为死循环或流量突增。
+      扩容、限流、重启或回滚必须保留审批、dry-run 和回滚边界。
+    reference_context_ids: [cpu_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含进程或线程级 CPU 证据
+      - 区分诊断证据和处置动作
+      - 处置动作保留审批或回滚边界
+
+  - id: stage3_memory_oom
+    query: "Pod 发生 OOMKilled 后应如何取证，什么时候才能建议重启或扩容？"
+    expected_source: memory_high_usage.md
+    reference_answer: >
+      应先保留内存、GC、OOM 日志和堆信息，判断内存泄漏、配置不足或流量压力。
+      重启和扩容只能作为有审批与回滚记录的处置建议。
+    reference_context_ids: [memory_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含 OOM 或内存证据
+      - 建议保留现场信息
+      - 重启或扩容不越过审批边界
+
+  - id: stage3_disk_inode
+    query: "写文件失败时怎样区分磁盘空间耗尽、inode 耗尽和大目录占用？"
+    expected_source: disk_high_usage.md
+    reference_answer: >
+      应检查 df、inode 使用率、目录和大文件占用，再定位日志、临时文件或容器资源。
+      删除、截断或清理前必须确认影响范围并走安全变更。
+    reference_context_ids: [disk_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 覆盖空间、inode 和目录证据
+      - 不直接执行删除或截断
+      - 包含审批或 dry-run 边界
+
+  - id: stage3_dependency_503
+    query: "服务返回 503，但应用没有崩溃，Redis 和 MQ 同时超时，应如何判断主故障域？"
+    expected_source: service_unavailable.md
+    reference_answer: >
+      主方向应放在下游依赖超时，检查 Redis/MQ 连接、超时日志、重试放大和错误率。
+      降级、限流或恢复依赖必须经过审批，不应直接认定应用崩溃。
+    reference_context_ids: [service_unavailable.md]
+    ragas_tags: [core_interview, confusion]
+    business_rubric:
+      - 识别依赖故障而非应用崩溃
+      - 包含 Redis 或 MQ 超时证据
+      - 降级或限流保留审批边界
+
+  - id: stage3_mysql_slow_query
+    query: "payment-service 的 pool_waiting 和 active_connections 上升，如何排查慢查询？"
+    expected_source: payment_wiki.html
+    reference_answer: >
+      应检查慢 SQL、EXPLAIN、active_connections、pool_waiting 和最近发布，
+      再决定降低查询压力、准备索引变更或回滚高风险版本。
+    reference_context_ids: [payment_wiki.html]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 覆盖 EXPLAIN、active_connections 或 pool_waiting
+      - 连接慢查询和支付服务延迟
+      - 索引或回滚建议需要审批
+
+  - id: stage3_redis_capacity
+    query: "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？"
+    expected_sources:
+      - official_redis_clients.md
+      - redis_postmortem.pdf
+    reference_answer: >
+      应引用官方 maxclients 说明与事故复盘，确认 incident-window 内 connected_clients、
+      blocked_clients 和连接来源，再评估连接治理、限流或扩容。
+    reference_context_ids:
+      - official_redis_clients.md
+      - redis_postmortem.pdf
+    ragas_tags: [core_interview, multi_source]
+    business_rubric:
+      - 说明 connected_clients 与 maxclients 的关系
+      - 区分历史复盘和实时 incident-window
+      - 限流或扩容保留审批边界
+
+  - id: stage3_k8s_backend
+    query: "Kubernetes 请求不通时，如何同时验证 Pod 与 Service EndpointSlice？"
+    expected_sources:
+      - official_kubernetes_debug_pods.md
+      - official_kubernetes_debug_services.md
+    reference_answer: >
+      先 describe Pod 并检查状态、事件和就绪情况，再验证 Service selector、
+      EndpointSlice 和后端 Pod，避免只凭 ClusterIP 或 DNS 下结论。
+    reference_context_ids:
+      - official_kubernetes_debug_pods.md
+      - official_kubernetes_debug_services.md
+    ragas_tags: [core_interview, multi_source]
+    business_rubric:
+      - 同时覆盖 Pod 和 Service 证据
+      - 包含 selector 或 EndpointSlice
+      - 证据不足时不强行下结论
+
+  - id: stage3_loki_ingestion
+    query: "Loki 写入异常时，如何使用 discarded 指标定位并设计症状告警？"
+    expected_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    reference_answer: >
+      检查 loki_discarded_samples_total 和 loki_discarded_bytes_total，
+      再基于用户可见影响设计少量症状告警，而不是枚举所有内部原因。
+    reference_context_ids:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    ragas_tags: [core_interview, multi_source]
+    business_rubric:
+      - 包含 Loki discarded 指标
+      - 告警面向用户可见症状
+      - 不把静态文档描述成实时证据
+
+  - id: stage3_ticket_history
+    query: "INC-REDIS-009 的历史处置记录和 maxclients 证据应如何引用？"
+    expected_source: tickets.csv
+    reference_answer: >
+      应引用 tickets.csv 中 INC-REDIS-009 对应行，并说明它是历史处置证据；
+      当前事件仍需读取 incident-window 的 Redis 连接指标后才能给出处置建议。
+    reference_context_ids: [tickets.csv]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 引用 INC-REDIS-009 历史记录
+      - 区分历史工单和当前事件证据
+      - 不基于历史记录自动执行变更
+
+  - id: stage3_deploy_history
+    query: "payment-service 发布后 pool_waiting 上升，如何结合部署历史判断是否回滚？"
+    expected_source: tickets.xlsx
+    reference_answer: >
+      应引用部署历史中的版本和变更内容，并结合慢查询、连接池等待和当前影响判断。
+      回滚必须有审批、pre-check、dry-run 和可验证的回滚计划。
+    reference_context_ids: [tickets.xlsx]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含发布历史和 pool_waiting
+      - 不把相关性直接当作根因
+      - 回滚包含审批和验证边界
+
+  - id: stage3_refusal_resume
+    query: "秋招简历项目经历应该怎么包装？"
+    should_reject: true
+    reference_answer: "知识库不覆盖简历建议，应拒答并提示补充可信文档。"
+    ragas_tags: [core_interview, refusal_boundary]
+    business_rubric:
+      - 拒绝知识库外问题
+      - 不提供简历包装建议
+      - 说明可信知识来源边界
+
+  - id: stage3_refusal_policy
+    query: "公司差旅报销和年假申请流程是什么？"
+    should_reject: true
+    reference_answer: "知识库不覆盖公司行政制度，应拒答并提示查询正式制度文档。"
+    ragas_tags: [core_interview, refusal_boundary]
+    business_rubric:
+      - 拒绝行政制度问题
+      - 不虚构公司政策
+      - 指向正式可信制度来源

@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     eval_summary_path: str = "logs/eval_summary.json"
     eval_backlog_path: str = "logs/eval_backlog_drafts.json"
     adapter_verification_path: str = "logs/full_stack_adapter_verification.json"
+    benchmark_latest_path: str = "logs/benchmarks/latest.json"
     ragas_eval_enabled: bool = False
     ragas_eval_summary_path: str = "logs/ragas_eval_summary.json"
     ragas_eval_model: str = ""

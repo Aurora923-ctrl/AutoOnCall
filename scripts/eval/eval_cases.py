@@ -65,6 +65,7 @@ from app.models.trace import ToolCallRecord
 from app.services.alert_ingestion_service import _build_incident, _normalize_alertmanager_alert
 from app.services.report_generator import ReportGenerator
 from app.tools.base import AIOpsTool, ToolExecutionResult
+from app.tools.context_tool import QueryDeployHistoryTool
 from app.tools.logs_tool import QueryLogsTool
 from app.tools.metrics_tool import QueryMetricsTool
 from app.tools.ops_tool import (
@@ -75,6 +76,7 @@ from app.tools.ops_tool import (
 )
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.registry import ToolRegistry
+from scripts.eval.benchmark_metrics import proportion_metric
 from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
 from scripts.eval.eval_rag_cases import evaluate_cases as evaluate_rag_cases
 
@@ -118,6 +120,13 @@ METRIC_NAMES = [
     "evidence_sufficiency_hit",
     "runtime_vs_incident_boundary_hit",
     "approval_boundary_hit",
+    "rca_top1_hit",
+    "rca_top3_hit",
+    "rca_evidence_link_hit",
+    "required_evidence_recall_hit",
+    "replan_hit",
+    "needs_human_hit",
+    "report_conclusion_consistency_hit",
 ]
 
 METRIC_FAILURE_REASONS = {
@@ -146,6 +155,13 @@ METRIC_FAILURE_REASONS = {
     "evidence_sufficiency_hit": "报告没有按主故障域、现象侧、处置参考和失败工具执行证据充分性门槛。",
     "runtime_vs_incident_boundary_hit": "报告或工具输出未说明 runtime 与 incident evidence 的边界。",
     "approval_boundary_hit": "报告或评测摘要未明确诊断不需要审批、处置变更需要审批的边界。",
+    "rca_top1_hit": "结构化 Top-1 RCA 类别与标注不一致。",
+    "rca_top3_hit": "结构化 Top-3 RCA 未覆盖可接受类别。",
+    "rca_evidence_link_hit": "RCA 候选未回链有效 evidence_id。",
+    "required_evidence_recall_hit": "必要证据工具未被完整采集。",
+    "replan_hit": "Replan 二分类结果与标注不一致。",
+    "needs_human_hit": "needs_human 二分类结果与标注不一致。",
+    "report_conclusion_consistency_hit": "报告结论类别与结构化 Top-1 RCA 不一致。",
 }
 
 
@@ -296,7 +312,47 @@ def load_cases(path: str | Path) -> list[dict[str, Any]]:
     cases = payload.get("cases", []) if isinstance(payload, dict) else []
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"No eval cases found in {case_path}")
-    return [dict(case) for case in cases]
+    annotations = payload.get("rca_annotations", {}) if isinstance(payload, dict) else {}
+    expanded: list[dict[str, Any]] = []
+    for raw_case in cases:
+        case = dict(raw_case)
+        case_id = str(case.get("id") or "")
+        annotation = annotations.get(case_id, {}) if isinstance(annotations, dict) else {}
+        if isinstance(annotation, dict):
+            case.update(dict(annotation))
+        variant_count = max(1, int(case.pop("variant_count", 1)))
+        for variant_index in range(variant_count):
+            variant = dict(case)
+            if variant_index:
+                variant["base_case_id"] = case_id
+                variant["id"] = f"{case_id}__v{variant_index + 1}"
+                variant["title"] = f"{case.get('title', case_id)} variant {variant_index + 1}"
+                variant["input"] = (
+                    f"{case.get('input', '')}；复核窗口={variant_index + 1}，"
+                    "告警措辞变化但故障事实不变"
+                )
+            _validate_structured_rca_case(variant, case_path)
+            expanded.append(variant)
+    return expanded
+
+
+def _validate_structured_rca_case(case: dict[str, Any], case_path: Path) -> None:
+    required_fields = [
+        "expected_root_category",
+        "acceptable_top3_categories",
+        "required_evidence_tools",
+        "allowed_tools",
+        "forbidden_tools",
+        "should_replan",
+        "should_needs_human",
+        "expected_report_status",
+    ]
+    missing = [field for field in required_fields if field not in case]
+    if missing:
+        raise ValueError(
+            f"Structured RCA case {case.get('id', 'unknown')} in {case_path} "
+            f"is missing fields: {', '.join(missing)}"
+        )
 
 
 def load_env_file(path: str | Path | None, *, override: bool = False) -> None:
@@ -453,6 +509,7 @@ async def evaluate_case(
 
     analysis = analyze_evidence(state)
     state["hypotheses"] = analysis.hypotheses
+    state["evidence_analysis"] = analysis.model_dump(mode="json")
     state["final_diagnosis"] = analysis.hypotheses[0] if analysis.hypotheses else ""
     risk_policy = strongest_policy(risk_decisions)
     if risk_policy != "allow":
@@ -499,6 +556,23 @@ async def evaluate_case(
         and all(record.status in {"success", "failed"} for record in tool_calls)
     )
     golden = golden_expectations(case)
+    ranking = [dict(item) for item in report.hypothesis_ranking]
+    predicted_categories = [str(item.get("category") or "unknown") for item in ranking[:3]]
+    expected_root_category = str(case.get("expected_root_category") or "unknown")
+    acceptable_top3 = {
+        str(item) for item in case.get("acceptable_top3_categories", [expected_root_category])
+    }
+    actual_top1 = predicted_categories[0] if predicted_categories else "unknown"
+    expected_replan = bool(case.get("should_replan", False))
+    observed_replan = analysis.decision in {"add_steps", "retry_failed_tool"}
+    expected_needs_human = bool(case.get("should_needs_human", False))
+    observed_needs_human = report.status == "needs_human"
+    linked_evidence_ids = {str(item.evidence_id) for item in evidence if str(item.evidence_id)}
+    rca_evidence_link_hit = bool(ranking) and all(
+        bool(set(item.get("supporting_evidence_ids") or []) & linked_evidence_ids)
+        for item in ranking[:3]
+    )
+    required_evidence_tools = [str(item) for item in case.get("required_evidence_tools", [])]
 
     metrics = {
         "tool_hit": contains_all(planned_tools, case.get("expected_tools", [])),
@@ -574,6 +648,16 @@ async def evaluate_case(
             golden,
         ),
         "approval_boundary_hit": approval_boundary_hit(report, golden, risk_policy),
+        "rca_top1_hit": actual_top1 == expected_root_category,
+        "rca_top3_hit": expected_root_category in predicted_categories,
+        "rca_evidence_link_hit": rca_evidence_link_hit,
+        "required_evidence_recall_hit": contains_all(
+            executed_tools,
+            required_evidence_tools,
+        ),
+        "replan_hit": observed_replan == expected_replan,
+        "needs_human_hit": observed_needs_human == expected_needs_human,
+        "report_conclusion_consistency_hit": (report.selected_root_cause_category == actual_top1),
     }
     failed_metrics = failed_metric_names(metrics)
     return {
@@ -584,17 +668,26 @@ async def evaluate_case(
         "failure_reasons": failure_reasons(failed_metrics),
         "planned_tools": planned_tools,
         "executed_tools": executed_tools,
+        "required_evidence_tools": required_evidence_tools,
+        "allowed_tools": [str(item) for item in case.get("allowed_tools", [])],
         "failed_tools": failed_tools,
         "expected_failed_tools": expected_failed_tools,
         "forbidden_tools": forbidden_tools,
         "risk_policy": risk_policy,
         "expected_risk_policy": case.get("expected_risk_policy", "allow"),
         "expected_needs_approval": bool(case.get("expected_needs_approval", False)),
+        "expected_root_category": expected_root_category,
+        "acceptable_top3_categories": sorted(acceptable_top3),
+        "predicted_root_category": actual_top1,
+        "predicted_top3_categories": predicted_categories,
+        "expected_replan": expected_replan,
+        "observed_replan": observed_replan,
+        "expected_needs_human": expected_needs_human,
+        "observed_needs_human": observed_needs_human,
+        "analysis_decision": analysis.decision,
         "report_status": report.status,
         "hypotheses": analysis.hypotheses,
-        "hypothesis_ranking": [
-            item.model_dump(mode="json") for item in analysis.hypothesis_ranking
-        ],
+        "hypothesis_ranking": ranking,
         "evidence_count": len(evidence),
         "evidence_support_rate": support_rate,
         "unnecessary_tool_rate": unexpected_tool_rate,
@@ -623,6 +716,18 @@ async def evaluate_case(
             use_live_golden_adapters=use_live_golden_adapters,
         ),
         "live_golden_adapters": use_live_golden_adapters,
+        "failure_evidence_chain": (
+            {
+                "trace": {
+                    "trace_id": report.trace_id,
+                    "tool_calls": [item.model_dump(mode="json") for item in tool_calls],
+                },
+                "evidence": [item.model_dump(mode="json") for item in evidence],
+                "report": report.model_dump(mode="json"),
+            }
+            if failed_metrics
+            else {}
+        ),
     }
 
 
@@ -639,6 +744,7 @@ def create_eval_tool_registry(
     registry.register(QueryRedisStatusTool())
     registry.register(QueryK8sStatusTool())
     registry.register(QueryMySQLStatusTool())
+    registry.register(QueryDeployHistoryTool())
     registry.register(EvalRunbookTool(should_reject=bool(case.get("runbook_should_reject"))))
     registry.register(SearchHistoryTicketTool())
     registry.register(SuggestRemediationTool())
@@ -921,8 +1027,10 @@ def report_structure_hit(report: Any, golden: dict[str, Any]) -> bool:
     if not golden:
         return True
     required_sections = [
-        "### Tool Call Table",
-        "### Evidence Quick View",
+        "## 4. 关键证据",
+        "## 5. 排查过程",
+        "## 附录 A. Evidence、Graph 与 Citation",
+        "## 附录 B. ToolCall 与 Trace",
     ]
     markdown = str(report.markdown or "")
     return bool(
@@ -1065,6 +1173,7 @@ def default_tool_output_specs(
         "query_redis_status": _eval_redis_output(service_name, text),
         "query_k8s_status": _eval_k8s_output(service_name, text),
         "query_mysql_status": _eval_mysql_output(service_name, text),
+        "query_deploy_history": _eval_deploy_history_output(service_name, text),
         "search_history_ticket": _eval_ticket_output(service_name, text),
     }
     live_tools = live_golden_tools(case) if use_live_golden_adapters else set()
@@ -1085,7 +1194,7 @@ def live_golden_tools(case: dict[str, Any]) -> set[str]:
             live_tools.add("search_history_ticket")
     if "mysql" in case_id and live_mysql_configured():
         live_tools.update({"query_mysql_status", *live_observability_tools()})
-        live_tools.add("search_history_ticket")
+        live_tools.update({"query_deploy_history", "search_history_ticket"})
     return live_tools
 
 
@@ -1118,14 +1227,20 @@ def live_observability_tools() -> set[str]:
 def _eval_metrics_output(service_name: str, text: str) -> dict[str, Any]:
     cpu_high = "cpu" in text
     memory_high = "memory" in text or "oom" in text or "内存" in text
+    mysql_case = "mysql" in text or "slow query" in text or "慢查询" in text
+    p95_ms = 2280 if mysql_case else 3250
+    error_rate = 0.012 if mysql_case else 0.082
+    cpu_avg = 78.5 if mysql_case else 86.2 if cpu_high else 72.5
+    cpu_max = 84.0 if mysql_case else 96.0 if cpu_high else 91.2
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "qps": {"current": 1280, "baseline": 900, "trend": "up"},
-        "p95_latency_ms": {"current": 3250, "threshold": 1000, "status": "high"},
-        "error_rate": {"current": 0.082, "threshold": 0.01, "status": "high"},
+        "p95_latency_ms": {"current": p95_ms, "threshold": 1000, "status": "high"},
+        "error_rate": {"current": error_rate, "threshold": 0.01, "status": "high"},
         "cpu": {
-            "statistics": {"avg": 86.2 if cpu_high else 72.5, "max": 96.0 if cpu_high else 91.2},
+            "statistics": {"avg": cpu_avg, "max": cpu_max},
             "alert_info": {"triggered": True, "message": "CPU 使用率超过阈值"},
         },
         "memory": {
@@ -1138,7 +1253,69 @@ def _eval_metrics_output(service_name: str, text: str) -> dict[str, Any]:
                 "message": "Memory 使用率超过阈值" if memory_high else "内存未超过关键阈值",
             },
         },
-        "summary": f"{service_name} P95=3250ms, 5xx=8.20%, CPU 指标异常",
+        "fact": (f"{service_name} P95={p95_ms}ms, 5xx={error_rate * 100:.2f}%, CPU={cpu_avg}%."),
+        "inference": (
+            "P95 is the primary impact symptom; CPU is concurrent load and does not identify "
+            "the slow SQL digest."
+            if mysql_case
+            else "Service metrics confirm user impact."
+        ),
+        "uncertainty": (
+            "Metrics cannot prove that CPU is the root cause; SQL and pool evidence are required."
+            if mysql_case
+            else "Metrics require dependency and log evidence for root-cause selection."
+        ),
+        "summary": (f"{service_name} P95={p95_ms}ms, 5xx={error_rate * 100:.2f}%, CPU={cpu_avg}%"),
+    }
+
+
+def _eval_deploy_history_output(service_name: str, text: str) -> dict[str, Any]:
+    mysql_case = service_name == "payment-service" or "mysql" in text
+    if mysql_case:
+        recent_change = {
+            "change_id": "CHG-10087",
+            "status": "succeeded",
+            "risk": "medium",
+            "summary": "Enabled payment reconciliation report with a new date-range query.",
+            "related_config": ["PAYMENT_REPORT_ENABLED=true"],
+        }
+        return {
+            "service_name": service_name,
+            "source": "eval_fixture",
+            "signals": {
+                "deployment_count": 1,
+                "latest_status": "succeeded",
+                "high_risk_change_count": 0,
+                "feature_flag_change": True,
+            },
+            "deployments": [recent_change],
+            "recent_change": recent_change,
+            "release_correlation": {
+                "change_id": "CHG-10087",
+                "feature_flag": "PAYMENT_REPORT_ENABLED=true",
+                "changed_path": "payment reconciliation report date-range query",
+                "root_cause_role": "supporting_correlation",
+            },
+            "fact": (
+                "CHG-10087 enabled PAYMENT_REPORT_ENABLED=true and introduced the report "
+                "date-range query."
+            ),
+            "inference": (
+                "The release timing raises the matching slow-report-SQL hypothesis above a "
+                "generic CPU explanation."
+            ),
+            "uncertainty": (
+                "Release correlation is supporting context and cannot prove root cause alone."
+            ),
+            "summary": "payment-service deploy enabled PAYMENT_REPORT_ENABLED=true",
+        }
+    return {
+        "service_name": service_name,
+        "source": "eval_fixture",
+        "signals": {"deployment_count": 0, "feature_flag_change": False},
+        "deployments": [],
+        "recent_change": {},
+        "summary": f"No relevant deployment change for {service_name}",
     }
 
 
@@ -1156,6 +1333,7 @@ def _eval_logs_output(service_name: str, text: str) -> dict[str, Any]:
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "logs": {"total": 2, "logs": [{"level": "ERROR", "message": message}]},
         "summary": f"eval fixture 日志发现异常: {message}",
     }
@@ -1170,6 +1348,7 @@ def _eval_redis_output(service_name: str, text: str) -> dict[str, Any]:
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "connected_clients": connected_clients,
         "maxclients": maxclients,
         "client_usage_ratio": round(usage, 4),
@@ -1214,6 +1393,7 @@ def _eval_k8s_output(service_name: str, text: str) -> dict[str, Any]:
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "pods": [
             {
                 "name": f"{service_name}-7f8d9c-abc12",
@@ -1241,6 +1421,7 @@ def _eval_mysql_output(service_name: str, text: str) -> dict[str, Any]:
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "slow_queries": (
             [
                 {
@@ -1319,9 +1500,31 @@ def _eval_ticket_output(service_name: str, text: str) -> dict[str, Any]:
     return {
         "service_name": service_name,
         "source": "eval_fixture",
+        "rca_category": _eval_rca_category(text),
         "tickets": [{"ticket_id": "INC-EVAL-001", "root_cause": root_cause}],
         "summary": f"找到 1 条相似故障: {root_cause}",
     }
+
+
+def _eval_rca_category(text: str) -> str:
+    """Return the structured ground-truth signal emitted by deterministic fixtures."""
+    if any(token in text for token in ["unknown-service", "无法归类", "unaudited", "delete_pod"]):
+        return "unknown_needs_human"
+    if "no space" in text or "disk" in text or "磁盘" in text:
+        return "disk_capacity"
+    if "oom" in text or "oomkilled" in text:
+        return "k8s_oomkilled"
+    if "crashloop" in text or "pod crash" in text or "重启次数" in text:
+        return "k8s_crashloop"
+    if "mysql" in text or "slow query" in text or "慢查询" in text:
+        return "mysql_slow_query"
+    if "cpu" in text and any(token in text for token in ["95%", "saturation", "高 cpu"]):
+        return "cpu_hot_loop"
+    if "redis" in text and not any(
+        token in text for token in ["look normal", "status conflict", "状态显示连接数正常"]
+    ):
+        return "redis_maxclients"
+    return "dependency_timeout"
 
 
 def tool_failure_specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1430,6 +1633,7 @@ def build_summary(
     }
     summary["pass_rate"] = ratio(summary["passed_count"], summary["case_count"])
     summary["categories"] = build_category_metrics(results, metric_summary, rag_payload=rag_payload)
+    summary["agent_rca"] = build_agent_rca_metrics(results)
     summary["resume_metrics"] = build_resume_metrics(summary, rag_payload=rag_payload)
     summary["fixed_demo_chains"] = build_fixed_demo_chain_summary(results)
     summary["negative_boundaries"] = build_negative_boundary_summary(results)
@@ -1444,10 +1648,205 @@ def build_aiops_failed_cases(results: list[dict[str, Any]]) -> list[dict[str, An
             "id": result["id"],
             "failed_metrics": result["failed_metrics"],
             "failure_reasons": result["failure_reasons"],
+            "expected_root_category": result.get("expected_root_category", "unknown"),
+            "predicted_root_category": result.get("predicted_root_category", "unknown"),
+            "failure_evidence_chain": result.get("failure_evidence_chain", {}),
         }
         for result in results
         if not result["passed"]
     ]
+
+
+def build_agent_rca_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build structured RCA, tool, replan, and escalation metrics."""
+    sample_count = len(results)
+    top1_hits = sum(1 for result in results if result["metrics"].get("rca_top1_hit"))
+    top3_hits = sum(1 for result in results if result["metrics"].get("rca_top3_hit"))
+    evidence_hits = sum(
+        1 for result in results if result["metrics"].get("required_evidence_recall_hit")
+    )
+    support_hits = sum(1 for result in results if result["metrics"].get("rca_evidence_link_hit"))
+    labels = sorted(
+        {str(result.get("expected_root_category") or "unknown") for result in results}
+        | {str(result.get("predicted_root_category") or "unknown") for result in results}
+    )
+    confusion = {expected: dict.fromkeys(labels, 0) for expected in labels}
+    for result in results:
+        expected = str(result.get("expected_root_category") or "unknown")
+        predicted = str(result.get("predicted_root_category") or "unknown")
+        confusion.setdefault(expected, {}).setdefault(predicted, 0)
+        confusion[expected][predicted] += 1
+
+    per_class: dict[str, dict[str, Any]] = {}
+    for label in labels:
+        tp = sum(
+            1
+            for result in results
+            if result.get("expected_root_category") == label
+            and result.get("predicted_root_category") == label
+        )
+        fp = sum(
+            1
+            for result in results
+            if result.get("expected_root_category") != label
+            and result.get("predicted_root_category") == label
+        )
+        fn = sum(
+            1
+            for result in results
+            if result.get("expected_root_category") == label
+            and result.get("predicted_root_category") != label
+        )
+        precision = ratio(tp, tp + fp)
+        recall = ratio(tp, tp + fn)
+        per_class[label] = {
+            "precision": precision,
+            "recall": recall,
+            "f1": f1_score(precision, recall),
+            "support": tp + fn,
+        }
+
+    tool_counts = {"tp": 0, "fp": 0, "fn": 0, "executed": 0, "successful": 0}
+    invalid_tool_count = 0
+    for result in results:
+        planned = set(result.get("planned_tools") or [])
+        required = set(result.get("required_evidence_tools") or [])
+        allowed = set(result.get("allowed_tools") or [])
+        relevant = required | allowed
+        tool_counts["tp"] += len(planned & relevant)
+        tool_counts["fp"] += len(planned - relevant)
+        tool_counts["fn"] += len(required - planned)
+        tool_counts["executed"] += len(result.get("executed_tools") or [])
+        tool_counts["successful"] += len(result.get("executed_tools") or []) - len(
+            result.get("failed_tools") or []
+        )
+        invalid_tool_count += len(planned & set(result.get("forbidden_tools") or []))
+    tool_precision = ratio(tool_counts["tp"], tool_counts["tp"] + tool_counts["fp"])
+    tool_recall = ratio(tool_counts["tp"], tool_counts["tp"] + tool_counts["fn"])
+
+    replan = binary_classification_metrics(
+        results,
+        expected_key="expected_replan",
+        predicted_key="observed_replan",
+    )
+    needs_human = binary_classification_metrics(
+        results,
+        expected_key="expected_needs_human",
+        predicted_key="observed_needs_human",
+    )
+    failure_cases = [
+        {
+            "id": result["id"],
+            "expected": result.get("expected_root_category"),
+            "predicted": result.get("predicted_root_category"),
+            "failed_metrics": result.get("failed_metrics", []),
+            "evidence_chain": result.get("failure_evidence_chain", {}),
+        }
+        for result in results
+        if result.get("expected_root_category") != result.get("predicted_root_category")
+        or result.get("failed_metrics")
+    ]
+    return {
+        "sample_count": sample_count,
+        "top1_accuracy": ratio(top1_hits, sample_count),
+        "top3_recall": ratio(top3_hits, sample_count),
+        "macro_precision": average([item["precision"] for item in per_class.values()]),
+        "macro_recall": average([item["recall"] for item in per_class.values()]),
+        "macro_f1": average([item["f1"] for item in per_class.values()]),
+        "per_class": per_class,
+        "confusion_matrix": {"labels": labels, "matrix": confusion},
+        "tool_selection": {
+            "precision": tool_precision,
+            "recall": tool_recall,
+            "f1": f1_score(tool_precision, tool_recall),
+            "invalid_tool_rate": ratio(
+                invalid_tool_count,
+                sum(len(result.get("planned_tools") or []) for result in results),
+            ),
+            "execution_success_rate": ratio(
+                tool_counts["successful"],
+                tool_counts["executed"],
+            ),
+            **tool_counts,
+        },
+        "required_evidence_recall": ratio(evidence_hits, sample_count),
+        "conclusion_evidence_support_rate": ratio(support_hits, sample_count),
+        "auditable_metrics": {
+            "top1_accuracy": proportion_metric(
+                numerator=top1_hits,
+                denominator=sample_count,
+                label="Top-1 RCA Accuracy",
+                source="eval/cases.yaml structured RCA annotations",
+            ),
+            "top3_recall": proportion_metric(
+                numerator=top3_hits,
+                denominator=sample_count,
+                label="Top-3 RCA Recall",
+                source="eval/cases.yaml acceptable_top3_categories",
+            ),
+            "required_evidence_recall": proportion_metric(
+                numerator=evidence_hits,
+                denominator=sample_count,
+                label="Required evidence recall",
+                source="eval/cases.yaml required_evidence_tools",
+            ),
+            "conclusion_evidence_support_rate": proportion_metric(
+                numerator=support_hits,
+                denominator=sample_count,
+                label="Conclusion evidence support rate",
+                source="report hypothesis_ranking evidence_ids",
+            ),
+        },
+        "replan": replan,
+        "needs_human": needs_human,
+        "degradation_success_rate": metric_rate(
+            {
+                "degradation_success": {
+                    "passed": sum(
+                        1 for result in results if result["metrics"].get("degradation_success")
+                    ),
+                    "total": len(results),
+                }
+            },
+            "degradation_success",
+        ),
+        "trace_completeness_rate": ratio(
+            sum(1 for result in results if result["metrics"].get("trace_completeness")),
+            len(results),
+        ),
+        "report_conclusion_consistency_rate": ratio(
+            sum(
+                1
+                for result in results
+                if result["metrics"].get("report_conclusion_consistency_hit")
+            ),
+            len(results),
+        ),
+        "failure_cases": failure_cases,
+    }
+
+
+def binary_classification_metrics(
+    results: list[dict[str, Any]],
+    *,
+    expected_key: str,
+    predicted_key: str,
+) -> dict[str, Any]:
+    tp = sum(1 for item in results if item.get(expected_key) and item.get(predicted_key))
+    fp = sum(1 for item in results if not item.get(expected_key) and item.get(predicted_key))
+    fn = sum(1 for item in results if item.get(expected_key) and not item.get(predicted_key))
+    tn = sum(1 for item in results if not item.get(expected_key) and not item.get(predicted_key))
+    precision = ratio(tp, tp + fp)
+    recall = ratio(tp, tp + fn)
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1_score(precision, recall),
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+    }
 
 
 def build_rag_failed_cases(rag_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1690,20 +2089,38 @@ def build_exception_result(case: dict[str, Any], exc: Exception) -> dict[str, An
         },
         "planned_tools": [],
         "executed_tools": [],
+        "required_evidence_tools": case.get("required_evidence_tools", []),
+        "allowed_tools": case.get("allowed_tools", []),
         "failed_tools": [],
         "expected_failed_tools": case.get("expected_failed_tools", []),
         "forbidden_tools": case.get("forbidden_tools", []),
         "risk_policy": "error",
         "expected_risk_policy": case.get("expected_risk_policy", "allow"),
         "expected_needs_approval": bool(case.get("expected_needs_approval", False)),
+        "expected_root_category": case.get("expected_root_category", "unknown"),
+        "acceptable_top3_categories": case.get("acceptable_top3_categories", []),
+        "predicted_root_category": "unknown",
+        "predicted_top3_categories": [],
+        "expected_replan": bool(case.get("should_replan", False)),
+        "observed_replan": False,
+        "expected_needs_human": bool(case.get("should_needs_human", False)),
+        "observed_needs_human": False,
+        "analysis_decision": "error",
         "report_status": "error",
         "hypotheses": [],
+        "hypothesis_ranking": [],
         "evidence_count": 0,
         "report_id": "",
         "confidence": 0.0,
         "runbook_rejected": False,
         "runbook_should_reject": bool(case.get("runbook_should_reject", False)),
         "tool_latency_ms": [],
+        "failure_evidence_chain": {
+            "trace": {},
+            "evidence": [],
+            "report": {},
+            "exception": str(exc),
+        },
     }
 
 
@@ -1797,6 +2214,13 @@ def ratio(numerator: int | float, denominator: int | float) -> float:
     return round(float(numerator) / max(float(denominator), 1.0), 4)
 
 
+def f1_score(precision: float, recall: float) -> float:
+    """Return harmonic mean for two rates."""
+    if precision + recall == 0:
+        return 0.0
+    return round(2 * precision * recall / (precision + recall), 4)
+
+
 def average(values: list[int | float]) -> float:
     """Return a rounded average."""
     if not values:
@@ -1817,6 +2241,7 @@ def render_summary(payload: dict[str, Any]) -> str:
     """Render a compact console summary."""
     summary = payload["summary"]
     categories = summary["categories"]
+    rca = summary.get("agent_rca", {})
     lines = [
         (
             f"Full eval: {summary['overall_passed_count']}/"
@@ -1843,6 +2268,15 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"RAG cite={categories['rag']['citation_coverage_rate']:.0%}, "
             f"RAG confusion={categories['rag']['confusion_case_pass_rate']:.0%}, "
             f"RAG reject={categories['rag']['no_answer_rejection_rate']:.0%}"
+        ),
+        (
+            "Agent RCA: "
+            f"Top1={rca.get('top1_accuracy', 0.0):.0%}, "
+            f"Top3={rca.get('top3_recall', 0.0):.0%}, "
+            f"Macro-F1={rca.get('macro_f1', 0.0):.0%}, "
+            f"Tool-F1={rca.get('tool_selection', {}).get('f1', 0.0):.0%}, "
+            f"Replan-F1={rca.get('replan', {}).get('f1', 0.0):.0%}, "
+            f"needs-human-F1={rca.get('needs_human', {}).get('f1', 0.0):.0%}"
         ),
     ]
     for result in payload["cases"]:
@@ -1871,6 +2305,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
     failed_cases = summary["failed_cases"]
     fixed_demo = summary.get("fixed_demo_chains", {})
     negative_boundaries = summary.get("negative_boundaries", {})
+    agent_rca = summary.get("agent_rca", {})
 
     lines = [
         "# AutoOnCall 离线评测摘要",
@@ -1893,6 +2328,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- 审批召回率：{resume['approval_recall']:.0%}，禁止动作拦截率：{resume['forbidden_action_block_rate']:.0%}",
         f"- 工具失败降级报告率：{resume['tool_failure_graceful_degradation_rate']:.0%}",
         f"- 诊断链路：工具选择召回 {resume['diagnostic_tool_selection_recall']:.0%}，假设根因命中 {resume['diagnostic_root_cause_hit']:.0%}，证据充分性 {resume['diagnostic_evidence_sufficiency']:.0%}，Trace 完整性 {resume['diagnostic_trace_completeness']:.0%}",
+        f"- Agent RCA：Top-1 {agent_rca.get('top1_accuracy', 0.0):.0%}，Top-3 {agent_rca.get('top3_recall', 0.0):.0%}，Macro-F1 {agent_rca.get('macro_f1', 0.0):.0%}，工具 F1 {agent_rca.get('tool_selection', {}).get('f1', 0.0):.0%}，Replan F1 {agent_rca.get('replan', {}).get('f1', 0.0):.0%}，needs-human F1 {agent_rca.get('needs_human', {}).get('f1', 0.0):.0%}",
         f"- RAG case：{resume['rag_case_count']} 个，recall@{categories['rag']['top_k']} {resume['rag_recall_at_k']:.0%}，MRR {resume['rag_mrr']:.2f}，引用覆盖率 {resume['rag_citation_coverage_rate']:.0%}，混淆 case 通过率 {resume['rag_confusion_case_pass_rate']:.0%}，无答案拒答率 {resume['rag_no_answer_rejection_rate']:.0%}",
         "",
         "> 诊断链路指标用于验证离线 case 中的工具选择、证据、假设排序、风控、报告和 Trace 闭环，不代表线上根因准确率。",
@@ -1933,6 +2369,12 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"| 诊断链路 | degradation success | {categories['diagnostic_chain']['degradation_success']:.0%} |",
         f"| 诊断链路 | trace completeness | {categories['diagnostic_chain']['trace_completeness']:.0%} |",
         f"| 诊断链路 | evidence sufficiency gate | {categories['diagnostic_chain']['evidence_sufficiency']:.0%} |",
+        "",
+        "## Agent RCA 混淆矩阵",
+        *_confusion_matrix_markdown(agent_rca.get("confusion_matrix", {})),
+        "",
+        "## Agent RCA 失败证据链",
+        *_rca_failure_markdown(agent_rca.get("failure_cases", [])),
         "",
         "## 失败定位",
     ]
@@ -1999,6 +2441,43 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
                 )
 
     return "\n".join(lines) + "\n"
+
+
+def _confusion_matrix_markdown(confusion: Any) -> list[str]:
+    if not isinstance(confusion, dict):
+        return ["- missing"]
+    labels = [str(item) for item in confusion.get("labels") or []]
+    matrix = confusion.get("matrix") or {}
+    if not labels or not isinstance(matrix, dict):
+        return ["- missing"]
+    lines = [
+        "| Actual \\ Predicted | " + " | ".join(labels) + " |",
+        "| --- | " + " | ".join("---:" for _ in labels) + " |",
+    ]
+    for actual in labels:
+        row = matrix.get(actual, {}) if isinstance(matrix.get(actual), dict) else {}
+        lines.append(
+            f"| {actual} | "
+            + " | ".join(str(int(row.get(predicted, 0))) for predicted in labels)
+            + " |"
+        )
+    return lines
+
+
+def _rca_failure_markdown(failures: Any) -> list[str]:
+    if not isinstance(failures, list) or not failures:
+        return ["- 无结构化 RCA 失败 case。"]
+    return [
+        (
+            f"- {item.get('id', 'unknown')}：expected={item.get('expected', 'unknown')}，"
+            f"predicted={item.get('predicted', 'unknown')}，"
+            f"failed={', '.join(item.get('failed_metrics') or []) or 'classification'}；"
+            "完整 Trace、Evidence、Report 保存在 JSON 的 "
+            "`summary.agent_rca.failure_cases[].evidence_chain`。"
+        )
+        for item in failures
+        if isinstance(item, dict)
+    ]
 
 
 def _fixed_demo_rows(rows: Any) -> list[str]:

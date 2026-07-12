@@ -30,11 +30,19 @@ def test_trace_service_records_lists_and_reloads_events(tmp_path) -> None:
             output={"summary": "P95 high"},
             latency_ms=12.5,
             status="success",
+            execution_metadata={
+                "retry": {
+                    "attempt_count": 2,
+                    "retried": True,
+                    "stop_reason": "success",
+                }
+            },
         )
     )
 
     assert node_event.event_id.startswith("traceevt-")
     assert tool_event.event_type == "tool_call"
+    assert tool_event.metadata["execution_metadata"]["retry"]["attempt_count"] == 2
     assert len(service.list_events(incident_id="inc-1")) == 2
     assert (
         service.list_events(incident_id="inc-1", event_type="tool_call")[0].tool_name

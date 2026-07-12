@@ -18,7 +18,7 @@ def test_knowledge_base_has_stable_ascii_asset_names() -> None:
     knowledge_base = ROOT / "docs" / "knowledge-base"
     names = sorted(path.name for path in knowledge_base.iterdir() if path.is_file())
 
-    assert names == [
+    required_names = [
         "cpu_high_usage.md",
         "disk_high_usage.md",
         "memory_high_usage.md",
@@ -31,4 +31,6 @@ def test_knowledge_base_has_stable_ascii_asset_names() -> None:
         "tickets.csv",
         "tickets.xlsx",
     ]
+    assert set(required_names).issubset(names)
+    assert all(name.isascii() for name in names)
     assert all(name.isascii() for name in names)

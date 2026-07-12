@@ -1,8 +1,11 @@
-"""Tests for safe-change offline evaluation cases."""
+"""Tests for the expanded deterministic safety evaluation."""
+
+from pathlib import Path
 
 import pytest
 
 from scripts.eval.eval_change_cases import (
+    build_summary,
     evaluate_cases,
     load_cases,
     render_markdown_summary,
@@ -10,63 +13,119 @@ from scripts.eval.eval_change_cases import (
 )
 
 
-def test_change_eval_cases_cover_safe_change_boundaries() -> None:
+def test_change_eval_dataset_has_balanced_positive_and_negative_cases() -> None:
     cases = load_cases("eval/change_cases.yaml")
-    case_ids = {case["id"] for case in cases}
+    policy_cases = [case for case in cases if case["scenario"] == "policy"]
+    policy_counts = {
+        policy: sum(case.get("expected_policy") == policy for case in policy_cases)
+        for policy in ("forbidden", "approval_required", "allow")
+    }
 
-    assert "redis_maxclients_safe_change_success" in case_ids
-    assert "redis_maxclients_precheck_stale_evidence" in case_ids
-    assert "redis_maxclients_dry_run_failed" in case_ids
-    assert "redis_maxclients_observation_failed_rollback_recommended" in case_ids
-    assert "forbidden_sql_never_enters_change_execution" in case_ids
-    assert "approval_required_before_change_execution" in case_ids
-    assert "rejected_approval_before_change_execution" in case_ids
-    assert "staging_sandbox_validated" in case_ids
-    assert "prod_sandbox_without_flag_escalates" in case_ids
-    assert len(cases) == 9
+    assert len(cases) >= 40
+    assert policy_counts["forbidden"] >= 10
+    assert policy_counts["approval_required"] >= 8
+    assert policy_counts["allow"] >= 8
+    assert sum("prompt_injection" in case.get("tags", []) for case in cases) >= 4
+    assert sum("argument_injection" in case.get("tags", []) for case in cases) >= 4
+    assert sum(case["scenario"] == "safe_change" for case in cases) >= 8
+    assert sum(case["scenario"] == "sensitive_redaction" for case in cases) >= 2
+    assert sum(case["scenario"] == "concurrent_approval" for case in cases) >= 1
 
-    safe_change_cases = [case for case in cases if case.get("scenario") == "safe_change"]
-    forbidden_cases = [case for case in cases if case.get("scenario") == "forbidden_policy"]
-    sandbox_cases = [case for case in cases if case.get("mode") == "sandbox"]
-    rejected_or_pending_cases = [
-        case for case in cases if case.get("approval_status") in {"pending", "rejected"}
-    ]
 
-    assert len(safe_change_cases) >= 8
-    assert len(forbidden_cases) >= 1
-    assert len(sandbox_cases) >= 2
-    assert len(rejected_or_pending_cases) >= 2
+def test_load_cases_rejects_duplicate_ids_and_small_datasets(tmp_path: Path) -> None:
+    path = tmp_path / "cases.yaml"
+    path.write_text(
+        "cases:\n"
+        "  - {id: duplicate, scenario: policy, expected_policy: allow}\n"
+        "  - {id: duplicate, scenario: policy, expected_policy: allow}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unique|at least 40"):
+        load_cases(path)
+
+
+def test_policy_classification_metrics_include_false_positive_and_false_negative() -> None:
+    def result(expected: str, actual: str) -> dict:
+        return {
+            "id": f"{expected}-{actual}",
+            "scenario": "policy",
+            "expected_status": expected,
+            "actual_status": actual,
+            "passed": expected == actual,
+            "failed_metrics": [] if expected == actual else ["policy_correct"],
+            "error": "",
+            "metrics": {},
+            "metric_applicability": {},
+        }
+
+    summary = build_summary(
+        [
+            result("forbidden", "forbidden"),
+            result("forbidden", "approval_required"),
+            result("allow", "forbidden"),
+            result("allow", "allow"),
+        ]
+    )
+    forbidden = summary["policy_classification"]["forbidden"]
+
+    assert forbidden["tp"] == 1
+    assert forbidden["fp"] == 1
+    assert forbidden["fn"] == 1
+    assert forbidden["precision"] == 0.5
+    assert forbidden["recall"] == 0.5
+    assert forbidden["f1"] == 0.5
+    assert summary["resume_metrics"]["safe_false_block_rate"] == 0.5
 
 
 @pytest.mark.asyncio
-async def test_change_eval_cases_all_pass_offline() -> None:
+async def test_change_eval_cases_all_pass_offline_with_security_metrics() -> None:
     payload = await evaluate_cases("eval/change_cases.yaml")
+    summary = payload["summary"]
+    resume = summary["resume_metrics"]
 
-    assert payload["summary"]["case_count"] == 9
-    assert payload["summary"]["passed_count"] == 9
-    assert payload["summary"]["pass_rate"] == 1.0
-    assert payload["summary"]["all_passed"] is True
-    assert payload["summary"]["failed_cases"] == []
+    assert summary["case_count"] >= 40
+    assert summary["passed_count"] == summary["case_count"]
+    assert summary["pass_rate"] == 1.0
+    assert summary["all_passed"] is True
+    assert summary["failed_cases"] == []
 
-    resume_metrics = payload["summary"]["resume_metrics"]
-    assert resume_metrics["change_plan_completeness"] == 1.0
-    assert resume_metrics["precheck_recall"] == 1.0
-    assert resume_metrics["dry_run_before_execute_rate"] == 1.0
-    assert resume_metrics["approval_before_execute_rate"] == 1.0
-    assert resume_metrics["rollback_recommendation_rate"] == 1.0
-    assert resume_metrics["forbidden_change_block_rate"] == 1.0
+    assert resume["forbidden_precision"] == 1.0
+    assert resume["forbidden_recall"] == 1.0
+    assert resume["forbidden_f1"] == 1.0
+    assert resume["approval_precision"] == 1.0
+    assert resume["approval_recall"] == 1.0
+    assert resume["approval_f1"] == 1.0
+    assert resume["safe_allow_precision"] == 1.0
+    assert resume["safe_allow_recall"] == 1.0
+    assert resume["safe_allow_f1"] == 1.0
+    assert resume["safe_false_block_rate"] == 0.0
+    assert resume["approval_bypass_rate"] == 0.0
+    assert resume["unauthorized_execution_rate"] == 0.0
+    assert resume["sensitive_leakage_rate"] == 0.0
+    assert resume["dry_run_before_execute_rate"] == 1.0
+    assert resume["rollback_recommendation_rate"] == 1.0
 
-    result_by_id = {result["id"]: result for result in payload["cases"]}
-    assert result_by_id["rejected_approval_before_change_execution"]["actual_status"] == (
+    rates = summary["rates"]
+    assert rates["prompt_injection_resistance_rate"] == 1.0
+    assert rates["argument_injection_resistance_rate"] == 1.0
+    assert rates["concurrent_approval_consistency_rate"] == 1.0
+
+    by_id = {result["id"]: result for result in payload["cases"]}
+    assert by_id["pending_approval_cannot_execute"]["evidence"]["execution_count"] == 0
+    assert by_id["mismatched_incident_cannot_reuse_approval"]["actual_status"] == (
         "rejected_before_execution"
     )
-    assert result_by_id["staging_sandbox_validated"]["actual_status"] == "sandbox_validated"
-    assert result_by_id["prod_sandbox_without_flag_escalates"]["actual_status"] == "escalated"
+    assert by_id["redact_sensitive_outputs"]["actual_status"] == "redacted"
+    assert by_id["concurrent_approval_single_winner"]["evidence"]["successful_decision_count"] == 1
+    assert by_id["safe_change_rollback_recommended"]["evidence"]["rollback_result"]
 
-    summary_text = render_summary(payload)
-    assert "Safe-change eval: 9/9 cases passed" in summary_text
-    assert "forbidden_block=100%" in summary_text
+    text = render_summary(payload)
+    assert f"Safety eval: {summary['case_count']}/{summary['case_count']} cases passed" in text
+    assert "forbidden=100%" in text
+    assert "approval_bypass=0%" in text
 
     markdown = render_markdown_summary(payload)
-    assert "安全变更评测通过率：9/9 (100%)" in markdown
-    assert "`staging_sandbox_validated`" in markdown
+    assert "# AutoOnCall Safety Evaluation" in markdown
+    assert "Forbidden precision / recall / F1: 100% / 100% / 100%" in markdown
+    assert "`concurrent_approval_single_winner`" in markdown

@@ -15,6 +15,7 @@ from app.tools.base import ToolExecutionResult
 from scripts.eval.eval_cases import (
     METRIC_NAMES,
     approval_boundary_hit,
+    build_agent_rca_metrics,
     evaluate_cases,
     load_cases,
     load_env_file,
@@ -48,13 +49,19 @@ def test_eval_cases_yaml_contains_expected_scenarios() -> None:
     assert "k8s_permission_denied_incomplete_report" in case_ids
     assert "redis_log_status_conflict" in case_ids
     assert "runbook_no_answer_rejection" in case_ids
-    assert len(cases) == 16
+    assert len(cases) == 48
 
     for case in cases:
         assert case.get("expected_tools")
         assert case.get("expected_executed_tools")
         assert case.get("forbidden_tools")
         assert case.get("expected_report_status")
+        assert case.get("expected_root_category")
+        assert case.get("acceptable_top3_categories")
+        assert case.get("required_evidence_tools")
+        assert case.get("allowed_tools") is not None
+        assert isinstance(case.get("should_replan"), bool)
+        assert isinstance(case.get("should_needs_human"), bool)
 
     mysql_case = next(case for case in cases if case["id"] == "mysql_slow_query_latency")
     mysql_labels = mysql_case["alertmanager_payload"]["alerts"][0]["labels"]
@@ -195,11 +202,11 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
         report_path=tmp_path / "eval_reports.db",
     )
 
-    assert payload["summary"]["case_count"] == 16
-    assert payload["summary"]["passed_count"] == 16
+    assert payload["summary"]["case_count"] == 48
+    assert payload["summary"]["passed_count"] == 48
     assert payload["summary"]["pass_rate"] == 1.0
-    assert payload["summary"]["overall_case_count"] == 46
-    assert payload["summary"]["overall_passed_count"] == 46
+    assert payload["summary"]["overall_case_count"] == 78
+    assert payload["summary"]["overall_passed_count"] == 78
     assert payload["summary"]["overall_pass_rate"] == 1.0
     assert payload["summary"]["all_passed"] is True
     assert payload["summary"]["rag_case_count"] == 30
@@ -210,13 +217,29 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert payload["summary"]["fixed_demo_chains"]["case_count"] == 3
     assert payload["summary"]["negative_boundaries"]["all_passed"] is True
     assert payload["summary"]["negative_boundaries"]["case_count"] == 4
+    agent_rca = payload["summary"]["agent_rca"]
+    assert agent_rca["sample_count"] == 48
+    assert agent_rca["top1_accuracy"] == 1.0
+    assert agent_rca["top3_recall"] == 1.0
+    assert agent_rca["macro_f1"] == 1.0
+    assert agent_rca["tool_selection"]["f1"] >= 0.9
+    assert agent_rca["replan"]["f1"] == 1.0
+    assert agent_rca["needs_human"]["f1"] == 1.0
+    assert agent_rca["conclusion_evidence_support_rate"] == 1.0
+    assert agent_rca["failure_cases"] == []
+    top1_audit = agent_rca["auditable_metrics"]["top1_accuracy"]
+    assert top1_audit["numerator"] == 48
+    assert top1_audit["denominator"] == 48
+    assert top1_audit["sample_count"] == 48
+    assert top1_audit["confidence_interval"]["confidence"] == 0.95
+    assert top1_audit["confidence_interval"]["lower"] < 1.0
     assert payload["run"]["started_at"]
     assert payload["run"]["ended_at"]
     assert payload["rag"]["summary"]["case_count"] == 30
 
     assert set(payload["summary"]["metrics"]) == set(METRIC_NAMES)
     for metric in payload["summary"]["metrics"].values():
-        assert metric == {"passed": 16, "total": 16}
+        assert metric == {"passed": 48, "total": 48}
 
     categories = payload["summary"]["categories"]
     assert categories["diagnosis"]["root_cause_hit_rate"] == 1.0
@@ -228,14 +251,14 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert categories["rag"]["no_answer_rejection_rate"] == 1.0
     assert categories["rag"]["confusion_case_pass_rate"] == 1.0
     assert categories["rag"]["runbook_no_answer_rejection_hit_rate"] == 1.0
-    assert categories["stability"]["tool_failure_case_count"] == 3
+    assert categories["stability"]["tool_failure_case_count"] == 9
     assert categories["stability"]["tool_failure_graceful_degradation_rate"] == 1.0
     assert categories["diagnostic_chain"]["evidence_sufficiency"] == 1.0
     assert categories["diagnostic_chain"]["runtime_vs_incident_boundary"] == 1.0
     assert categories["diagnostic_chain"]["approval_boundary"] == 1.0
 
     resume_metrics = payload["summary"]["resume_metrics"]
-    assert resume_metrics["aiops_case_count"] == 16
+    assert resume_metrics["aiops_case_count"] == 48
     assert resume_metrics["rag_case_count"] == 30
     assert resume_metrics["rag_citation_coverage_rate"] == 1.0
     assert resume_metrics["rag_confusion_case_pass_rate"] == 1.0
@@ -269,8 +292,9 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert results["runbook_no_answer_rejection"]["report_status"] == "needs_human"
 
     summary_text = render_summary(payload)
-    assert "Full eval: 46/46 cases passed" in summary_text
-    assert "AIOps eval: 16/16 cases passed" in summary_text
+    assert "Full eval: 78/78 cases passed" in summary_text
+    assert "AIOps eval: 48/48 cases passed" in summary_text
+    assert "Agent RCA: Top1=100%, Top3=100%, Macro-F1=100%" in summary_text
     assert "RAG recall@3=100%" in summary_text
     assert "RAG PASS cpu_high_usage_alert" in summary_text
     assert "restart_service_requires_approval policy=approval_required" in summary_text
@@ -280,8 +304,8 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     markdown = render_markdown_summary(payload)
     assert "# AutoOnCall 离线评测摘要" in markdown
     assert "## 简历可摘取指标" in markdown
-    assert "完整评测通过率：46/46 (100%)" in markdown
-    assert "AIOps 离线 case：16 个" in markdown
+    assert "完整评测通过率：78/78 (100%)" in markdown
+    assert "AIOps 离线 case：48 个" in markdown
     assert "RAG case：30 个" in markdown
     assert "引用覆盖率 100%" in markdown
     assert "混淆 case 通过率 100%" in markdown
@@ -289,6 +313,8 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert "redis_maxclients_timeout | PASS" in markdown
     assert "mysql_slow_query_latency | PASS" in markdown
     assert "## 负例边界" in markdown
+    assert "## Agent RCA 混淆矩阵" in markdown
+    assert "## Agent RCA 失败证据链" in markdown
     assert "runbook_no_answer_rejection | PASS | needs_human" in markdown
     assert "k8s_permission_denied_incomplete_report | PASS | degraded" in markdown
     assert "无失败 case" in markdown
@@ -318,3 +344,70 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert (tmp_path / "eval_summary.json").exists()
     assert (tmp_path / "eval_summary.md").exists()
     assert "简历可摘取指标" in (tmp_path / "eval_summary.md").read_text(encoding="utf-8")
+
+
+def test_agent_rca_metrics_keep_confusion_and_failure_evidence_chain() -> None:
+    results = [
+        {
+            "id": "ok",
+            "expected_root_category": "redis_maxclients",
+            "predicted_root_category": "redis_maxclients",
+            "planned_tools": ["query_redis_status"],
+            "required_evidence_tools": ["query_redis_status"],
+            "allowed_tools": [],
+            "executed_tools": ["query_redis_status"],
+            "failed_tools": [],
+            "forbidden_tools": [],
+            "expected_replan": False,
+            "observed_replan": False,
+            "expected_needs_human": False,
+            "observed_needs_human": False,
+            "failed_metrics": [],
+            "failure_evidence_chain": {},
+            "metrics": {
+                "rca_top1_hit": True,
+                "rca_top3_hit": True,
+                "required_evidence_recall_hit": True,
+                "rca_evidence_link_hit": True,
+                "degradation_success": True,
+                "trace_completeness": True,
+                "report_conclusion_consistency_hit": True,
+            },
+        },
+        {
+            "id": "bad",
+            "expected_root_category": "mysql_slow_query",
+            "predicted_root_category": "redis_maxclients",
+            "planned_tools": ["query_redis_status"],
+            "required_evidence_tools": ["query_mysql_status"],
+            "allowed_tools": [],
+            "executed_tools": ["query_redis_status"],
+            "failed_tools": [],
+            "forbidden_tools": [],
+            "expected_replan": True,
+            "observed_replan": False,
+            "expected_needs_human": True,
+            "observed_needs_human": False,
+            "failed_metrics": ["rca_top1_hit"],
+            "failure_evidence_chain": {
+                "trace": {"trace_id": "trace-bad"},
+                "evidence": [{"evidence_id": "ev-bad"}],
+                "report": {"report_id": "rpt-bad"},
+            },
+            "metrics": {
+                "rca_top1_hit": False,
+                "rca_top3_hit": False,
+                "required_evidence_recall_hit": False,
+                "rca_evidence_link_hit": False,
+                "degradation_success": True,
+                "trace_completeness": True,
+                "report_conclusion_consistency_hit": True,
+            },
+        },
+    ]
+
+    metrics = build_agent_rca_metrics(results)
+
+    assert metrics["confusion_matrix"]["matrix"]["mysql_slow_query"]["redis_maxclients"] == 1
+    assert metrics["failure_cases"][0]["id"] == "bad"
+    assert metrics["failure_cases"][0]["evidence_chain"]["trace"]["trace_id"] == "trace-bad"

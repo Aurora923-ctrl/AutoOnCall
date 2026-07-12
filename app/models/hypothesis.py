@@ -20,3 +20,8 @@ class RootCauseHypothesis(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_reason: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def evidence_ids(self) -> list[str]:
+        """Return stable supporting evidence IDs for RCA evaluation and APIs."""
+        return list(self.supporting_evidence_ids)

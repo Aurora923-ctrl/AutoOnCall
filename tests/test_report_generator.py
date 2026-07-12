@@ -174,37 +174,34 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert report.confirmed_facts
     assert report.inferred_conclusions
     assert report.next_steps
-    assert "## 附录 A. 面试速览" in report.markdown
-    assert "### Tool Call Table" in report.markdown
-    assert "### Evidence Quick View" in report.markdown
-    assert "| Tool | Source | Status | Latency ms | Artifact | Summary |" in report.markdown
-    assert "| supporting | 4 |" in report.markdown
+    assert "## 附录 A. Evidence、Graph 与 Citation" in report.markdown
+    assert "## 附录 B. ToolCall 与 Trace" in report.markdown
+    assert "### Citation / Runbook 引用" in report.markdown
+    assert (
+        "query_redis_status step=s1 source=redis_info status=success latency_ms=18.5"
+        in report.markdown
+    )
+    assert report.evidence_profile["by_stance"]["supporting"] == 4
     assert "## 1. 故障摘要" in report.markdown
-    assert "## 2. 影响范围" in report.markdown
+    assert "## 2. 用户影响" in report.markdown
     assert "## 3. 初步根因" in report.markdown
     assert "## 4. 关键证据" in report.markdown
     assert "## 5. 排查过程" in report.markdown
     assert "## 6. 风险动作判断" in report.markdown
     assert "## 7. 建议处置" in report.markdown
-    assert "## 8. 回滚 / 观察指标" in report.markdown
+    assert "## 8. 回滚与观察指标" in report.markdown
     assert "## 9. 未确认事项" in report.markdown
     assert "Evidence back-links" in report.markdown
     assert "未记录到明确 evidence_id" not in report.markdown
     assert report.hypothesis_ranking[0]["supporting_evidence_ids"]
-    assert "Risk boundary: policy=allow" in report.markdown
-    assert "does not directly perform production write actions" in report.markdown
     assert "关键证据" in report.markdown
-    assert "## 附录 B. 证据审计" in report.markdown
     assert "### 已确认事实" in report.markdown
     assert "### 推断结论" in report.markdown
     assert "### 根因假设矩阵" in report.markdown
-    assert "### 下一步建议" in report.markdown
     assert "### 证据质量" in report.markdown
     assert "### 数据源边界" in report.markdown
     assert "### 诊断链路证据" in report.markdown
     assert "### 证据矩阵" in report.markdown
-    assert "Root-cause evidence closure" in report.markdown
-    assert "closure: satisfied (live + knowledge/history)" in report.markdown
     assert report.evidence_graph["root_cause_closure"]["status"] == "closed"
     assert report.evidence_graph["root_cause_closure"]["live_evidence_ids"]
     assert (
@@ -258,6 +255,17 @@ def test_report_generator_builds_persists_and_reloads_report(tmp_path) -> None:
     assert "### Conclusion Alignment" in report.markdown
     assert "root_cause: aligned=true" in report.markdown
     assert "remediation_suggestion: aligned=true" in report.markdown
+    first_screen = report.markdown.split("## 2. 用户影响", 1)[0]
+    assert "order-service" in first_screen
+    assert "P1" in first_screen
+    assert "初步根因" in first_screen
+    assert "置信度" in first_screen
+    key_evidence_body = report.markdown.split("## 4. 关键证据", 1)[1].split("## 5. 排查过程", 1)[0]
+    assert key_evidence_body.count("\n| evd-") <= 5
+    assert "| Evidence | Tool / Source | Fact | Inference | Uncertainty |" in report.markdown
+    investigation = report.markdown.split("## 5. 排查过程", 1)[1].split("## 6. 风险动作判断", 1)[0]
+    assert "query_redis_status" in investigation
+    assert "18.5 ms" in investigation
 
     reloaded = ReportGenerator(tmp_path / "reports.db")
     assert reloaded.get_report(report.incident_id).report_id == report.report_id
@@ -285,6 +293,81 @@ def test_report_generator_downgrades_completed_when_evidence_is_insufficient(tmp
     assert "处置参考" in missing_text
     assert "报告由 completed 降级为 incomplete" in report.markdown
     assert "当前置信度上限：0.55" in report.markdown
+
+
+def test_report_body_shows_failed_tool_without_dumping_raw_json(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["tool_call_records"].append(
+        ToolCallRecord(
+            trace_id=state["trace_id"],
+            incident_id=state["incident"]["incident_id"],
+            step_id="s5",
+            tool_name="query_logs",
+            input_args={"service_name": "order-service", "token": "secret-value"},
+            output={"status": "failed", "raw": {"very_large": ["x"] * 20}},
+            output_summary="",
+            data_source="failed",
+            latency_ms=120.0,
+            status="failed",
+            error_message="Loki timeout",
+        ).model_dump(mode="json")
+    )
+    state["errors"] = ["工具 query_logs 调用失败: Loki timeout"]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    body = report.markdown.split("## 附录 A.", 1)[0]
+    investigation = body.split("## 5. 排查过程", 1)[1].split("## 6. 风险动作判断", 1)[0]
+    assert "query_logs" in investigation
+    assert "failed" in investigation
+    assert "Loki timeout" in investigation
+    assert "secret-value" not in body
+    assert '"very_large"' not in body
+
+
+def test_report_recommendation_contains_complete_change_loop(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    plan = build_change_plan(
+        incident_id=state["incident"]["incident_id"],
+        action="调整 Redis maxclients 配置",
+        risk_level="high",
+        tool_name="apply_config_change",
+        service_name="order-service",
+        environment="prod",
+        reason="Redis incident-window evidence is saturated.",
+    )
+    state["risk_assessment"] = {
+        "risk_level": "high",
+        "policy": "approval_required",
+        "need_approval": True,
+        "action": plan.action,
+    }
+    state["pending_approval"] = {
+        "approval_id": "apr-report-loop",
+        "status": "pending",
+        "action": plan.action,
+        "risk_level": "high",
+        "change_plan": plan.model_dump(mode="json"),
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="waiting_approval",
+    )
+
+    recommendation = report.markdown.split("## 7. 建议处置", 1)[1].split("## 8. 回滚与观察指标", 1)[
+        0
+    ]
+    assert "前置检查" in recommendation
+    assert "审批边界" in recommendation
+    assert "Dry-run" in recommendation
+    assert "观察" in recommendation
+    assert "回滚" in recommendation
 
 
 def test_report_generator_downgrades_unaligned_conclusions(tmp_path) -> None:
@@ -487,8 +570,8 @@ def test_report_generator_renders_runbook_references(tmp_path) -> None:
         status="completed",
     )
 
-    assert "## 附录 C. 工具、Trace 与 Runbook" in report.markdown
-    assert "### Runbook 引用" in report.markdown
+    assert "## 附录 B. ToolCall 与 Trace" in report.markdown
+    assert "### Citation / Runbook 引用" in report.markdown
     assert "cpu_high_usage.md" in report.markdown
     assert "chunk=cpu_high_usage.md#0001" in report.markdown
     assert "score=0.2000" in report.markdown
@@ -546,8 +629,8 @@ def test_report_generator_marks_pending_approval_as_manual_action(tmp_path) -> N
     assert report.approval_decision["approval_id"] == "apr-1"
     assert report.approval_decision["action"] == "调整 Redis maxclients 配置"
     assert report.change_plan["change_plan_id"] == "chg-1"
-    assert "Risk boundary: policy=approval_required" in report.markdown
-    assert "manual_action_required=true" in report.markdown
+    assert "风险策略：approval_required" in report.markdown
+    assert "是否需要人工动作：是" in report.markdown
     assert "等待人工审批" in report.markdown
     assert "审批动作：调整 Redis maxclients 配置" in report.markdown
     assert "### 人工动作与回滚边界" in report.markdown

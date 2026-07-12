@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "autooncall.controlled_fault.v1",
+  "title": "AutoOnCall controlled fault experiment record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "evidence_level",
+    "environment",
+    "dry_run",
+    "fault_type",
+    "target",
+    "injection_parameters",
+    "ground_truth",
+    "status",
+    "started_at",
+    "ended_at",
+    "diagnosis",
+    "metrics",
+    "pre_checks",
+    "raw_evidence",
+    "cleanup_verification"
+  ],
+  "properties": {
+    "schema_version": {"const": "controlled_fault.v1"},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "evidence_level": {"const": "controlled_fault"},
+    "environment": {"enum": ["local", "sandbox"]},
+    "dry_run": {"type": "boolean"},
+    "fault_type": {
+      "enum": [
+        "redis_capacity",
+        "mysql_slow_query",
+        "downstream_http",
+        "evidence_backend_outage"
+      ]
+    },
+    "target": {"type": "string", "minLength": 1},
+    "injection_parameters": {"type": "object"},
+    "ground_truth": {
+      "type": "object",
+      "required": ["source", "root_cause"],
+      "properties": {
+        "source": {"const": "experiment_label"},
+        "root_cause": {"type": "string", "minLength": 1}
+      }
+    },
+    "status": {"enum": ["planned", "not_run", "blocked", "injected", "passed", "failed"]},
+    "status_reason": {"type": "string"},
+    "diagnosis": {"type": "object"},
+    "metrics": {"type": "object"},
+    "pre_checks": {"type": "array"},
+    "raw_evidence": {"type": "array"},
+    "cleanup_verification": {"type": "array"}
+  }
+}

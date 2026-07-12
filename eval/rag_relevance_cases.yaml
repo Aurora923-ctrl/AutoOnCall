@@ -1,0 +1,303 @@
+schema_version: "2.0"
+dataset_version: "2026.07.11"
+annotation_version: "1.0"
+cases:
+  - id: cpu_common
+    split: dev
+    category: cpu
+    difficulty: medium
+    case_type: positive
+    relevant_chunks: [{chunk_id: cpu_high_usage.md#0003, relevance: 3}]
+    required_sources: [cpu_high_usage.md]
+    expected_keywords: [CPU]
+    variants:
+      - {query: "CPU 使用率持续 95% 应如何开始排查？"}
+      - {query: "单进程 CPU 飙升后先收集哪些证据？"}
+      - {query: "CPU 告警发生时排查步骤是什么？"}
+      - {query: "billing-service 高 CPU 如何定位线程和进程？"}
+      - {query: "CPU load 快速上升应该参考哪段 Runbook？"}
+  - id: memory_common
+    split: dev
+    category: memory
+    difficulty: medium
+    case_type: positive
+    relevant_chunks: [{chunk_id: memory_high_usage.md#0003, relevance: 3}]
+    required_sources: [memory_high_usage.md]
+    expected_keywords: [内存]
+    variants:
+      - {query: "Pod 内存 96% 且 OOMKilled 如何排查？"}
+      - {query: "Java 服务内存持续上涨先查什么？"}
+      - {query: "内存告警发生时应收集哪些进程证据？"}
+      - {query: "容器接近 memory limit 的排查步骤是什么？"}
+      - {query: "recommendation-service 内存压力如何定位？"}
+  - id: disk_common
+    split: dev
+    category: disk
+    difficulty: medium
+    case_type: positive
+    relevant_chunks: [{chunk_id: disk_high_usage.md#0003, relevance: 3}]
+    required_sources: [disk_high_usage.md]
+    expected_keywords: [磁盘]
+    variants:
+      - {query: "no space left on device 如何开始排查？"}
+      - {query: "磁盘使用率告警需要先看哪些目录？"}
+      - {query: "节点磁盘接近满容量应收集什么证据？"}
+      - {query: "写文件失败且磁盘满如何定位？"}
+      - {query: "report-service 磁盘告警排查步骤是什么？"}
+  - id: service_common
+    split: dev
+    category: service_unavailable
+    difficulty: medium
+    case_type: positive
+    relevant_chunks: [{chunk_id: service_unavailable.md#0003, relevance: 3}]
+    required_sources: [service_unavailable.md]
+    expected_keywords: [服务]
+    variants:
+      - {query: "checkout-service 大量 503 如何排查？"}
+      - {query: "用户无法访问服务时先确认哪些信号？"}
+      - {query: "服务不可用告警的标准排查步骤是什么？"}
+      - {query: "5xx 激增但实例仍运行如何定位？"}
+      - {query: "线上接口全部失败应参考哪份 Runbook？"}
+  - id: prometheus_common
+    split: dev
+    category: prometheus
+    difficulty: medium
+    case_type: positive
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0002, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [alert]
+    variants:
+      - {query: "Prometheus alerting rule 如何定义 expr 和 for？"}
+      - {query: "告警规则中的 labels 与 annotations 如何配置？"}
+      - {query: "Prometheus 如何声明 pending 到 firing 的规则？"}
+      - {query: "如何编写一条 Prometheus 告警规则？"}
+  - id: redis_confusion
+    split: dev
+    category: redis
+    difficulty: hard
+    case_type: confusion
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0004, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    forbidden_sources: [official_redis_latency.md]
+    expected_keywords: [maxclients]
+    variants:
+      - {query: "新连接被拒绝且 connected_clients 接近上限，是延迟还是客户端容量问题？"}
+      - {query: "Redis timeout 同时 maxclients 接近耗尽，主方向是什么？"}
+      - {query: "客户端连接数满但 CPU 正常，应查哪个配置？"}
+      - {query: "Redis 无法建立新连接，如何区分网络延迟和 maxclients？"}
+      - {query: "blocked_clients 增长且连接槽位用尽，应看哪段官方说明？"}
+  - id: mysql_confusion
+    split: dev
+    category: mysql
+    difficulty: hard
+    case_type: confusion
+    relevant_chunks: [{chunk_id: payment_wiki.html#0001, relevance: 3}]
+    required_sources: [payment_wiki.html]
+    expected_keywords: [slow]
+    variants:
+      - {query: "CPU 高但火焰图无热点，慢 SQL 与 pool_waiting 上升，根因方向是什么？"}
+      - {query: "接口变慢且 active_connections 188/200，应先查应用还是数据库？"}
+      - {query: "5xx 不高但 P95 和连接池等待上升，如何排查 MySQL？"}
+      - {query: "payment-service 发布后慢查询增加，应检查哪些数据库证据？"}
+  - id: k8s_confusion
+    split: dev
+    category: kubernetes
+    difficulty: hard
+    case_type: confusion
+    relevant_chunks: [{chunk_id: official_kubernetes_debug_services.md#0013, relevance: 3}]
+    required_sources: [official_kubernetes_debug_services.md]
+    expected_keywords: [EndpointSlices]
+    variants:
+      - {query: "Service 存在但没有后端地址，应检查什么资源？"}
+      - {query: "DNS 正常而 ClusterIP 无响应，EndpointSlices 为空怎么办？"}
+      - {query: "Pod 正常但 Service 没有 endpoints，如何定位 selector？"}
+      - {query: "Kubernetes 流量不通时怎样区分 Service 与 Pod 问题？"}
+  - id: loki_confusion
+    split: dev
+    category: loki
+    difficulty: hard
+    case_type: confusion
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_query.md#0018, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_query.md]
+    expected_keywords: [Timeout]
+    variants:
+      - {query: "Loki 查询超时，应缩短时间范围还是扩大 ingester 配置？"}
+      - {query: "LogQL range query 太慢，怎样判断是查询超时而非写入失败？"}
+      - {query: "日志已写入但查询返回 timeout，应查哪个 READ 故障章节？"}
+  - id: redis_multi
+    split: dev
+    category: redis
+    difficulty: hard
+    case_type: multi_source
+    relevant_chunks:
+      - {chunk_id: redis_postmortem.pdf#0001, relevance: 3}
+      - {chunk_id: redis_capacity_wiki.html#0001, relevance: 2}
+    required_sources: [redis_postmortem.pdf, redis_capacity_wiki.html]
+    expected_keywords: [maxclients]
+    variants:
+      - {query: "connected_clients 9940/10000 的复盘和容量边界分别在哪里？"}
+      - query: "Redis maxclients 事故需要结合哪些 postmortem 与 wiki？"
+        relevant_chunks:
+          - {chunk_id: redis_postmortem.pdf#0001, relevance: 3}
+          - {chunk_id: redis_capacity_wiki.html#0002, relevance: 2}
+      - query: "如何同时引用 Redis 容量知识和历史复盘证据？"
+        relevant_chunks:
+          - {chunk_id: redis_postmortem.pdf#0001, relevance: 3}
+          - {chunk_id: redis_capacity_wiki.html#0002, relevance: 2}
+      - {query: "blocked_clients 37 且连接耗尽，需要哪两个可信来源？"}
+      - {query: "Redis 容量耗尽的 incident-window 与审批边界如何区分？"}
+  - id: mysql_multi
+    split: dev
+    category: mysql
+    difficulty: hard
+    case_type: multi_source
+    relevant_chunks:
+      - {chunk_id: mysql_slow_query_postmortem.pdf#0001, relevance: 3}
+      - {chunk_id: payment_wiki.html#0001, relevance: 2}
+    required_sources: [mysql_slow_query_postmortem.pdf, payment_wiki.html]
+    expected_keywords: [pool_waiting]
+    variants:
+      - {query: "payment-service pool_waiting 6 的复盘和排查手册在哪里？"}
+      - {query: "MySQL slow query 事故需要哪两个多格式来源？"}
+      - {query: "active_connections 188/200 应结合 postmortem 和 wiki 如何判断？"}
+      - {query: "如何引用支付慢查询复盘与 EXPLAIN Runbook？"}
+  - id: k8s_multi
+    split: regression
+    category: kubernetes
+    difficulty: hard
+    case_type: multi_source
+    relevant_chunks:
+      - {chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}
+      - {chunk_id: official_kubernetes_debug_services.md#0015, relevance: 2}
+    required_sources: [official_kubernetes_debug_pods.md, official_kubernetes_debug_services.md]
+    expected_keywords: [Pod]
+    variants:
+      - {query: "Kubernetes 故障如何同时验证 Pod 与 Service 后端？"}
+      - query: "请求不通时怎样联合 Pod triage 和 Service backend 检查？"
+        relevant_chunks:
+          - {chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}
+          - {chunk_id: official_kubernetes_debug_services.md#0015, relevance: 2}
+      - query: "需要哪些官方文档同时排查 Pod 与 Service？"
+        relevant_chunks:
+          - {chunk_id: official_kubernetes_debug_pods.md#0002, relevance: 3}
+          - {chunk_id: official_kubernetes_debug_services.md#0015, relevance: 2}
+  - id: observability_multi
+    split: regression
+    category: observability
+    difficulty: hard
+    case_type: multi_source
+    relevant_chunks:
+      - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+      - {chunk_id: official_prometheus_alerting_practices.md#0003, relevance: 2}
+    required_sources: [official_loki_troubleshoot_ingest.md, official_prometheus_alerting_practices.md]
+    expected_keywords: [ingestion]
+    variants:
+      - query: "Loki 写入失败应如何结合 ingestion 指标和症状告警实践？"
+        relevant_chunks:
+          - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+          - {chunk_id: official_prometheus_alerting_practices.md#0004, relevance: 1}
+      - query: "日志摄取异常需要哪两份 Loki 与 Prometheus 官方资料？"
+        relevant_chunks:
+          - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+          - {chunk_id: official_prometheus_alerting_practices.md#0004, relevance: 1}
+      - query: "怎样同时设计 Loki ingestion 监控与面向症状的告警？"
+        relevant_chunks:
+          - {chunk_id: official_loki_troubleshoot_ingest.md#0003, relevance: 3}
+          - {chunk_id: official_prometheus_alerting_practices.md#0001, relevance: 2}
+      - {query: "可观测性写入故障如何结合指标与告警原则？"}
+  - id: redis_alias
+    split: regression
+    category: redis
+    difficulty: medium
+    case_type: alias
+    relevant_chunks: [{chunk_id: official_redis_clients.md#0013, relevance: 3}]
+    required_sources: [official_redis_clients.md]
+    expected_keywords: [keepalive]
+    variants:
+      - {query: "Redis 连接保活机制是什么？"}
+      - {query: "客户端 TCP keepalive 在 Redis 中有什么作用？"}
+  - id: k8s_alias
+    split: regression
+    category: kubernetes
+    difficulty: medium
+    case_type: alias
+    relevant_chunks: [{chunk_id: official_kubernetes_pod_failure_reason.md#0003, relevance: 3}]
+    required_sources: [official_kubernetes_pod_failure_reason.md]
+    expected_keywords: [termination]
+    variants:
+      - {query: "容器退出原因消息从哪里读取？"}
+      - {query: "Pod 终止信息 termination message 如何获得？"}
+  - id: loki_alias
+    split: regression
+    category: loki
+    difficulty: medium
+    case_type: alias
+    relevant_chunks: [{chunk_id: official_loki_troubleshoot_query.md#0004, relevance: 3}]
+    required_sources: [official_loki_troubleshoot_query.md]
+    expected_keywords: [LogQL]
+    variants:
+      - {query: "日志查询语言写错返回 400 如何修？"}
+      - {query: "LogQL parser error 应检查什么？"}
+  - id: prometheus_alias
+    split: regression
+    category: prometheus
+    difficulty: medium
+    case_type: alias
+    relevant_chunks: [{chunk_id: official_prometheus_alerting_rules.md#0006, relevance: 3}]
+    required_sources: [official_prometheus_alerting_rules.md]
+    expected_keywords: [alerts]
+    variants:
+      - {query: "怎样查看正在触发的 Prometheus 告警？"}
+      - {query: "运行时检查 pending/firing alerts 的入口是什么？"}
+  - id: refusal_dev
+    split: dev
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    relevant_chunks: []
+    required_sources: []
+    variants:
+      - {query: "秋招简历项目经历如何包装？"}
+  - id: refusal_business
+    split: regression
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    relevant_chunks: []
+    required_sources: []
+    variants:
+      - {query: "公司差旅报销流程是什么？"}
+      - {query: "年假和调休制度是什么？"}
+      - {query: "会议室预订怎么申请？"}
+      - {query: "行政采购电脑走什么流程？"}
+      - {query: "团建预算如何审批？"}
+  - id: refusal_advice
+    split: regression
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    relevant_chunks: []
+    required_sources: []
+    variants:
+      - {query: "推荐股票基金投资组合。"}
+      - {query: "头痛应该吃什么药？"}
+      - {query: "劳动合同纠纷如何起诉？"}
+      - {query: "帮我规划日本旅行路线。"}
+      - {query: "今晚红烧肉怎么做？"}
+  - id: refusal_creative
+    split: regression
+    category: out_of_domain
+    difficulty: easy
+    case_type: refusal
+    should_reject: true
+    relevant_chunks: []
+    required_sources: []
+    variants:
+      - {query: "写一首关于春天的诗。"}
+      - {query: "把 hello world 翻译成法语。"}
+      - {query: "推荐一个单机游戏。"}
+      - {query: "最近有什么电影值得看？"}
+      - {query: "前端按钮颜色和圆角怎么设计？"}

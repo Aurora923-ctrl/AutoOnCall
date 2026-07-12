@@ -78,9 +78,7 @@ class IndexingQualityService:
             status = (
                 "success"
                 if path in success_by_path
-                else "empty"
-                if path in empty_files
-                else "unknown"
+                else "empty" if path in empty_files else "unknown"
             )
             record = build_quality_record(
                 report=report,

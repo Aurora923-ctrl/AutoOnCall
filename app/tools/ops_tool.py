@@ -9,7 +9,7 @@ from app.integrations.kubernetes import KubernetesStatusAdapter
 from app.integrations.mysql import MySQLStatusAdapter
 from app.integrations.ticketing import TicketingAdapter
 from app.services.service_topology import get_primary_dependency_instance
-from app.tools.base import AIOpsTool, clamp_duration, clamp_int
+from app.tools.base import AIOpsTool, ToolRetryPolicy, clamp_duration, clamp_int
 
 
 class QueryK8sStatusTool(AIOpsTool):
@@ -17,6 +17,11 @@ class QueryK8sStatusTool(AIOpsTool):
     description = "Query pod status, restarts, image versions, and deployment timing."
     risk_level = "low"
     read_only = True
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["Kubernetes API"]
     degradation_strategy = (
         "Use Kubernetes API when configured; otherwise return a structured unavailable payload."
@@ -62,6 +67,11 @@ class QueryMySQLStatusTool(AIOpsTool):
     description = "Query MySQL slow SQL, connection pool, lock waits, and active connections."
     risk_level = "low"
     read_only = True
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["MySQL status SQL", "MySQL live incident evidence tables", "service topology"]
     degradation_strategy = (
         "Use MySQL adapters when configured; otherwise return a structured unavailable payload."
@@ -106,6 +116,11 @@ class SearchHistoryTicketTool(AIOpsTool):
     description = "Search historical tickets for similar incidents."
     risk_level = "low"
     read_only = True
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["ticketing API", "MySQL historical tickets"]
     degradation_strategy = (
         "Use the configured ticketing API or MySQL-backed historical tickets; return a "

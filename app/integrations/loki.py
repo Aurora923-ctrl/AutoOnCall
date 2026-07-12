@@ -69,6 +69,7 @@ class LokiLogAdapter:
             payload = response.json()
 
         logs = self._normalize_streams(payload)
+        mysql_details = self._mysql_log_details(logs)
         return adapter_success(
             source="loki",
             summary=f"Loki 返回 {len(logs)} 条 {service_name} 日志",
@@ -84,6 +85,7 @@ class LokiLogAdapter:
             start_time_ns=start_ns,
             end_time_ns=end_ns,
             logs={"total": len(logs), "logs": logs},
+            **mysql_details,
         )
 
     @staticmethod
@@ -118,6 +120,35 @@ class LokiLogAdapter:
                     }
                 )
         return logs
+
+    @staticmethod
+    def _mysql_log_details(logs: list[dict[str, Any]]) -> dict[str, Any]:
+        messages = " ".join(str(item.get("message") or "") for item in logs)
+        digest_match = re.search(r"\bdigest=([A-Za-z0-9._-]+)", messages)
+        avg_ms_match = re.search(r"\bavg_ms=(\d+)", messages)
+        pool_waiting_match = re.search(r"\bpool_waiting=(\d+)", messages)
+        if not (digest_match or avg_ms_match or pool_waiting_match):
+            return {}
+        digest = digest_match.group(1) if digest_match else "unknown"
+        avg_ms = int(avg_ms_match.group(1)) if avg_ms_match else 0
+        pool_waiting = int(pool_waiting_match.group(1)) if pool_waiting_match else 0
+        return {
+            "slow_sql_digest": digest,
+            "slow_sql_avg_ms": avg_ms,
+            "pool_waiting": pool_waiting,
+            "fact": (
+                f"Application logs show slow SQL digest={digest}, avg_ms={avg_ms}, "
+                f"pool_waiting={pool_waiting}."
+            ),
+            "inference": (
+                "The same slow report query appears while callers wait for database "
+                "connections, linking the SQL path to payment latency."
+            ),
+            "uncertainty": (
+                "Logs identify the application-observed digest and wait symptom, but MySQL "
+                "incident evidence is still required to quantify connection pressure."
+            ),
+        }
 
 
 def _escape_logql_string(value: str) -> str:

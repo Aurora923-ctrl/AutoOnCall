@@ -45,6 +45,37 @@ def test_mysql_slow_query_fallback_plan_contains_mysql_step() -> None:
     assert any("MySQL" in step.purpose for step in steps)
 
 
+def test_mysql_demo_plan_uses_release_correlation_and_no_write_action() -> None:
+    incident = {
+        "service_name": "payment-service",
+        "environment": "prod",
+        "symptom": "P95 high, slow SQL digest and pool waiting after report feature flag",
+        "raw_alert": {
+            "alertname": "MySQLSlowQueryLatency",
+            "dependency": "payment-mysql",
+            "feature_flag": "PAYMENT_REPORT_ENABLED=true",
+        },
+    }
+
+    steps = build_fallback_plan("payment-service MySQL slow query latency", incident)
+    tool_names = [step.tool_name for step in steps]
+
+    assert tool_names == [
+        "query_mysql_status",
+        "query_metrics",
+        "query_logs",
+        "query_deploy_history",
+        "search_runbook",
+        "search_history_ticket",
+        "suggest_remediation",
+    ]
+    assert steps[2].input_args["service_name"] == "payment-service"
+    assert "digest" in steps[2].input_args["query"]
+    assert steps[5].input_args["service_name"] == "payment-service"
+    assert "feature flag" in steps[5].input_args["query"].lower()
+    assert "execute_sql" not in tool_names
+
+
 def test_slow_response_fallback_plan_uses_core_evidence() -> None:
     steps = build_fallback_plan(
         input_text="checkout-service ????P95 ????? timeout",
@@ -99,6 +130,50 @@ def test_raw_alert_requested_action_is_prioritized_for_risk_control() -> None:
     assert requested_action_step.risk_level == "high"
     assert decision.policy == "forbidden"
     assert "sql:unaudited" in decision.matched_rules
+
+
+def test_redis_demo_plan_keeps_evidence_order_and_approval_action() -> None:
+    incident = {
+        "service_name": "order-service",
+        "environment": "prod",
+        "symptom": "Redis connection timeout and 5xx spike",
+        "raw_alert": {
+            "alertname": "RedisMaxClientsNearLimit",
+            "dependency": "redis-order",
+            "requested_action": "apply_config_change",
+            "reason": "调整 Redis maxclients",
+        },
+    }
+
+    steps = build_fallback_plan("order-service Redis maxclients exhausted", incident)
+    tool_names = [step.tool_name for step in steps]
+
+    assert tool_names[:5] == [
+        "query_redis_status",
+        "query_metrics",
+        "query_logs",
+        "search_runbook",
+        "search_history_ticket",
+    ]
+    assert tool_names[-1] == "apply_config_change"
+    assert assess_plan_step(steps[-1], incident=incident).policy == "approval_required"
+
+
+def test_requested_action_stays_inside_eight_step_execution_budget() -> None:
+    incident = {
+        "service_name": "catalog-service",
+        "environment": "prod",
+        "symptom": "Redis connection exhaustion requires operator review",
+        "raw_alert": {
+            "requested_action": "restart_service",
+            "reason": "operator requested a production restart",
+        },
+    }
+
+    steps = build_fallback_plan("catalog-service Redis maxclients exhausted", incident)
+
+    assert steps[0].tool_name == "restart_service"
+    assert assess_plan_step(steps[0], incident=incident).policy == "approval_required"
 
 
 def test_normalize_plan_steps_resets_status_and_renders_legacy_plan() -> None:

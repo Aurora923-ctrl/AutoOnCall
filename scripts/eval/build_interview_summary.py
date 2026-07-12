@@ -28,6 +28,7 @@ DEFAULT_CHANGE_SUMMARY = REPO_ROOT / "logs" / "change_eval_summary.json"
 DEFAULT_REPLANNER_SUMMARY = REPO_ROOT / "logs" / "replanner_eval_summary.json"
 DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "interview_eval_summary.json"
 DEFAULT_OUTPUT_MD = REPO_ROOT / "logs" / "interview_eval_summary.md"
+DEFAULT_BENCHMARK_LATEST = REPO_ROOT / "logs" / "benchmarks" / "latest.json"
 
 CORE_CASE_IDS = ["redis_maxclients_timeout", "mysql_slow_query_latency", "pod_crashloop"]
 NEGATIVE_BOUNDARY_CASE_IDS = [
@@ -43,11 +44,318 @@ INTERVIEW_GATE_MODULES = [
     "replanner_eval",
 ]
 
+SCORECARD_MODULES = [
+    ("baseline", "Baseline provenance", None),
+    ("knowledge_quality", "Knowledge quality", "knowledge_quality"),
+    ("rag_retrieval", "RAG retrieval", "rag"),
+    ("answer_quality", "Answer quality", "ragas"),
+    ("agent_rca", "Agent RCA", "aiops"),
+    ("security", "Safety", "safe_change"),
+    ("performance", "Latency, token and cost", "performance"),
+    ("capacity", "Concurrency capacity", "load_test"),
+    ("controlled_fault", "Controlled fault", "controlled_faults"),
+    ("production", "Production data", None),
+]
+
 
 def load_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resolve_latest_benchmark_manifest(pointer_path: Path = DEFAULT_BENCHMARK_LATEST) -> Path | None:
+    """Resolve the latest benchmark manifest without mixing independent current artifacts."""
+    pointer = load_json(pointer_path)
+    if not pointer:
+        return None
+    value = str(pointer.get("manifest_json") or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def build_scorecard_from_manifest(
+    manifest: dict[str, Any],
+    *,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    """Build the stage-8 scorecard exclusively from one benchmark run."""
+    run = manifest.get("run") if isinstance(manifest.get("run"), dict) else {}
+    summary = manifest.get("summary") if isinstance(manifest.get("summary"), dict) else {}
+    modules = manifest.get("modules") if isinstance(manifest.get("modules"), list) else []
+    module_by_id = {
+        str(item.get("id")): item for item in modules if isinstance(item, dict) and item.get("id")
+    }
+    run_id = str(run.get("run_id") or manifest_path.parent.name)
+    rows: list[dict[str, Any]] = []
+    for key, label, source_id in SCORECARD_MODULES:
+        if key == "baseline":
+            rows.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "status": str(summary.get("status") or "missing"),
+                    "baseline_status": str(summary.get("baseline_status") or "missing"),
+                    "evidence_level": "local_live",
+                    "run_id": run_id,
+                    "sample_count": int(summary.get("module_count") or len(modules)),
+                    "metrics": [
+                        {
+                            "key": "module_pass_rate",
+                            "value": _nested(summary, "metrics", "module_pass_rate", "value"),
+                            "confidence_interval": {},
+                        }
+                    ],
+                    "failed_case_count": int(summary.get("failed_module_count") or 0),
+                    "failed_cases": list(summary.get("official_block_reasons") or [])[:5],
+                    "artifact_path": _artifact_path(str(manifest_path)),
+                }
+            )
+            continue
+        if key == "production":
+            rows.append(_production_scorecard_module(run_id))
+            continue
+        module = module_by_id.get(str(source_id))
+        rows.append(_scorecard_module(key, label, module, run_id))
+
+    required_keys = {
+        "baseline",
+        "knowledge_quality",
+        "rag_retrieval",
+        "answer_quality",
+        "agent_rca",
+        "security",
+    }
+    available_rows = [row for row in rows if row["status"] not in {"missing", "not_enough_data"}]
+    failed_rows = [row for row in available_rows if row["status"] not in {"passed", "official"}]
+    required_failed_rows = [row for row in failed_rows if row["key"] in required_keys]
+    return {
+        "run": {
+            "run_id": run_id,
+            "started_at": run.get("started_at"),
+            "ended_at": run.get("ended_at"),
+            "command": run.get("command"),
+            "manifest_path": _artifact_path(str(manifest_path)),
+            "environment": run.get("environment", {}),
+            "single_run_enforced": True,
+        },
+        "summary": {
+            "status": "passed" if not required_failed_rows else "failed",
+            "baseline_status": summary.get("baseline_status", "missing"),
+            "official_baseline": bool(summary.get("official_baseline")),
+            "module_count": len(rows),
+            "available_module_count": len(available_rows),
+            "passed_module_count": sum(
+                1 for row in available_rows if row["status"] in {"passed", "official"}
+            ),
+            "failed_module_count": len(failed_rows),
+            "missing_optional_module_count": sum(
+                1
+                for row in rows
+                if row["key"] not in required_keys
+                and row["status"] in {"missing", "not_enough_data"}
+            ),
+            "production_status": "not_enough_data",
+            "production_boundary": (
+                "No production incident sample is present in this run. Controlled-fault "
+                "latency or recovery metrics must not be presented as production MTTD/MTTR."
+            ),
+        },
+        "modules": rows,
+    }
+
+
+def _scorecard_module(
+    key: str,
+    label: str,
+    module: dict[str, Any] | None,
+    run_id: str,
+) -> dict[str, Any]:
+    if not module:
+        return {
+            "key": key,
+            "label": label,
+            "status": "missing",
+            "evidence_level": _default_evidence_level(key),
+            "run_id": run_id,
+            "sample_count": 0,
+            "metrics": [],
+            "failed_case_count": 0,
+            "failed_cases": [],
+            "artifact_path": "",
+        }
+    summary = module.get("summary") if isinstance(module.get("summary"), dict) else {}
+    artifact_path = str(module.get("json_path") or "")
+    artifact = load_json(REPO_ROOT / artifact_path) if artifact_path else None
+    failed_cases = _failed_cases(summary, artifact)
+    return {
+        "key": key,
+        "label": label,
+        "status": str(module.get("status") or "missing"),
+        "evidence_level": str(module.get("evidence_level") or _default_evidence_level(key)),
+        "run_id": run_id,
+        "sample_count": _sample_count(summary, artifact),
+        "metrics": _scorecard_metrics(summary),
+        "failed_case_count": len(failed_cases),
+        "failed_cases": failed_cases[:5],
+        "artifact_path": artifact_path,
+    }
+
+
+def _production_scorecard_module(run_id: str) -> dict[str, Any]:
+    return {
+        "key": "production",
+        "label": "Production data",
+        "status": "not_enough_data",
+        "evidence_level": "production",
+        "run_id": run_id,
+        "sample_count": 0,
+        "metrics": [],
+        "failed_case_count": 0,
+        "failed_cases": [],
+        "artifact_path": "",
+        "collection_fields": [
+            "alert_time",
+            "diagnosis_start_time",
+            "first_useful_diagnosis_time",
+            "resolve_time",
+            "human_confirmed_root_cause",
+            "recommendation_accepted",
+            "recommendation_executed",
+            "recovered_after_execution",
+        ],
+    }
+
+
+def _default_evidence_level(key: str) -> str:
+    if key == "controlled_fault":
+        return "controlled_fault"
+    if key in {"performance", "capacity", "knowledge_quality"}:
+        return "local_live"
+    return "offline_fixture"
+
+
+def _sample_count(summary: dict[str, Any], artifact: dict[str, Any] | None) -> int:
+    for key in (
+        "sample_count",
+        "case_count",
+        "overall_case_count",
+        "asset_count",
+        "request_count",
+        "experiment_count",
+        "check_count",
+    ):
+        value = summary.get(key)
+        if isinstance(value, int | float):
+            return int(value)
+    cases = (artifact or {}).get("cases")
+    return len(cases) if isinstance(cases, list) else 0
+
+
+def _failed_cases(
+    summary: dict[str, Any],
+    artifact: dict[str, Any] | None,
+) -> list[Any]:
+    raw = summary.get("failed_cases") or summary.get("failed_checks")
+    if isinstance(raw, list):
+        return raw
+    cases = (artifact or {}).get("cases")
+    if isinstance(cases, list):
+        return [
+            {"id": case.get("id"), "failure_reasons": case.get("failure_reasons", {})}
+            for case in cases
+            if isinstance(case, dict) and case.get("passed") is False
+        ]
+    return []
+
+
+def _scorecard_metrics(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    metrics: list[dict[str, Any]] = []
+    structured = summary.get("metrics")
+    if isinstance(structured, dict):
+        for key, value in structured.items():
+            if isinstance(value, dict) and "value" in value:
+                metrics.append(
+                    {
+                        "key": str(key),
+                        "value": value.get("value"),
+                        "numerator": value.get("numerator"),
+                        "denominator": value.get("denominator"),
+                        "sample_count": value.get("sample_count"),
+                        "confidence_interval": value.get("confidence_interval", {}),
+                    }
+                )
+    for key in (
+        "pass_rate",
+        "overall_pass_rate",
+        "recall_at_k",
+        "recall_at_3",
+        "precision_at_3",
+        "mrr",
+        "ndcg_at_3",
+        "citation_coverage_rate",
+        "core_case_pass_rate",
+        "refusal_boundary_rate",
+        "p95_latency_ms",
+    ):
+        value = summary.get(key)
+        if isinstance(value, int | float) and not any(item["key"] == key for item in metrics):
+            metrics.append({"key": key, "value": value, "confidence_interval": {}})
+    return metrics[:8]
+
+
+def _nested(payload: dict[str, Any], *keys: str) -> Any:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def render_scorecard_markdown(payload: dict[str, Any]) -> str:
+    summary = payload["summary"]
+    lines = [
+        "# AutoOnCall Interview Scorecard",
+        "",
+        f"- Run ID: `{payload['run']['run_id']}`",
+        f"- Manifest: `{payload['run']['manifest_path']}`",
+        f"- Single run enforced: `{payload['run']['single_run_enforced']}`",
+        f"- Scorecard status: `{summary['status']}`",
+        f"- Baseline status: `{summary['baseline_status']}`",
+        f"- Production: `{summary['production_status']}`",
+        "",
+        "| Module | Evidence | Samples | Status | Failed cases | Artifact |",
+        "| --- | --- | ---: | --- | ---: | --- |",
+    ]
+    for module in payload["modules"]:
+        lines.append(
+            f"| {module['label']} | `{module['evidence_level']}` | "
+            f"{module['sample_count']} | `{module['status']}` | "
+            f"{module['failed_case_count']} | `{module['artifact_path'] or '-'}` |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Production Boundary",
+            "",
+            summary["production_boundary"],
+            "",
+            "## Failure Samples",
+            "",
+        ]
+    )
+    for module in payload["modules"]:
+        if module["failed_cases"]:
+            lines.append(
+                f"- `{module['key']}`: `{json.dumps(module['failed_cases'][0], ensure_ascii=False)}`"
+            )
+    if not any(module["failed_cases"] for module in payload["modules"]):
+        lines.append("- No failed case is present in the available modules for this run.")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _ratio_percent(value: Any) -> str:
@@ -362,10 +670,18 @@ def _ragas_quality(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(summary, dict):
         summary = {}
     artifacts = run.get("artifacts") if isinstance(run.get("artifacts"), dict) else {}
+    profile = str(run.get("metric_profile") or "")
+    full_judge_metrics_run = profile == "full"
     return {
         "available": bool(payload),
         "status": str(summary.get("status") or "missing"),
-        "profile": str(run.get("metric_profile") or ""),
+        "profile": profile,
+        "full_judge_metrics_run": full_judge_metrics_run,
+        "full_judge_status": (
+            "passed"
+            if full_judge_metrics_run and str(summary.get("status") or "") == "passed"
+            else "not_run"
+        ),
         "answer_source": str(run.get("answer_source") or ""),
         "case_count": int(summary.get("case_count", 0) or 0),
         "core_case_count": int(summary.get("core_case_count", 0) or 0),
@@ -830,6 +1146,25 @@ def write_outputs(payload: dict[str, Any], json_path: Path, md_path: Path) -> No
     md_path.write_text(render_markdown(payload), encoding="utf-8")
 
 
+def write_scorecard_outputs(
+    payload: dict[str, Any],
+    *,
+    run_dir: Path,
+    json_path: Path | None = None,
+    md_path: Path | None = None,
+) -> tuple[Path, Path]:
+    scorecard_json = json_path or run_dir / "interview_scorecard.json"
+    scorecard_md = md_path or run_dir / "interview_scorecard.md"
+    scorecard_json.parent.mkdir(parents=True, exist_ok=True)
+    scorecard_md.parent.mkdir(parents=True, exist_ok=True)
+    scorecard_json.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    scorecard_md.write_text(render_scorecard_markdown(payload), encoding="utf-8")
+    return scorecard_json, scorecard_md
+
+
 def _artifact_path(value: str) -> str:
     path = Path(value)
     try:
@@ -849,12 +1184,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--replanner-summary", default=str(DEFAULT_REPLANNER_SUMMARY))
     parser.add_argument("--summary-json", default=str(DEFAULT_OUTPUT_JSON))
     parser.add_argument("--summary-md", default=str(DEFAULT_OUTPUT_MD))
+    parser.add_argument(
+        "--benchmark-manifest",
+        default="",
+        help="Build the stage-8 scorecard from this single benchmark manifest.",
+    )
+    parser.add_argument("--scorecard-json", default="")
+    parser.add_argument("--scorecard-md", default="")
     parser.add_argument("--json", action="store_true", help="Print JSON to stdout")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    manifest_path = (
+        Path(args.benchmark_manifest)
+        if args.benchmark_manifest
+        else resolve_latest_benchmark_manifest()
+    )
+    if manifest_path is not None:
+        manifest = load_json(manifest_path)
+        if manifest is None:
+            print(f"Benchmark manifest is missing or unreadable: {manifest_path}", file=sys.stderr)
+            return 2
+        scorecard = build_scorecard_from_manifest(manifest, manifest_path=manifest_path)
+        scorecard_json, scorecard_md = write_scorecard_outputs(
+            scorecard,
+            run_dir=manifest_path.parent,
+            json_path=Path(args.scorecard_json) if args.scorecard_json else None,
+            md_path=Path(args.scorecard_md) if args.scorecard_md else None,
+        )
+        if args.json:
+            print(json.dumps(scorecard, ensure_ascii=False, indent=2))
+        else:
+            print(
+                "Interview scorecard: "
+                f"run={scorecard['run']['run_id']}; "
+                f"status={scorecard['summary']['status']}; "
+                f"json={scorecard_json}; md={scorecard_md}"
+            )
+        return 0 if scorecard["summary"]["status"] == "passed" else 1
+
     payload = build_summary(
         live_payload=load_json(Path(args.live_summary)),
         rag_payload=load_json(Path(args.rag_summary)),

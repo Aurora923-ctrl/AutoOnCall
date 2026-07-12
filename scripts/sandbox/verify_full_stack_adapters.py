@@ -28,11 +28,13 @@ REAL_SOURCE_BY_TOOL = {
 DEFAULT_CHECKS = [
     {
         "tool_name": "query_metrics",
+        "chain": "redis_maxclients",
         "input_args": {"service_name": "order-service", "time_range": "10m", "interval": "1m"},
         "expected_source": "prometheus",
     },
     {
         "tool_name": "query_logs",
+        "chain": "redis_maxclients",
         "input_args": {
             "service_name": "order-service",
             "time_range": "24h",
@@ -53,6 +55,7 @@ DEFAULT_CHECKS = [
     },
     {
         "tool_name": "query_redis_status",
+        "chain": "redis_maxclients",
         "input_args": {
             "service_name": "order-service",
             "redis_instance": "redis-cluster-prod",
@@ -62,6 +65,7 @@ DEFAULT_CHECKS = [
     },
     {
         "tool_name": "query_mysql_status",
+        "chain": "mysql_slow_query",
         "input_args": {"service_name": "payment-service", "mysql_instance": "payment-mysql"},
         "expected_source": "mysql",
         "required_signals": {
@@ -72,7 +76,45 @@ DEFAULT_CHECKS = [
     },
     {
         "tool_name": "search_history_ticket",
+        "chain": "redis_maxclients",
         "input_args": {"service_name": "order-service", "query": "redis timeout", "limit": 5},
+        "expected_source": "ticket_api",
+    },
+    {
+        "tool_name": "query_metrics",
+        "chain": "mysql_slow_query",
+        "input_args": {"service_name": "payment-service", "time_range": "10m", "interval": "1m"},
+        "expected_source": "prometheus",
+    },
+    {
+        "tool_name": "query_logs",
+        "chain": "mysql_slow_query",
+        "input_args": {
+            "service_name": "payment-service",
+            "time_range": "24h",
+            "query": "slow query OR digest OR pool_waiting",
+            "limit": 20,
+        },
+        "expected_source": "loki",
+    },
+    {
+        "tool_name": "query_deploy_history",
+        "chain": "mysql_slow_query",
+        "input_args": {"service_name": "payment-service", "limit": 5},
+        "expected_source": "deploy_history",
+        "required_signals": {
+            "deployment_count": {"gte": 1},
+            "feature_flag_change": {"equals": True},
+        },
+    },
+    {
+        "tool_name": "search_history_ticket",
+        "chain": "mysql_slow_query",
+        "input_args": {
+            "service_name": "payment-service",
+            "query": "mysql slow query covering index feature flag",
+            "limit": 5,
+        },
         "expected_source": "ticket_api",
     },
 ]
@@ -85,15 +127,56 @@ GOLDEN_CHAINS = {
             "search_history_ticket",
         ],
         "required_sources": ["redis_info", "prometheus", "loki", "ticket_api"],
+        "required_signals": {
+            "query_redis_status": {
+                "connected_clients": {"equals": 9940},
+                "maxclients": {"equals": 10000},
+                "client_usage_ratio": {"gte": 0.99},
+                "blocked_clients": {"gte": 1},
+            },
+            "query_metrics": {
+                "p95_latency_ms": {"gte": 1000},
+                "error_rate": {"gte": 0.05},
+            },
+            "query_logs": {
+                "log_count": {"gte": 1},
+            },
+            "search_history_ticket": {
+                "ticket_count": {"gte": 1},
+            },
+        },
     },
     "mysql_slow_query": {
         "required_tools": [
             "query_mysql_status",
             "query_metrics",
             "query_logs",
+            "query_deploy_history",
             "search_history_ticket",
         ],
-        "required_sources": ["mysql", "prometheus", "loki", "ticket_api"],
+        "required_sources": ["mysql", "prometheus", "loki", "deploy_history", "ticket_api"],
+        "required_signals": {
+            "query_mysql_status": {
+                "slow_query_count": {"gte": 18},
+                "pool_waiting": {"gte": 1},
+                "active_connections": {"gte": 180},
+            },
+            "query_metrics": {
+                "p95_latency_ms": {"gte": 2000},
+                "error_rate": {"lte": 0.02},
+                "cpu_usage_percent": {"gte": 70},
+            },
+            "query_logs": {
+                "log_count": {"gte": 1},
+            },
+            "query_deploy_history": {
+                "deployment_count": {"gte": 1},
+                "feature_flag_change": {"equals": True},
+            },
+            "search_history_ticket": {
+                "ticket_count": {"gte": 1},
+            },
+        },
     },
 }
 
@@ -138,7 +221,7 @@ async def verify_adapters(
         "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         "data_sources": data_sources,
         "missing_sources": missing_sources,
-        "failed_tools": [item["tool_name"] for item in failed],
+        "failed_tools": list(dict.fromkeys(item["tool_name"] for item in failed)),
         "not_integrated": [],
         "mock_fallback_detected": any(item["observed_source"] == "mock" for item in results),
         "golden_chains": golden_chains,
@@ -176,6 +259,7 @@ async def _run_check(
             passed = False
         return {
             "tool_name": tool_name,
+            "chain": str(check.get("chain") or ""),
             "status": status,
             "passed": passed,
             "expected_source": expected_source,
@@ -189,6 +273,7 @@ async def _run_check(
     except Exception as exc:
         return {
             "tool_name": tool_name,
+            "chain": str(check.get("chain") or ""),
             "status": "failed",
             "passed": False,
             "expected_source": expected_source,
@@ -215,6 +300,10 @@ def _signal_failures(
                 isinstance(value, int | float) and value >= float(expected["gte"])
             ):
                 failures.append(f"{key} expected >= {expected['gte']}, got {value}")
+            if "lte" in expected and not (
+                isinstance(value, int | float) and value <= float(expected["lte"])
+            ):
+                failures.append(f"{key} expected <= {expected['lte']}, got {value}")
             if "equals" in expected and value != expected["equals"]:
                 failures.append(f"{key} expected {expected['equals']}, got {value}")
             continue
@@ -224,9 +313,13 @@ def _signal_failures(
 
 
 def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    by_tool = {str(item.get("tool_name")): item for item in results}
     chains: dict[str, dict[str, Any]] = {}
     for chain_name, spec in GOLDEN_CHAINS.items():
+        by_tool = {
+            str(item.get("tool_name")): item
+            for item in results
+            if str(item.get("chain") or "") in {"", chain_name}
+        }
         required_tools = [str(item) for item in spec["required_tools"]]
         required_sources = [str(item) for item in spec["required_sources"]]
         tool_results = [by_tool.get(tool_name, {}) for tool_name in required_tools]
@@ -251,11 +344,22 @@ def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, 
             for item in tool_results
             if item.get("observed_source") in {"mock", "not_configured"}
         ]
+        signal_failures: list[str] = []
+        required_signals = spec.get("required_signals", {})
+        if isinstance(required_signals, dict):
+            for tool_name, requirements in required_signals.items():
+                item = by_tool.get(str(tool_name), {})
+                failures = _signal_failures(
+                    item.get("signals", {}) if isinstance(item.get("signals"), dict) else {},
+                    requirements,
+                )
+                signal_failures.extend(f"{tool_name}: {failure}" for failure in failures)
         chains[chain_name] = {
             "passed": not missing_tools
             and not failed_tools
             and not missing_sources
-            and not mock_sources,
+            and not mock_sources
+            and not signal_failures,
             "required_tools": required_tools,
             "required_sources": required_sources,
             "observed_sources": observed_sources,
@@ -263,6 +367,7 @@ def _golden_chain_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, 
             "failed_tools": failed_tools,
             "missing_sources": missing_sources,
             "mock_or_unconfigured_tools": mock_sources,
+            "signal_failures": signal_failures,
         }
     return chains
 
@@ -313,7 +418,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     registry = create_default_tool_registry([])
     payload = await verify_adapters(registry, fail_on_mock=not args.allow_mock)
     payload["run"] = {
-        "environment": collect_eval_environment(suite="adapter_verification"),
+        "environment": collect_eval_environment(
+            suite="adapter_verification",
+            evidence_level="local_live",
+        ),
         "env_file": str(Path(args.env_file)),
         "scope": "live local Docker adapter verification",
     }

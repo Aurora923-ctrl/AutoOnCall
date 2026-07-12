@@ -1661,9 +1661,9 @@ def seed_demo_data(
     status_counts = Counter(case.report_status for case in cases)
     return {
         "database": str(store_label),
-        "backend": "sqlite"
-        if database_path is not None
-        else backend or config.aiops_storage_backend,
+        "backend": (
+            "sqlite" if database_path is not None else backend or config.aiops_storage_backend
+        ),
         "reset": reset,
         "deleted": deleted,
         "eval_summary": str(eval_summary),

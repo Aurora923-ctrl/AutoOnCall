@@ -1,5 +1,26 @@
 // Workbench navigation, API client helpers, incidents, alerts, and run history.
 Object.assign(window.AutoOnCallApp.prototype, {
+    toggleMobileSidebar() {
+        const shouldOpen = !document.body.classList.contains('mobile-sidebar-open');
+        document.body.classList.toggle('mobile-sidebar-open', shouldOpen);
+        if (this.mobileMenuBtn) {
+            this.mobileMenuBtn.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        }
+        if (this.sidebarBackdrop) {
+            this.sidebarBackdrop.hidden = !shouldOpen;
+        }
+    }
+,
+    closeMobileSidebar() {
+        document.body.classList.remove('mobile-sidebar-open');
+        if (this.mobileMenuBtn) {
+            this.mobileMenuBtn.setAttribute('aria-expanded', 'false');
+        }
+        if (this.sidebarBackdrop) {
+            this.sidebarBackdrop.hidden = true;
+        }
+    }
+,
     toggleModeDropdown() {
         if (this.modeSelectorBtn && this.modeDropdown) {
             const wrapper = this.modeSelectorBtn.closest('.mode-selector-wrapper');
@@ -155,6 +176,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         this.updateWorkbenchPanelVisibility();
         this.updateWorkbenchNavState();
         this.updateIncidentTabNavState();
+        this.closeMobileSidebar();
         if (this.currentWorkbenchView === 'response') {
             this.setResponseAttention(false);
         }

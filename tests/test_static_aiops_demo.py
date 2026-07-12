@@ -29,6 +29,13 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "extractAIOpsStatus" in script
     assert "this.apiBaseUrl = '/api'" in script
     assert "bootstrapAutoOnCallApp" in script
+    assert "toggleMobileSidebar" in script
+    assert "closeMobileSidebar" in script
+    assert 'id="mobileMenuBtn"' in page
+    assert 'id="sidebarBackdrop"' in page
+    assert "mobile-sidebar-open" in style
+    assert "translateX(-105%)" in style
+    assert "overscroll-behavior-inline: contain" in style
     assert "document.readyState === 'loading'" in script
     assert "sanitizeRenderedHtml" in script
     assert "value.startsWith('javascript:')" in script
@@ -170,6 +177,9 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "/changes/${encodeURIComponent(changeExecutionId)}/manual-result" in script
     assert "refreshEvalSummary" in script
     assert "/eval/ragas" in script
+    assert "/eval/scorecard" in script
+    assert "renderInterviewScorecard" in script
+    assert "production_status" in script
     assert "ragasSummary" in script
     assert "renderRagasQualityPanel" in script
     assert "RAGAS 答案质量门禁" in script
@@ -421,6 +431,12 @@ async def test_demo_incident_catalog_is_frontend_source_of_truth() -> None:
         "forbidden_sql",
     ]
     assert payload["items"][3]["incident"]["raw_alert"]["requested_action"] == "execute_sql"
+    redis_alert = payload["items"][0]["incident"]["raw_alert"]
+    assert redis_alert["connected_clients"] == 9940
+    assert redis_alert["requested_action"] == "apply_config_change"
+    mysql_alert = payload["items"][1]["incident"]["raw_alert"]
+    assert mysql_alert["sql_digest"] == "9f3a-pay-report"
+    assert mysql_alert["feature_flag"] == "PAYMENT_REPORT_ENABLED=true"
     assert "redis-maxclients" in payload["items"][0]["aliases"]
 
 

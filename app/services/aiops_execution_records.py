@@ -102,6 +102,7 @@ def tool_result_to_call_record(
         risk_level=result.risk_level,
         read_only=result.read_only,
         error_message=result.error_message,
+        execution_metadata=result.metadata,
     )
 
 

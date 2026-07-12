@@ -27,6 +27,7 @@ class ToolCallRecord(BaseModel):
     risk_level: str = "low"
     read_only: bool = True
     error_message: str | None = None
+    execution_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
 

@@ -7,7 +7,14 @@ from typing import Any
 from app.integrations.base import adapter_failure, adapter_not_configured
 from app.integrations.log_gateway import HTTPLogGatewayAdapter
 from app.integrations.loki import LokiLogAdapter
-from app.tools.base import AIOpsTool, clamp_duration, clamp_int, invoke_langchain_tool, tool_map
+from app.tools.base import (
+    AIOpsTool,
+    ToolRetryPolicy,
+    clamp_duration,
+    clamp_int,
+    invoke_langchain_tool,
+    tool_map,
+)
 
 
 class QueryLogsTool(AIOpsTool):
@@ -29,6 +36,11 @@ class QueryLogsTool(AIOpsTool):
     risk_level = "low"
     read_only = True
     timeout_seconds = 15.0
+    retry_policy = ToolRetryPolicy(
+        max_attempts=2,
+        backoff_seconds=0.1,
+        retry_on=["timeout", "connection_error", "server_error"],
+    )
     data_sources = ["Loki", "HTTP log gateway", "CLS MCP"]
     degradation_strategy = (
         "Query Loki, an HTTP log gateway, or CLS MCP tools; return structured unavailable "
