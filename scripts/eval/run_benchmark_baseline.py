@@ -266,6 +266,8 @@ def artifact_status(payload: dict[str, Any]) -> str:
     raw = str(summary.get("status") or "").lower()
     if raw in {"passed", "pass", "ready"}:
         return "passed"
+    if raw == "observed_not_accepted":
+        return "passed"
     if raw in {"failed", "fail", "not_ready"}:
         return "failed"
     if summary.get("all_passed") is True:

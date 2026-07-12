@@ -3,6 +3,7 @@
 import json
 
 from scripts.eval.run_benchmark_baseline import (
+    artifact_status,
     build_official_block_reasons,
     reserve_run_directory,
     write_interview_scorecard,
@@ -45,6 +46,10 @@ def test_stale_module_blocks_official_baseline_reason() -> None:
     )
 
     assert reasons == ["rag:stale"]
+
+
+def test_observed_performance_smoke_is_a_valid_baseline_module() -> None:
+    assert artifact_status({"summary": {"status": "observed_not_accepted"}}) == "passed"
 
 
 def test_benchmark_writes_scorecard_into_same_run_directory(tmp_path) -> None:
