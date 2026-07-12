@@ -112,7 +112,9 @@ def evaluate_performance(
             "storage_backend": config.aiops_storage_backend,
             "environment": collect_eval_environment(
                 suite="performance",
-                evidence_level=evidence_level,
+                evidence_level=(
+                    evidence_level if evidence_level in EVIDENCE_LEVELS else "offline_fixture"
+                ),
             ),
         },
         "summary": {
