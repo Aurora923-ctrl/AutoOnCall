@@ -56,9 +56,10 @@ def evaluate_performance(
     store: AIOpsStateStore | None = None,
 ) -> dict[str, Any]:
     """Read persisted trace events and report only observations supported by them."""
-    if evidence_level not in EVIDENCE_LEVELS:
+    supported_levels = EVIDENCE_LEVELS | {"unclassified"}
+    if evidence_level not in supported_levels:
         raise ValueError(
-            f"Unsupported evidence_level={evidence_level}; supported={sorted(EVIDENCE_LEVELS)}"
+            f"Unsupported evidence_level={evidence_level}; supported={sorted(supported_levels)}"
         )
 
     active_store = store or create_aiops_store()
@@ -632,7 +633,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument(
         "--evidence-level",
-        choices=sorted(EVIDENCE_LEVELS),
+        choices=sorted(EVIDENCE_LEVELS | {"unclassified"}),
         default="offline_fixture",
         help="The level actually represented by the selected persisted events.",
     )
