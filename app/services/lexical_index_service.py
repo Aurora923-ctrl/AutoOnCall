@@ -97,9 +97,16 @@ class LexicalIndexService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[tuple[Document, float]]:
         """Search the local lexical index and return Document/score pairs."""
+        safe_query = str(query or "").strip()
+        if not safe_query:
+            raise ValueError("query 不能为空")
+        if len(safe_query) > 8000:
+            raise ValueError("query 长度不能超过 8000")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+            raise ValueError("top_k 必须是正整数")
         with self._locked_payload():
             payload = self._load_index(strict=True)
-        query_terms = extract_lexical_terms(query)
+        query_terms = extract_lexical_terms(safe_query)
         if not query_terms:
             return []
 
@@ -273,11 +280,19 @@ def _metadata_matches_filter(
     for key, expected in metadata_filter.items():
         actual = metadata.get(key)
         if isinstance(expected, list):
-            if str(actual) not in {str(item) for item in expected}:
+            if not any(_metadata_values_equal(actual, item) for item in expected):
                 return False
-        elif str(actual) != str(expected):
+        elif not _metadata_values_equal(actual, expected):
             return False
     return True
+
+
+def _metadata_values_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return isinstance(actual, bool) and isinstance(expected, bool) and actual == expected
+    if isinstance(actual, int | float) and isinstance(expected, int | float):
+        return float(actual) == float(expected)
+    return type(actual) is type(expected) and actual == expected
 
 
 def _average(values: list[int]) -> float:

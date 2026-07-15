@@ -191,7 +191,28 @@ def test_rag_agent_does_not_create_model_during_construction(monkeypatch) -> Non
         service._ensure_model()
 
 
-def test_rag_history_keeps_original_question_after_grounding() -> None:
+def test_rag_agent_configures_bounded_model_timeout_and_disables_sdk_retries(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_chat_qwen(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(rag_agent_module.config, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(rag_agent_module.config, "rag_model_timeout_seconds", 12.5)
+    monkeypatch.setattr(rag_agent_module, "ChatQwen", fake_chat_qwen)
+
+    service = rag_agent_module.RagAgentService()
+    service._ensure_model()
+
+    assert captured["timeout"] == 12.5
+    assert captured["max_retries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_rag_history_keeps_original_question_after_grounding() -> None:
     original_question = "Redis timeout 如何处理？"
     grounded_question = rag_agent_module.build_grounded_question(
         original_question,
@@ -209,6 +230,9 @@ def test_rag_history_keeps_original_question_after_grounding() -> None:
         def get(self, _config):
             return checkpoint
 
+        async def aget(self, _config):
+            return checkpoint
+
     service = rag_agent_module.RagAgentService()
     service.checkpointer = FakeCheckpointer()
 
@@ -217,7 +241,7 @@ def test_rag_history_keeps_original_question_after_grounding() -> None:
         stored_question=grounded_question,
         display_question=original_question,
     )
-    history = service.get_session_history("session-rag-history")
+    history = await service.get_session_history("session-rag-history")
 
     assert history[0]["role"] == "user"
     assert history[0]["content"] == original_question

@@ -201,10 +201,10 @@ class FakeRagAgentService:
             },
         }
 
-    def clear_session(self, session_id: str) -> bool:
+    async def clear_session(self, session_id: str) -> bool:
         return True
 
-    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+    async def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         return []
 
 

@@ -72,6 +72,18 @@ def evaluate_performance(
     request_counts = Counter(
         sample["request_kind"] for sample in request_samples if sample["request_kind"] != "unknown"
     )
+    successful_requests = [sample for sample in request_samples if sample["status"] == "success"]
+    failed_requests = [sample for sample in request_samples if sample["status"] != "success"]
+    successful_request_counts = Counter(
+        sample["request_kind"]
+        for sample in successful_requests
+        if sample["request_kind"] != "unknown"
+    )
+    failed_request_counts = Counter(
+        sample["request_kind"]
+        for sample in failed_requests
+        if sample["request_kind"] != "unknown"
+    )
     observed_levels = sorted(
         {
             sample["evidence_level"]
@@ -83,13 +95,15 @@ def evaluate_performance(
         sample for sample in samples if sample["evidence_level"] != evidence_level
     ]
     coverage = {
-        "rag": _coverage_entry(request_counts["rag"], required_rag_requests),
-        "aiops": _coverage_entry(request_counts["aiops"], required_aiops_requests),
+        "rag": _coverage_entry(successful_request_counts["rag"], required_rag_requests),
+        "aiops": _coverage_entry(successful_request_counts["aiops"], required_aiops_requests),
     }
     real_request_gate = (
         evidence_level in {"local_live", "controlled_fault", "production"}
         and not evidence_conflicts
-        and all(item["status"] == "met" for item in coverage.values())
+        and not failed_requests
+        and any(int(item["required"]) > 0 for item in coverage.values())
+        and all(item["status"] in {"met", "not_required"} for item in coverage.values())
     )
 
     usage = aggregate_token_usage(samples)
@@ -98,6 +112,7 @@ def evaluate_performance(
     status = _evaluation_status(
         samples=samples,
         evidence_conflicts=evidence_conflicts,
+        failed_requests=failed_requests,
         real_request_gate=real_request_gate,
     )
     return {
@@ -124,11 +139,15 @@ def evaluate_performance(
                 evidence_level=evidence_level,
                 samples=samples,
                 evidence_conflicts=evidence_conflicts,
+                failed_requests=failed_requests,
                 coverage=coverage,
             ),
             "event_sample_count": len(samples),
             "request_sample_count": len(request_samples),
             "request_counts": dict(sorted(request_counts.items())),
+            "successful_request_counts": dict(sorted(successful_request_counts.items())),
+            "failed_request_counts": dict(sorted(failed_request_counts.items())),
+            "failed_request_count": len(failed_requests),
             "required_real_request_coverage": coverage,
             "real_request_acceptance_gate": "passed" if real_request_gate else "not_run",
             "latency_ms": distribution([sample["latency_ms"] for sample in request_samples]),
@@ -572,7 +591,13 @@ def _coverage_entry(observed: int, required: int) -> dict[str, int | str]:
     return {
         "observed": int(observed),
         "required": normalized_required,
-        "status": "met" if observed >= normalized_required else "not_met",
+        "status": (
+            "not_required"
+            if normalized_required == 0
+            else "met"
+            if observed >= normalized_required
+            else "not_met"
+        ),
     }
 
 
@@ -580,12 +605,15 @@ def _evaluation_status(
     *,
     samples: list[dict[str, Any]],
     evidence_conflicts: list[dict[str, Any]],
+    failed_requests: list[dict[str, Any]],
     real_request_gate: bool,
 ) -> str:
     if not samples:
         return "not_run"
     if evidence_conflicts:
         return "invalid_evidence"
+    if failed_requests:
+        return "failed"
     if real_request_gate:
         return "passed"
     return "observed_not_accepted"
@@ -597,12 +625,18 @@ def _status_reason(
     evidence_level: str,
     samples: list[dict[str, Any]],
     evidence_conflicts: list[dict[str, Any]],
+    failed_requests: list[dict[str, Any]],
     coverage: dict[str, dict[str, int | str]],
 ) -> str:
     if status == "not_run":
         return "No persisted performance events were available."
     if evidence_conflicts:
         return "Persisted events contain evidence levels that conflict with the requested run."
+    if failed_requests:
+        return (
+            f"{len(failed_requests)} completed request sample(s) failed; failed requests never "
+            "satisfy real-request coverage."
+        )
     if evidence_level == "offline_fixture":
         return (
             "Fixture observations are reported but cannot satisfy the real-model acceptance gate."
@@ -669,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         f"requests={payload['summary']['request_sample_count']}; "
         f"evidence={payload['run']['evidence_level']}"
     )
-    return 0
+    return 0 if payload["summary"]["status"] in {"passed", "observed_not_accepted"} else 1
 
 
 if __name__ == "__main__":

@@ -1,10 +1,15 @@
 """Tests for the knowledge quality benchmark."""
 
+from datetime import UTC, datetime
+from pathlib import Path
+
 from scripts.eval.eval_knowledge_quality import (
     analyze_duplicates,
+    asset_modified_at,
     build_quality_review,
     build_summary,
     deterministic_vector,
+    parse_as_of,
 )
 
 
@@ -72,6 +77,42 @@ def test_summary_exposes_counts_and_confidence_intervals() -> None:
     assert "overlong_chunk_rate" in summary["watch_metrics"]
 
 
+def test_summary_can_pass_local_asset_checks_when_milvus_is_explicitly_skipped() -> None:
+    summary = build_summary(
+        [
+            {
+                "extension": ".md",
+                "parse_status": "success",
+                "split_status": "success",
+                "index_ready_status": "success",
+                "stale": False,
+                "age_days": 1.0,
+                "source_file": "runbook.md",
+                "errors": [],
+            }
+        ],
+        [
+            {
+                "length_chars": 120,
+                "empty": False,
+                "overlong": False,
+                "metadata_complete": True,
+            }
+        ],
+        duplicate_analysis={
+            "exact_duplicate_chunk_count": 0,
+            "near_duplicate_chunk_count": 0,
+        },
+        milvus={"status": "not_run", "collection_removed": False},
+    )
+
+    assert summary["status"] == "passed_without_milvus"
+    assert summary["local_asset_status"] == "passed"
+    assert summary["milvus_required"] is False
+    assert summary["hard_gates"]["milvus_crud_consistent"] == "not_applicable"
+    assert summary["hard_gates"]["milvus_cleanup_complete"] == "not_applicable"
+
+
 def test_deterministic_vector_is_stable_and_normalized() -> None:
     left = deterministic_vector("Redis maxclients timeout")
     right = deterministic_vector("Redis maxclients timeout")
@@ -97,3 +138,23 @@ def test_quality_review_explains_multiformat_ticket_duplicates() -> None:
 
     assert review["expected_duplicate_pair_count"] == 1
     assert review["review_required_count"] == 0
+
+
+def test_parse_as_of_normalizes_utc() -> None:
+    assert parse_as_of("2026-07-15T12:00:00+08:00") == datetime(
+        2026,
+        7,
+        15,
+        4,
+        tzinfo=UTC,
+    )
+
+
+def test_asset_freshness_uses_git_timestamp_for_tracked_file() -> None:
+    modified_at, basis = asset_modified_at(
+        Path("docs/knowledge-base/cpu_high_usage.md"),
+        fallback_mtime=0,
+    )
+
+    assert basis == "git_last_commit"
+    assert modified_at.year >= 2025

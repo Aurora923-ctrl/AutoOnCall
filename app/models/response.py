@@ -25,6 +25,7 @@ class ChatDataResponse(BaseModel):
     answer: str | None = None
     citations: list[dict[str, Any]] = Field(default_factory=list)
     retrieval: dict[str, Any] = Field(default_factory=dict)
+    observability: dict[str, Any] = Field(default_factory=dict)
     no_answer: bool = Field(default=False, alias="noAnswer")
     answer_policy: str = Field(default="", alias="answerPolicy")
     error_message: str | None = Field(default=None, alias="errorMessage")

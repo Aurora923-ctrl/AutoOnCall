@@ -17,6 +17,7 @@ def test_sse_message_serializes_non_json_values_safely() -> None:
 
 def test_sse_terminal_event_detection_is_limited_to_stream_end_types() -> None:
     assert is_terminal_event({"type": "complete"}) is True
+    assert is_terminal_event({"type": "done"}) is True
     assert is_terminal_event({"type": "error"}) is True
     assert is_terminal_event({"type": "approval_required"}) is False
 

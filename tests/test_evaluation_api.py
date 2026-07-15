@@ -85,7 +85,9 @@ async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) ->
 
     payload = await evaluations_api.get_eval_summary()
 
-    assert payload["available"] is True
+    assert payload["available"] is False
+    assert payload["stale"] is True
+    assert "missing_evaluation_fingerprint" in payload["artifact_status"]["reasons"]
     assert payload["path"] == "eval_summary.json"
     assert payload["artifact"] == "eval_summary.json"
     assert str(tmp_path) not in payload["path"]
@@ -102,7 +104,7 @@ async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) ->
     assert metric_by_key["aiops_pass_rate"]["value"] == 1.0
     assert metric_by_key["rag_pass_rate"]["value"] == 1.0
     assert metric_by_key["forbidden_action_block_rate"]["value"] == 1.0
-    assert metric_by_key["rag_citation_pass_rate"]["value"] == 1.0
+    assert metric_by_key["rag_retrieval_citation_metadata_rate"]["value"] == 1.0
     assert metric_by_key["p95_latency_ms"]["value_type"] == "duration_ms"
 
 
@@ -260,7 +262,9 @@ async def test_ragas_summary_api_returns_quality_dashboard(monkeypatch, tmp_path
 
     payload = await evaluations_api.get_ragas_summary()
 
-    assert payload["available"] is True
+    assert payload["available"] is False
+    assert payload["stale"] is True
+    assert "missing_evaluation_fingerprint" in payload["artifact_status"]["reasons"]
     assert payload["path"] == "ragas_eval_summary.json"
     assert str(tmp_path) not in payload["path"]
     assert payload["summary"]["status"] == "passed"

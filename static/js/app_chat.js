@@ -116,6 +116,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     // 发送流式消息
 ,
     async sendStreamMessage(message) {
+        let assistantMessageElement = null;
         try {
             const response = await this.apiFetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
@@ -133,7 +134,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             }
             
             // 创建助手消息元素
-            const assistantMessageElement = this.addMessage('assistant', '', true);
+            assistantMessageElement = this.addMessage('assistant', '', true);
             let fullResponse = '';
             let streamRagMetadata = null;
 
@@ -141,16 +142,103 @@ Object.assign(window.AutoOnCallApp.prototype, {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
-            let currentEvent = '';
+            let terminalReceived = false;
+
+            const handleSseLine = (line) => {
+                const normalizedLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+                if (normalizedLine.trim() === '') return false;
+
+                if (normalizedLine.startsWith('id:') || normalizedLine.startsWith('event:')) {
+                    return false;
+                }
+                if (!normalizedLine.startsWith('data:')) {
+                    return false;
+                }
+
+                const rawData = normalizedLine.substring(5).trim();
+                if (rawData === '[DONE]') {
+                    terminalReceived = true;
+                    this.handleStreamComplete(
+                        assistantMessageElement,
+                        fullResponse,
+                        streamRagMetadata
+                    );
+                    return true;
+                }
+
+                try {
+                    const sseMessage = JSON.parse(rawData);
+                    if (sseMessage && typeof sseMessage.type === 'string') {
+                        if (sseMessage.type === 'content') {
+                            const content = sseMessage.data || '';
+                            fullResponse += content;
+
+                            if (assistantMessageElement) {
+                                const messageContent = assistantMessageElement.querySelector('.message-content');
+                                messageContent.innerHTML = this.renderMarkdown(fullResponse);
+                                this.highlightCodeBlocks(messageContent);
+                                this.scrollToBottom();
+                            }
+                        } else if (sseMessage.type === 'search_results') {
+                            streamRagMetadata = this.buildRagMetadata({ retrieval: sseMessage.data });
+                            this.renderRagSources(assistantMessageElement, streamRagMetadata);
+                        } else if (sseMessage.type === 'done') {
+                            terminalReceived = true;
+                            const doneMetadata = this.buildRagMetadata(sseMessage.data || {});
+                            streamRagMetadata = this.mergeRagMetadata(streamRagMetadata, doneMetadata);
+                            fullResponse = (sseMessage.data && sseMessage.data.answer) || fullResponse;
+                            this.handleStreamComplete(
+                                assistantMessageElement,
+                                fullResponse,
+                                streamRagMetadata
+                            );
+                            return true;
+                        } else if (sseMessage.type === 'error') {
+                            terminalReceived = true;
+                            console.error('[SSE调试] 收到错误事件');
+                            this.handleStreamFailure(
+                                assistantMessageElement,
+                                sseMessage.data || '未知错误'
+                            );
+                            return true;
+                        }
+                    } else {
+                        fullResponse += rawData;
+                        if (assistantMessageElement) {
+                            const messageContent = assistantMessageElement.querySelector('.message-content');
+                            messageContent.innerHTML = this.renderMarkdown(fullResponse);
+                            this.highlightCodeBlocks(messageContent);
+                            this.scrollToBottom();
+                        }
+                    }
+                } catch (e) {
+                    fullResponse += rawData === '' ? '\n' : rawData;
+                    if (assistantMessageElement) {
+                        const messageContent = assistantMessageElement.querySelector('.message-content');
+                        messageContent.innerHTML = this.renderMarkdown(fullResponse);
+                        this.highlightCodeBlocks(messageContent);
+                        this.scrollToBottom();
+                    }
+                }
+                return false;
+            };
 
             try {
                 while (true) {
                     const { done, value } = await reader.read();
                     
                     if (done) {
-                        // 流结束，使用统一的处理方法
-                        this.handleStreamComplete(assistantMessageElement, fullResponse, streamRagMetadata);
-                        break;
+                        buffer += decoder.decode();
+                        if (buffer && handleSseLine(buffer)) {
+                            return;
+                        }
+                        if (!terminalReceived) {
+                            this.handleStreamFailure(
+                                assistantMessageElement,
+                                '流式响应在完成事件前中断，请重试'
+                            );
+                        }
+                        return;
                     }
 
                     // 解码数据并添加到缓冲区
@@ -162,87 +250,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     buffer = lines.pop() || '';
                     
                     for (const line of lines) {
-                        if (line.trim() === '') continue;
-                        
-                        // 解析SSE格式
-                        if (line.startsWith('id:')) {
-                            continue;
-                        } else if (line.startsWith('event:')) {
-                            // 兼容 "event:message" 和 "event: message" 两种格式
-                            currentEvent = line.substring(6).trim();
-                            // 注意：后端统一使用 "message" 事件名，真正的类型在 data 的 JSON 中
-                            continue;
-                        } else if (line.startsWith('data:')) {
-                            // 兼容 "data:xxx" 和 "data: xxx" 两种格式
-                            const rawData = line.substring(5).trim();
-                            
-                            // 兼容旧格式 [DONE] 标记
-                            if (rawData === '[DONE]') {
-                                // 流结束标记，将内容转换为Markdown渲染
-                                this.handleStreamComplete(assistantMessageElement, fullResponse, streamRagMetadata);
-                                return;
-                            }
-                            
-                            // 处理 SSE 数据
-                            try {
-                                // 尝试解析为 SseMessage 格式的 JSON
-                                const sseMessage = JSON.parse(rawData);
-                                
-                                if (sseMessage && typeof sseMessage.type === 'string') {
-                                    if (sseMessage.type === 'content') {
-                                        const content = sseMessage.data || '';
-                                        fullResponse += content;
-                                        
-                                        // 实时渲染 Markdown
-                                        if (assistantMessageElement) {
-                                            const messageContent = assistantMessageElement.querySelector('.message-content');
-                                            messageContent.innerHTML = this.renderMarkdown(fullResponse);
-                                            // 高亮代码块
-                                            this.highlightCodeBlocks(messageContent);
-                                            this.scrollToBottom();
-                                        }
-                                    } else if (sseMessage.type === 'search_results') {
-                                        streamRagMetadata = this.buildRagMetadata({ retrieval: sseMessage.data });
-                                        this.renderRagSources(assistantMessageElement, streamRagMetadata);
-                                    } else if (sseMessage.type === 'done') {
-                                        const doneMetadata = this.buildRagMetadata(sseMessage.data || {});
-                                        streamRagMetadata = this.mergeRagMetadata(streamRagMetadata, doneMetadata);
-                                        fullResponse = (sseMessage.data && sseMessage.data.answer) || fullResponse;
-                                        this.handleStreamComplete(assistantMessageElement, fullResponse, streamRagMetadata);
-                                        return;
-                                    } else if (sseMessage.type === 'error') {
-                                        console.error('[SSE调试] 收到错误:', sseMessage.data);
-                                        if (assistantMessageElement) {
-                                            const messageContent = assistantMessageElement.querySelector('.message-content');
-                                            messageContent.innerHTML = this.renderMarkdown('错误: ' + (sseMessage.data || '未知错误'));
-                                        }
-                                        return;
-                                    }
-                                } else {
-                                    // 不是标准 SseMessage 格式，尝试兼容处理
-                                    fullResponse += rawData;
-                                    if (assistantMessageElement) {
-                                        const messageContent = assistantMessageElement.querySelector('.message-content');
-                                        messageContent.innerHTML = this.renderMarkdown(fullResponse);
-                                        this.highlightCodeBlocks(messageContent);
-                                        this.scrollToBottom();
-                                    }
-                                }
-                            } catch (e) {
-                                // JSON 解析失败，尝试兼容旧格式
-                                if (rawData === '') {
-                                    fullResponse += '\n';
-                                } else {
-                                    fullResponse += rawData;
-                                }
-                                
-                                if (assistantMessageElement) {
-                                    const messageContent = assistantMessageElement.querySelector('.message-content');
-                                    messageContent.innerHTML = this.renderMarkdown(fullResponse);
-                                    this.highlightCodeBlocks(messageContent);
-                                    this.scrollToBottom();
-                                }
-                            }
+                        if (handleSseLine(line)) {
+                            return;
                         }
                     }
                 }
@@ -250,8 +259,26 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 reader.releaseLock();
             }
         } catch (error) {
+            if (assistantMessageElement) {
+                console.error('流式响应读取失败:', error);
+                this.handleStreamFailure(
+                    assistantMessageElement,
+                    error?.message || '流式响应读取失败，请重试'
+                );
+                return;
+            }
             throw error;
         }
+    }
+,
+    handleStreamFailure(assistantMessageElement, message) {
+        if (!assistantMessageElement) return;
+        assistantMessageElement.classList.remove('streaming');
+        const messageContent = assistantMessageElement.querySelector('.message-content');
+        if (messageContent) {
+            messageContent.innerHTML = this.renderMarkdown('错误: ' + message);
+        }
+        this.renderRagSources(assistantMessageElement, null);
     }
 
     // 添加消息到聊天界面

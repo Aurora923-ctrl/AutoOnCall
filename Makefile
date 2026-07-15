@@ -743,7 +743,7 @@ performance-real-model:  ## Evaluate persisted real-model traces for the stage-6
 	$(PYTHON) scripts/performance/run_real_model_acceptance.py --rag-requests 20 --aiops-requests 10 --summary-json logs/performance_real_model.json --summary-md logs/performance_real_model.md
 
 performance-rag-runtime:  ## Benchmark the real Milvus RAG path with stage observations
-	$(PYTHON) scripts/performance/run_rag_runtime_benchmark.py --limit 20
+	$(PYTHON) scripts/performance/run_rag_runtime_benchmark.py
 
 controlled-fault-readiness:  ## Verify controlled-fault implementation and summary tests
 	$(PYTHON) -m pytest tests/test_controlled_fault.py -q

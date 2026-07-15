@@ -12,6 +12,7 @@ from loguru import logger
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.vector_embedding_service import vector_embedding_service
+from app.utils.log_safety import summarize_text_for_log
 
 COLLECTION_NAME = "biz"
 
@@ -337,18 +338,36 @@ class VectorStoreManager:
         Returns:
             List[Document]: 相关文档列表
         """
+        safe_query = str(query or "").strip()
+        if not safe_query:
+            raise ValueError("query 不能为空")
+        if len(safe_query) > 8000:
+            raise ValueError("query 长度不能超过 8000")
+        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+            raise ValueError("k 必须是正整数")
+        if expr is not None and not isinstance(expr, str):
+            raise TypeError("expr 必须是字符串或 None")
+        safe_expr = expr.strip() if expr else None
         try:
             vector_store = cast(Any, self._ensure_vector_store())
             docs = (
-                vector_store.similarity_search(query, k=k, expr=expr)
-                if expr
-                else vector_store.similarity_search(query, k=k)
+                vector_store.similarity_search(safe_query, k=k, expr=safe_expr)
+                if safe_expr
+                else vector_store.similarity_search(safe_query, k=k)
             )
-            logger.debug(f"相似度搜索完成: query='{query}', 结果数={len(docs)}")
+            logger.debug(
+                "相似度搜索完成: {}, 结果数={}",
+                summarize_text_for_log(safe_query, label="query"),
+                len(docs),
+            )
             return cast(list[Document], docs)
         except Exception as e:
-            logger.error(f"相似度搜索失败: {e}")
-            return []
+            logger.error(
+                "相似度搜索失败: {}, error_type={}",
+                summarize_text_for_log(safe_query, label="query"),
+                type(e).__name__,
+            )
+            raise
 
     def close(self) -> None:
         """Close clients owned by the LangChain vector store."""

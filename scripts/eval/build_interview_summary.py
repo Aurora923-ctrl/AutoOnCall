@@ -697,6 +697,16 @@ def _ragas_quality(payload: dict[str, Any] | None) -> dict[str, Any]:
         "response_relevancy_avg": float(summary.get("response_relevancy_avg", 0.0) or 0.0),
         "judge_model": str(run.get("judge_model") or ""),
         "embedding_model": str(run.get("embedding_model") or ""),
+        "id_metric_execution": (
+            run.get("id_metric_execution")
+            if isinstance(run.get("id_metric_execution"), dict)
+            else {}
+        ),
+        "metric_coverage": (
+            summary.get("metric_coverage")
+            if isinstance(summary.get("metric_coverage"), dict)
+            else {}
+        ),
         "artifacts": artifacts,
     }
 
@@ -893,7 +903,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- recall@{rag['top_k']}: `{_ratio_percent(rag['recall_at_k'])}`",
             f"- strict recall@{rag['top_k']}: `{_ratio_percent(rag['strict_recall_at_k'])}`",
             f"- MRR: `{rag['mrr']:.2f}`",
-            f"- citation coverage: `{_ratio_percent(rag['citation_coverage_rate'])}`",
+            (
+                "- retrieval citation metadata coverage: "
+                f"`{_ratio_percent(rag['citation_coverage_rate'])}`"
+            ),
             f"- no-answer rejection: `{_ratio_percent(rag['no_answer_rejection_rate'])}`",
             f"- confusion case pass: `{_ratio_percent(rag['confusion_case_pass_rate'])}`",
             "",
@@ -919,6 +932,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- response relevancy/full judge: "
             f"`{_ragas_full_metric_text(ragas, 'response_relevancy_avg')}`",
             f"- judge model: `{_ragas_judge_text(ragas)}`",
+            (
+                "- ID metric execution: "
+                f"`{ragas['id_metric_execution'].get('engine', 'unknown')}/"
+                f"{ragas['id_metric_execution'].get('status', 'unknown')}`"
+            ),
+            f"- metric coverage: `{_ragas_coverage_text(ragas)}`",
             "",
             "> RAGAS id-smoke is a reproducible answer-quality regression. "
             "Use `--metrics-profile full` when a judge key is available.",
@@ -1057,6 +1076,21 @@ def _ragas_judge_text(ragas: dict[str, Any]) -> str:
     if ragas.get("profile") != "full":
         return "not_required_for_id_smoke"
     return str(ragas.get("judge_model") or "missing")
+
+
+def _ragas_coverage_text(ragas: dict[str, Any]) -> str:
+    coverage = ragas.get("metric_coverage")
+    if not isinstance(coverage, dict) or not coverage:
+        return "not_reported"
+    incomplete = []
+    for metric, item in coverage.items():
+        if not isinstance(item, dict):
+            continue
+        available = int(item.get("available_count", 0) or 0)
+        expected = int(item.get("expected_count", 0) or 0)
+        if available != expected:
+            incomplete.append(f"{metric}={available}/{expected}")
+    return "complete" if not incomplete else ", ".join(incomplete)
 
 
 def _alignment_markdown_rows(rows: list[dict[str, Any]]) -> list[str]:

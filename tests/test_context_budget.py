@@ -2,6 +2,8 @@
 
 import importlib
 
+import pytest
+
 from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.evidence_analyzer import EvidenceAnalysis
 from app.services.aiops_prompt_builder import format_raw_alert_for_prompt
@@ -11,9 +13,12 @@ replanner_module = importlib.import_module("app.agent.aiops.replanner")
 
 
 def test_context_budgeter_truncates_text_with_consistent_marker() -> None:
-    budgeter = ContextBudgeter(ContextBudget(default_chars=6))
+    budgeter = ContextBudgeter(ContextBudget(default_chars=20))
 
-    assert budgeter.text("abcdefghi") == f"abcdef{TRUNCATION_MARKER}"
+    output = budgeter.text("abcdefghijklmnopqrstuvwxyz")
+
+    assert output.endswith(TRUNCATION_MARKER)
+    assert len(output) == 20
 
 
 def test_context_budgeter_serializes_json_before_truncating() -> None:
@@ -21,8 +26,31 @@ def test_context_budgeter_serializes_json_before_truncating() -> None:
 
     output = budgeter.json({"b": 2, "a": 1}, sort_keys=True)
 
-    assert output.startswith('{\n  "a": 1')
+    assert output.startswith("{\n")
     assert output.endswith(TRUNCATION_MARKER)
+    assert len(output) == 18
+
+
+def test_context_budgeter_keeps_only_complete_ordered_sections() -> None:
+    budgeter = ContextBudgeter(ContextBudget(default_chars=14))
+
+    assert budgeter.sections(["first", "second", "third"]) == ["first", "second"]
+
+
+def test_context_budgeter_handles_limits_shorter_than_marker() -> None:
+    budgeter = ContextBudgeter()
+
+    assert budgeter.text("abcdef", limit=3) == TRUNCATION_MARKER[:3]
+    assert len(budgeter.text("abcdef", limit=3)) == 3
+
+
+def test_context_budgeter_rejects_negative_limit_and_non_string_separator() -> None:
+    budgeter = ContextBudgeter()
+
+    with pytest.raises(ValueError, match="limit"):
+        budgeter.text("abcdef", limit=-1)
+    with pytest.raises(TypeError, match="separator"):
+        budgeter.sections(["first"], separator=None)  # type: ignore[arg-type]
 
 
 def test_format_raw_alert_for_prompt_uses_shared_budget() -> None:

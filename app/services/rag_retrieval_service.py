@@ -42,7 +42,7 @@ def retrieve_structured_knowledge(
     """Retrieve knowledge chunks with source metadata, scores, and rejection details."""
     total_started = time.perf_counter()
     safe_query = str(query or "").strip()
-    k = top_k or config.rag_top_k
+    k = config.rag_top_k if top_k is None else top_k
     threshold = config.rag_max_l2_distance if max_distance is None else max_distance
     lexical_threshold = config.rag_min_lexical_trust_score
     hybrid_enabled = (
@@ -50,21 +50,46 @@ def retrieve_structured_knowledge(
     )
     rerank_on = config.rag_rerank_enabled if rerank_enabled is None else rerank_enabled
     normalized_fusion_strategy = normalize_fusion_strategy(fusion_strategy)
-    candidate_k = _candidate_count(k) if hybrid_enabled or rerank_on else k
-    expr = build_milvus_metadata_expr(metadata_filter)
+    candidate_k = 0
+    normalized_metadata_filter: dict[str, Any] = {}
+    expr: str | None = None
     resolved_lexical_index = lexical_index or lexical_index_service
     resolved_vector_store_provider = vector_store_provider or vector_store_manager.get_vector_store
 
     vector_error_detail = ""
     vector_error_type = ""
+    lexical_error_detail = ""
+    lexical_error_type = ""
     stage_timings = {
         "vector_search_ms": 0.0,
         "lexical_search_ms": 0.0,
         "fusion_rerank_ms": 0.0,
     }
+    vector_results: list[tuple[Document, float | None]] = []
+    lexical_results: list[tuple[Document, float]] = []
+    merged_candidate_count = 0
+    deduplicated_count = 0
+    filtered_stale_count = 0
+    filtered_metadata_count = 0
 
     try:
-        vector_results: list[tuple[Document, float | None]] = []
+        if not safe_query:
+            raise ValueError("query 不能为空")
+        if len(safe_query) > 8000:
+            raise ValueError("query 长度不能超过 8000")
+        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+            raise ValueError("top_k 必须是正整数")
+        candidate_k = _candidate_count(k) if hybrid_enabled or rerank_on else k
+        if isinstance(threshold, bool):
+            raise ValueError("max_distance 必须是非负数")
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_distance 必须是非负数") from exc
+        if not math.isfinite(threshold) or threshold < 0:
+            raise ValueError("max_distance 必须是非负有限数")
+        normalized_metadata_filter = normalize_metadata_filter(metadata_filter, strict=True)
+        expr = build_milvus_metadata_expr(normalized_metadata_filter)
         vector_started = time.perf_counter()
         try:
             store = vector_store or resolved_vector_store_provider()
@@ -82,7 +107,6 @@ def retrieve_structured_knowledge(
         finally:
             stage_timings["vector_search_ms"] = _elapsed_ms(vector_started)
 
-        lexical_results: list[tuple[Document, float]] = []
         if hybrid_enabled and (
             vector_error_detail or _should_query_lexical_index(vector_store, vector_results)
         ):
@@ -93,7 +117,7 @@ def retrieve_structured_knowledge(
                     resolved_lexical_index.search(
                         safe_query,
                         top_k=candidate_k,
-                        metadata_filter=normalize_metadata_filter(metadata_filter),
+                        metadata_filter=normalized_metadata_filter,
                     ),
                 )
             except Exception as exc:
@@ -102,7 +126,15 @@ def retrieve_structured_knowledge(
                         "向量检索失败且词法索引降级也失败: "
                         f"vector_error={vector_error_detail}; lexical_error={exc}"
                     ) from exc
-                raise
+                if not vector_results:
+                    raise
+                lexical_error_detail = str(exc)
+                lexical_error_type = type(exc).__name__
+                logger.warning(
+                    "词法检索不可用，继续使用向量候选: {}, error_type={}",
+                    summarize_text_for_log(safe_query, label="query"),
+                    lexical_error_type,
+                )
             finally:
                 stage_timings["lexical_search_ms"] = _elapsed_ms(lexical_started)
 
@@ -114,36 +146,68 @@ def retrieve_structured_knowledge(
                     targeted_lexical_results(
                         resolved_lexical_index,
                         safe_query,
-                        metadata_filter=normalize_metadata_filter(metadata_filter),
+                        metadata_filter=normalized_metadata_filter,
                     ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "定向词法扩展失败，保留已有候选: {}, error_type={}",
+                    summarize_text_for_log(safe_query, label="query"),
+                    type(exc).__name__,
                 )
             finally:
                 stage_timings["lexical_search_ms"] += _elapsed_ms(lexical_started)
 
-        retrieval_mode = (
-            build_degraded_retrieval_mode(rerank_on, normalized_fusion_strategy)
-            if vector_error_detail
-            else build_retrieval_mode(hybrid_enabled, rerank_on, normalized_fusion_strategy)
-        )
+        if vector_error_detail:
+            retrieval_mode = build_degraded_retrieval_mode(
+                rerank_on,
+                normalized_fusion_strategy,
+            )
+        elif lexical_error_detail:
+            retrieval_mode = build_vector_degraded_retrieval_mode(
+                rerank_on,
+                normalized_fusion_strategy,
+            )
+        else:
+            retrieval_mode = build_retrieval_mode(
+                hybrid_enabled,
+                rerank_on,
+                normalized_fusion_strategy,
+            )
         vector_error_message = build_public_vector_error_message(vector_error_detail)
+        lexical_error_message = build_public_lexical_error_message(lexical_error_detail)
         raw_results = merge_raw_retrieval_results(vector_results, lexical_results)
+        merged_candidate_count = len(raw_results)
+        deduplicated_count = max(
+            len(vector_results) + len(lexical_results) - merged_candidate_count,
+            0,
+        )
         candidates = [
             document_to_retrieval_chunk(document, score=score, rank=rank)
             for rank, (document, score) in enumerate(raw_results, 1)
         ]
-        candidates = [chunk for chunk in candidates if not is_stale_retrieval_source(chunk)]
-        if metadata_filter:
+        pre_stale_filter_count = len(candidates)
+        candidates = [
+            chunk
+            for chunk in candidates
+            if not is_stale_retrieval_source(chunk, lexical_index=resolved_lexical_index)
+        ]
+        filtered_stale_count = pre_stale_filter_count - len(candidates)
+        pre_metadata_filter_count = len(candidates)
+        if normalized_metadata_filter:
             candidates = [
                 chunk
                 for chunk in candidates
-                if metadata_matches_filter(chunk["metadata"], metadata_filter)
+                if metadata_matches_filter(chunk["metadata"], normalized_metadata_filter)
             ]
+        filtered_metadata_count = pre_metadata_filter_count - len(candidates)
+        pre_dedup_candidate_count = len(candidates)
         rerank_started = time.perf_counter()
         try:
             candidates = rerank_retrieval_candidates(
                 safe_query,
                 candidates,
-                top_k=k,
+                top_k=max(len(candidates), k),
                 hybrid_search_enabled=hybrid_enabled,
                 rerank_enabled=rerank_on,
                 fusion_strategy=normalized_fusion_strategy,
@@ -188,6 +252,10 @@ def retrieve_structured_knowledge(
         )
         if normalized_fusion_strategy == "weighted" and not required_sources:
             trusted = prune_low_relevance_candidates(trusted, top_k=k)
+        else:
+            trusted = trusted[:k]
+        for rank, chunk in enumerate(trusted, 1):
+            chunk["rank"] = rank
 
         if not trusted:
             return {
@@ -200,13 +268,16 @@ def retrieve_structured_knowledge(
                 "min_lexical_trust_score": lexical_threshold,
                 "retrieval_mode": retrieval_mode,
                 "fusion_strategy": normalized_fusion_strategy,
-                "retrieval_degraded": bool(vector_error_detail),
+                "retrieval_degraded": bool(vector_error_detail or lexical_error_detail),
                 "vector_error_message": vector_error_message,
                 "vector_error_type": vector_error_type,
                 "vector_error_detail": vector_error_detail,
+                "lexical_error_message": lexical_error_message,
+                "lexical_error_type": lexical_error_type,
+                "lexical_error_detail": lexical_error_detail,
                 "vector_candidate_count": len(vector_results),
                 "lexical_candidate_count": len(lexical_results),
-                "metadata_filter": normalize_metadata_filter(metadata_filter),
+                "metadata_filter": normalized_metadata_filter,
                 "metadata_filter_expr": expr,
                 "no_answer_rejected": True,
                 "answer_policy": "refuse_without_trusted_source",
@@ -217,9 +288,16 @@ def retrieve_structured_knowledge(
                     total_started=total_started,
                     vector_candidate_count=len(vector_results),
                     lexical_candidate_count=len(lexical_results),
+                    merged_candidate_count=merged_candidate_count,
+                    deduplicated_count=(
+                        deduplicated_count + pre_dedup_candidate_count - len(candidates)
+                    ),
+                    filtered_stale_count=filtered_stale_count,
+                    filtered_metadata_count=filtered_metadata_count,
                     trusted_count=0,
                     rejected_count=len(rejected),
                     retrieval_mode=retrieval_mode,
+                    rerank_enabled=rerank_on,
                 ),
                 "summary": NO_TRUSTED_KNOWLEDGE,
                 "content": NO_TRUSTED_KNOWLEDGE,
@@ -235,13 +313,16 @@ def retrieve_structured_knowledge(
             "min_lexical_trust_score": lexical_threshold,
             "retrieval_mode": retrieval_mode,
             "fusion_strategy": normalized_fusion_strategy,
-            "retrieval_degraded": bool(vector_error_detail),
+            "retrieval_degraded": bool(vector_error_detail or lexical_error_detail),
             "vector_error_message": vector_error_message,
             "vector_error_type": vector_error_type,
             "vector_error_detail": vector_error_detail,
+            "lexical_error_message": lexical_error_message,
+            "lexical_error_type": lexical_error_type,
+            "lexical_error_detail": lexical_error_detail,
             "vector_candidate_count": len(vector_results),
             "lexical_candidate_count": len(lexical_results),
-            "metadata_filter": normalize_metadata_filter(metadata_filter),
+            "metadata_filter": normalized_metadata_filter,
             "metadata_filter_expr": expr,
             "no_answer_rejected": False,
             "answer_policy": "answer_with_citations",
@@ -252,9 +333,14 @@ def retrieve_structured_knowledge(
                 total_started=total_started,
                 vector_candidate_count=len(vector_results),
                 lexical_candidate_count=len(lexical_results),
+                merged_candidate_count=merged_candidate_count,
+                deduplicated_count=deduplicated_count + pre_dedup_candidate_count - len(candidates),
+                filtered_stale_count=filtered_stale_count,
+                filtered_metadata_count=filtered_metadata_count,
                 trusted_count=len(trusted),
                 rejected_count=len(rejected),
                 retrieval_mode=retrieval_mode,
+                rerank_enabled=rerank_on,
             ),
             "summary": f"检索到 {len(trusted)} 条可信知识来源",
             "content": format_retrieval_results(trusted),
@@ -279,9 +365,12 @@ def retrieve_structured_knowledge(
             "vector_error_message": build_public_vector_error_message(vector_error_detail),
             "vector_error_type": vector_error_type,
             "vector_error_detail": vector_error_detail,
-            "vector_candidate_count": 0,
-            "lexical_candidate_count": 0,
-            "metadata_filter": normalize_metadata_filter(metadata_filter),
+            "lexical_error_message": build_public_lexical_error_message(lexical_error_detail),
+            "lexical_error_type": lexical_error_type,
+            "lexical_error_detail": lexical_error_detail,
+            "vector_candidate_count": len(vector_results),
+            "lexical_candidate_count": len(lexical_results),
+            "metadata_filter": normalized_metadata_filter,
             "metadata_filter_expr": expr,
             "no_answer_rejected": False,
             "answer_policy": "retrieval_failed",
@@ -290,8 +379,12 @@ def retrieve_structured_knowledge(
             "observability": build_retrieval_observability(
                 stage_timings,
                 total_started=total_started,
-                vector_candidate_count=0,
-                lexical_candidate_count=0,
+                vector_candidate_count=len(vector_results),
+                lexical_candidate_count=len(lexical_results),
+                merged_candidate_count=merged_candidate_count,
+                deduplicated_count=deduplicated_count,
+                filtered_stale_count=filtered_stale_count,
+                filtered_metadata_count=filtered_metadata_count,
                 trusted_count=0,
                 rejected_count=0,
                 retrieval_mode=build_retrieval_mode(
@@ -299,6 +392,7 @@ def retrieve_structured_knowledge(
                     rerank_on,
                     normalized_fusion_strategy,
                 ),
+                rerank_enabled=rerank_on,
             ),
             "summary": PUBLIC_RETRIEVAL_ERROR,
             "content": PUBLIC_RETRIEVAL_ERROR,
@@ -312,9 +406,14 @@ def build_retrieval_observability(
     total_started: float,
     vector_candidate_count: int,
     lexical_candidate_count: int,
+    merged_candidate_count: int,
+    deduplicated_count: int,
+    filtered_stale_count: int,
+    filtered_metadata_count: int,
     trusted_count: int,
     rejected_count: int,
     retrieval_mode: str,
+    rerank_enabled: bool,
 ) -> dict[str, Any]:
     """Build honest stage observations without inventing hidden backend timings."""
     return {
@@ -329,14 +428,19 @@ def build_retrieval_observability(
         "counts": {
             "vector_candidate_count": vector_candidate_count,
             "lexical_candidate_count": lexical_candidate_count,
-            "candidate_count": vector_candidate_count + lexical_candidate_count,
+            "retriever_hit_count": vector_candidate_count + lexical_candidate_count,
+            "candidate_count": merged_candidate_count,
+            "merged_candidate_count": merged_candidate_count,
+            "deduplicated_count": deduplicated_count,
+            "filtered_stale_count": filtered_stale_count,
+            "filtered_metadata_count": filtered_metadata_count,
             "trusted_count": trusted_count,
             "rejected_count": rejected_count,
         },
         "runtime": {
             "retrieval_mode": retrieval_mode,
             "embedding_model": config.dashscope_embedding_model,
-            "reranker_model": "rule-weighted" if config.rag_rerank_enabled else "disabled",
+            "reranker_model": "rule-weighted" if rerank_enabled else "disabled",
             "collection_version": "not_observed",
         },
         "limitations": [
@@ -384,13 +488,18 @@ def document_to_retrieval_chunk(
     }
 
 
-def is_stale_retrieval_source(chunk: dict[str, Any]) -> bool:
+def is_stale_retrieval_source(
+    chunk: dict[str, Any],
+    *,
+    lexical_index: Any | None = None,
+) -> bool:
     """Return True when an indexed source was superseded but failed to re-index."""
     source_path = str(chunk.get("source_path") or "")
     if not source_path:
         return False
+    stale_registry = lexical_index or lexical_index_service
     try:
-        return lexical_index_service.is_source_stale(source_path)
+        return stale_registry.is_source_stale(source_path)
     except Exception as exc:
         logger.warning(f"检查陈旧 RAG source 失败: source={source_path}, error={exc}")
         return True
@@ -408,6 +517,23 @@ def merge_raw_retrieval_results(
         metadata["_vector_score"] = _coerce_score(score)
         metadata["_vector_rank"] = position
         metadata.setdefault("_retrieval_source", "vector")
+        if key in merged:
+            existing_document, existing_score, existing_position = merged[key]
+            if str(document.page_content or "") != str(existing_document.page_content or ""):
+                logger.warning(
+                    "跳过 identity 相同但正文不同的 vector 候选: source={}, chunk_id={}",
+                    key[0],
+                    key[1],
+                )
+                continue
+            existing_value = _coerce_score(existing_score)
+            candidate_value = _coerce_score(score)
+            if existing_value is not None and (
+                candidate_value is None or candidate_value >= existing_value
+            ):
+                continue
+            position = existing_position
+            metadata["_vector_rank"] = existing_position
         merged[key] = (
             Document(page_content=document.page_content, metadata=metadata),
             score,
@@ -420,6 +546,13 @@ def merge_raw_retrieval_results(
         if key in merged:
             existing_document, existing_score, position = merged[key]
             metadata = dict(existing_document.metadata or {})
+            if str(document.page_content or "") != str(existing_document.page_content or ""):
+                logger.warning(
+                    "跳过 identity 相同但正文不同的 lexical 候选: source={}, chunk_id={}",
+                    key[0],
+                    key[1],
+                )
+                continue
             metadata["_lexical_score"] = lexical_score
             metadata["_lexical_rank"] = offset
             metadata["_retrieval_source"] = "hybrid"
@@ -463,8 +596,12 @@ def targeted_lexical_results(
     for source_file, expanded_query in build_targeted_lexical_queries(query).items():
         source_filter = dict(metadata_filter or {})
         existing_source = source_filter.get("_file_name")
-        if existing_source and str(existing_source) != source_file:
-            continue
+        if existing_source:
+            if isinstance(existing_source, list):
+                if source_file not in {str(item) for item in existing_source}:
+                    continue
+            elif str(existing_source) != source_file:
+                continue
         source_filter["_file_name"] = source_file
         results.extend(
             cast(
@@ -551,9 +688,10 @@ def is_trusted_l2_distance(score: Any, max_distance: float) -> bool:
     if score is None:
         return False
     try:
-        return float(score) <= max_distance
+        value = float(score)
     except (TypeError, ValueError):
         return False
+    return math.isfinite(value) and 0 <= value <= max_distance
 
 
 def is_trusted_retrieval_chunk(
@@ -615,8 +753,7 @@ def format_retrieval_results(results: list[dict[str, Any]]) -> str:
 
     parts: list[str] = [CITATION_INSTRUCTION]
     for item in results:
-        score = item.get("score")
-        score_text = "未知" if score is None else f"{float(score):.4f}"
+        score_text = _format_retrieval_score(item.get("score"))
         heading = str(item.get("heading_path") or "").strip()
         source = str(item.get("source_file") or "未知来源")
         chunk_id = str(item.get("chunk_id") or "")
@@ -629,11 +766,11 @@ def format_retrieval_results(results: list[dict[str, Any]]) -> str:
             f"chunk_id: {chunk_id}",
             f"score: {score_text}",
         ]
-        if metadata.get("page_number"):
+        if metadata.get("page_number") is not None:
             lines.append(f"page_number: {metadata.get('page_number')}")
         if metadata.get("sheet_name"):
             lines.append(f"sheet_name: {metadata.get('sheet_name')}")
-        if metadata.get("row_number"):
+        if metadata.get("row_number") is not None:
             lines.append(f"row_number: {metadata.get('row_number')}")
         if metadata.get("primary_key"):
             lines.append(f"primary_key: {metadata.get('primary_key')}")
@@ -664,6 +801,8 @@ def rerank_retrieval_candidates(
     prune_low_relevance: bool = True,
 ) -> list[dict[str, Any]]:
     """Blend vector ranking with lexical signals and return final ordered chunks."""
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+        raise ValueError("top_k 必须是正整数")
     if not candidates:
         return []
 
@@ -729,6 +868,10 @@ def rerank_retrieval_candidates(
             required_sources=required_sources,
             top_k=top_k,
         )
+    elif normalized_fusion_strategy == "weighted" and bool(
+        retrieval_preferences.get("require_source_diversity")
+    ):
+        deduped = select_diverse_sources(deduped, top_k=top_k)
 
     selected = (
         prune_low_relevance_candidates(deduped, top_k=top_k)
@@ -743,7 +886,10 @@ def rerank_retrieval_candidates(
 def normalize_fusion_strategy(value: str | None = None) -> str:
     """Return the supported retrieval fusion strategy without changing safe defaults."""
     strategy = str(value or config.rag_retrieval_fusion_strategy or "weighted").strip().lower()
-    return strategy if strategy in {"weighted", "rrf"} else "weighted"
+    if strategy not in {"weighted", "rrf"}:
+        logger.warning("不支持的 RAG fusion strategy，回退 weighted: strategy={}", strategy)
+        return "weighted"
+    return strategy
 
 
 def _weighted_fusion_score(
@@ -828,8 +974,10 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         }
     ):
         preferred_heading_terms.add("升级与审批")
-    if "redis" in lowered and "官方" in lowered and any(
-        term in lowered for term in {"复盘", "事故"}
+    if (
+        "redis" in lowered
+        and "官方" in lowered
+        and any(term in lowered for term in {"复盘", "事故"})
     ):
         required_sources.update({"official_redis_clients.md", "redis_postmortem.pdf"})
     if (
@@ -1084,9 +1232,7 @@ def retrieval_intent_multiplier(
         set(raw_heading_terms) if isinstance(raw_heading_terms, set) else set()
     )
     raw_required_sources = preferences.get("required_sources")
-    required_sources = (
-        set(raw_required_sources) if isinstance(raw_required_sources, set) else set()
-    )
+    required_sources = set(raw_required_sources) if isinstance(raw_required_sources, set) else set()
     normalized_source = source_file.lower().replace("-", "_")
     normalized_heading = str(chunk.get("heading_path") or "").lower()
     multiplier = 1.0
@@ -1200,6 +1346,29 @@ def select_required_sources(
     ]
 
 
+def select_diverse_sources(
+    candidates: list[dict[str, Any]],
+    *,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Prefer distinct sources before filling remaining ranked slots."""
+    if not candidates or top_k <= 1:
+        return candidates
+
+    selected: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for chunk in candidates:
+        source = str(chunk.get("source_file") or "").strip().lower()
+        if source and source not in seen_sources:
+            selected.append(chunk)
+            seen_sources.add(source)
+            if len(selected) >= top_k:
+                break
+
+    selected_ids = {id(item) for item in selected}
+    return selected + [item for item in candidates if id(item) not in selected_ids]
+
+
 def _required_sources_from_preferences(
     preferences: dict[str, set[str] | bool],
 ) -> set[str]:
@@ -1250,8 +1419,10 @@ def _rrf_fusion_score(
         _coerce_rank(metadata.get("_vector_rank")),
         _coerce_rank(metadata.get("_lexical_rank")),
     ]
-    ranks.append(max(base_rank, 1))
-    return sum(1 / (k + rank) for rank in ranks if rank is not None)
+    observed_ranks = [rank for rank in ranks if rank is not None]
+    if not observed_ranks:
+        observed_ranks.append(max(base_rank, 1))
+    return sum(1 / (k + rank) for rank in observed_ranks)
 
 
 def _coerce_rank(value: Any) -> int | None:
@@ -1264,15 +1435,32 @@ def _coerce_rank(value: Any) -> int | None:
 
 def deduplicate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep the best-ranked candidate for each stable chunk identity."""
-    seen: set[tuple[str, str]] = set()
-    deduped = []
+    positions: dict[tuple[str, str], int] = {}
+    deduped: list[dict[str, Any]] = []
     for chunk in candidates:
         key = (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
-        if key in seen:
+        existing_position = positions.get(key)
+        if existing_position is None:
+            positions[key] = len(deduped)
+            deduped.append(dict(chunk))
             continue
-        seen.add(key)
-        deduped.append(dict(chunk))
+        if _candidate_is_better(chunk, deduped[existing_position]):
+            deduped[existing_position] = dict(chunk)
     return deduped
+
+
+def _candidate_is_better(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+    candidate_score = _coerce_score(candidate.get("score"))
+    current_score = _coerce_score(current.get("score"))
+    if candidate_score is not None and current_score is not None:
+        return candidate_score < current_score
+    if candidate_score is not None:
+        return True
+    if current_score is not None:
+        return False
+    candidate_lexical = _coerce_score(candidate.get("metadata", {}).get("_lexical_score"))
+    current_lexical = _coerce_score(current.get("metadata", {}).get("_lexical_score"))
+    return (candidate_lexical or 0.0) > (current_lexical or 0.0)
 
 
 def compute_lexical_score(query_terms: set[str], chunk: dict[str, Any]) -> float:
@@ -1323,7 +1511,7 @@ def normalize_vector_distance(score: Any) -> float:
         distance = float(score)
     except (TypeError, ValueError):
         return 0.5
-    if distance < 0:
+    if not math.isfinite(distance) or distance < 0:
         return 0.0
     return 1 / (1 + distance)
 
@@ -1334,6 +1522,8 @@ def lexical_score_to_distance(score: Any) -> float:
         value = float(score)
     except (TypeError, ValueError):
         return 9999.0
+    if not math.isfinite(value):
+        return 9999.0
     return 1 / (1 + max(value, 0.0))
 
 
@@ -1342,11 +1532,19 @@ def metadata_matches_filter(metadata: dict[str, Any], metadata_filter: dict[str,
     for key, expected in normalize_metadata_filter(metadata_filter).items():
         actual = metadata.get(key)
         if isinstance(expected, list):
-            if str(actual) not in {str(item) for item in expected}:
+            if not any(_metadata_values_equal(actual, item) for item in expected):
                 return False
-        elif str(actual) != str(expected):
+        elif not _metadata_values_equal(actual, expected):
             return False
     return True
+
+
+def _metadata_values_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return isinstance(actual, bool) and isinstance(expected, bool) and actual == expected
+    if isinstance(actual, int | float) and isinstance(expected, int | float):
+        return float(actual) == float(expected)
+    return type(actual) is type(expected) and actual == expected
 
 
 def build_milvus_metadata_expr(metadata_filter: dict[str, Any] | None) -> str | None:
@@ -1365,24 +1563,46 @@ def build_milvus_metadata_expr(metadata_filter: dict[str, Any] | None) -> str | 
     return " and ".join(expressions)
 
 
-def normalize_metadata_filter(metadata_filter: dict[str, Any] | None) -> dict[str, Any]:
+def normalize_metadata_filter(
+    metadata_filter: dict[str, Any] | None,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
     """Drop empty filter values while preserving exact-match semantics."""
     if not metadata_filter:
         return {}
     normalized: dict[str, Any] = {}
     for key, value in metadata_filter.items():
         safe_key = str(key).strip()
-        if not safe_key or value in (None, ""):
+        if not safe_key:
+            if strict:
+                raise ValueError("metadata filter key 不能为空")
             continue
         if not METADATA_FILTER_KEY_PATTERN.fullmatch(safe_key):
+            if strict:
+                raise ValueError(f"非法 metadata filter key: {safe_key}")
             logger.warning(f"忽略非法 metadata filter key: {safe_key}")
             continue
+        if value in (None, ""):
+            if strict:
+                raise ValueError(f"metadata filter value 不能为空: {safe_key}")
+            continue
         if isinstance(value, list):
-            items = [item for item in value if item not in (None, "")]
+            if strict and any(
+                item in (None, "") or not _is_metadata_scalar(item) for item in value
+            ):
+                raise ValueError(f"metadata filter list 不能为空且只能包含标量: {safe_key}")
+            items = [item for item in value if item not in (None, "") and _is_metadata_scalar(item)]
             if items:
                 normalized[safe_key] = items
-        else:
+            elif strict:
+                raise ValueError(f"metadata filter list 不能为空且只能包含标量: {safe_key}")
+        elif _is_metadata_scalar(value):
             normalized[safe_key] = value
+        elif strict:
+            raise ValueError(f"metadata filter value 只能是标量或标量列表: {safe_key}")
+        else:
+            logger.warning(f"忽略非法 metadata filter value: key={safe_key}")
     return normalized
 
 
@@ -1417,11 +1637,29 @@ def build_degraded_retrieval_mode(
     return "lexical_degraded_rrf_rerank" if strategy == "rrf" else "lexical_degraded_rerank"
 
 
+def build_vector_degraded_retrieval_mode(
+    rerank_enabled: bool,
+    fusion_strategy: str | None = None,
+) -> str:
+    """Return the retrieval mode used when lexical search fails but vector search succeeds."""
+    strategy = normalize_fusion_strategy(fusion_strategy)
+    if not rerank_enabled:
+        return "vector_degraded"
+    return "vector_degraded_rrf_rerank" if strategy == "rrf" else "vector_degraded_rerank"
+
+
 def build_public_vector_error_message(error_detail: str) -> str:
     """Return a frontend-safe vector retrieval error summary."""
     if not error_detail:
         return ""
     return "向量检索暂不可用，已降级使用本地词法索引。"
+
+
+def build_public_lexical_error_message(error_detail: str) -> str:
+    """Return a frontend-safe lexical retrieval error summary."""
+    if not error_detail:
+        return ""
+    return "词法检索暂不可用，已降级使用向量检索结果。"
 
 
 def _should_query_lexical_index(
@@ -1461,16 +1699,10 @@ def _call_similarity_search_with_score(
     expr: str | None,
 ) -> list[tuple[Document, Any]]:
     if expr:
-        try:
-            return cast(
-                list[tuple[Document, Any]],
-                vector_store.similarity_search_with_score(query, k=top_k, expr=expr),
-            )
-        except TypeError:
-            return cast(
-                list[tuple[Document, Any]],
-                vector_store.similarity_search_with_score(query, k=top_k),
-            )
+        return cast(
+            list[tuple[Document, Any]],
+            vector_store.similarity_search_with_score(query, k=top_k, expr=expr),
+        )
     return cast(
         list[tuple[Document, Any]],
         vector_store.similarity_search_with_score(query, k=top_k),
@@ -1484,14 +1716,13 @@ def _call_similarity_search(
     expr: str | None,
 ) -> list[Document]:
     if expr:
-        try:
-            return cast(list[Document], vector_store.similarity_search(query, k=top_k, expr=expr))
-        except TypeError:
-            return cast(list[Document], vector_store.similarity_search(query, k=top_k))
+        return cast(list[Document], vector_store.similarity_search(query, k=top_k, expr=expr))
     return cast(list[Document], vector_store.similarity_search(query, k=top_k))
 
 
 def _candidate_count(top_k: int) -> int:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+        raise ValueError("top_k 必须是正整数")
     multiplier = max(int(config.rag_hybrid_candidate_multiplier or 1), 1)
     return max(top_k, top_k * multiplier)
 
@@ -1507,10 +1738,18 @@ def _document_identity(document: Document) -> tuple[str, str]:
 
 
 def _coerce_score(score: Any) -> float | None:
+    if isinstance(score, bool):
+        return None
     try:
-        return float(score)
+        value = float(score)
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
+
+
+def _format_retrieval_score(score: Any) -> str:
+    value = _coerce_score(score)
+    return "未知" if value is None else f"{value:.4f}"
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -1529,3 +1768,9 @@ def _quote_expr_value(value: Any) -> str:
         return str(value)
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _is_metadata_scalar(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, str | int | bool)

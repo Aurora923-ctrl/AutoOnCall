@@ -11,6 +11,7 @@ from scripts.eval.eval_performance import (
     evaluate_performance,
     load_price_snapshot,
 )
+from scripts.performance.run_rag_runtime_benchmark import _has_valid_citation
 
 
 def test_distribution_reports_percentiles_and_stddev() -> None:
@@ -119,6 +120,38 @@ def test_evidence_level_conflict_is_rejected(tmp_path) -> None:
     assert result["summary"]["evidence"]["conflict_count"] == 1
 
 
+def test_failed_real_requests_do_not_satisfy_coverage(tmp_path) -> None:
+    store = create_aiops_store(tmp_path / "performance.db")
+    store.save_trace_event(
+        TraceEvent(
+            trace_id="trace-failed-rag",
+            incident_id="INC-FAILED-RAG",
+            event_type="request_complete",
+            node_name="rag",
+            status="failed",
+            latency_ms=25,
+            metadata={
+                "request_kind": "rag",
+                "evidence_level": "local_live",
+            },
+        )
+    )
+
+    result = evaluate_performance(
+        store=store,
+        evidence_level="local_live",
+        required_rag_requests=1,
+        required_aiops_requests=0,
+    )
+
+    assert result["summary"]["status"] == "failed"
+    assert result["summary"]["request_counts"]["rag"] == 1
+    assert result["summary"]["successful_request_counts"] == {}
+    assert result["summary"]["failed_request_counts"]["rag"] == 1
+    assert result["summary"]["required_real_request_coverage"]["rag"]["status"] == "not_met"
+    assert result["summary"]["real_request_acceptance_gate"] == "not_run"
+
+
 def test_internal_trace_events_do_not_count_as_completed_requests(tmp_path) -> None:
     store = create_aiops_store(tmp_path / "performance.db")
     store.save_trace_event(
@@ -180,3 +213,23 @@ def test_dated_price_snapshot_calculates_only_known_models(tmp_path) -> None:
     assert result["amount"] == 2.0
     assert result["priced_sample_count"] == 1
     assert result["unpriced_sample_count"] == 1
+
+
+def test_runtime_benchmark_requires_citations_for_every_required_source() -> None:
+    citations = [
+        {"source_file": "redis.md", "chunk_id": "redis.md#0001"},
+    ]
+
+    assert not _has_valid_citation(
+        citations,
+        ["redis.md", "postmortem.pdf"],
+        required_sources=["redis.md", "postmortem.pdf"],
+    )
+    assert _has_valid_citation(
+        [
+            *citations,
+            {"source_file": "postmortem.pdf", "chunk_id": "postmortem.pdf#0001"},
+        ],
+        ["redis.md", "postmortem.pdf"],
+        required_sources=["redis.md", "postmortem.pdf"],
+    )

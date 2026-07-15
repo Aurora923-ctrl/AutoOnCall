@@ -9,10 +9,13 @@ from app.services.lexical_index_service import LexicalIndexService
 from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
     build_targeted_lexical_queries,
+    deduplicate_candidates,
     infer_retrieval_preferences,
+    merge_raw_retrieval_results,
     normalize_metadata_filter,
     rerank_retrieval_candidates,
     retrieve_structured_knowledge,
+    targeted_lexical_results,
 )
 from app.tools import runbook_tool as runbook_module
 from app.tools.runbook_tool import SearchRunbookTool
@@ -34,6 +37,32 @@ class FakePlainVectorStore:
 
     def similarity_search(self, query: str, k: int, **kwargs):
         return self.documents[:k]
+
+
+@pytest.mark.parametrize("query, top_k", [("", 1), ("   ", 1), ("Redis", 0), ("Redis", -1)])
+def test_structured_retrieval_rejects_invalid_query_or_top_k_without_search(
+    query: str,
+    top_k: int,
+) -> None:
+    store = FakeVectorStore([])
+
+    payload = retrieve_structured_knowledge(query, top_k=top_k, vector_store=store)
+
+    assert payload["status"] == "failed"
+    assert store.calls == []
+
+
+def test_structured_retrieval_rejects_invalid_distance_without_search() -> None:
+    store = FakeVectorStore([])
+
+    payload = retrieve_structured_knowledge(
+        "Redis",
+        max_distance=float("nan"),
+        vector_store=store,
+    )
+
+    assert payload["status"] == "failed"
+    assert store.calls == []
 
 
 def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
@@ -105,6 +134,28 @@ def test_structured_retrieval_rejects_when_all_scores_exceed_threshold() -> None
     )
 
 
+def test_structured_retrieval_applies_trust_gate_before_top_k_cutoff() -> None:
+    untrusted = Document(
+        page_content="Redis maxclients connection timeout",
+        metadata={"_file_name": "untrusted.md", "_chunk_id": "untrusted#1"},
+    )
+    trusted = Document(
+        page_content="Redis connection troubleshooting",
+        metadata={"_file_name": "trusted.md", "_chunk_id": "trusted#1"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        top_k=1,
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(untrusted, 8.0), (trusted, 0.8)]),
+    )
+
+    assert payload["status"] == "success"
+    assert [item["source_file"] for item in payload["retrieval_results"]] == ["trusted.md"]
+    assert [item["source_file"] for item in payload["rejected_results"]] == ["untrusted.md"]
+
+
 def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path) -> None:
     index = LexicalIndexService(tmp_path / "lexical.json")
     source = "docs/knowledge-base/redis.md"
@@ -130,6 +181,29 @@ def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path
     assert payload["status"] == "no_answer"
     assert payload["retrieval_results"] == []
     assert payload["rejected_results"] == []
+
+
+def test_structured_retrieval_uses_injected_lexical_index_for_stale_checks(tmp_path) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    source = "docs/knowledge-base/redis.md"
+    index.mark_source_stale(source, "test stale registry")
+    document = Document(
+        page_content="Redis timeout",
+        metadata={
+            "_source": source,
+            "_file_name": "redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        vector_store=FakeVectorStore([(document, 0.1)]),
+        lexical_index=index,
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["retrieval_results"] == []
 
 
 def test_structured_retrieval_supports_metadata_filter_and_expr() -> None:
@@ -185,6 +259,72 @@ def test_metadata_filter_rejects_unsafe_keys() -> None:
     assert expr == 'metadata["_document_version"] == "v2"'
     assert "billing" not in expr
     assert "service-name" not in expr
+
+
+def test_structured_retrieval_fails_closed_for_invalid_metadata_filter() -> None:
+    document = Document(
+        page_content="billing Redis timeout",
+        metadata={"_file_name": "redis.md", "_chunk_id": "redis#1", "service": "billing"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        metadata_filter={"service-name": "billing"},
+        vector_store=FakeVectorStore([(document, 0.1)]),
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["retrieval_results"] == []
+
+
+def test_structured_retrieval_rejects_partially_invalid_filter_list() -> None:
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        metadata_filter={"service": ["billing", {"unexpected": "value"}]},
+        vector_store=FakeVectorStore([]),
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["retrieval_results"] == []
+
+
+def test_metadata_filter_is_not_retried_without_expr_when_store_rejects_filter() -> None:
+    class StoreWithoutFilterSupport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def similarity_search_with_score(self, query: str, k: int):
+            self.calls += 1
+            return []
+
+    store = StoreWithoutFilterSupport()
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        metadata_filter={"service": "billing"},
+        vector_store=store,
+    )
+
+    assert payload["status"] == "failed"
+    assert store.calls == 0
+
+
+def test_metadata_post_filter_preserves_scalar_types() -> None:
+    document = Document(
+        page_content="Redis timeout",
+        metadata={
+            "_file_name": "redis.md",
+            "_chunk_id": "redis.md#0001",
+            "enabled": True,
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        metadata_filter={"enabled": 1},
+        vector_store=FakeVectorStore([(document, 0.1)]),
+    )
+
+    assert payload["status"] == "no_answer"
 
 
 def test_hybrid_rerank_can_promote_lexically_strong_candidate() -> None:
@@ -263,6 +403,213 @@ def test_rrf_strategy_does_not_bypass_trust_gate() -> None:
     assert payload["fusion_strategy"] == "rrf"
     assert payload["retrieval_results"] == []
     assert payload["rejected_results"][0]["rrf_score"] > 0
+
+
+def test_rrf_counts_each_retriever_rank_once() -> None:
+    ranked = rerank_retrieval_candidates(
+        "Redis timeout",
+        [
+            {
+                "doc_id": "vector",
+                "source_file": "vector.md",
+                "chunk_id": "vector#1",
+                "score": 0.1,
+                "content": "Redis timeout",
+                "metadata": {"_retrieval_source": "vector", "_vector_rank": 1},
+            },
+            {
+                "doc_id": "hybrid",
+                "source_file": "hybrid.md",
+                "chunk_id": "hybrid#1",
+                "score": 0.2,
+                "content": "Redis timeout",
+                "metadata": {
+                    "_retrieval_source": "hybrid",
+                    "_vector_rank": 2,
+                    "_lexical_rank": 1,
+                },
+            },
+        ],
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+        fusion_strategy="rrf",
+        prune_low_relevance=False,
+    )
+
+    by_source = {item["source_file"]: item for item in ranked}
+    assert by_source["vector.md"]["rrf_score"] == round(1 / 61, 4)
+    assert by_source["hybrid.md"]["rrf_score"] == round((1 / 62) + (1 / 61), 4)
+
+
+def test_rerank_rejects_invalid_top_k() -> None:
+    with pytest.raises(ValueError, match="top_k"):
+        rerank_retrieval_candidates(
+            "Redis timeout",
+            [],
+            top_k=0,
+            hybrid_search_enabled=True,
+            rerank_enabled=True,
+        )
+
+
+def test_boolean_vector_score_is_not_treated_as_numeric_distance() -> None:
+    document = Document(
+        page_content="Redis timeout",
+        metadata={"_file_name": "redis.md", "_chunk_id": "redis.md#0001"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(document, True)]),
+    )
+
+    assert payload["status"] == "no_answer"
+
+
+def test_duplicate_candidates_keep_the_best_distance() -> None:
+    candidates = [
+        {
+            "doc_id": "redis",
+            "chunk_id": "redis#1",
+            "score": 0.8,
+            "metadata": {},
+        },
+        {
+            "doc_id": "redis",
+            "chunk_id": "redis#1",
+            "score": 0.2,
+            "metadata": {},
+        },
+    ]
+
+    deduped = deduplicate_candidates(candidates)
+
+    assert len(deduped) == 1
+    assert deduped[0]["score"] == 0.2
+
+
+def test_multi_source_intent_prefers_distinct_sources() -> None:
+    candidates = [
+        {
+            "doc_id": "one",
+            "source_file": "one.md",
+            "chunk_id": "one#1",
+            "score": 0.1,
+            "content": "Redis timeout diagnosis",
+            "metadata": {"_retrieval_source": "vector", "_vector_rank": 1},
+        },
+        {
+            "doc_id": "one",
+            "source_file": "one.md",
+            "chunk_id": "one#2",
+            "score": 0.2,
+            "content": "Redis timeout verification",
+            "metadata": {"_retrieval_source": "vector", "_vector_rank": 2},
+        },
+        {
+            "doc_id": "two",
+            "source_file": "two.md",
+            "chunk_id": "two#1",
+            "score": 0.3,
+            "content": "Redis timeout boundary",
+            "metadata": {"_retrieval_source": "vector", "_vector_rank": 3},
+        },
+    ]
+
+    ranked = rerank_retrieval_candidates(
+        "请结合多来源分别说明 Redis timeout",
+        candidates,
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+        fusion_strategy="weighted",
+        prune_low_relevance=False,
+    )
+
+    assert [item["source_file"] for item in ranked] == ["one.md", "two.md"]
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf"), -0.1])
+def test_non_finite_or_negative_vector_distance_is_not_trusted(score: float) -> None:
+    document = Document(
+        page_content="Redis timeout",
+        metadata={"_file_name": "redis.md", "_chunk_id": "redis.md#0001"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis timeout",
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(document, score)]),
+    )
+
+    assert payload["status"] == "no_answer"
+
+
+def test_retrieval_result_formatter_keeps_zero_locators_and_unknown_score() -> None:
+    rendered = rag_retrieval_service.format_retrieval_results(
+        [
+            {
+                "rank": 1,
+                "source_file": "tickets.csv",
+                "chunk_id": "tickets.csv#0001",
+                "score": float("nan"),
+                "content": "ticket row",
+                "metadata": {"page_number": 0, "row_number": 0},
+            }
+        ]
+    )
+
+    assert "score: 未知" in rendered
+    assert "page_number: 0" in rendered
+    assert "row_number: 0" in rendered
+
+
+def test_merge_does_not_mark_conflicting_same_identity_as_hybrid() -> None:
+    vector = Document(
+        page_content="current content",
+        metadata={"_doc_id": "redis", "_chunk_id": "redis#1"},
+    )
+    lexical = Document(
+        page_content="stale content",
+        metadata={"_doc_id": "redis", "_chunk_id": "redis#1"},
+    )
+
+    merged = merge_raw_retrieval_results([(vector, 0.1)], [(lexical, 2.0)])
+
+    assert len(merged) == 1
+    assert merged[0][0].page_content == "current content"
+    assert merged[0][0].metadata["_retrieval_source"] == "vector"
+    assert "_lexical_score" not in merged[0][0].metadata
+
+
+def test_targeted_lexical_results_respect_list_source_filter(monkeypatch) -> None:
+    class RecordingIndex:
+        def __init__(self) -> None:
+            self.filters = []
+
+        def search(self, query: str, *, top_k: int, metadata_filter=None):
+            self.filters.append(metadata_filter)
+            return []
+
+    monkeypatch.setattr(
+        rag_retrieval_service,
+        "build_targeted_lexical_queries",
+        lambda _query: {
+            "allowed.md": "allowed query",
+            "blocked.md": "blocked query",
+        },
+    )
+    index = RecordingIndex()
+
+    targeted_lexical_results(
+        index,
+        "query",
+        metadata_filter={"_file_name": ["allowed.md", "other.md"]},
+    )
+
+    assert index.filters == [{"_file_name": "allowed.md"}]
 
 
 def test_ticket_query_prefers_table_history_over_generic_runbook() -> None:
@@ -632,6 +979,54 @@ def test_retrieval_degrades_to_lexical_when_default_vector_store_fails(
     assert payload["retrieval_results"][0]["metadata"]["_retrieval_source"] == "lexical"
 
 
+def test_retrieval_degrades_to_vector_when_lexical_search_fails() -> None:
+    document = Document(
+        page_content="Redis maxclients timeout",
+        metadata={"_file_name": "redis.md", "_chunk_id": "redis.md#0001"},
+    )
+
+    class FailingLexicalIndex:
+        def search(self, *_args, **_kwargs):
+            raise RuntimeError("lexical unavailable")
+
+        def is_source_stale(self, _source_path: str) -> bool:
+            return False
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients timeout",
+        max_distance=1.0,
+        vector_store_provider=lambda: FakeVectorStore([(document, 0.1)]),
+        lexical_index=FailingLexicalIndex(),
+    )
+
+    assert payload["status"] == "success"
+    assert payload["retrieval_degraded"] is True
+    assert payload["retrieval_mode"] == "vector_degraded_rerank"
+    assert payload["lexical_error_type"] == "RuntimeError"
+    assert payload["lexical_error_message"]
+    assert [item["source_file"] for item in payload["retrieval_results"]] == ["redis.md"]
+
+
+def test_trusted_results_are_reranked_after_gate_removes_higher_candidate() -> None:
+    untrusted = Document(
+        page_content="Redis maxclients exact timeout",
+        metadata={"_file_name": "untrusted.md", "_chunk_id": "untrusted#1"},
+    )
+    trusted = Document(
+        page_content="Redis timeout",
+        metadata={"_file_name": "trusted.md", "_chunk_id": "trusted#1"},
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients exact timeout",
+        top_k=2,
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(untrusted, 8.0), (trusted, 0.5)]),
+    )
+
+    assert [item["rank"] for item in payload["retrieval_results"]] == [1]
+
+
 def test_lexical_only_candidate_must_pass_lexical_trust_threshold(
     monkeypatch,
     tmp_path,
@@ -741,6 +1136,8 @@ async def test_search_runbook_tool_hides_vector_error_detail(monkeypatch) -> Non
     assert result.output["vector_error_message"] == "向量检索暂不可用，已降级使用本地词法索引。"
     assert "vector_error_detail" not in result.output
     assert "milvus.internal" not in str(result.output)
+
+
 def test_stale_registry_read_failure_filters_vector_candidate(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.rag_retrieval_service.lexical_index_service.is_source_stale",

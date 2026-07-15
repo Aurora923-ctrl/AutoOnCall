@@ -282,3 +282,48 @@ def test_delete_by_ids_builds_bounded_compensation_expression(monkeypatch) -> No
     assert deleted == 3
     assert collection.expr == 'id in ["vec-a", "vec-b"]'
     assert collection.flushed is True
+
+
+def test_similarity_search_propagates_backend_failure(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+
+    class FailingVectorStore:
+        def similarity_search(self, query, k, **kwargs):
+            raise RuntimeError("milvus search failed")
+
+    monkeypatch.setattr(manager, "_ensure_vector_store", lambda: FailingVectorStore())
+
+    with pytest.raises(RuntimeError, match="milvus search failed"):
+        manager.similarity_search("Redis timeout")
+
+
+@pytest.mark.parametrize(
+    ("query", "k"),
+    [("", 1), ("   ", 1), ("x" * 8001, 1), ("Redis", 0), ("Redis", True)],
+)
+def test_similarity_search_rejects_invalid_inputs_before_initializing_store(
+    monkeypatch,
+    query,
+    k,
+) -> None:
+    manager = vector_store_module.VectorStoreManager()
+    monkeypatch.setattr(
+        manager,
+        "_ensure_vector_store",
+        lambda: pytest.fail("invalid input must not initialize Milvus"),
+    )
+
+    with pytest.raises(ValueError):
+        manager.similarity_search(query, k=k)
+
+
+def test_similarity_search_rejects_non_string_expr_before_initializing_store(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+    monkeypatch.setattr(
+        manager,
+        "_ensure_vector_store",
+        lambda: pytest.fail("invalid input must not initialize Milvus"),
+    )
+
+    with pytest.raises(TypeError, match="expr"):
+        manager.similarity_search("Redis", expr=1)  # type: ignore[arg-type]

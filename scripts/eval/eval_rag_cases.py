@@ -237,13 +237,12 @@ def evaluate_case(
     query = str(case.get("query") or "")
     should_reject = bool(case.get("should_reject", False))
     threshold = float(case.get("min_score", min_score))
-    case_index = _index_with_case_fixture(index, case)
     max_k = max(*EVAL_CUTOFFS, top_k)
     strategy_results: dict[str, dict[str, Any]] = {}
     for strategy in EVAL_FUSION_STRATEGIES:
         strategy_started = time.perf_counter()
         retrieved = search_offline(
-            case_index,
+            index,
             query,
             top_k=max_k,
             min_score=threshold,
@@ -823,39 +822,6 @@ def _iter_supported_docs(root: Path) -> list[Path]:
     )
 
 
-def _index_with_case_fixture(
-    index: list[dict[str, Any]], case: dict[str, Any]
-) -> list[dict[str, Any]]:
-    fixture_chunk = _fixture_to_chunk(case)
-    return [fixture_chunk, *index] if fixture_chunk is not None else index
-
-
-def _fixture_to_chunk(case: dict[str, Any]) -> dict[str, Any] | None:
-    fixture = case.get("fixture")
-    if not isinstance(fixture, dict):
-        return None
-    metadata = dict(fixture.get("metadata") or {})
-    metadata.setdefault("_file_name", fixture.get("source_file", "fixture"))
-    metadata.setdefault("_chunk_id", fixture.get("chunk_id", "fixture#0001"))
-    metadata.setdefault("_source", fixture.get("source_file", "fixture"))
-    document = type(
-        "OfflineFixtureDocument",
-        (),
-        {"page_content": str(fixture.get("content") or ""), "metadata": metadata},
-    )()
-    chunk = document_to_retrieval_chunk(document, score=None, rank=1)
-    chunk["heading_path"] = str(fixture.get("heading_path") or chunk.get("heading_path") or "")
-    searchable_text = " ".join(
-        [
-            str(chunk.get("source_file") or ""),
-            str(chunk.get("heading_path") or ""),
-            str(chunk.get("content") or ""),
-        ]
-    )
-    chunk["offline_terms"] = extract_terms(searchable_text)
-    return chunk
-
-
 def search_offline(
     index: list[dict[str, Any]],
     query: str,
@@ -944,7 +910,6 @@ def search_offline(
         item
         for item in candidates
         if item["_gate_score"] + 0.05 >= effective_min_score
-        or (fusion_strategy == "weighted" and _is_explicit_joint_evidence_candidate(item, query))
         or (
             fusion_strategy == "weighted"
             and float(item.get("intent_multiplier") or 1.0) > 1.0
@@ -953,224 +918,11 @@ def search_offline(
         )
     ]
     eligible.sort(key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"]))
-    if fusion_strategy == "weighted":
-        eligible = _suppress_known_confusions(eligible, query)
     for item in eligible:
         item.pop("_gate_score", None)
     if fusion_strategy == "weighted" and bool(preferences.get("require_source_diversity")):
         return _select_diverse_sources(eligible, top_k=top_k)
     return eligible[:top_k]
-
-
-def _is_explicit_joint_evidence_candidate(item: dict[str, Any], query: str) -> bool:
-    lowered = query.lower()
-    source = str(item.get("source_file") or "")
-    heading = str(item.get("heading_path") or "")
-    content = str(item.get("content") or "")
-    if (
-        "pod" in lowered
-        and "service" in lowered
-        and any(term in lowered for term in {"同时", "结合", "联合"})
-    ):
-        return (
-            source == "official_kubernetes_debug_pods.md"
-            and heading == "Diagnosing the problem"
-            and "Is it your Pods" in content
-        ) or (
-            source == "official_kubernetes_debug_services.md" and "Are the Pods working?" in heading
-        )
-    if (
-        any(term in lowered for term in {"写入", "摄取", "ingestion", "丢弃"})
-        and any(term in lowered for term in {"指标", "信号", "丢弃"})
-        and any(
-            term in lowered
-            for term in {"告警原则", "告警实践", "症状告警", "用户影响", "转化为", "告警"}
-        )
-    ):
-        return (
-            source == "official_loki_troubleshoot_ingest.md"
-            and "Monitoring ingestion errors" in heading
-        ) or (
-            source == "official_prometheus_alerting_practices.md" and heading == "What to alert on"
-        )
-    return False
-
-
-def _suppress_known_confusions(
-    candidates: list[dict[str, Any]], query: str
-) -> list[dict[str, Any]]:
-    lowered = query.lower()
-    filtered = candidates
-    if (
-        "pod" in lowered
-        and "service" in lowered
-        and any(term in lowered for term in {"同时", "结合", "联合"})
-    ):
-        pod_service_candidates = [
-            item
-            for item in filtered
-            if (
-                str(item.get("source_file") or "") == "official_kubernetes_debug_pods.md"
-                and str(item.get("heading_path") or "") == "Diagnosing the problem"
-                and "Is it your Pods" in str(item.get("content") or "")
-            )
-            or (
-                str(item.get("source_file") or "") == "official_kubernetes_debug_services.md"
-                and "Are the Pods working?" in str(item.get("heading_path") or "")
-            )
-        ]
-        filtered = pod_service_candidates + [
-            item for item in filtered if item not in pod_service_candidates
-        ]
-    if (
-        any(term in lowered for term in {"写入", "摄取", "ingestion", "丢弃"})
-        and any(term in lowered for term in {"指标", "信号", "丢弃"})
-        and any(
-            term in lowered
-            for term in {"告警原则", "告警实践", "症状告警", "用户影响", "转化为", "告警"}
-        )
-    ):
-        observability_candidates = [
-            item
-            for item in filtered
-            if (
-                str(item.get("source_file") or "") == "official_loki_troubleshoot_ingest.md"
-                and "Monitoring ingestion errors" in str(item.get("heading_path") or "")
-            )
-            or (
-                str(item.get("source_file") or "") == "official_prometheus_alerting_practices.md"
-                and str(item.get("heading_path") or "") == "What to alert on"
-            )
-        ]
-        filtered = observability_candidates + [
-            item for item in filtered if item not in observability_candidates
-        ]
-    if any(
-        term in lowered
-        for term in {
-            "maxclients",
-            "connected_clients",
-            "blocked_clients",
-            "连接数满",
-            "连接槽位",
-            "新连接被拒绝",
-        }
-    ):
-        filtered = [
-            item
-            for item in filtered
-            if str(item.get("source_file") or "") != "official_redis_latency.md"
-        ]
-    if "redis" in lowered or any(
-        term in lowered
-        for term in {"connected_clients", "blocked_clients", "连接数满", "新连接被拒绝"}
-    ):
-        redis_candidates = [
-            item for item in filtered if "redis" in str(item.get("source_file") or "").lower()
-        ]
-        if redis_candidates:
-            filtered = redis_candidates + [
-                item for item in filtered if item not in redis_candidates
-            ]
-    if any(
-        term in lowered for term in {"endpointslice", "endpoints", "selector", "service 与 pod"}
-    ):
-        endpoint_candidates = [
-            item
-            for item in filtered
-            if "debug_services" in str(item.get("source_file") or "").lower()
-            and (
-                "endpointslice" in str(item.get("heading_path") or "").lower()
-                or str(item.get("chunk_id") or "").endswith(("#0013", "#0014"))
-            )
-        ]
-        if endpoint_candidates:
-            filtered = endpoint_candidates + [
-                item for item in filtered if item not in endpoint_candidates
-            ]
-    loki_read_intent = any(
-        term in lowered
-        for term in {"查询", "query", "logql", "range query", "读取", "read", "时间范围"}
-    )
-    loki_write_intent = any(
-        term in lowered for term in {"写入", "摄取", "ingestion", "push", "write"}
-    )
-    if "loki" in lowered and loki_read_intent and not loki_write_intent:
-        query_candidates = [
-            item
-            for item in filtered
-            if "loki_troubleshoot_query" in str(item.get("source_file") or "").lower()
-        ]
-        filtered = query_candidates + [item for item in filtered if item not in query_candidates]
-    elif any(term in lowered for term in {"摄取", "ingestion", "可观测性写入", "loki 写入"}):
-        ingest_candidates = [
-            item
-            for item in filtered
-            if "loki_troubleshoot_ingest" in str(item.get("source_file") or "").lower()
-        ]
-        prometheus_candidates = [
-            item
-            for item in filtered
-            if "prometheus_alerting_practices" in str(item.get("source_file") or "").lower()
-        ]
-        prioritized = ingest_candidates[:1] + prometheus_candidates[:1]
-        if prioritized:
-            filtered = prioritized + [item for item in filtered if item not in prioritized]
-    if any(term in lowered for term in {"超时", "timeout"}) and loki_read_intent:
-        timeout_candidates = [
-            item
-            for item in filtered
-            if "loki_troubleshoot_query" in str(item.get("source_file") or "").lower()
-            and "timeout" in str(item.get("heading_path") or "").lower()
-        ]
-        if timeout_candidates:
-            filtered = timeout_candidates + [
-                item for item in filtered if item not in timeout_candidates
-            ]
-    if any(term in lowered for term in {"两个可信来源", "哪两个"}) and any(
-        term in lowered for term in {"redis", "blocked_clients", "连接耗尽"}
-    ):
-        preferred = [
-            item
-            for item in filtered
-            if str(item.get("source_file") or "")
-            in {"redis_postmortem.pdf", "redis_capacity_wiki.html"}
-        ]
-        if preferred:
-            filtered = preferred + [item for item in filtered if item not in preferred]
-    if (
-        "cpu" in lowered
-        and any(term in lowered for term in {"慢 sql", "慢sql"})
-        and not any(term in lowered for term in {"pool_waiting", "active_connections", "mysql"})
-    ):
-        cpu_candidates = [
-            item for item in filtered if str(item.get("source_file") or "") == "cpu_high_usage.md"
-        ]
-        if cpu_candidates:
-            filtered = cpu_candidates + [item for item in filtered if item not in cpu_candidates]
-    if any(term in lowered for term in {"503", "接口失败"}) and any(
-        term in lowered for term in {"redis", "mq", "依赖"}
-    ):
-        service_candidates = [
-            item
-            for item in filtered
-            if str(item.get("source_file") or "") == "service_unavailable.md"
-        ]
-        if service_candidates:
-            filtered = service_candidates + [
-                item for item in filtered if item not in service_candidates
-            ]
-    if any(term in lowered for term in {"inc-redis-", "ticket", "工单", "历史记录"}):
-        ticket_candidates = [
-            item
-            for item in filtered
-            if str(item.get("source_file") or "") in {"tickets.csv", "tickets.xlsx"}
-        ]
-        if ticket_candidates:
-            filtered = ticket_candidates + [
-                item for item in filtered if item not in ticket_candidates
-            ]
-    return filtered
 
 
 def _select_diverse_sources(
@@ -1529,7 +1281,7 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"({summary['pass_rate']:.0%}); recall@1={summary['recall_at_1']:.0%}, "
             f"recall@3={summary['recall_at_3']:.0%}, recall@5={summary['recall_at_5']:.0%}, "
             f"MRR={summary['mrr']:.2f}, nDCG@3={summary['ndcg_at_3']:.2f}, "
-            f"cite={summary['citation_coverage_rate']:.0%}, "
+            f"retrieval_citation_metadata={summary['citation_coverage_rate']:.0%}, "
             f"confusion={summary['confusion_case_pass_rate']:.0%}, "
             f"reject={summary['no_answer_rejection_f1']:.0%}"
         )
@@ -1573,6 +1325,11 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Recall@1/3/5: {summary['recall_at_1']:.0%} / {summary['recall_at_3']:.0%} / {summary['recall_at_5']:.0%}",
         f"- Precision@1/3/5: {summary['precision_at_1']:.0%} / {summary['precision_at_3']:.0%} / {summary['precision_at_5']:.0%}",
         f"- MRR / MAP@3 / nDCG@3: {summary['mrr']:.3f} / {summary['map_at_3']:.3f} / {summary['ndcg_at_3']:.3f}",
+        (
+            "- Retrieval citation metadata coverage: "
+            f"{summary['citation_coverage_rate']:.0%} "
+            "(source_file + chunk_id on relevant retrievals; no answer generation)"
+        ),
         f"- Rejection precision/recall/F1: {summary['no_answer_rejection_precision']:.0%} / {summary['no_answer_rejection_recall']:.0%} / {summary['no_answer_rejection_f1']:.0%}",
         f"- Latency P50/P95/P99: {summary['latency_ms']['p50']:.2f} / {summary['latency_ms']['p95']:.2f} / {summary['latency_ms']['p99']:.2f} ms",
         "",

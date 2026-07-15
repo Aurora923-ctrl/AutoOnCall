@@ -48,8 +48,12 @@ def test_stale_module_blocks_official_baseline_reason() -> None:
     assert reasons == ["rag:stale"]
 
 
-def test_observed_performance_smoke_is_a_valid_baseline_module() -> None:
-    assert artifact_status({"summary": {"status": "observed_not_accepted"}}) == "passed"
+def test_observed_performance_smoke_is_incomplete_baseline_evidence() -> None:
+    assert artifact_status({"summary": {"status": "observed_not_accepted"}}) == "incomplete"
+
+
+def test_local_knowledge_checks_without_milvus_are_incomplete_baseline_evidence() -> None:
+    assert artifact_status({"summary": {"status": "passed_without_milvus"}}) == "incomplete"
 
 
 def test_benchmark_writes_scorecard_into_same_run_directory(tmp_path) -> None:

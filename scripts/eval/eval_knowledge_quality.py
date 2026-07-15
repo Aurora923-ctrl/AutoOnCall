@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -43,9 +44,11 @@ def evaluate_knowledge_quality(
     near_duplicate_threshold: float = DEFAULT_NEAR_DUPLICATE_THRESHOLD,
     overlong_chars: int = DEFAULT_OVERLONG_CHARS,
     verify_milvus: bool = True,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Evaluate supported assets and optionally run real local Milvus CRUD checks."""
     started_at = datetime.now(UTC)
+    freshness_as_of = normalize_utc_datetime(as_of or started_at)
     timer = time.perf_counter()
     root = Path(docs_dir).resolve()
     files = _supported_files(root)
@@ -57,6 +60,7 @@ def evaluate_knowledge_quality(
             path,
             stale_after_days=stale_after_days,
             overlong_chars=overlong_chars,
+            as_of=freshness_as_of,
         )
         assets.append(asset)
         chunks.extend(file_chunks)
@@ -92,6 +96,11 @@ def evaluate_knowledge_quality(
             "evidence_level": "local_live" if verify_milvus else "offline_fixture",
             "docs_dir": _relative_or_absolute(root),
             "stale_after_days": stale_after_days,
+            "freshness_as_of": freshness_as_of.isoformat(),
+            "freshness_policy": (
+                "age is measured from --as-of/run start to the file's last Git commit; "
+                "filesystem mtime is used only for untracked or unavailable Git history"
+            ),
             "near_duplicate_threshold": near_duplicate_threshold,
             "overlong_chars": overlong_chars,
             "environment": collect_eval_environment(
@@ -117,11 +126,13 @@ def inspect_asset(
     *,
     stale_after_days: int,
     overlong_chars: int,
+    as_of: datetime | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run the production loader and splitter for one asset."""
     stat = path.stat()
-    modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
-    age_days = max(0.0, (datetime.now(UTC) - modified_at).total_seconds() / 86400)
+    modified_at, freshness_basis = asset_modified_at(path, fallback_mtime=stat.st_mtime)
+    freshness_as_of = normalize_utc_datetime(as_of or datetime.now(UTC))
+    age_days = max(0.0, (freshness_as_of - modified_at).total_seconds() / 86400)
     asset: dict[str, Any] = {
         "source_file": path.name,
         "source_path": _relative_or_absolute(path),
@@ -129,6 +140,8 @@ def inspect_asset(
         "size_bytes": stat.st_size,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "modified_at": modified_at.isoformat(),
+        "freshness_basis": freshness_basis,
+        "freshness_as_of": freshness_as_of.isoformat(),
         "age_days": round(age_days, 2),
         "stale": age_days > stale_after_days,
         "parse_status": "failed",
@@ -464,19 +477,37 @@ def build_summary(
         for item in assets
         if item["index_ready_status"] != "success"
     ]
-    hard_gates = {
+    required_hard_gates = {
         "asset_discovery": file_count > 0,
         "all_assets_parse": parsed == file_count and file_count > 0,
         "all_assets_split": split == file_count and file_count > 0,
         "all_assets_index_ready": index_ready == file_count and file_count > 0,
         "empty_chunk_rate_zero": empty == 0,
         "citation_metadata_complete": metadata_missing == 0,
-        "milvus_crud_consistent": milvus.get("status") == "passed",
-        "milvus_cleanup_complete": bool(milvus.get("collection_removed")),
     }
-    status = "passed" if all(hard_gates.values()) else "failed"
+    milvus_status = str(milvus.get("status") or "failed")
+    milvus_hard_gates = {
+        "milvus_crud_consistent": (
+            "not_applicable" if milvus_status == "not_run" else milvus_status == "passed"
+        ),
+        "milvus_cleanup_complete": (
+            "not_applicable"
+            if milvus_status == "not_run"
+            else bool(milvus.get("collection_removed"))
+        ),
+    }
+    hard_gates = {**required_hard_gates, **milvus_hard_gates}
+    local_status = "passed" if all(required_hard_gates.values()) else "failed"
+    status = (
+        "failed"
+        if local_status == "failed" or milvus_status == "failed"
+        else "passed"
+        if milvus_status == "passed"
+        else "passed_without_milvus"
+    )
     return {
         "status": status,
+        "local_asset_status": local_status,
         "asset_count": file_count,
         "file_type_counts": dict(sorted(by_type.items())),
         "parsed_file_count": parsed,
@@ -504,7 +535,8 @@ def build_summary(
         },
         "by_file_type": type_results,
         "metrics": metrics,
-        "milvus_status": milvus.get("status"),
+        "milvus_status": milvus_status,
+        "milvus_required": milvus_status != "not_run",
         "failed_assets": failed_assets,
         "hard_gates": hard_gates,
         "watch_metrics": {
@@ -705,6 +737,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--summary-md", default=str(DEFAULT_OUTPUT_MD))
     parser.add_argument("--stale-after-days", type=int, default=DEFAULT_STALE_AFTER_DAYS)
     parser.add_argument(
+        "--as-of",
+        help="ISO-8601 freshness reference time; defaults to the recorded run start.",
+    )
+    parser.add_argument(
         "--near-duplicate-threshold",
         type=float,
         default=DEFAULT_NEAR_DUPLICATE_THRESHOLD,
@@ -723,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
         near_duplicate_threshold=args.near_duplicate_threshold,
         overlong_chars=args.overlong_chars,
         verify_milvus=not args.skip_milvus,
+        as_of=parse_as_of(args.as_of),
     )
     write_outputs(payload, Path(args.summary_json), Path(args.summary_md))
     if args.json:
@@ -736,7 +773,45 @@ def main(argv: list[str] | None = None) -> int:
             f"chunks={summary['chunk_count']}; "
             f"milvus={summary['milvus_status']}"
         )
-    return 0 if payload["summary"]["status"] == "passed" else 1
+    return (
+        0
+        if payload["summary"]["status"] in {"passed", "passed_without_milvus"}
+        else 1
+    )
+
+
+def asset_modified_at(path: Path, *, fallback_mtime: float) -> tuple[datetime, str]:
+    """Return a checkout-stable content timestamp when Git history is available."""
+    try:
+        relative = path.resolve().relative_to(REPO_ROOT).as_posix()
+        completed = subprocess.run(
+            ["git", "log", "-1", "--format=%cI", "--", relative],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        value = completed.stdout.strip()
+        if completed.returncode == 0 and value:
+            return normalize_utc_datetime(datetime.fromisoformat(value)), "git_last_commit"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return datetime.fromtimestamp(fallback_mtime, tz=UTC), "filesystem_mtime_fallback"
+
+
+def parse_as_of(value: str | None) -> datetime | None:
+    """Parse an optional reproducibility timestamp."""
+    if not value:
+        return None
+    return normalize_utc_datetime(datetime.fromisoformat(value.replace("Z", "+00:00")))
+
+
+def normalize_utc_datetime(value: datetime) -> datetime:
+    """Normalize timestamps before freshness arithmetic."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 if __name__ == "__main__":

@@ -108,7 +108,10 @@ def run_baseline(
     modules = [run_module(spec, run_dir=run_dir, skip_milvus=skip_milvus) for spec in MODULES]
     passed_count = sum(1 for item in modules if item["status"] == "passed")
     missing_count = sum(1 for item in modules if item["status"] == "missing")
-    failed_count = sum(1 for item in modules if item["status"] == "failed")
+    incomplete_count = sum(1 for item in modules if item["status"] == "incomplete")
+    failed_count = sum(
+        1 for item in modules if item["status"] not in {"passed", "missing", "incomplete"}
+    )
     stale_count = sum(1 for item in modules if item["artifact_status"]["stale"])
     official_block_reasons = build_official_block_reasons(
         environment=environment,
@@ -137,6 +140,7 @@ def run_baseline(
         "passed_module_count": passed_count,
         "failed_module_count": failed_count,
         "missing_module_count": missing_count,
+        "incomplete_module_count": incomplete_count,
         "stale_module_count": stale_count,
         "metrics": {
             "module_pass_rate": proportion_metric(
@@ -266,8 +270,14 @@ def artifact_status(payload: dict[str, Any]) -> str:
     raw = str(summary.get("status") or "").lower()
     if raw in {"passed", "pass", "ready"}:
         return "passed"
-    if raw == "observed_not_accepted":
-        return "passed"
+    if raw in {
+        "passed_without_milvus",
+        "observed_not_accepted",
+        "retrieval_only_passed",
+        "incomplete",
+        "not_run",
+    }:
+        return "incomplete"
     if raw in {"failed", "fail", "not_ready"}:
         return "failed"
     if summary.get("all_passed") is True:

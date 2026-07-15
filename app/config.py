@@ -103,15 +103,19 @@ class Settings(BaseSettings):
     milvus_recreate_on_dimension_mismatch: bool = False
 
     # ---- RAG 检索与索引配置 ---------------------------------------------------
-    rag_top_k: int = 3
+    rag_top_k: int = Field(default=3, ge=1)
     rag_model: str = ""  # 为空时复用 DASHSCOPE_MODEL，避免两个模型配置互相漂移
-    rag_max_l2_distance: float = 2.0
-    rag_content_preview_chars: int = 240
+    rag_max_l2_distance: float = Field(default=2.0, ge=0)
+    rag_content_preview_chars: int = Field(default=240, ge=1)
     rag_hybrid_search_enabled: bool = True
-    rag_hybrid_candidate_multiplier: int = 4
+    rag_hybrid_candidate_multiplier: int = Field(default=4, ge=1)
     rag_rerank_enabled: bool = True
     rag_retrieval_fusion_strategy: str = "weighted"
-    rag_min_lexical_trust_score: float = 0.20
+    rag_min_lexical_trust_score: float = Field(default=0.20, ge=0)
+    rag_model_timeout_seconds: float = Field(default=60.0, gt=0)
+    rag_model_max_retries: int = Field(default=1, ge=0)
+    rag_model_retry_delay_seconds: float = Field(default=0.25, ge=0)
+    rag_stream_spool_max_memory_bytes: int = Field(default=1_048_576, ge=1)
 
     chunk_max_size: int = 800
     chunk_overlap: int = 100

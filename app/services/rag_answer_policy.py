@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from app.services.context_budget import DEFAULT_CONTEXT_BUDGETER, ContextBudgeter
 from app.services.rag_read_models import format_score
 from app.services.rag_retrieval_service import NO_TRUSTED_KNOWLEDGE
 
@@ -72,29 +73,94 @@ def build_grounded_system_prompt() -> str:
 
 def build_generation_context(retrieval_payload: dict[str, Any]) -> str:
     """Build a de-duplicated evidence block without changing retrieval results."""
+    evidence = build_generation_evidence(retrieval_payload)
+    if not evidence:
+        return ""
+    return "\n\n".join(
+        _format_evidence_block(
+            index,
+            source_file=str(item.get("source_file") or "未知来源").strip(),
+            chunk_id=str(item.get("chunk_id") or "unknown").strip(),
+            content=str(item.get("content") or item.get("content_preview") or "").strip(),
+        )
+        for index, item in enumerate(evidence, 1)
+    )
+
+
+def build_generation_evidence(
+    retrieval_payload: dict[str, Any],
+    *,
+    budgeter: ContextBudgeter | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Freeze the de-duplicated, budgeted evidence set used for generation."""
     results = retrieval_payload.get("retrieval_results") or []
     if not isinstance(results, list) or not results:
-        return str(retrieval_payload.get("content") or "").strip()
+        return []
 
-    evidence_blocks: list[str] = []
+    evidence: list[dict[str, Any]] = []
     seen_content: list[str] = []
     for item in results:
         if not isinstance(item, dict):
             continue
         content = str(item.get("content") or item.get("content_preview") or "").strip()
         normalized = normalize_evidence_text(content)
-        if not content or any(
-            evidence_texts_are_redundant(normalized, previous) for previous in seen_content
-        ):
+        if not content:
+            continue
+        redundant_index = next(
+            (
+                index
+                for index, previous in enumerate(seen_content)
+                if evidence_texts_are_redundant(normalized, previous)
+            ),
+            None,
+        )
+        if redundant_index is not None:
+            if len(normalized) <= len(seen_content[redundant_index]):
+                continue
+            seen_content[redundant_index] = normalized
+            evidence[redundant_index] = dict(item)
             continue
         seen_content.append(normalized)
+        evidence.append(dict(item))
+
+    active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
+    max_chars = active_budgeter.limit(limit)
+    selected: list[dict[str, Any]] = []
+    used_chars = 0
+    for item in evidence:
         source_file = str(item.get("source_file") or "未知来源").strip()
         chunk_id = str(item.get("chunk_id") or "unknown").strip()
-        evidence_blocks.append(
-            f"[证据 {len(evidence_blocks) + 1}: source_file={source_file}; "
-            f"chunk_id={chunk_id}]\n{content}"
+        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        separator_chars = 2 if selected else 0
+        header = _format_evidence_block(
+            len(selected) + 1,
+            source_file=source_file,
+            chunk_id=chunk_id,
+            content="",
         )
-    return "\n\n".join(evidence_blocks)
+        remaining = max_chars - used_chars - separator_chars
+        if remaining <= len(header):
+            break
+        if len(header) + len(content) <= remaining:
+            selected.append(dict(item))
+            used_chars += separator_chars + len(header) + len(content)
+            continue
+        if selected:
+            break
+        marker = active_budgeter.budget.truncation_marker
+        available_content = remaining - len(header)
+        if available_content <= len(marker):
+            break
+        truncated = f"{content[: available_content - len(marker)]}{marker}"
+        trimmed_item = dict(item)
+        if item.get("content"):
+            trimmed_item["content"] = truncated
+        else:
+            trimmed_item["content_preview"] = truncated
+        selected.append(trimmed_item)
+        break
+    return selected
 
 
 def normalize_evidence_text(content: str) -> str:
@@ -114,30 +180,55 @@ def evidence_texts_are_redundant(left: str, right: str) -> bool:
     return shorter in longer and len(shorter) / len(longer) >= 0.65
 
 
+def _format_evidence_block(
+    index: int,
+    *,
+    source_file: str,
+    chunk_id: str,
+    content: str,
+) -> str:
+    return f"[证据 {index}: source_file={source_file}; chunk_id={chunk_id}]\n" f"{content}"
+
+
 def select_supporting_citations(
     answer: str,
     citations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep only unique citations explicitly used by the generated answer."""
-    answer_text = str(answer or "")
-    selected = [
-        item
-        for item in citations
-        if str(item.get("chunk_id") or "").strip()
-        and str(item.get("chunk_id") or "").strip() in answer_text
-    ]
+    """Keep exact allowlisted source/chunk pairs and reject any fabricated pair."""
+    allowed: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in citations:
+        source_file = str(item.get("source_file") or "").strip()
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        if source_file and chunk_id:
+            allowed.setdefault((source_file, chunk_id), item)
+
+    cited_pairs = extract_citation_pairs(answer)
+    if not cited_pairs or any(pair not in allowed for pair in cited_pairs):
+        return []
+
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for item in selected:
-        key = (
-            str(item.get("source_file") or "").strip(),
-            str(item.get("chunk_id") or "").strip(),
-        )
-        if key in seen:
+    for pair in cited_pairs:
+        if pair in seen:
             continue
-        seen.add(key)
-        unique.append(item)
+        seen.add(pair)
+        unique.append(allowed[pair])
     return unique
+
+
+def extract_citation_pairs(answer: str) -> list[tuple[str, str]]:
+    """Parse strict ``[source_file | chunk_id]`` references from an answer."""
+    pairs: list[tuple[str, str]] = []
+    for raw_reference in re.findall(r"\[([^\[\]\r\n]+)\]", str(answer or "")):
+        if "|" not in raw_reference and "#" not in raw_reference:
+            continue
+        if raw_reference.count("|") != 1:
+            return []
+        source_file, chunk_id = (part.strip() for part in raw_reference.split("|", 1))
+        if not source_file or not chunk_id:
+            return []
+        pairs.append((source_file, chunk_id))
+    return pairs
 
 
 def is_explicit_knowledge_refusal(answer: str) -> bool:
@@ -219,13 +310,15 @@ def build_citation_guard_payload(retrieval_payload: dict[str, Any]) -> dict[str,
 
 
 def has_valid_citations(citations: list[dict[str, Any]]) -> bool:
-    """Require at least one source_file + chunk_id citation before answering."""
+    """Require every supplied citation to include a stable source and chunk identity."""
+    if not citations:
+        return False
     for item in citations:
         source_file = str(item.get("source_file") or "").strip()
         chunk_id = str(item.get("chunk_id") or "").strip()
-        if source_file and source_file != "未知来源" and chunk_id:
-            return True
-    return False
+        if not source_file or source_file == "未知来源" or not chunk_id:
+            return False
+    return True
 
 
 def ensure_citation_block(answer: str, citations: list[dict[str, Any]]) -> str:
@@ -234,11 +327,12 @@ def ensure_citation_block(answer: str, citations: list[dict[str, Any]]) -> str:
     if not citations:
         return clean_answer
 
+    cited_pairs = set(extract_citation_pairs(clean_answer))
     missing = []
     for item in citations:
         source_file = str(item.get("source_file") or "未知来源")
         chunk_id = str(item.get("chunk_id") or "unknown")
-        if source_file not in clean_answer or chunk_id not in clean_answer:
+        if (source_file, chunk_id) not in cited_pairs:
             missing.append((source_file, chunk_id, item.get("score"), item))
 
     if not missing:
@@ -248,11 +342,11 @@ def ensure_citation_block(answer: str, citations: list[dict[str, Any]]) -> str:
     for source_file, chunk_id, score, item in missing:
         score_text = format_score(score)
         locator_parts = [f"source_file: {source_file}", f"chunk_id: {chunk_id}"]
-        if item.get("page_number"):
+        if item.get("page_number") is not None:
             locator_parts.append(f"page_number: {item.get('page_number')}")
         if item.get("sheet_name"):
             locator_parts.append(f"sheet_name: {item.get('sheet_name')}")
-        if item.get("row_number"):
+        if item.get("row_number") is not None:
             locator_parts.append(f"row_number: {item.get('row_number')}")
         if item.get("primary_key"):
             locator_parts.append(f"primary_key: {item.get('primary_key')}")

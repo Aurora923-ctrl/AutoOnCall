@@ -2265,7 +2265,8 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"forbidden={categories['risk']['forbidden_action_block_rate']:.0%}, "
             f"stability={categories['stability']['tool_failure_graceful_degradation_rate']:.0%}, "
             f"RAG recall@{categories['rag']['top_k']}={categories['rag']['recall_at_k']:.0%}, "
-            f"RAG cite={categories['rag']['citation_coverage_rate']:.0%}, "
+            "RAG retrieval citation metadata="
+            f"{categories['rag']['citation_coverage_rate']:.0%}, "
             f"RAG confusion={categories['rag']['confusion_case_pass_rate']:.0%}, "
             f"RAG reject={categories['rag']['no_answer_rejection_rate']:.0%}"
         ),
@@ -2425,7 +2426,10 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
                 f"- recall@1：{rag.get('recall_at_1', 0.0):.0%}",
                 f"- recall@{rag.get('top_k', 0)}：{rag.get('recall_at_k', 0.0):.0%}",
                 f"- MRR：{rag.get('mrr', 0.0):.2f}",
-                f"- citation coverage：{rag.get('citation_coverage_rate', 0.0):.0%}",
+                (
+                    "- retrieval citation metadata coverage："
+                    f"{rag.get('citation_coverage_rate', 0.0):.0%}"
+                ),
                 f"- confusion case pass：{rag.get('confusion_case_pass_rate', 0.0):.0%}",
                 f"- no-answer rejection：{rag.get('no_answer_rejection_rate', 0.0):.0%}",
             ]

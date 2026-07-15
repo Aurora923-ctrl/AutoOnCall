@@ -270,6 +270,16 @@ def collect_config_summary() -> dict[str, Any]:
         "rag_retrieval_fusion_strategy": config.rag_retrieval_fusion_strategy,
         "rag_max_l2_distance": config.rag_max_l2_distance,
         "rag_min_lexical_trust_score": config.rag_min_lexical_trust_score,
+        "rag_model_timeout_seconds": config.rag_model_timeout_seconds,
+        "rag_model_max_retries": config.rag_model_max_retries,
+        "rag_model_retry_delay_seconds": config.rag_model_retry_delay_seconds,
+        "ragas_eval_model": config.effective_ragas_eval_model,
+        "ragas_eval_embedding_model": config.effective_ragas_eval_embedding_model,
+        "ragas_min_faithfulness": config.ragas_min_faithfulness,
+        "ragas_min_response_relevancy": config.ragas_min_response_relevancy,
+        "ragas_min_id_context_precision": config.ragas_min_id_context_precision,
+        "ragas_min_id_context_recall": config.ragas_min_id_context_recall,
+        "ragas_min_oncall_actionability": config.ragas_min_oncall_actionability,
         "chunk_max_size": config.chunk_max_size,
         "chunk_overlap": config.chunk_overlap,
         "index_allowed_roots": config.index_allowed_roots,
@@ -309,13 +319,19 @@ def build_eval_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def assess_eval_artifact_staleness(run: dict[str, Any] | None) -> dict[str, Any]:
+def assess_eval_artifact_staleness(
+    run: dict[str, Any] | None,
+    *,
+    current_environment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Compare an artifact's provenance with the current repository state."""
     payload = run if isinstance(run, dict) else {}
     environment = payload.get("environment")
     if not isinstance(environment, dict):
         environment = payload
-    current = collect_eval_environment(suite=str(environment.get("suite") or "artifact_check"))
+    current = current_environment or collect_eval_environment(
+        suite=str(environment.get("suite") or "artifact_check")
+    )
     generated_fingerprint = str(environment.get("evaluation_fingerprint") or "")
     reasons: list[str] = []
     if not generated_fingerprint:

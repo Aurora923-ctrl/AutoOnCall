@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import assess_eval_artifact_staleness, collect_eval_environment
 
 DEFAULT_JSON = REPO_ROOT / "logs" / "rag_scorecard_candidate.json"
 DEFAULT_MD = REPO_ROOT / "logs" / "rag_scorecard_candidate.md"
@@ -43,8 +43,81 @@ def artifact_ref(path: Path) -> dict[str, Any]:
     }
 
 
+def artifact_validation(
+    name: str,
+    payload: dict[str, Any],
+    *,
+    current_environment: dict[str, Any],
+) -> dict[str, Any]:
+    run = payload.get("run")
+    run = run if isinstance(run, dict) else {}
+    environment = run.get("environment")
+    environment = environment if isinstance(environment, dict) else {}
+    stale = assess_eval_artifact_staleness(run, current_environment=current_environment)
+    return {
+        "name": name,
+        "summary_status": str(payload.get("summary", {}).get("status") or "missing"),
+        "stale": stale["stale"],
+        "stale_reasons": stale["reasons"],
+        "provenance": {
+            key: environment.get(key)
+            for key in (
+                "git_commit",
+                "git_worktree_sha256",
+                "asset_manifest_sha256",
+                "config_sha256",
+                "dependency_manifest_sha256",
+                "prompt_manifest_sha256",
+            )
+        },
+    }
+
+
+def layer_status(
+    *validations: dict[str, Any],
+    accepted_statuses: set[str] | None = None,
+) -> str:
+    if any(item["stale"] for item in validations):
+        return "stale"
+    accepted = accepted_statuses or {"passed"}
+    return (
+        "passed"
+        if all(item["summary_status"] in accepted for item in validations)
+        else "failed"
+    )
+
+
+def provenance_signature(validation: dict[str, Any]) -> str:
+    return json.dumps(validation.get("provenance", {}), sort_keys=True, separators=(",", ":"))
+
+
+def failed_case_ids(payload: dict[str, Any]) -> list[str]:
+    failed = payload.get("summary", {}).get("failed_cases", [])
+    if not isinstance(failed, list):
+        return []
+    case_ids = []
+    for item in failed:
+        case_id = str(item.get("id") or "") if isinstance(item, dict) else str(item)
+        if case_id.strip():
+            case_ids.append(case_id)
+    return case_ids
+
+
 def build_scorecard() -> dict[str, Any]:
     payloads = {name: read_json(path) for name, path in ARTIFACTS.items()}
+    current_environment = collect_eval_environment(suite="rag_scorecard")
+    validations = {
+        name: artifact_validation(
+            name,
+            payload,
+            current_environment=current_environment,
+        )
+        for name, payload in payloads.items()
+    }
+    provenance_signatures = {
+        provenance_signature(item) for item in validations.values()
+    }
+    mixed_provenance = len(provenance_signatures) != 1
     offline = payloads["offline_retrieval"]
     retrieval = payloads["runtime_retrieval"]
     fixed = payloads["fixed_context_generation"]
@@ -62,20 +135,45 @@ def build_scorecard() -> dict[str, Any]:
         "output_tokens": sum(int(row.get("output_tokens") or 0) for row in token_rows),
         "total_tokens": sum(int(row.get("total_tokens") or 0) for row in token_rows),
     }
+    deterministic_status = layer_status(
+        validations["offline_retrieval"],
+        validations["runtime_retrieval"],
+        accepted_statuses={"passed", "retrieval_only_passed"},
+    )
+    fixed_generation_executed = fixed.get("run", {}).get("answer_generation_executed") is True
+    fixed_status = layer_status(validations["fixed_context_generation"])
+    if not fixed_generation_executed:
+        fixed_status = "not_run"
+    runtime_status = layer_status(
+        validations["runtime_id_smoke"],
+        validations["runtime_demo"],
+        validations["demo_chain"],
+        validations["api_contract"],
+    )
+    blockers = []
+    if mixed_provenance:
+        blockers.append("mixed_artifact_provenance")
+    if any(item["stale"] for item in validations.values()):
+        blockers.append("stale_artifacts")
+    if any(status != "passed" for status in (deterministic_status, fixed_status, runtime_status)):
+        blockers.append("layer_not_passed")
+    scorecard_status = "passed" if not blockers else "invalid"
+    runtime_failed_cases = failed_case_ids(runtime)
+    fixed_generation_mode = str(fixed.get("run", {}).get("answer_generation_mode") or "unknown")
     return {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
-        "status": "candidate",
+        "status": scorecard_status,
         "official": False,
-        "official_blockers": ["dirty_worktree"],
+        "official_blockers": blockers or ["candidate_only"],
         "scope": (
             "RAG evidence separated into deterministic retrieval, fixed-context generation, "
             "and runtime end-to-end layers."
         ),
-        "environment": collect_eval_environment(suite="rag_scorecard"),
+        "environment": current_environment,
         "layers": {
             "deterministic_retrieval": {
-                "status": "passed",
+                "status": deterministic_status,
                 "offline_regression": {
                     "cases": (
                         f"{offline['summary']['passed_count']}/{offline['summary']['case_count']}"
@@ -83,10 +181,15 @@ def build_scorecard() -> dict[str, Any]:
                     "recall_at_3": offline["summary"]["recall_at_3"],
                     "mrr": offline["summary"]["mrr"],
                     "ndcg_at_3": offline["summary"]["ndcg_at_3"],
-                    "citation_coverage": offline["summary"]["citation_coverage_rate"],
+                    "retrieval_citation_metadata_coverage": offline["summary"][
+                        "citation_coverage_rate"
+                    ],
                     "refusal_precision": offline["summary"]["no_answer_rejection_precision"],
                     "refusal_recall": offline["summary"]["no_answer_rejection_recall"],
-                    "evidence_boundary": "historical dirty-worktree regression candidate",
+                    "evidence_boundary": (
+                        "offline retrieval regression; provenance and staleness are reported "
+                        "in artifact_validation"
+                    ),
                 },
                 "runtime_frozen_retrieval": {
                     "cases": (
@@ -102,7 +205,7 @@ def build_scorecard() -> dict[str, Any]:
                 },
             },
             "fixed_context_generation": {
-                "status": fixed["summary"]["status"],
+                "status": fixed_status,
                 "cases": f"{fixed['summary']['passed_count']}/{fixed['summary']['case_count']}",
                 "repeat_count": fixed["run"]["repeat_count"],
                 "faithfulness": fixed["summary"]["faithfulness_avg"],
@@ -112,11 +215,12 @@ def build_scorecard() -> dict[str, Any]:
                 "oncall_actionability": fixed["summary"]["oncall_actionability_avg"],
                 "refusal_boundary": fixed["summary"]["refusal_boundary_rate"],
                 "evidence_boundary": (
-                    "real qwen-max generation on fixed contexts; failed quality contract"
+                    f"generation mode={fixed_generation_mode}; "
+                    f"answer_generation_executed={fixed_generation_executed}"
                 ),
             },
             "runtime_end_to_end": {
-                "status": runtime["summary"]["status"],
+                "status": runtime_status,
                 "id_smoke_cases": (
                     f"{runtime['summary']['passed_count']}/{runtime['summary']['case_count']}"
                 ),
@@ -144,14 +248,12 @@ def build_scorecard() -> dict[str, Any]:
                     f"{api_contract['summary']['passed_check_count']}/"
                     f"{api_contract['summary']['check_count']}"
                 ),
-                "known_failures": [
-                    "Full id-smoke contract is 9/12; Disk, MySQL, and Kubernetes miss "
-                    "deterministic actionability rubric items.",
-                    "CPU remains the explainable context-completeness failure.",
-                ],
+                "known_failures": runtime_failed_cases,
             },
         },
         "artifacts": {name: artifact_ref(path) for name, path in ARTIFACTS.items()},
+        "artifact_validation": validations,
+        "single_provenance_valid": not mixed_provenance,
     }
 
 
@@ -165,25 +267,25 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "# AutoOnCall RAG Scorecard",
         "",
         f"- Status: `{payload['status']}`; official: `{payload['official']}`",
-        "- Boundary: dirty worktree, so every result on this page is a candidate.",
+        f"- Blockers: `{', '.join(payload['official_blockers'])}`",
         "",
         "| Layer | Result | Key evidence |",
         "| --- | --- | --- |",
         (
-            "| Deterministic retrieval | PASS | "
+            f"| Deterministic retrieval | {retrieval['status'].upper()} | "
             f"offline `{retrieval['offline_regression']['cases']}`, "
             f"Recall@3 `{retrieval['offline_regression']['recall_at_3']:.4f}`, "
             f"MRR `{retrieval['offline_regression']['mrr']:.4f}`; "
             f"runtime frozen `{retrieval['runtime_frozen_retrieval']['cases']}` |"
         ),
         (
-            "| Fixed-context generation | FAIL candidate | "
+            f"| Fixed-context generation | {fixed['status'].upper()} | "
             f"`{fixed['cases']}` contract pass, Faithfulness `{fixed['faithfulness']:.4f}`, "
             f"Relevancy `{fixed['response_relevancy']:.4f}`, "
             f"ID recall `{fixed['id_context_recall']:.4f}` |"
         ),
         (
-            "| Runtime end-to-end | FAIL full contract / PASS frozen demo | "
+            f"| Runtime end-to-end | {runtime['status'].upper()} | "
             f"id-smoke `{runtime['id_smoke_cases']}`, ID recall "
             f"`{runtime['id_context_recall']:.4f}`, OOD `{runtime['refusal_boundary']:.0%}`; "
             f"frozen demo `{runtime['frozen_demo_cases']}` |"
@@ -236,7 +338,7 @@ def main() -> int:
     )
     Path(args.summary_md).write_text(render_markdown(payload), encoding="utf-8")
     print(render_markdown(payload))
-    return 0
+    return 0 if payload["status"] == "passed" else 1
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@
 提供基于 RAG Agent 的普通对话和流式对话接口
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -67,14 +69,15 @@ async def chat(request: ChatRequest):
                 "answer": chat_payload.get("answer", ""),
                 "citations": chat_payload.get("citations", []),
                 "retrieval": chat_payload.get("retrieval", {}),
+                "observability": chat_payload.get("observability", {}),
                 "noAnswer": chat_payload.get("no_answer", False),
                 "answerPolicy": chat_payload.get("answer_policy", ""),
                 "errorMessage": None,
             },
         }
 
-    except Exception as e:
-        logger.exception(f"对话接口错误: {e}")
+    except Exception as exc:
+        logger.error("对话接口错误: error_type={}", type(exc).__name__)
         return JSONResponse(
             status_code=500,
             content={
@@ -120,6 +123,7 @@ async def chat_stream(request: ChatRequest):
     )
 
     async def event_generator():
+        terminal_sent = False
         try:
             async for chunk in rag_agent_service.query_stream_with_retrieval(
                 request.question,
@@ -146,14 +150,25 @@ async def chat_stream(request: ChatRequest):
                     yield sse_message({"type": "content", "data": chunk_data})
                 elif chunk_type == "complete":
                     yield sse_message({"type": "done", "data": chunk_data})
+                    terminal_sent = True
+                    return
                 elif chunk_type == "error":
-                    yield sse_message({"type": "error", "data": str(chunk_data)})
+                    yield sse_message({"type": "error", "data": PUBLIC_CHAT_STREAM_ERROR_MESSAGE})
+                    terminal_sent = True
+                    return
+
+            if not terminal_sent:
+                yield sse_message({"type": "error", "data": PUBLIC_CHAT_STREAM_ERROR_MESSAGE})
+                terminal_sent = True
 
             logger.info(f"[会话 {session_id}] 流式对话完成")
-
-        except Exception as e:
-            logger.exception(f"流式对话接口错误: {e}")
-            yield sse_message({"type": "error", "data": PUBLIC_CHAT_STREAM_ERROR_MESSAGE})
+        except asyncio.CancelledError:
+            logger.info(f"[会话 {session_id}] 流式对话客户端已断开")
+            raise
+        except Exception as exc:
+            logger.error("流式对话接口错误: error_type={}", type(exc).__name__)
+            if not terminal_sent:
+                yield sse_message({"type": "error", "data": PUBLIC_CHAT_STREAM_ERROR_MESSAGE})
 
     return EventSourceResponse(event_generator())
 
@@ -173,7 +188,7 @@ async def clear_session(request: ClearRequest):
         操作结果
     """
     try:
-        success = rag_agent_service.clear_session(request.session_id)
+        success = await rag_agent_service.clear_session(request.session_id)
         logger.info(f"清空会话: {sanitize_log_value(request.session_id)}, 结果: {success}")
 
         return ApiResponse(
@@ -182,9 +197,9 @@ async def clear_session(request: ClearRequest):
             data=None,
         )
 
-    except Exception as e:
-        logger.exception(f"清空会话错误: {e}")
-        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from e
+    except Exception as exc:
+        logger.error("清空会话错误: error_type={}", type(exc).__name__)
+        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from exc
 
 
 @router.get(
@@ -204,14 +219,16 @@ async def get_session_info(
         会话信息
     """
     try:
-        history = rag_agent_service.get_session_history(session_id)
+        history = await rag_agent_service.get_session_history(session_id)
 
         return SessionInfoResponse(
             session_id=session_id, message_count=len(history), history=history
         )
 
-    except Exception as e:
-        logger.exception(
-            f"获取会话信息错误: session_id={sanitize_log_value(session_id)}, error={e}"
+    except Exception as exc:
+        logger.error(
+            "获取会话信息错误: session_id={}, error_type={}",
+            sanitize_log_value(session_id),
+            type(exc).__name__,
         )
-        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from e
+        raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from exc

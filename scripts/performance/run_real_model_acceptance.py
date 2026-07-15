@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import time
@@ -13,9 +14,14 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import yaml
+
+from scripts.eval.eval_environment import collect_eval_environment
 
 DEFAULT_RAG_REQUESTS = 20
 DEFAULT_AIOPS_REQUESTS = 10
+DEFAULT_RAG_CASES_PATH = Path("eval/rag_demo_frozen_cases_20260713.yaml")
+ACCEPTED_AIOPS_TERMINAL_STATUSES = {"completed"}
 
 
 async def run_acceptance(
@@ -24,17 +30,27 @@ async def run_acceptance(
     rag_requests: int,
     aiops_requests: int,
     concurrency: int,
+    rag_cases_path: str | Path = DEFAULT_RAG_CASES_PATH,
 ) -> dict[str, Any]:
     """Execute real RAG and AIOps requests and retain request-level evidence."""
+    if rag_requests < 0 or aiops_requests < 0:
+        raise ValueError("request counts must be non-negative")
     run_id = f"stage6-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     semaphore = asyncio.Semaphore(max(1, concurrency))
     timeout = httpx.Timeout(240.0)
     limits = httpx.Limits(max_connections=max(2, concurrency))
+    rag_cases = load_rag_acceptance_cases(rag_cases_path) if rag_requests else []
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         tasks = [
             _bounded(
                 semaphore,
-                _run_rag(client, base_url=base_url, run_id=run_id, index=index),
+                _run_rag(
+                    client,
+                    base_url=base_url,
+                    run_id=run_id,
+                    index=index,
+                    case=rag_cases[index % len(rag_cases)],
+                ),
             )
             for index in range(rag_requests)
         ]
@@ -50,6 +66,19 @@ async def run_acceptance(
     rag = [item for item in requests if item["request_kind"] == "rag"]
     aiops = [item for item in requests if item["request_kind"] == "aiops"]
     failures = [item for item in requests if not item["passed"]]
+    status = acceptance_run_status(
+        requests,
+        rag_requests=rag_requests,
+        aiops_requests=aiops_requests,
+        semantic_claims_unverified=any(
+            case["required_claims"] or case["forbidden_claims"] for case in rag_cases
+        ),
+    )
+    semantic_claim_case_ids = [
+        case["id"]
+        for case in rag_cases
+        if case["required_claims"] or case["forbidden_claims"]
+    ]
     return {
         "run": {
             "run_id": run_id,
@@ -58,14 +87,35 @@ async def run_acceptance(
             "evidence_level": "local_live",
             "model_requests_enabled": True,
             "concurrency": max(1, concurrency),
+            "rag_cases_path": str(Path(rag_cases_path)),
+            "rag_case_set_sha256": (
+                hashlib.sha256(Path(rag_cases_path).read_bytes()).hexdigest()
+                if rag_requests
+                else ""
+            ),
+            "rag_case_ids": [case["id"] for case in rag_cases],
+            "environment": collect_eval_environment(
+                suite="real_model_acceptance",
+                evidence_level="local_live",
+            ),
         },
         "summary": {
-            "status": "passed" if not failures else "failed",
+            "status": status,
             "request_count": len(requests),
             "passed_count": len(requests) - len(failures),
             "failure_count": len(failures),
             "rag": _request_summary(rag, required=rag_requests),
             "aiops": _request_summary(aiops, required=aiops_requests),
+            "semantic_claim_validation": {
+                "status": "not_run" if semantic_claim_case_ids else "not_required",
+                "case_ids": semantic_claim_case_ids,
+                "reason": (
+                    "Required and forbidden natural-language claims need a bound Judge or "
+                    "human review. Citation and approved-chunk checks do not prove entailment."
+                    if semantic_claim_case_ids
+                    else ""
+                ),
+            },
             "token_usage": {
                 "status": "not_observed",
                 "reason": (
@@ -93,6 +143,7 @@ async def _run_rag(
     base_url: str,
     run_id: str,
     index: int,
+    case: dict[str, Any],
 ) -> dict[str, Any]:
     request_id = f"{run_id}-rag-{index:02d}-{uuid4().hex[:6]}"
     started = time.perf_counter()
@@ -101,21 +152,50 @@ async def _run_rag(
             f"{base_url}/api/chat",
             json={
                 "Id": request_id,
-                "Question": (
-                    "How should Redis maxclients saturation be diagnosed with evidence, "
-                    "approval, dry-run, and rollback boundaries?"
-                ),
+                "Question": case["query"],
             },
         )
         payload = response.json()
-        success = response.status_code == 200 and bool(payload.get("data", {}).get("success"))
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        validation_errors = validate_rag_response(data, case)
+        success = (
+            response.status_code == 200
+            and bool(data.get("success"))
+            and not validation_errors
+        )
         return _request_result(
             request_id=request_id,
             request_kind="rag",
             status_code=response.status_code,
             passed=success,
             started=started,
-            error="" if success else str(payload.get("message") or "RAG request failed"),
+            error=(
+                ""
+                if success
+                else "; ".join(validation_errors)
+                or str(payload.get("message") or "RAG request failed")
+            ),
+            details={
+                "case_id": case["id"],
+                "answer_policy": str(data.get("answerPolicy") or ""),
+                "no_answer": bool(data.get("noAnswer")),
+                "cited_sources": sorted(
+                    {
+                        str(item.get("source_file") or "")
+                        for item in data.get("citations", [])
+                        if isinstance(item, dict) and str(item.get("source_file") or "")
+                    }
+                ),
+                "retrieval_status": str((data.get("retrieval") or {}).get("status") or ""),
+                "retrieval_mode": str(
+                    (data.get("retrieval") or {}).get("retrieval_mode") or ""
+                ),
+                "runtime_model": str(
+                    (data.get("observability") or {}).get("runtime", {}).get("llm_model")
+                    or ""
+                ),
+            },
         )
     except Exception as exc:
         return _request_result(
@@ -125,6 +205,7 @@ async def _run_rag(
             passed=False,
             started=started,
             error=f"{type(exc).__name__}: {exc}",
+            details={"case_id": case["id"]},
         )
 
 
@@ -154,6 +235,8 @@ async def _run_aiops(
     }
     started = time.perf_counter()
     completed = False
+    terminal_status = ""
+    validation_error = ""
     status_code = 0
     try:
         async with client.stream(
@@ -164,16 +247,36 @@ async def _run_aiops(
         ) as response:
             status_code = response.status_code
             async for line in response.aiter_lines():
-                if '"type":"complete"' in line or '"type": "complete"' in line:
-                    completed = True
+                event = _parse_sse_event(line)
+                if event.get("type") == "error":
+                    validation_error = str(event.get("message") or "AIOps stream emitted error")
                     break
+                if event.get("type") == "complete":
+                    completed = True
+                    terminal_status = str(event.get("status") or "")
+                    break
+        passed = (
+            status_code == 200
+            and completed
+            and terminal_status in ACCEPTED_AIOPS_TERMINAL_STATUSES
+        )
         return _request_result(
             request_id=request_id,
             request_kind="aiops",
             status_code=status_code,
-            passed=status_code == 200 and completed,
+            passed=passed,
             started=started,
-            error="" if completed else "SSE stream ended without a complete event",
+            error=(
+                ""
+                if passed
+                else validation_error
+                or (
+                    f"unaccepted AIOps terminal status: {terminal_status or 'missing'}"
+                    if completed
+                    else "SSE stream ended without a complete event"
+                )
+            ),
+            details={"terminal_status": terminal_status},
         )
     except Exception as exc:
         return _request_result(
@@ -183,6 +286,7 @@ async def _run_aiops(
             passed=False,
             started=started,
             error=f"{type(exc).__name__}: {exc}",
+            details={"terminal_status": terminal_status},
         )
 
 
@@ -194,6 +298,7 @@ def _request_result(
     passed: bool,
     started: float,
     error: str,
+    details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -203,6 +308,7 @@ def _request_result(
         "passed": passed,
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "error": error,
+        "details": details or {},
     }
 
 
@@ -214,7 +320,9 @@ def _request_summary(requests: list[dict[str, Any]], *, required: int) -> dict[s
         "observed": len(requests),
         "passed": len(passed),
         "failed": len(requests) - len(passed),
-        "acceptance_status": "met" if len(passed) >= required else "not_met",
+        "acceptance_status": (
+            "not_run" if required == 0 else "met" if len(passed) >= required else "not_met"
+        ),
         "latency_ms": {
             "count": len(latencies),
             "p50": _percentile(latencies, 0.50),
@@ -225,11 +333,171 @@ def _request_summary(requests: list[dict[str, Any]], *, required: int) -> dict[s
     }
 
 
+def acceptance_run_status(
+    requests: list[dict[str, Any]],
+    *,
+    rag_requests: int,
+    aiops_requests: int,
+    semantic_claims_unverified: bool = False,
+) -> str:
+    if any(not item["passed"] for item in requests):
+        return "failed"
+    if not requests:
+        return "not_run"
+    if rag_requests == 0 or aiops_requests == 0:
+        return "incomplete"
+    if semantic_claims_unverified:
+        return "incomplete"
+    return "passed"
+
+
 def _percentile(values: list[float], quantile: float) -> float:
     if not values:
         return 0.0
     index = max(0, min(len(values) - 1, math.ceil(len(values) * quantile) - 1))
     return round(values[index], 2)
+
+
+def load_rag_acceptance_cases(path: str | Path) -> list[dict[str, Any]]:
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    raw_cases = payload.get("cases", []) if isinstance(payload, dict) else []
+    if not raw_cases and isinstance(payload, dict):
+        standby = payload.get("standby_cases")
+        raw_cases = standby if isinstance(standby, list) else []
+    cases = []
+    case_ids: set[str] = set()
+    for item in raw_cases:
+        if not isinstance(item, dict) or not str(item.get("query") or "").strip():
+            continue
+        acceptance = item.get("acceptance")
+        acceptance = acceptance if isinstance(acceptance, dict) else {}
+        case = {
+            "id": str(item.get("id") or f"case-{len(cases) + 1}"),
+            "query": str(item["query"]).strip(),
+            "should_reject": bool(item.get("should_reject")),
+            "required_sources": _string_list(item.get("required_sources")),
+            "approved_chunk_ids": _string_list(item.get("approved_chunk_ids")),
+            "answer_policy": str(acceptance.get("answer_policy") or ""),
+            "citations_must_be_empty": bool(acceptance.get("citations_must_be_empty")),
+            "required_claims": _string_list(acceptance.get("required_claims")),
+            "forbidden_claims": _string_list(acceptance.get("forbidden_claims")),
+        }
+        if case["id"] in case_ids:
+            raise ValueError(f"Duplicate real-model RAG acceptance case id: {case['id']}")
+        case_ids.add(case["id"])
+        _validate_rag_acceptance_case(case)
+        cases.append(case)
+    if not cases:
+        raise ValueError(f"No real-model RAG acceptance cases found in {path}")
+    return cases
+
+
+def _validate_rag_acceptance_case(case: dict[str, Any]) -> None:
+    if case["should_reject"]:
+        if case["answer_policy"] != "refuse_without_trusted_source":
+            raise ValueError(f"Refusal case {case['id']} lacks the refusal answer policy")
+        if not case["citations_must_be_empty"]:
+            raise ValueError(f"Refusal case {case['id']} must require empty citations")
+        return
+    if not case["required_sources"]:
+        raise ValueError(f"Positive case {case['id']} lacks required_sources")
+    if not case["approved_chunk_ids"]:
+        raise ValueError(f"Positive case {case['id']} lacks approved_chunk_ids")
+    if case["answer_policy"] != "answer_with_citations":
+        raise ValueError(f"Positive case {case['id']} lacks the cited-answer policy")
+
+
+def validate_rag_response(data: dict[str, Any], case: dict[str, Any]) -> list[str]:
+    errors = []
+    no_answer = bool(data.get("noAnswer"))
+    answer_policy = str(data.get("answerPolicy") or "")
+    answer = str(data.get("answer") or "")
+    citations = data.get("citations")
+    citation_items = citations if isinstance(citations, list) else []
+    valid_citations = [
+        item
+        for item in citation_items
+        if isinstance(item, dict)
+        and str(item.get("source_file") or "").strip()
+        and str(item.get("chunk_id") or "").strip()
+    ]
+    retrieval = data.get("retrieval")
+    retrieval = retrieval if isinstance(retrieval, dict) else {}
+    retrieval_mode = str(retrieval.get("retrieval_mode") or "")
+    if not retrieval_mode or "offline" in retrieval_mode or "fixture" in retrieval_mode:
+        errors.append("retrieval mode does not prove a runtime retrieval")
+    if case["should_reject"]:
+        if not no_answer:
+            errors.append("expected refusal but noAnswer=false")
+        if answer_policy != case["answer_policy"]:
+            errors.append("refusal answerPolicy mismatch")
+        if case["citations_must_be_empty"] and valid_citations:
+            errors.append("refusal returned citations")
+        return errors
+
+    if no_answer:
+        errors.append("positive case was refused")
+    if answer_policy != case["answer_policy"]:
+        errors.append("positive answerPolicy mismatch")
+    if not answer.strip():
+        errors.append("answer is empty")
+    if retrieval.get("status") != "success":
+        errors.append("retrieval status is not success")
+    cited_sources = {str(item.get("source_file") or "") for item in valid_citations}
+    cited_chunks = {str(item.get("chunk_id") or "") for item in valid_citations}
+    mismatched_citations = [
+        item
+        for item in valid_citations
+        if str(item.get("chunk_id") or "").split("#", 1)[0]
+        != str(item.get("source_file") or "")
+    ]
+    if mismatched_citations:
+        errors.append("citation source_file and chunk_id source do not match")
+    missing_sources = set(case["required_sources"]) - cited_sources
+    if missing_sources:
+        errors.append(f"missing required citation sources: {sorted(missing_sources)}")
+    approved_chunks = set(case["approved_chunk_ids"])
+    missing_approved_sources = [
+        source
+        for source in case["required_sources"]
+        if not any(
+            chunk_id in approved_chunks and chunk_id.split("#", 1)[0] == source
+            for chunk_id in cited_chunks
+        )
+    ]
+    if missing_approved_sources:
+        errors.append(
+            "required sources lack approved cited chunks: "
+            f"{sorted(missing_approved_sources)}"
+        )
+    observability = data.get("observability")
+    observability = observability if isinstance(observability, dict) else {}
+    runtime = observability.get("runtime")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    if not str(runtime.get("llm_model") or "").strip():
+        errors.append("runtime LLM model evidence is missing")
+    return errors
+
+
+def _parse_sse_event(line: str) -> dict[str, Any]:
+    value = str(line or "").strip()
+    if not value.startswith("data:"):
+        return {}
+    try:
+        payload = json.loads(value.removeprefix("data:").strip())
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list | tuple | set):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
 
 
 def write_outputs(payload: dict[str, Any], *, json_path: Path, md_path: Path) -> None:
@@ -274,6 +542,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rag-requests", type=int, default=DEFAULT_RAG_REQUESTS)
     parser.add_argument("--aiops-requests", type=int, default=DEFAULT_AIOPS_REQUESTS)
     parser.add_argument("--concurrency", type=int, default=5)
+    parser.add_argument("--rag-cases", default=str(DEFAULT_RAG_CASES_PATH))
     parser.add_argument("--summary-json", default="logs/performance_real_model.json")
     parser.add_argument("--summary-md", default="logs/performance_real_model.md")
     return parser.parse_args()
@@ -287,6 +556,7 @@ def main() -> int:
             rag_requests=max(0, args.rag_requests),
             aiops_requests=max(0, args.aiops_requests),
             concurrency=max(1, args.concurrency),
+            rag_cases_path=args.rag_cases,
         )
     )
     write_outputs(

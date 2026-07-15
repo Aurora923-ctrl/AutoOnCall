@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-TERMINAL_EVENT_TYPES = {"complete", "error"}
+TERMINAL_EVENT_TYPES = {"complete", "done", "error"}
 
 
 def sse_message(payload: dict[str, Any]) -> dict[str, str]:

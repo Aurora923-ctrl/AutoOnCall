@@ -224,7 +224,7 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "ready=${status} · live=${liveStatus}" in script
     assert "AIOps 用例通过率" in script
     assert "禁止动作识别通过率" in script
-    assert "RAG 引用通过率" in script
+    assert "RAG 检索引用元数据率" in script
     assert "评测范围" in script
     assert "复现命令" in script
     assert "失败用例" in script
@@ -256,6 +256,18 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "source-pill.unavailable" in style
     assert "buildRagMetadata" in script
     assert "renderRagSources" in script
+    assert "terminalReceived" in script
+    assert "流式响应在完成事件前中断，请重试" in script
+    assert "handleStreamFailure" in script
+    assert "if (!terminalReceived)" in script
+    assert "buffer += decoder.decode();" in script
+    assert "line.endsWith('\\r')" in script
+    assert "收到错误事件" in script
+    assert "收到错误:', sseMessage.data" not in script
+    assert (
+        "this.handleStreamComplete(assistantMessageElement, fullResponse, streamRagMetadata);"
+        not in script.split("if (done)", 1)[1].split("buffer +=", 1)[0]
+    )
     assert "引用来源" in script
     assert "拒答边界" in script
     assert "search_results" in script

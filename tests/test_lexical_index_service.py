@@ -46,6 +46,49 @@ def test_lexical_index_upsert_search_filter_and_delete(tmp_path) -> None:
     assert service.search("Redis maxclients timeout", top_k=3) == []
 
 
+@pytest.mark.parametrize(
+    ("query", "top_k"),
+    [("", 1), ("   ", 1), ("Redis", 0), ("Redis", True)],
+)
+def test_lexical_index_rejects_invalid_search_inputs_without_reading_index(
+    tmp_path,
+    query,
+    top_k,
+) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+
+    with pytest.raises(ValueError):
+        service.search(query, top_k=top_k)
+
+
+def test_lexical_index_rejects_overlong_query_without_reading_index(tmp_path) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+
+    with pytest.raises(ValueError, match="8000"):
+        service.search("x" * 8001, top_k=1)
+
+
+def test_lexical_index_metadata_filter_preserves_scalar_types(tmp_path) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+    service.upsert_source(
+        "docs/knowledge-base/redis.md",
+        [
+            Document(
+                page_content="Redis timeout",
+                metadata={
+                    "_source": "docs/knowledge-base/redis.md",
+                    "_chunk_id": "redis.md#0001",
+                    "enabled": True,
+                    "version": 1,
+                },
+            )
+        ],
+    )
+
+    assert service.search("Redis", top_k=1, metadata_filter={"enabled": 1}) == []
+    assert service.search("Redis", top_k=1, metadata_filter={"version": "1"}) == []
+
+
 def test_lexical_index_stale_source_is_excluded_until_reindexed(tmp_path) -> None:
     service = LexicalIndexService(tmp_path / "lexical.json")
     source = "docs/knowledge-base/redis.md"

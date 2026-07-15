@@ -25,7 +25,7 @@ def build_eval_summary_payload(
     artifact_status = assess_eval_artifact_staleness(run)
 
     return {
-        "available": True,
+        "available": not artifact_status["stale"],
         "path": summary_path.name,
         "artifact": summary_path.name,
         "run": run,
@@ -39,7 +39,11 @@ def build_eval_summary_payload(
         "eval_backlog": backlog,
         "artifact_status": artifact_status,
         "stale": artifact_status["stale"],
-        "message": "evaluation summary loaded",
+        "message": (
+            "evaluation summary is stale"
+            if artifact_status["stale"]
+            else "evaluation summary loaded"
+        ),
     }
 
 
@@ -162,7 +166,7 @@ def build_ragas_summary_payload(
     dashboard = build_ragas_dashboard(run, summary, thresholds)
     artifact_status = assess_eval_artifact_staleness(run)
     return {
-        "available": True,
+        "available": not artifact_status["stale"],
         "path": summary_path.name,
         "artifact": summary_path.name,
         "run": run,
@@ -174,7 +178,11 @@ def build_ragas_summary_payload(
         "failed_cases": failed_cases,
         "artifact_status": artifact_status,
         "stale": artifact_status["stale"],
-        "message": "RAGAS quality summary loaded",
+        "message": (
+            "RAGAS quality summary is stale"
+            if artifact_status["stale"]
+            else "RAGAS quality summary loaded"
+        ),
     }
 
 
@@ -323,6 +331,8 @@ def build_ragas_dashboard(
         "judge_model": judge_model,
         "embedding_model": embedding_model,
         "thresholds": thresholds,
+        "id_metric_execution": _dict_or_empty(run.get("id_metric_execution")),
+        "metric_coverage": _dict_or_empty(summary.get("metric_coverage")),
     }
 
 
@@ -435,15 +445,15 @@ def build_eval_dashboard(
             "summary.resume_metrics.forbidden_action_block_rate",
         ),
         _metric(
-            "rag_citation_pass_rate",
-            "RAG 引用通过率",
+            "rag_retrieval_citation_metadata_rate",
+            "RAG 检索引用元数据率",
             _first_present(
                 resume_metrics.get("rag_citation_coverage_rate"),
                 rag_summary.get("citation_coverage_rate"),
                 rag_category.get("citation_coverage_rate"),
             ),
             "percent",
-            "成功回答是否带有 source_file + chunk_id 引用。",
+            "相关检索结果是否具备 source_file + chunk_id；不代表生成答案实际引用。",
             "summary.resume_metrics.rag_citation_coverage_rate",
         ),
         _metric(

@@ -5,8 +5,10 @@
 """
 
 import asyncio
+import tempfile
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Any, cast
 
@@ -27,6 +29,7 @@ from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
 from app.services.rag_answer_policy import (
     build_citation_guard_payload,
+    build_generation_evidence,
     build_grounded_question,
     build_grounded_system_prompt,
     build_missing_citation_message,
@@ -46,7 +49,7 @@ from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
 )
 from app.tools import get_current_time, retrieve_knowledge
-from app.utils.log_safety import summarize_text_for_log
+from app.utils.log_safety import sanitize_log_value, summarize_text_for_log
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -113,9 +116,12 @@ class RagAgentService:
 
         self.checkpointer = MemorySaver()
         self._grounded_history: dict[str, list[dict[str, str]]] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_lock_users: dict[str, int] = {}
 
         self.agent: Any | None = None
         self._agent_initialized = False
+        self._agent_initialization_lock = asyncio.Lock()
 
         logger.info(f"RAG Agent 服务初始化完成, model={self.model_name}, streaming={streaming}")
 
@@ -124,31 +130,34 @@ class RagAgentService:
         if self._agent_initialized:
             return
 
-        model = self._ensure_model()
-        try:
-            mcp_client = await get_mcp_client_with_retry()
-            mcp_tools = await mcp_client.get_tools()
-            logger.info(f"成功加载 {len(mcp_tools)} 个 MCP 工具")
-        except Exception as e:
-            logger.warning(f"MCP 工具加载失败，RAG Agent 将仅使用本地工具: {e}")
-            mcp_tools = []
+        async with self._agent_initialization_lock:
+            if self._agent_initialized:
+                return
 
-        # 将 MCP 工具添加到实例变量中
-        self.mcp_tools = mcp_tools
+            model = self._ensure_model()
+            try:
+                mcp_client = await get_mcp_client_with_retry()
+                mcp_tools = await mcp_client.get_tools()
+                logger.info(f"成功加载 {len(mcp_tools)} 个 MCP 工具")
+            except Exception as exc:
+                logger.warning(
+                    "MCP 工具加载失败，RAG Agent 将仅使用本地工具: error_type={}",
+                    type(exc).__name__,
+                )
+                mcp_tools = []
 
-        all_tools = self.tools + self.mcp_tools
+            self.mcp_tools = mcp_tools
+            all_tools = self.tools + self.mcp_tools
+            self.agent = create_agent(
+                model,
+                tools=all_tools,
+                checkpointer=self.checkpointer,
+            )
+            self._agent_initialized = True
 
-        self.agent = create_agent(
-            model,
-            tools=all_tools,
-            checkpointer=self.checkpointer,
-        )
-
-        self._agent_initialized = True
-
-        if all_tools:
-            tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
-            logger.info(f"可用工具列表: {', '.join(tool_names)}")
+            if all_tools:
+                tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
+                logger.info(f"可用工具列表: {', '.join(tool_names)}")
 
     def _build_system_prompt(self) -> str:
         """
@@ -199,12 +208,13 @@ class RagAgentService:
         Returns:
             str: 完整答案
         """
+        safe_session_id = sanitize_log_value(session_id)
         try:
             await self._initialize_agent()
             agent = self._require_agent()
 
             logger.info(
-                f"[会话 {session_id}] RAG Agent 收到查询（非流式）: "
+                f"[会话 {safe_session_id}] RAG Agent 收到查询（非流式）: "
                 f"{summarize_text_for_log(question, label='question')}"
             )
 
@@ -233,16 +243,20 @@ class RagAgentService:
 
                 if hasattr(last_message, "tool_calls") and last_message.tool_calls:
                     tool_names = [tc.get("name", "unknown") for tc in last_message.tool_calls]
-                    logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
+                    logger.info(f"[会话 {safe_session_id}] Agent 调用了工具: {tool_names}")
 
-                logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
+                logger.info(f"[会话 {safe_session_id}] RAG Agent 查询完成（非流式）")
                 return answer
 
-            logger.warning(f"[会话 {session_id}] Agent 返回结果为空")
+            logger.warning(f"[会话 {safe_session_id}] Agent 返回结果为空")
             return ""
 
-        except Exception as e:
-            logger.error(f"[会话 {session_id}] RAG Agent 查询失败（非流式）: {e}")
+        except Exception as exc:
+            logger.error(
+                "[会话 {}] RAG Agent 查询失败（非流式）: error_type={}",
+                safe_session_id,
+                type(exc).__name__,
+            )
             raise
 
     async def query_with_retrieval(
@@ -252,6 +266,20 @@ class RagAgentService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Answer a knowledge-base question with explicit retrieval citations."""
+        async with self._session_scope(session_id):
+            return await self._query_with_retrieval_locked(
+                question,
+                session_id,
+                metadata_filter=metadata_filter,
+            )
+
+    async def _query_with_retrieval_locked(
+        self,
+        question: str,
+        session_id: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run one non-streaming RAG turn while the session lock is held."""
         retrieval_payload = await asyncio.to_thread(
             retrieve_structured_knowledge,
             question,
@@ -273,7 +301,12 @@ class RagAgentService:
                 ),
             }
 
-        citations = build_citations(retrieval_payload)
+        generation_evidence = build_generation_evidence(retrieval_payload)
+        generation_payload = {
+            **retrieval_payload,
+            "retrieval_results": generation_evidence,
+        }
+        citations = build_citations(generation_payload)
         if not has_valid_citations(citations):
             answer = build_missing_citation_message()
             guarded_payload = build_citation_guard_payload(retrieval_payload)
@@ -287,7 +320,7 @@ class RagAgentService:
                 "answer_policy": "refuse_without_citation",
             }
 
-        grounded_question = build_grounded_question(question, retrieval_payload)
+        grounded_question = build_grounded_question(question, generation_payload)
         generation_started = time.perf_counter()
         answer, generation_observability = await self.query_grounded_observed(
             grounded_question,
@@ -386,17 +419,18 @@ class RagAgentService:
     ) -> str:
         """Generate a grounded answer without exposing any Agent tools to the model."""
         model = self._ensure_model()
-        logger.info(f"[会话 {session_id}] RAG grounded 生成（禁用工具）")
+        safe_session_id = sanitize_log_value(session_id)
+        logger.info(f"[会话 {safe_session_id}] RAG grounded 生成（禁用工具）")
         messages = [
             SystemMessage(content=build_grounded_system_prompt()),
             HumanMessage(content=grounded_question),
         ]
-        result = await model.ainvoke(messages)
+        result = await self._invoke_model_with_retry(model, messages, session_id=session_id)
         content = result.content if hasattr(result, "content") else result
         answer = message_content_to_text(content)
         if history_question:
             logger.debug(
-                f"[会话 {session_id}] grounded 问答原始问题: "
+                f"[会话 {safe_session_id}] grounded 问答原始问题: "
                 f"{summarize_text_for_log(history_question, label='question')}"
             )
         return answer
@@ -415,7 +449,7 @@ class RagAgentService:
             SystemMessage(content=build_grounded_system_prompt()),
             HumanMessage(content=grounded_question),
         ]
-        result = await model.ainvoke(messages)
+        result = await self._invoke_model_with_retry(model, messages, session_id=session_id)
         content = result.content if hasattr(result, "content") else result
         answer = message_content_to_text(content)
         usage = extract_message_token_usage(result)
@@ -450,12 +484,13 @@ class RagAgentService:
                 - type: "content" | "tool_call" | "complete" | "error"
                 - data: 具体内容
         """
+        safe_session_id = sanitize_log_value(session_id)
         try:
             await self._initialize_agent()
             agent = self._require_agent()
 
             logger.info(
-                f"[会话 {session_id}] RAG Agent 收到查询（流式）: "
+                f"[会话 {safe_session_id}] RAG Agent 收到查询（流式）: "
                 f"{summarize_text_for_log(question, label='question')}"
             )
 
@@ -505,7 +540,7 @@ class RagAgentService:
                                 "node": node_name,
                             }
 
-            logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
+            logger.info(f"[会话 {safe_session_id}] RAG Agent 查询完成（流式）")
             self._replace_latest_human_message(
                 session_id=session_id,
                 stored_question=question,
@@ -514,8 +549,12 @@ class RagAgentService:
 
             yield {"type": "complete"}
 
-        except Exception as e:
-            logger.error(f"[会话 {session_id}] RAG Agent 查询失败（流式）: {e}")
+        except Exception as exc:
+            logger.error(
+                "[会话 {}] RAG Agent 查询失败（流式）: error_type={}",
+                safe_session_id,
+                type(exc).__name__,
+            )
             raise
 
     async def query_stream_with_retrieval(
@@ -525,6 +564,21 @@ class RagAgentService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream a grounded answer and expose retrieval details before generation."""
+        async with self._session_scope(session_id):
+            async for event in self._query_stream_with_retrieval_locked(
+                question,
+                session_id,
+                metadata_filter=metadata_filter,
+            ):
+                yield event
+
+    async def _query_stream_with_retrieval_locked(
+        self,
+        question: str,
+        session_id: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Run one streaming RAG turn while the session lock is held."""
         retrieval_payload = await asyncio.to_thread(
             retrieve_structured_knowledge,
             question,
@@ -558,7 +612,12 @@ class RagAgentService:
             }
             return
 
-        citations = build_citations(retrieval_payload)
+        generation_evidence = build_generation_evidence(retrieval_payload)
+        generation_payload = {
+            **retrieval_payload,
+            "retrieval_results": generation_evidence,
+        }
+        citations = build_citations(generation_payload)
         if not has_valid_citations(citations):
             answer = build_missing_citation_message()
             guarded_payload = build_citation_guard_payload(retrieval_payload)
@@ -589,7 +648,7 @@ class RagAgentService:
             "type": "search_results",
             "data": retrieval_context,
         }
-        grounded_question = build_grounded_question(question, retrieval_payload)
+        grounded_question = build_grounded_question(question, generation_payload)
         full_answer = ""
         async for chunk in self.query_grounded_stream(
             grounded_question,
@@ -598,7 +657,6 @@ class RagAgentService:
         ):
             if chunk.get("type") == "content":
                 full_answer += str(chunk.get("data") or "")
-                yield chunk
             elif chunk.get("type") == "complete":
                 continue
             else:
@@ -653,11 +711,10 @@ class RagAgentService:
             }
             return
         final_answer = ensure_citation_block(full_answer, citations)
-        appended_content = final_answer[len(full_answer) :]
-        if appended_content:
+        if final_answer:
             yield {
                 "type": "content",
-                "data": appended_content,
+                "data": final_answer,
                 "node": "citation_guard",
             }
         self._append_grounded_history(session_id, question, final_answer)
@@ -682,7 +739,8 @@ class RagAgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream a grounded answer from the base model without Agent tools."""
         model = self._ensure_model()
-        logger.info(f"[会话 {session_id}] RAG grounded 流式生成（禁用工具）")
+        safe_session_id = sanitize_log_value(session_id)
+        logger.info(f"[会话 {safe_session_id}] RAG grounded 流式生成（禁用工具）")
         messages = [
             SystemMessage(content=build_grounded_system_prompt()),
             HumanMessage(content=grounded_question),
@@ -698,19 +756,21 @@ class RagAgentService:
             yield {"type": "complete"}
             return
 
-        async for chunk in model.astream(messages):
-            content = chunk.content if hasattr(chunk, "content") else chunk
-            text = message_content_to_text(content)
-            if text:
+        async with self._model_stream_with_retry(
+            model,
+            messages,
+            session_id=session_id,
+        ) as chunks:
+            async for text in chunks:
                 yield {"type": "content", "data": text, "node": "grounded_model"}
         if history_question:
             logger.debug(
-                f"[会话 {session_id}] grounded 流式问答原始问题: "
+                f"[会话 {safe_session_id}] grounded 流式问答原始问题: "
                 f"{summarize_text_for_log(history_question, label='question')}"
             )
         yield {"type": "complete"}
 
-    def get_session_history(self, session_id: str) -> list:
+    async def get_session_history(self, session_id: str) -> list[dict[str, str]]:
         """
         获取会话历史（从 MemorySaver checkpointer 中读取）
 
@@ -720,44 +780,47 @@ class RagAgentService:
         Returns:
             list: 消息历史列表 [{"role": "user|assistant", "content": "...", "timestamp": "..."}]
         """
-        try:
-            checkpoint_data = self._get_checkpoint_data(session_id)
-            if not checkpoint_data:
-                grounded_history = list(self._grounded_history.get(session_id, []))
-                logger.info(f"获取会话历史: {session_id}, 消息数量: {len(grounded_history)}")
-                return grounded_history
+        safe_session_id = sanitize_log_value(session_id)
+        async with self._session_scope(session_id):
+            try:
+                checkpoint_data = await self._aget_checkpoint_data(session_id)
+                if not checkpoint_data:
+                    grounded_history = list(self._grounded_history.get(session_id, []))
+                    logger.info(
+                        f"获取会话历史: {safe_session_id}, 消息数量: {len(grounded_history)}"
+                    )
+                    return grounded_history
 
-            messages = checkpoint_data.get("channel_values", {}).get("messages", [])
+                messages = checkpoint_data.get("channel_values", {}).get("messages", [])
 
-            # 转换为前端需要的格式
-            history = []
-            for msg in messages:
-                if isinstance(msg, SystemMessage):
-                    continue
+                history: list[dict[str, str]] = []
+                for msg in messages:
+                    if isinstance(msg, SystemMessage):
+                        continue
 
-                role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                content = msg.content if hasattr(msg, "content") else str(msg)
-
-                timestamp = getattr(msg, "timestamp", None)
-                if timestamp:
-                    history.append({"role": role, "content": content, "timestamp": timestamp})
-                else:
-                    from datetime import datetime
-
+                    role = "user" if isinstance(msg, HumanMessage) else "assistant"
+                    content = message_content_to_text(
+                        msg.content if hasattr(msg, "content") else msg
+                    )
+                    timestamp = str(getattr(msg, "timestamp", None) or datetime.now().isoformat())
                     history.append(
-                        {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
+                        {"role": role, "content": content, "timestamp": timestamp}
                     )
 
-            history.extend(self._grounded_history.get(session_id, []))
-            history.sort(key=lambda item: item.get("timestamp", ""))
-            logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
-            return history
+                history.extend(self._grounded_history.get(session_id, []))
+                history.sort(key=lambda item: item.get("timestamp", ""))
+                logger.info(f"获取会话历史: {safe_session_id}, 消息数量: {len(history)}")
+                return history
 
-        except Exception as e:
-            logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
-            return []
+            except Exception as exc:
+                logger.error(
+                    "获取会话历史失败: session_id={}, error_type={}",
+                    safe_session_id,
+                    type(exc).__name__,
+                )
+                raise
 
-    def clear_session(self, session_id: str) -> bool:
+    async def clear_session(self, session_id: str) -> bool:
         """
         清空会话历史（从 MemorySaver checkpointer 中删除）
 
@@ -767,16 +830,20 @@ class RagAgentService:
         Returns:
             bool: 是否成功
         """
-        try:
-            self.checkpointer.delete_thread(session_id)
-            self._grounded_history.pop(session_id, None)
-
-            logger.info(f"已清除会话历史: {session_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
-            return False
+        async with self._session_scope(session_id):
+            safe_session_id = sanitize_log_value(session_id)
+            try:
+                await self.checkpointer.adelete_thread(session_id)
+                self._grounded_history.pop(session_id, None)
+                logger.info(f"已清除会话历史: {safe_session_id}")
+                return True
+            except Exception as exc:
+                logger.error(
+                    "清空会话历史失败: session_id={}, error_type={}",
+                    safe_session_id,
+                    type(exc).__name__,
+                )
+                return False
 
     async def cleanup(self):
         """清理资源"""
@@ -784,8 +851,8 @@ class RagAgentService:
             logger.info("清理 RAG Agent 服务资源...")
             # MCP 客户端由全局管理器统一管理，无需手动清理
             logger.info("RAG Agent 服务资源已清理")
-        except Exception as e:
-            logger.error(f"清理资源失败: {e}")
+        except Exception as exc:
+            logger.error("清理资源失败: error_type={}", type(exc).__name__)
 
     def _require_agent(self) -> Any:
         """Return the initialized LangGraph agent or fail loudly."""
@@ -808,6 +875,12 @@ class RagAgentService:
             checkpoint_data = checkpoint_candidate[0] if checkpoint_candidate else {}
         return cast(dict[str, Any], checkpoint_data) if isinstance(checkpoint_data, dict) else {}
 
+    async def _aget_checkpoint_data(self, session_id: str) -> dict[str, Any]:
+        """Return the raw checkpoint payload without blocking the event loop."""
+        config = {"configurable": {"thread_id": session_id}}
+        checkpoint_data = await self.checkpointer.aget(cast(Any, config))
+        return cast(dict[str, Any], checkpoint_data) if isinstance(checkpoint_data, dict) else {}
+
     def _append_grounded_history(self, session_id: str, question: str, answer: str) -> None:
         """Persist tool-free grounded RAG turns for the session-history API."""
         timestamp = datetime.now().isoformat()
@@ -817,6 +890,98 @@ class RagAgentService:
                 {"role": "assistant", "content": answer, "timestamp": timestamp},
             ]
         )
+
+    @asynccontextmanager
+    async def _session_scope(self, session_id: str):
+        """Serialize turns and cleanup for one session without blocking other sessions."""
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._session_lock_users.get(session_id, 1) - 1
+            if remaining <= 0:
+                self._session_lock_users.pop(session_id, None)
+                if not lock.locked():
+                    self._session_locks.pop(session_id, None)
+            else:
+                self._session_lock_users[session_id] = remaining
+
+    async def _invoke_model_with_retry(
+        self,
+        model: Any,
+        messages: list[BaseMessage],
+        *,
+        session_id: str,
+    ) -> Any:
+        """Invoke the grounded model with one explicit timeout and bounded retry policy."""
+        max_attempts = int(config.rag_model_max_retries) + 1
+        safe_session_id = sanitize_log_value(session_id)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await asyncio.wait_for(
+                    model.ainvoke(messages),
+                    timeout=float(config.rag_model_timeout_seconds),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if attempt >= max_attempts or not _is_retryable_model_error(exc):
+                    raise
+                logger.warning(
+                    "RAG 模型调用失败，准备重试: session_id={}, attempt={}, error_type={}",
+                    safe_session_id,
+                    attempt,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
+        raise RuntimeError("RAG 模型调用未返回结果")
+
+    @asynccontextmanager
+    async def _model_stream_with_retry(
+        self,
+        model: Any,
+        messages: list[BaseMessage],
+        *,
+        session_id: str,
+    ) -> AsyncIterator[AsyncIterator[str]]:
+        """Buffer a model stream in a spooled file so retries never duplicate client output."""
+        max_attempts = int(config.rag_model_max_retries) + 1
+        safe_session_id = sanitize_log_value(session_id)
+        spool = tempfile.SpooledTemporaryFile(
+            max_size=int(config.rag_stream_spool_max_memory_bytes),
+            mode="w+b",
+        )
+        try:
+            for attempt in range(1, max_attempts + 1):
+                spool.seek(0)
+                spool.truncate(0)
+                try:
+                    async with asyncio.timeout(float(config.rag_model_timeout_seconds)):
+                        async for chunk in model.astream(messages):
+                            content = chunk.content if hasattr(chunk, "content") else chunk
+                            text = message_content_to_text(content)
+                            if text:
+                                _write_stream_record(spool, text)
+                    spool.seek(0)
+                    yield _read_stream_records(spool)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if attempt >= max_attempts or not _is_retryable_model_error(exc):
+                        raise
+                    logger.warning(
+                        "RAG 模型流调用失败，准备重试: session_id={}, attempt={}, error_type={}",
+                        safe_session_id,
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
+            raise RuntimeError("RAG 模型流未返回结果")
+        finally:
+            spool.close()
 
     def _replace_latest_human_message(
         self,
@@ -845,10 +1010,17 @@ class RagAgentService:
                 if message_content_to_text(msg.content) != stored_question:
                     break
                 messages[index] = copy_message_with_content(msg, display_question)
-                logger.debug(f"[会话 {session_id}] 已将 RAG grounded prompt 替换为用户原问题")
+                logger.debug(
+                    f"[会话 {sanitize_log_value(session_id)}] "
+                    "已将 RAG grounded prompt 替换为用户原问题"
+                )
                 return
-        except Exception as e:
-            logger.debug(f"[会话 {session_id}] 替换 RAG 会话问题失败: {e}")
+        except Exception as exc:
+            logger.debug(
+                "[会话 {}] 替换 RAG 会话问题失败: error_type={}",
+                sanitize_log_value(session_id),
+                type(exc).__name__,
+            )
 
     def _ensure_model(self) -> Any:
         """Create the ChatQwen client lazily so imports and tests do not require cloud credentials."""
@@ -864,11 +1036,57 @@ class RagAgentService:
             base_url=config.dashscope_api_base,
             temperature=0,
             streaming=self.streaming,
+            timeout=float(config.rag_model_timeout_seconds),
+            max_retries=0,
         )
         return self.model
 
 
 rag_agent_service = RagAgentService(streaming=True)
+
+
+def _is_retryable_model_error(exc: Exception) -> bool:
+    """Return True for transient provider/network failures only."""
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    error_name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    retryable_markers = (
+        "timeout",
+        "timed out",
+        "connection",
+        "rate limit",
+        "ratelimit",
+        "temporarily unavailable",
+        "service unavailable",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    return any(marker in error_name or marker in message for marker in retryable_markers)
+
+
+def _write_stream_record(spool: Any, text: str) -> None:
+    payload = text.encode("utf-8")
+    spool.write(len(payload).to_bytes(8, byteorder="big", signed=False))
+    spool.write(payload)
+
+
+async def _read_stream_records(spool: Any) -> AsyncIterator[str]:
+    while True:
+        header = spool.read(8)
+        if not header:
+            return
+        if len(header) != 8:
+            raise RuntimeError("RAG 模型流缓存记录损坏")
+        size = int.from_bytes(header, byteorder="big", signed=False)
+        payload = spool.read(size)
+        if len(payload) != size:
+            raise RuntimeError("RAG 模型流缓存记录不完整")
+        yield payload.decode("utf-8")
+        await asyncio.sleep(0)
 
 
 def extract_message_token_usage(message: Any) -> dict[str, Any] | None:

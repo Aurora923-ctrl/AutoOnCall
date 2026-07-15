@@ -26,10 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.config import config
 from app.services.rag_agent_service import RagAgentService
-from app.services.rag_answer_policy import (
-    build_grounded_question,
-    ensure_citation_block,
-)
+from app.services.rag_answer_policy import ensure_citation_block
 from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
@@ -88,6 +85,25 @@ HUMAN_REVIEW_DIMENSIONS = [
 ]
 
 MetricRunner = Callable[[list["RagasCaseSample"], dict[str, Any]], dict[str, dict[str, Any]]]
+
+
+class HumanReviewCollection(dict[str, list[dict[str, Any]]]):
+    """Human reviews plus provenance needed to prevent cross-run reuse."""
+
+    def __init__(
+        self,
+        *args: Any,
+        source_run: dict[str, Any] | None = None,
+        evidence_level: str = "",
+        validity_boundary: str = "",
+        load_error: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.source_run = source_run or {}
+        self.evidence_level = evidence_level
+        self.validity_boundary = validity_boundary
+        self.load_error = load_error
 
 
 @dataclass(slots=True)
@@ -157,6 +173,7 @@ async def evaluate_cases(
     )
     runner_context["case_set_sha256"] = case_set_sha256(cases)
     generation_mode = answer_generation_mode(answer_source)
+    generation_executed = answer_source in {"context-fixture", "runtime"}
     judge_requested = metric_profile == "full"
     judge_available = judge_status["status"] == "ready"
     effective_metric_profile = "full" if judge_available else "id-smoke"
@@ -228,20 +245,38 @@ async def evaluate_cases(
     )
     summary["deterministic_status"] = summary["status"]
     summary["judge_status"] = judge_status["status"]
-    if judge_requested and judge_status["status"] == "not_run":
+    if not generation_executed:
+        summary["status"] = "not_run"
+        summary["not_run_reason"] = (
+            "Answer generation was not executed. Reference fixtures may validate retrieval, "
+            "citation plumbing, and deterministic gates, but cannot pass answer-quality acceptance."
+        )
+    elif judge_requested and judge_status["status"] == "not_run":
         summary["status"] = "not_run"
         summary["not_run_reason"] = judge_status["reason"]
     elif judge_requested and judge_status["status"] == "failed":
         summary["status"] = "failed"
         summary["judge_failure_reason"] = judge_status["reason"]
     summary["stability"] = build_run_stability(results, repeat_count=repeat_count)
-    summary["human_review"] = compare_human_reviews(results, human_reviews)
+    summary["human_review"] = compare_human_reviews(
+        results,
+        human_reviews,
+        expected_source_run={
+            "case_set_sha256": runner_context["case_set_sha256"],
+            "answer_source": answer_source,
+            "repeat_count": repeat_count,
+            "review_item_set_sha256": review_item_set_sha256(results),
+        },
+    )
     quality_contract = build_quality_contract(
         summary,
         results,
         metric_profile=metric_profile,
         judge_status=judge_status["status"],
     )
+    if not generation_executed:
+        quality_contract["status"] = "not_run"
+        quality_contract["not_run_reason"] = summary["not_run_reason"]
 
     return {
         "run": {
@@ -258,6 +293,7 @@ async def evaluate_cases(
             "mode": mode,
             "answer_source": answer_source,
             "answer_generation_mode": generation_mode,
+            "answer_generation_executed": generation_executed,
             "retrieval_evidence_mode": retrieval_evidence_mode(mode),
             "metric_profile": metric_profile,
             "repeat_count": repeat_count,
@@ -285,6 +321,14 @@ async def evaluate_cases(
                 "output_tokens": None,
                 "total_tokens": None,
             },
+            "id_metric_execution": runner_context.get(
+                "id_metric_execution",
+                {
+                    "engine": "not_run",
+                    "status": "not_run",
+                    "reason": "No positive quality samples were scored.",
+                },
+            ),
             "human_review_path": str(human_review_path) if human_review_path else "",
             "top_k": top_k,
             "min_score": min_score,
@@ -329,11 +373,15 @@ async def build_case_sample(
             min_score=float(case.get("min_score", min_score)),
         )
         retrieval_payload = offline_retrieval_payload(case, query, retrieved, top_k=top_k)
+    elif answer_source == "runtime":
+        # The product call below performs the runtime retrieval. Do not issue a
+        # second retrieval whose contexts could diverge from the scored answer.
+        retrieval_payload = {}
     else:
         retrieval_payload = retrieve_structured_knowledge(query, top_k=top_k)
 
     if is_refusal_case(case):
-        if answer_source in {"product-offline", "runtime"}:
+        if answer_source in {"product-offline", "context-fixture", "runtime"}:
             if agent is None:
                 raise ValueError(f"agent is required for {answer_source} answer_source")
             chat_payload = await query_product_behavior(
@@ -348,7 +396,7 @@ async def build_case_sample(
             )
         return refusal_fixture_sample(case, retrieval_payload)
 
-    if answer_source in {"product-offline", "runtime"}:
+    if answer_source in {"product-offline", "context-fixture", "runtime"}:
         if agent is None:
             raise ValueError(f"agent is required for {answer_source} answer_source")
         chat_payload = await query_product_behavior(
@@ -381,27 +429,6 @@ async def build_case_sample(
             citations=citations,
             retrieval=compact_retrieval_payload(retrieval_payload),
         )
-
-    if agent is None:
-        raise ValueError("agent is required for context-fixture answer_source")
-    grounded_question = build_grounded_question(query, retrieval_payload)
-    answer = await agent.query_grounded(
-        grounded_question,
-        session_id=f"ragas-fixture-{case.get('id', 'case')}",
-        history_question=query,
-    )
-    answer = ensure_citation_block(answer, citations)
-    return RagasCaseSample(
-        case=case,
-        retrieved_contexts=contexts_from_retrieval(retrieval_payload),
-        retrieved_context_ids=context_ids_from_retrieval(retrieval_payload),
-        reference_context_ids=reference_context_ids(case),
-        answer=answer,
-        answer_policy=str(retrieval_payload.get("answer_policy") or "answer_with_citations"),
-        no_answer=False,
-        citations=citations,
-        retrieval=compact_retrieval_payload(retrieval_payload),
-    )
 
 
 def offline_retrieval_payload(
@@ -463,11 +490,15 @@ async def query_product_behavior(
     original_query_grounded_observed = agent.query_grounded_observed
 
     async def fixture_query_grounded(
-        _grounded_question: str,
+        grounded_question: str,
         _session_id: str,
         *,
         history_question: str | None = None,
     ) -> str:
+        allowed_chunk_ids = {
+            match.strip()
+            for match in re.findall(r"chunk_id=([^\]\s;]+)", grounded_question)
+        }
         citations = [
             {
                 "source_file": item.get("source_file", ""),
@@ -475,6 +506,7 @@ async def query_product_behavior(
                 "score": item.get("offline_score", item.get("score")),
             }
             for item in retrieval_payload.get("retrieval_results", [])
+            if str(item.get("chunk_id") or "") in allowed_chunk_ids
         ]
         return build_reference_fixture_answer(case, retrieval_payload, citations)
 
@@ -498,11 +530,12 @@ async def query_product_behavior(
 
     try:
         rag_agent_module.retrieve_structured_knowledge = lambda *_args, **_kwargs: retrieval_payload
-        agent.query_grounded = fixture_query_grounded  # type: ignore[method-assign]
-        agent.query_grounded_observed = fixture_query_grounded_observed  # type: ignore[method-assign]
+        if answer_source == "product-offline":
+            agent.query_grounded = fixture_query_grounded  # type: ignore[method-assign]
+            agent.query_grounded_observed = fixture_query_grounded_observed  # type: ignore[method-assign]
         return await agent.query_with_retrieval(
             query,
-            session_id=f"ragas-offline-{case.get('id', 'case')}",
+            session_id=f"ragas-{answer_source}-{case.get('id', 'case')}",
         )
     finally:
         rag_agent_module.retrieve_structured_knowledge = original_retrieve
@@ -525,10 +558,10 @@ def sample_from_chat_payload(
     return RagasCaseSample(
         case=case,
         retrieved_contexts=contexts_for_citations(
-            fallback_retrieval,
+            retrieval_payload,
             normalized_citations,
         ),
-        retrieved_context_ids=context_ids_from_retrieval(fallback_retrieval),
+        retrieved_context_ids=context_ids_from_retrieval(retrieval_payload),
         reference_context_ids=reference_context_ids(case),
         answer=str(chat_payload.get("answer") or ""),
         answer_policy=str(
@@ -559,6 +592,13 @@ def build_reference_fixture_answer(
             ),
         ]
     )
+    inline_citations = " ".join(
+        f"[{item.get('source_file', '')} | {item.get('chunk_id', '')}]"
+        for item in citations
+        if item.get("source_file") and item.get("chunk_id")
+    )
+    if inline_citations:
+        answer = f"{answer}\n\n{inline_citations}"
     return ensure_citation_block(answer, citations)
 
 
@@ -640,22 +680,12 @@ def run_ragas_metrics(
         from ragas import EvaluationDataset, evaluate
         from ragas.dataset_schema import SingleTurnSample
 
-        try:
-            from ragas.metrics.collections import (
-                AspectCritic,
-                Faithfulness,
-                IDBasedContextPrecision,
-                IDBasedContextRecall,
-                ResponseRelevancy,
-            )
-        except ImportError:
-            from ragas.metrics import (
-                _AspectCritic as AspectCritic,
-                _Faithfulness as Faithfulness,
-                _IDBasedContextPrecision as IDBasedContextPrecision,
-                _IDBasedContextRecall as IDBasedContextRecall,
-                _ResponseRelevancy as ResponseRelevancy,
-            )
+        metric_classes = load_ragas_metric_classes()
+        AspectCritic = metric_classes["AspectCritic"]
+        Faithfulness = metric_classes["Faithfulness"]
+        IDBasedContextPrecision = metric_classes["IDBasedContextPrecision"]
+        IDBasedContextRecall = metric_classes["IDBasedContextRecall"]
+        ResponseRelevancy = metric_classes["ResponseRelevancy"]
     except Exception as exc:
         raise RuntimeError(f"RAGAS dependencies are unavailable: {exc}") from exc
 
@@ -732,6 +762,11 @@ def run_ragas_metrics(
                 show_progress=False,
             )
             rows = result.to_pandas().to_dict(orient="records")
+            if len(rows) != len(samples):
+                raise RuntimeError(
+                    f"RAGAS {metric_name} row count mismatch: "
+                    f"expected {len(samples)}, got {len(rows)}"
+                )
             for sample, row in zip(samples, rows, strict=False):
                 case_id = str(sample.case.get("id"))
                 raw_value = row.get(metric_name)
@@ -764,6 +799,33 @@ def run_ragas_metrics(
                     )
                 )
     return scores
+
+
+def load_ragas_metric_classes() -> dict[str, Any]:
+    """Resolve the public RAGAS 0.4 compatibility exports and fail closed otherwise."""
+    import warnings
+
+    from ragas import metrics as public_metrics
+
+    metric_names = (
+        "AspectCritic",
+        "Faithfulness",
+        "IDBasedContextPrecision",
+        "IDBasedContextRecall",
+        "ResponseRelevancy",
+    )
+    resolved: dict[str, Any] = {}
+    for metric_name in metric_names:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            metric_class = getattr(public_metrics, metric_name, None)
+        if metric_class is None:
+            raise ImportError(
+                f"Installed RAGAS {safe_package_version('ragas')} does not expose the public "
+                f"{metric_name} compatibility class required by this evaluator"
+            )
+        resolved[metric_name] = metric_class
+    return resolved
 
 
 def metric_runner_for_profile(metric_profile: str) -> MetricRunner:
@@ -801,12 +863,9 @@ def run_ragas_id_smoke_metrics(
         from ragas import EvaluationDataset, evaluate
         from ragas.dataset_schema import SingleTurnSample
 
-        try:
-            from ragas.metrics.collections import IDBasedContextPrecision, IDBasedContextRecall
-        except Exception:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                from ragas.metrics import IDBasedContextPrecision, IDBasedContextRecall
+        metric_classes = load_ragas_metric_classes()
+        IDBasedContextPrecision = metric_classes["IDBasedContextPrecision"]
+        IDBasedContextRecall = metric_classes["IDBasedContextRecall"]
 
         dataset = EvaluationDataset(
             samples=[
@@ -830,6 +889,15 @@ def run_ragas_id_smoke_metrics(
                 show_progress=False,
             )
         rows = result.to_pandas().to_dict(orient="records")
+        if len(rows) != len(samples):
+            raise RuntimeError(
+                f"RAGAS ID metric row count mismatch: expected {len(samples)}, got {len(rows)}"
+            )
+        runner_context["id_metric_execution"] = {
+            "engine": "ragas",
+            "status": "executed",
+            "ragas_version": safe_package_version("ragas"),
+        }
         return {
             str(sample.case.get("id")): {
                 metric: safe_float(row.get(metric))
@@ -838,7 +906,13 @@ def run_ragas_id_smoke_metrics(
             }
             for sample, row in zip(samples, rows, strict=False)
         }
-    except Exception:
+    except Exception as exc:
+        runner_context["id_metric_execution"] = {
+            "engine": "deterministic_fallback",
+            "status": "fallback",
+            "ragas_version": safe_package_version("ragas"),
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
         return {str(sample.case.get("id")): deterministic_id_scores(sample) for sample in samples}
 
 
@@ -1044,9 +1118,11 @@ def numeric_stability(values: list[float]) -> dict[str, float]:
 
 
 def optional_numeric_stability(values: list[Any]) -> dict[str, float] | None:
-    """Return stability only when a metric was actually executed."""
-    numeric = [safe_float(value) for value in values if value is not None]
-    return numeric_stability(numeric) if numeric else None
+    """Return stability only when every repeat produced a finite metric value."""
+    numeric = [optional_metric_float(value) for value in values]
+    if not numeric or any(value is None for value in numeric):
+        return None
+    return numeric_stability([float(value) for value in numeric if value is not None])
 
 
 def build_run_stability(
@@ -1073,14 +1149,17 @@ def build_run_stability(
     }
 
 
-def load_human_reviews(path: str | Path | None) -> dict[str, list[dict[str, Any]]]:
+def load_human_reviews(path: str | Path | None) -> HumanReviewCollection:
     """Load optional human rubric scores keyed by case id."""
     if not path:
-        return {}
+        return HumanReviewCollection()
     review_path = Path(path)
     if not review_path.exists():
-        return {}
-    payload = json.loads(review_path.read_text(encoding="utf-8"))
+        return HumanReviewCollection()
+    try:
+        payload = json.loads(review_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return HumanReviewCollection(load_error=f"{type(exc).__name__}: {exc}")
     items = payload.get("items", []) if isinstance(payload, dict) else []
     reviews: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -1089,14 +1168,48 @@ def load_human_reviews(path: str | Path | None) -> dict[str, list[dict[str, Any]
         case_id = str(item.get("case_id") or "").strip()
         if case_id:
             reviews.setdefault(case_id, []).append(item)
-    return reviews
+    return HumanReviewCollection(
+        reviews,
+        source_run=payload.get("source_run") if isinstance(payload, dict) else {},
+        evidence_level=str(payload.get("evidence_level") or "") if isinstance(payload, dict) else "",
+        validity_boundary=(
+            str(payload.get("validity_boundary") or "") if isinstance(payload, dict) else ""
+        ),
+    )
 
 
 def compare_human_reviews(
     results: list[dict[str, Any]],
     human_reviews: dict[str, list[dict[str, Any]]],
+    *,
+    expected_source_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compare deterministic/LLM results with imported human rubric decisions."""
+    binding = human_review_binding(human_reviews, expected_source_run=expected_source_run)
+    evidence_level = str(getattr(human_reviews, "evidence_level", "") or "")
+    load_error = str(getattr(human_reviews, "load_error", "") or "")
+    if load_error or binding["status"] == "invalid":
+        return {
+            "status": "invalid",
+            "reason": load_error or binding["reason"],
+            "binding": binding,
+            "evidence_level": evidence_level or "unclassified",
+            "reviewed_case_count": 0,
+            "reviewed_unique_case_count": 0,
+            "available_review_count": sum(
+                len(items) if isinstance(items, list) else 1
+                for items in human_reviews.values()
+            ),
+            "reviewer_count": 0,
+            "automatic_agreement_rate": None,
+            "agreement_rate": None,
+            "inter_rater_agreement": {
+                "status": "not_run",
+                "reason": "Invalid or unbound review artifacts cannot support agreement claims.",
+                "cohens_kappa": None,
+            },
+            "comparisons": [],
+        }
     result_by_id = {str(result.get("id")): result for result in results}
     comparisons = []
     reviewer_ids: set[str] = set()
@@ -1129,8 +1242,18 @@ def compare_human_reviews(
             )
     decidable = [item for item in comparisons if item["agreement"] is not None]
     reviewer_count = len(reviewer_ids)
+    simulated = evidence_level == "simulated_review"
     return {
-        "status": "available" if decidable else "not_run",
+        "status": (
+            "simulated_review"
+            if simulated and decidable
+            else "available"
+            if decidable
+            else "not_run"
+        ),
+        "reason": str(getattr(human_reviews, "validity_boundary", "") or "") if simulated else "",
+        "binding": binding,
+        "evidence_level": evidence_level or "human_review",
         "reviewed_case_count": len(decidable),
         "reviewed_unique_case_count": len({item["case_id"] for item in decidable}),
         "available_review_count": sum(
@@ -1142,7 +1265,7 @@ def compare_human_reviews(
                 sum(1 for item in decidable if item["agreement"]),
                 len(decidable),
             )
-            if decidable
+            if decidable and not simulated
             else None
         ),
         "agreement_rate": (
@@ -1150,7 +1273,7 @@ def compare_human_reviews(
                 sum(1 for item in decidable if item["agreement"]),
                 len(decidable),
             )
-            if decidable
+            if decidable and not simulated
             else None
         ),
         "inter_rater_agreement": {
@@ -1164,6 +1287,40 @@ def compare_human_reviews(
         },
         "comparisons": comparisons,
     }
+
+
+def human_review_binding(
+    human_reviews: dict[str, list[dict[str, Any]]],
+    *,
+    expected_source_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate that a loaded review belongs to the exact answers under evaluation."""
+    if expected_source_run is None or not isinstance(human_reviews, HumanReviewCollection):
+        return {"status": "not_checked", "reason": ""}
+    if not human_reviews:
+        return {"status": "not_run", "reason": "No review items are available."}
+    source_run = human_reviews.source_run
+    required = (
+        "case_set_sha256",
+        "answer_source",
+        "repeat_count",
+        "review_item_set_sha256",
+    )
+    missing = [key for key in required if source_run.get(key) in {None, ""}]
+    if missing:
+        return {
+            "status": "invalid",
+            "reason": f"Human review source_run is missing binding fields: {missing}",
+        }
+    mismatches = [
+        key for key in required if source_run.get(key) != expected_source_run.get(key)
+    ]
+    if mismatches:
+        return {
+            "status": "invalid",
+            "reason": f"Human review does not match the current evaluated answers: {mismatches}",
+        }
+    return {"status": "matched", "reason": ""}
 
 
 def human_review_pass(review: dict[str, Any]) -> bool | None:
@@ -1237,6 +1394,10 @@ def build_human_review_template(
             "repeat_count": payload.get("run", {}).get("repeat_count"),
             "prompt_version": payload.get("run", {}).get(
                 "judge_prompt_version", JUDGE_PROMPT_VERSION
+            ),
+            "case_set_sha256": payload.get("run", {}).get("case_set_sha256"),
+            "review_item_set_sha256": review_item_set_sha256(
+                payload.get("case_scores", [])
             ),
         },
         "rubric": {
@@ -1347,6 +1508,15 @@ def build_case_result(
         },
         **business_scores,
     }
+    unavailable_required_metrics = [
+        metric
+        for metric in (
+            ["id_based_context_recall", "id_based_context_precision"]
+            if metric_profile == "full"
+            else ["id_based_context_recall"]
+        )
+        if metrics.get(metric) is None
+    ]
     failed_metrics = failed_quality_metrics(
         metrics,
         sample,
@@ -1363,6 +1533,11 @@ def build_case_result(
         for metric in unavailable_judge_metrics
         if f"{metric}_unavailable" not in failed_metrics
     )
+    failed_metrics.extend(
+        f"{metric}_unavailable"
+        for metric in unavailable_required_metrics
+        if f"{metric}_unavailable" not in failed_metrics
+    )
     return {
         "id": case_id,
         "query": str(case.get("query") or ""),
@@ -1373,7 +1548,7 @@ def build_case_result(
         "passed": not failed_metrics,
         "judge_metrics_status": (
             "failed"
-            if unavailable_judge_metrics
+            if unavailable_judge_metrics or unavailable_required_metrics
             else "available"
             if judge_metrics_available
             else "not_run"
@@ -1436,6 +1611,23 @@ def build_summary(
         if not result["passed"]
     ]
     status = "passed" if not failed_cases else "failed"
+    metric_names = [
+        "faithfulness",
+        "answer_relevancy",
+        "judge_oncall_actionability",
+        "answer_completeness",
+        "id_based_context_precision",
+        "id_based_context_recall",
+        "oncall_actionability_score",
+        "citation_grounding_hit",
+        "citation_existence_hit",
+        "citation_support_score",
+        "citation_correctness_score",
+        "factual_error_hit",
+        "severe_hallucination_hit",
+        "incident_boundary_hit",
+        "confusion_disambiguation_hit",
+    ]
     return {
         "status": status,
         "case_count": len(results),
@@ -1475,6 +1667,9 @@ def build_summary(
             quality_results,
             "confusion_disambiguation_hit",
         ),
+        "metric_coverage": {
+            metric: metric_coverage(quality_results, metric) for metric in metric_names
+        },
         "failed_cases": failed_cases,
     }
 
@@ -1880,6 +2075,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
                     f"`{summary.get('passed_count', 0)}/{summary.get('case_count', 0)}`"
                 ),
                 f"- Human review status: `{summary.get('human_review', {}).get('status', '')}`",
+                *ragas_execution_markdown_lines(run, summary),
                 "",
                 (
                     "> Deterministic rules still ran. Missing judge credentials never become "
@@ -1900,6 +2096,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Judge model: `{judge_text}`",
         f"- Embedding model: `{embedding_text}`",
         f"- RAGAS version: `{run.get('ragas_version', '')}`",
+        *ragas_execution_markdown_lines(run, summary),
         f"- Scope: {run.get('evaluation_scope', '')}",
         *provenance_markdown_lines(run.get("environment", {})),
         "",
@@ -2008,6 +2205,45 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
             f"{', '.join(result.get('failed_metrics', [])) or '-'} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def ragas_execution_markdown_lines(
+    run: dict[str, Any],
+    summary: dict[str, Any],
+) -> list[str]:
+    """Render actual metric engines and exact aggregate coverage."""
+    id_execution = run.get("id_metric_execution")
+    id_execution = id_execution if isinstance(id_execution, dict) else {}
+    coverage = summary.get("metric_coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    lines = [
+        (
+            "- ID metric execution: "
+            f"`{id_execution.get('engine', 'unknown')}/"
+            f"{id_execution.get('status', 'unknown')}`"
+        )
+    ]
+    if id_execution.get("reason"):
+        lines.append(f"- ID metric fallback reason: `{id_execution['reason']}`")
+    if coverage:
+        lines.extend(
+            [
+                "",
+                "## Metric Coverage",
+                "",
+                "| Metric | Available | Expected | Missing cases |",
+                "| --- | ---: | ---: | --- |",
+            ]
+        )
+        for metric, item in coverage.items():
+            if not isinstance(item, dict):
+                continue
+            missing = ", ".join(item.get("missing_case_ids", [])) or "-"
+            lines.append(
+                f"| `{metric}` | {item.get('available_count', 0)} | "
+                f"{item.get('expected_count', 0)} | {missing} |"
+            )
+    return lines
 
 
 def format_contract_value(value: Any) -> str:
@@ -2677,6 +2913,12 @@ def quality_failure_reasons(failed_metrics: list[str]) -> dict[str, str]:
         ),
         "id_based_context_precision": "Retrieved context ids include too many non-reference chunks.",
         "id_based_context_recall": "Retrieved context ids miss expected reference chunks.",
+        "id_based_context_precision_unavailable": (
+            "RAGAS ID context precision did not return a finite score."
+        ),
+        "id_based_context_recall_unavailable": (
+            "RAGAS ID context recall did not return a finite score."
+        ),
         "oncall_actionability_score": "Answer misses required OnCall actionability rubric items.",
         "citation_grounding_hit": "Answer lacks auditable source_file + chunk_id citations.",
         "citation_support_score": "One or more citations are not present in retrieved context.",
@@ -2783,13 +3025,49 @@ def average_metric(results: list[dict[str, Any]], metric: str) -> float:
 
 
 def average_optional_metric(results: list[dict[str, Any]], metric: str) -> float | None:
-    """Average a metric only when it was actually executed."""
-    values = [
-        safe_float(value)
-        for result in results
-        if (value := result.get("metrics", {}).get(metric)) is not None
-    ]
-    return round(sum(values) / len(values), 4) if values else None
+    """Average only complete coverage so missing Judge rows cannot inflate results."""
+    if not results:
+        return None
+    raw_values = [result.get("metrics", {}).get(metric) for result in results]
+    if any(optional_metric_float(value) is None for value in raw_values):
+        return None
+    values = [safe_float(value) for value in raw_values]
+    return round(sum(values) / len(results), 4)
+
+
+def metric_coverage(results: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+    """Expose the exact denominator used by aggregate metric averages."""
+    return {
+        "available_count": sum(
+            result.get("metrics", {}).get(metric) is not None for result in results
+        ),
+        "expected_count": len(results),
+        "missing_case_ids": [
+            str(result.get("id") or "")
+            for result in results
+            if result.get("metrics", {}).get(metric) is None
+        ],
+    }
+
+
+def review_item_set_sha256(results: list[dict[str, Any]]) -> str:
+    """Fingerprint the exact answers, contexts, and citations sent for human review."""
+    items = []
+    for result in results:
+        repeats = result.get("repeat_results") or [result]
+        for repeat in repeats:
+            items.append(
+                {
+                    "case_id": str(result.get("id") or ""),
+                    "run_index": int(repeat.get("repeat_index") or 1),
+                    "query": str(repeat.get("query") or result.get("query") or ""),
+                    "answer": str(repeat.get("answer") or ""),
+                    "retrieved_contexts": repeat.get("retrieved_contexts", []),
+                    "citations": repeat.get("citations", []),
+                }
+            )
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def ratio(numerator: int | float, denominator: int | float) -> float:
@@ -2936,10 +3214,7 @@ def main(argv: list[str] | None = None) -> int:
         if written:
             print("Artifacts: " + ", ".join(f"{key}={value}" for key, value in written.items()))
     summary = payload["summary"]
-    success = summary["status"] == "passed" or (
-        summary["status"] == "not_run" and summary.get("deterministic_status") == "passed"
-    )
-    return 0 if success else 1
+    return 0 if summary["status"] == "passed" else 1
 
 
 def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:

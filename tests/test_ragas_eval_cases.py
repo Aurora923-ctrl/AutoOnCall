@@ -29,11 +29,65 @@ from scripts.eval.eval_ragas_cases import (
     judge_execution_status,
     load_cases,
     load_human_reviews,
+    load_ragas_metric_classes,
     parse_args,
+    ragas_execution_markdown_lines,
     reference_context_ids,
+    review_item_set_sha256,
     safe_float,
     write_eval_artifacts,
 )
+
+
+def test_installed_ragas_metric_classes_resolve_without_private_exports() -> None:
+    metrics = load_ragas_metric_classes()
+
+    assert metrics["Faithfulness"].__name__ == "Faithfulness"
+    assert metrics["ResponseRelevancy"].__name__ in {"ResponseRelevancy", "AnswerRelevancy"}
+    assert not any(metric.__name__.startswith("_") for metric in metrics.values())
+
+
+def test_full_profile_metric_average_requires_complete_case_coverage() -> None:
+    from scripts.eval.eval_ragas_cases import average_optional_metric
+
+    results = [
+        {"id": "case-a", "metrics": {"faithfulness": 1.0}},
+        {"id": "case-b", "metrics": {"faithfulness": None}},
+    ]
+
+    assert average_optional_metric(results, "faithfulness") is None
+
+
+def test_repeat_metric_stability_requires_every_repeat() -> None:
+    from scripts.eval.eval_ragas_cases import optional_numeric_stability
+
+    assert optional_numeric_stability([1.0, None, 1.0]) is None
+
+
+def test_ragas_report_exposes_metric_engine_and_exact_coverage() -> None:
+    lines = ragas_execution_markdown_lines(
+        {
+            "id_metric_execution": {
+                "engine": "deterministic_fallback",
+                "status": "fallback",
+                "reason": "ImportError: incompatible RAGAS",
+            }
+        },
+        {
+            "metric_coverage": {
+                "faithfulness": {
+                    "available_count": 1,
+                    "expected_count": 2,
+                    "missing_case_ids": ["case-b"],
+                }
+            }
+        },
+    )
+
+    text = "\n".join(lines)
+    assert "deterministic_fallback/fallback" in text
+    assert "ImportError: incompatible RAGAS" in text
+    assert "| `faithfulness` | 1 | 2 | case-b |" in text
 
 
 def test_answer_for_judge_removes_inline_and_footer_citation_metadata() -> None:
@@ -339,6 +393,33 @@ def test_ragas_id_smoke_reports_precision_but_gates_on_recall() -> None:
     assert result["metrics"]["id_based_context_precision"] == 0.5
 
 
+def test_ragas_id_smoke_missing_recall_fails_instead_of_being_skipped() -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "missing-id",
+            "expected_source": "redis.md",
+            "business_rubric": ["Redis evidence approval"],
+        },
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md"],
+        reference_context_ids=["redis.md"],
+        answer="Redis evidence approval source_file redis.md chunk_id redis.md#1",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[{"source_file": "redis.md", "chunk_id": "redis.md#1"}],
+        retrieval={},
+    )
+
+    result = build_case_result(
+        sample,
+        {"id_based_context_precision": 1.0},
+        metric_profile="id-smoke",
+    )
+
+    assert result["passed"] is False
+    assert "id_based_context_recall_unavailable" in result["failed_metrics"]
+
+
 @pytest.mark.asyncio
 async def test_ragas_refusal_only_fixture_skips_metric_runner(monkeypatch, tmp_path) -> None:
     cases_path = tmp_path / "ragas_refusal_cases.yaml"
@@ -382,7 +463,8 @@ cases:
         metrics_runner=forbidden_runner,
     )
 
-    assert payload["summary"]["status"] == "passed"
+    assert payload["summary"]["status"] == "not_run"
+    assert payload["summary"]["deterministic_status"] == "passed"
     assert payload["summary"]["refusal_case_count"] == 1
     assert payload["summary"]["refusal_boundary_rate"] == 1.0
     assert payload["case_scores"][0]["answer_policy"] == "refuse_without_trusted_source"
@@ -442,8 +524,10 @@ cases:
 
     assert payload["run"]["metric_profile"] == "id-smoke"
     assert payload["run"]["answer_source"] == "reference-fixture"
-    assert payload["quality_contract"]["status"] == "passed"
-    assert payload["summary"]["status"] == "passed"
+    assert payload["run"]["answer_generation_executed"] is False
+    assert payload["quality_contract"]["status"] == "not_run"
+    assert payload["summary"]["status"] == "not_run"
+    assert payload["summary"]["deterministic_status"] == "passed"
     assert payload["summary"]["core_case_pass_rate"] == 1.0
     assert payload["case_scores"][0]["metrics"]["id_based_context_recall"] == 1.0
     assert "summary_json" in written
@@ -518,9 +602,11 @@ cases:
 
     assert payload["run"]["answer_source"] == "product-offline"
     assert payload["run"]["answer_generation_mode"] == "reference_fixture_via_product_contract"
+    assert payload["run"]["answer_generation_executed"] is False
     assert payload["run"]["retrieval_evidence_mode"] == "fixed_offline_retrieval"
     assert len(calls) == 2
-    assert payload["summary"]["status"] == "passed"
+    assert payload["summary"]["status"] == "not_run"
+    assert payload["summary"]["deterministic_status"] == "passed"
     assert payload["case_scores"][1]["answer_policy"] == "refuse_without_trusted_source"
 
 
@@ -555,11 +641,40 @@ cases:
 
     async def fake_query_grounded(self, grounded_question, session_id, *, history_question=None):
         generated_prompts.append(grounded_question)
-        return "Generated from the supplied context: check connected_clients before approval."
+        return (
+            "Generated from the supplied context: check connected_clients before approval. "
+            "[redis.md | redis.md#0001]"
+        )
+
+    async def fake_query_grounded_observed(
+        self,
+        grounded_question,
+        session_id,
+        *,
+        history_question=None,
+    ):
+        return (
+            await fake_query_grounded(
+                self,
+                grounded_question,
+                session_id,
+                history_question=history_question,
+            ),
+            {
+                "llm_generation_ms": 1.0,
+                "llm_ttft_ms": "not_observed",
+                "token_usage": {"status": "not_observed"},
+                "model": "test-real-model",
+            },
+        )
 
     monkeypatch.setattr(
         "scripts.eval.eval_ragas_cases.RagAgentService.query_grounded",
         fake_query_grounded,
+    )
+    monkeypatch.setattr(
+        "scripts.eval.eval_ragas_cases.RagAgentService.query_grounded_observed",
+        fake_query_grounded_observed,
     )
 
     payload = await evaluate_cases(
@@ -575,6 +690,68 @@ cases:
     assert payload["run"]["answer_generation_mode"] == "real_grounded_llm"
     assert payload["run"]["retrieval_evidence_mode"] == "fixed_offline_retrieval"
     assert "Generated from the supplied context" in payload["case_scores"][0]["answer"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_ragas_scores_the_same_retrieval_returned_by_product(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: runtime-consistency
+    query: Redis maxclients?
+    expected_source: redis.md
+    reference_context_ids: [redis.md]
+    business_rubric: [Redis evidence]
+""",
+        encoding="utf-8",
+    )
+
+    def forbidden_retrieval(*args, **kwargs):
+        raise AssertionError("runtime RAGAS must not issue a second retrieval")
+
+    async def fake_product_call(self, question, session_id, metadata_filter=None):
+        return {
+            "answer": "Redis evidence [redis.md | redis.md#0001]",
+            "answer_policy": "answer_with_citations",
+            "no_answer": False,
+            "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+            "retrieval": {
+                "status": "success",
+                "retrieval_results": [
+                    {
+                        "source_file": "redis.md",
+                        "chunk_id": "redis.md#0001",
+                        "content_preview": "Redis maxclients evidence",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "scripts.eval.eval_ragas_cases.retrieve_structured_knowledge",
+        forbidden_retrieval,
+    )
+    monkeypatch.setattr(
+        "scripts.eval.eval_ragas_cases.RagAgentService.query_with_retrieval",
+        fake_product_call,
+    )
+
+    payload = await evaluate_cases(
+        cases_path,
+        docs_dir=tmp_path,
+        mode="runtime",
+        answer_source="runtime",
+        metric_profile="id-smoke",
+        human_review_path=None,
+    )
+
+    result = payload["case_scores"][0]
+    assert result["retrieved_context_ids"] == ["redis.md"]
+    assert result["retrieved_contexts"] == ["Redis maxclients evidence"]
 
 
 def test_ragas_setup_failure_payload_is_structured() -> None:
@@ -867,6 +1044,10 @@ def test_human_review_template_is_blind_and_uses_zero_to_two_scale() -> None:
     assert "metrics" not in template["items"][0]
     assert "passed" not in template["items"][0]
     assert "automatic" not in str(template["items"][0]).lower()
+    assert template["source_run"]["case_set_sha256"] is None
+    assert template["source_run"]["review_item_set_sha256"] == review_item_set_sha256(
+        payload["case_scores"]
+    )
 
 
 def test_load_human_reviews_preserves_two_reviewers_for_same_case(tmp_path) -> None:
@@ -889,3 +1070,74 @@ def test_load_human_reviews_preserves_two_reviewers_for_same_case(tmp_path) -> N
     assert len(reviews["case-a"]) == 2
     assert comparison["reviewer_count"] == 2
     assert comparison["inter_rater_agreement"]["status"] == "not_computed"
+
+
+def test_unbound_human_review_is_invalid_for_evaluated_answers(tmp_path) -> None:
+    path = tmp_path / "reviews.json"
+    path.write_text(
+        """
+{
+  "source_run": {
+    "answer_source": "product-offline",
+    "repeat_count": 1
+  },
+  "items": [
+    {"case_id": "case-a", "reviewer": "one", "decision": "pass"}
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+
+    comparison = compare_human_reviews(
+        [{"id": "case-a", "passed": True}],
+        load_human_reviews(path),
+        expected_source_run={
+            "case_set_sha256": "cases",
+            "answer_source": "product-offline",
+            "repeat_count": 1,
+            "review_item_set_sha256": "answers",
+        },
+    )
+
+    assert comparison["status"] == "invalid"
+    assert comparison["agreement_rate"] is None
+    assert "missing binding fields" in comparison["reason"]
+
+
+def test_simulated_review_does_not_publish_human_agreement_rate(tmp_path) -> None:
+    path = tmp_path / "reviews.json"
+    path.write_text(
+        """
+{
+  "evidence_level": "simulated_review",
+  "validity_boundary": "Not independent human evidence.",
+  "source_run": {
+    "case_set_sha256": "cases",
+    "answer_source": "product-offline",
+    "repeat_count": 1,
+    "review_item_set_sha256": "answers"
+  },
+  "items": [
+    {"case_id": "case-a", "reviewer": "simulated", "decision": "pass"}
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+
+    comparison = compare_human_reviews(
+        [{"id": "case-a", "passed": True}],
+        load_human_reviews(path),
+        expected_source_run={
+            "case_set_sha256": "cases",
+            "answer_source": "product-offline",
+            "repeat_count": 1,
+            "review_item_set_sha256": "answers",
+        },
+    )
+
+    assert comparison["status"] == "simulated_review"
+    assert comparison["reviewed_case_count"] == 1
+    assert comparison["agreement_rate"] is None
+    assert comparison["automatic_agreement_rate"] is None
