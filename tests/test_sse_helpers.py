@@ -51,3 +51,13 @@ def test_sse_message_uses_progress_cursor_as_event_id() -> None:
     payload = json.loads(event["data"])
     assert payload["type"] == "progress"
     assert is_terminal_event(payload) is False
+
+
+def test_sse_message_preserves_zero_cursor() -> None:
+    event = sse_message({"type": "progress", "cursor": 0})
+
+    assert event["id"] == "0"
+
+
+def test_terminal_event_detection_normalizes_event_type() -> None:
+    assert is_terminal_event({"type": " ERROR "}) is True

@@ -7,6 +7,7 @@ import json
 from typing import Any
 from urllib.parse import quote
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---- 本地演示启动配置 ---------------------------------------------------------
@@ -87,13 +88,18 @@ class Settings(BaseSettings):
     dashscope_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_model: str = "qwen-max"
     dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
-    dashscope_embedding_batch_size: int = 64
-    dashscope_embedding_max_retries: int = 2
+    dashscope_embedding_dimensions: int = Field(default=1024, gt=0)
+    # DashScope compatible embedding APIs enforce small per-request input limits.
+    dashscope_embedding_batch_size: int = Field(default=10, ge=1)
+    dashscope_embedding_max_retries: int = Field(default=2, ge=0)
+    dashscope_embedding_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # ---- Milvus 向量库配置 ----------------------------------------------------
     milvus_host: str = "localhost"
     milvus_port: int = 19530
     milvus_timeout: int = 10000  # 毫秒
+    milvus_connect_max_retries: int = Field(default=2, ge=0)
+    milvus_connect_retry_delay_seconds: float = Field(default=0.5, ge=0)
     milvus_recreate_on_dimension_mismatch: bool = False
 
     # ---- RAG 检索与索引配置 ---------------------------------------------------
@@ -152,7 +158,7 @@ class Settings(BaseSettings):
     # ---- Prometheus 适配器配置 ------------------------------------------------
     prometheus_base_url: str = ""
     prometheus_bearer_token: str = ""
-    prometheus_timeout_seconds: float = 5.0
+    prometheus_timeout_seconds: float = Field(default=5.0, gt=0)
     prometheus_qps_query: str = 'sum(rate(http_requests_total{service="{service_name}"}[5m]))'
     prometheus_error_rate_query: str = (
         'sum(rate(http_requests_total{service="{service_name}",status=~"5.."}[5m])) / '
@@ -172,26 +178,26 @@ class Settings(BaseSettings):
     # ---- 日志与调用链适配器配置 ----------------------------------------------
     log_gateway_url: str = ""
     log_gateway_bearer_token: str = ""
-    log_gateway_timeout_seconds: float = 8.0
+    log_gateway_timeout_seconds: float = Field(default=8.0, gt=0)
     loki_base_url: str = ""
     loki_bearer_token: str = ""
-    loki_timeout_seconds: float = 8.0
+    loki_timeout_seconds: float = Field(default=8.0, gt=0)
 
     # ---- CMDB / 发布历史适配器配置 -------------------------------------------
     cmdb_api_url: str = ""
     cmdb_api_bearer_token: str = ""
-    cmdb_api_timeout_seconds: float = 8.0
+    cmdb_api_timeout_seconds: float = Field(default=8.0, gt=0)
 
     deploy_history_api_url: str = ""
     deploy_history_api_bearer_token: str = ""
-    deploy_history_api_timeout_seconds: float = 8.0
+    deploy_history_api_timeout_seconds: float = Field(default=8.0, gt=0)
 
     # ---- Kubernetes 适配器配置 ------------------------------------------------
     kubernetes_api_server: str = ""
     kubernetes_namespace: str = "default"
     kubernetes_bearer_token: str = ""
     kubernetes_verify_ssl: bool = True
-    kubernetes_timeout_seconds: float = 8.0
+    kubernetes_timeout_seconds: float = Field(default=8.0, gt=0)
 
     # ---- Redis 适配器配置 -----------------------------------------------------
     redis_host: str = ""
@@ -199,7 +205,7 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_url: str = ""
     redis_instances: str = ""
-    redis_timeout_seconds: float = 5.0
+    redis_timeout_seconds: float = Field(default=5.0, gt=0)
     redis_allow_admin_commands: bool = False
 
     # ---- MySQL 适配器与状态存储配置 ------------------------------------------
@@ -211,13 +217,23 @@ class Settings(BaseSettings):
     mysql_password: str = ""
     mysql_database: str = ""
     mysql_instances: str = ""
-    mysql_timeout_seconds: float = 5.0
+    mysql_timeout_seconds: float = Field(default=5.0, gt=0)
     aiops_store_raw_external_payload: bool = False
 
     # ---- 工单系统适配器配置 ---------------------------------------------------
     ticket_api_url: str = ""
     ticket_api_bearer_token: str = ""
-    ticket_api_timeout_seconds: float = 8.0
+    ticket_api_timeout_seconds: float = Field(default=8.0, gt=0)
+
+    @field_validator("dashscope_embedding_batch_size", mode="before")
+    @classmethod
+    def normalize_dashscope_embedding_batch_size(cls, value: Any) -> int:
+        """Keep legacy configurations within the provider's supported request limit."""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DASHSCOPE_EMBEDDING_BATCH_SIZE must be an integer") from exc
+        return min(max(parsed, 1), 10)
 
     # ---- MCP 服务配置 ---------------------------------------------------------
     mcp_cls_transport: str = "streamable-http"
@@ -242,8 +258,15 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         """Return CORS origins parsed from a comma-separated environment value."""
-        origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
-        return origins or ["*"]
+        origins: list[str] = []
+        seen: set[str] = set()
+        for item in self.cors_allowed_origins.split(","):
+            origin = item.strip().rstrip("/")
+            if not origin or origin in seen:
+                continue
+            seen.add(origin)
+            origins.append(origin)
+        return origins
 
     @property
     def effective_rag_model(self) -> str:

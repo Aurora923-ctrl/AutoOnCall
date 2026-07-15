@@ -52,6 +52,13 @@ def test_aiops_resume_request_rejects_invalid_ids() -> None:
         AIOpsResumeRequest(approval_id="")
 
 
+def test_aiops_request_ids_reject_control_characters() -> None:
+    with pytest.raises(ValidationError):
+        AIOpsRequest(session_id="session-\nforged")
+    with pytest.raises(ValidationError):
+        AIOpsResumeRequest(approval_id="approval-\tforged")
+
+
 def test_aiops_resume_request_strips_optional_ids() -> None:
     request = AIOpsResumeRequest(session_id=" session-123 ", approval_id=" apr-123 ")
 

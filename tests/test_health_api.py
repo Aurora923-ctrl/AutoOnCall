@@ -26,13 +26,8 @@ async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
     async def external_ready():
         return {"status": "configured", "mock_fallback_enabled": False}
 
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: False)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
-
-    def fail_connect():
-        raise RuntimeError("milvus down")
-
-    monkeypatch.setattr(health_api.milvus_manager, "connect", fail_connect)
 
     response = await health_api.readiness_check()
     payload = json.loads(response.body.decode("utf-8"))
@@ -51,14 +46,8 @@ async def test_readiness_attempts_lazy_milvus_connection(monkeypatch) -> None:
         return {"status": "configured", "mock_fallback_enabled": False}
 
     class LazyMilvus:
-        connected = False
-
-        def health_check(self) -> bool:
-            return self.connected
-
-        def connect(self):
-            self.connected = True
-            return object()
+        def readiness_check(self) -> bool:
+            return True
 
     monkeypatch.setattr(health_api, "milvus_manager", LazyMilvus())
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
@@ -76,7 +65,7 @@ async def test_readiness_reports_aiops_dependency_failure(monkeypatch) -> None:
     async def external_not_ready():
         return {"status": "not_configured", "mock_fallback_enabled": False}
 
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: True)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_not_ready)
 
     response = await health_api.readiness_check()
@@ -94,13 +83,8 @@ async def test_capability_readiness_splits_aiops_from_rag(monkeypatch) -> None:
     async def external_ready():
         return {"status": "configured", "mock_fallback_enabled": False}
 
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: False)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
-
-    def fail_connect():
-        raise RuntimeError("milvus down")
-
-    monkeypatch.setattr(health_api.milvus_manager, "connect", fail_connect)
 
     response = await health_api.aiops_readiness_check()
     payload = json.loads(response.body.decode("utf-8"))
@@ -114,12 +98,7 @@ async def test_capability_readiness_splits_aiops_from_rag(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_rag_readiness_uses_rag_dependency_status(monkeypatch) -> None:
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: False)
-
-    def fail_connect():
-        raise RuntimeError("milvus down")
-
-    monkeypatch.setattr(health_api.milvus_manager, "connect", fail_connect)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: False)
 
     response = await health_api.rag_readiness_check()
     payload = json.loads(response.body.decode("utf-8"))
@@ -134,7 +113,7 @@ async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
     async def external_ready():
         return {"status": "configured", "mock_fallback_enabled": False}
 
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: True)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
 
     response = await health_api.health_check()
@@ -146,7 +125,7 @@ async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> None:
-    monkeypatch.setattr(health_api.milvus_manager, "health_check", lambda: True)
+    monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: True)
 
     class ConnectedRedis:
         configured = True
@@ -170,6 +149,7 @@ async def test_readiness_reports_external_connected_and_failed(monkeypatch) -> N
     assert response.status_code == 503
     assert external["status"] == "degraded"
     assert external["checks"]["redis"]["status"] == "connected"
+    assert "endpoint" not in external["checks"]["redis"]
     assert external["checks"]["mysql"]["status"] == "failed"
     assert payload["data"]["capabilities"]["aiops"]["status"] == "degraded"
 
@@ -178,6 +158,27 @@ def test_external_overall_status_does_not_promote_unconfigured_sources() -> None
     statuses = {"alertmanager": "not_configured", "prometheus": "not_configured"}
 
     assert health_api._external_overall_status(statuses) == "not_configured"
+
+
+def test_external_overall_status_does_not_promote_unverified_configuration() -> None:
+    statuses = {"log_gateway": "configured", "ticket": "configured"}
+
+    assert health_api._external_overall_status(statuses) == "unverified"
+
+
+def test_unverified_external_configuration_does_not_mark_aiops_ready() -> None:
+    capabilities = health_api._capability_readiness(
+        {"status": "disconnected"},
+        {
+            "status": "unverified",
+            "mock_fallback_enabled": True,
+            "checks": {"log_gateway": {"status": "configured", "configured": True}},
+        },
+    )
+
+    assert capabilities["aiops"]["ready"] is False
+    assert capabilities["aiops"]["status"] == "unverified"
+    assert capabilities["aiops"]["mock_fallback_enabled"] is True
 
 
 def test_failed_readiness_hides_raw_exception_detail() -> None:
@@ -189,3 +190,34 @@ def test_failed_readiness_hides_raw_exception_detail() -> None:
     assert payload["error_type"] == "connection_error"
     assert "secret" not in payload["message"]
     assert "internal-db" not in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_constructor_failure_returns_structured_readiness(monkeypatch) -> None:
+    def fail_adapter():
+        raise ValueError("redis://user:secret@internal-cache:6379 is invalid")
+
+    monkeypatch.setattr(health_api, "RedisInfoAdapter", fail_adapter)
+
+    payload = await health_api._redis_readiness()
+
+    assert payload["status"] == "failed"
+    assert payload["error_type"] == "adapter_error"
+    assert "secret" not in payload["message"]
+    assert "internal-cache" not in payload["message"]
+
+
+def test_connected_readiness_does_not_expose_dependency_endpoint() -> None:
+    payload = health_api._connected_readiness(
+        {
+            "status": "connected",
+            "message": "PONG",
+            "endpoint": "internal-cache:6379",
+        }
+    )
+
+    assert payload == {
+        "status": "connected",
+        "configured": True,
+        "message": "PONG",
+    }

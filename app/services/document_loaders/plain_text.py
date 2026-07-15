@@ -22,7 +22,7 @@ class PlainTextLoader:
         doc_type = "markdown" if path.suffix.lower() in {".md", ".markdown"} else "text"
         raw = [
             LoadedDocument(
-                content=path.read_text(encoding="utf-8"),
+                content=path.read_text(encoding="utf-8-sig"),
                 metadata=base_metadata(path, doc_type=doc_type),
             )
         ]

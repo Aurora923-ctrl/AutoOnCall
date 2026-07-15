@@ -65,9 +65,10 @@ class DocumentSplitterService:
 
             for index, doc in enumerate(final_docs, 1):
                 doc.metadata["_source"] = file_path
-                doc.metadata["_extension"] = Path(file_path).suffix
+                doc.metadata["_extension"] = Path(file_path).suffix.lower()
                 doc.metadata["_file_name"] = Path(file_path).name
                 doc.metadata["_doc_id"] = file_path
+                doc.metadata["_source_id"] = _build_source_id(file_path)
                 doc.metadata["_chunk_id"] = _build_chunk_id(file_path, index)
                 doc.metadata.update(build_version_metadata(file_path, content, doc.page_content))
 
@@ -100,9 +101,10 @@ class DocumentSplitterService:
                     metadatas=[
                         {
                             "_source": file_path,
-                            "_extension": Path(file_path).suffix,
+                            "_extension": Path(file_path).suffix.lower(),
                             "_file_name": Path(file_path).name,
                             "_doc_id": file_path,
+                            "_source_id": _build_source_id(file_path),
                         }
                     ],
                 )
@@ -129,7 +131,7 @@ class DocumentSplitterService:
         Returns:
             List[Document]: 文档分片列表
         """
-        if Path(file_path).suffix in {".md", ".markdown"}:
+        if Path(file_path).suffix.lower() in {".md", ".markdown"}:
             return self.split_markdown(content, file_path)
         else:
             return self.split_text(content, file_path)
@@ -172,6 +174,7 @@ class DocumentSplitterService:
             metadata.setdefault("_extension", extension)
             metadata.setdefault("_file_name", Path(file_path).name)
             metadata.setdefault("_doc_id", file_path)
+            metadata.setdefault("_source_id", _build_source_id(file_path))
             metadata["_chunk_id"] = _build_chunk_id(file_path, index)
             metadata.update(build_version_metadata(file_path, full_content, doc.page_content))
             doc.metadata = metadata
@@ -196,21 +199,29 @@ class DocumentSplitterService:
 
         merged_docs = []
         current_doc = None
+        max_size = self.chunk_size * 2
 
         for doc in documents:
-            doc_size = len(doc.page_content)
-
             if current_doc is None:
-                current_doc = doc
-            elif (
-                doc_size < min_size
-                and len(current_doc.page_content) < self.chunk_size * 2
+                current_doc = doc.model_copy(deep=True)
+                continue
+
+            merged_content = _merge_adjacent_content(
+                current_doc.page_content,
+                doc.page_content,
+                max_overlap=self.chunk_overlap,
+            )
+            can_merge = (
+                min(len(current_doc.page_content), len(doc.page_content)) < min_size
+                and len(merged_content) <= max_size
                 and _same_markdown_heading(current_doc, doc)
-            ):
-                current_doc.page_content += "\n\n" + doc.page_content
-            else:
-                merged_docs.append(current_doc)
-                current_doc = doc
+            )
+            if can_merge:
+                current_doc.page_content = merged_content
+                continue
+
+            merged_docs.append(current_doc)
+            current_doc = doc.model_copy(deep=True)
 
         if current_doc is not None:
             merged_docs.append(current_doc)
@@ -227,10 +238,30 @@ def _build_chunk_id(file_path: str, index: int) -> str:
     return f"{file_name}#{index:04d}"
 
 
+def _build_source_id(file_path: str) -> str:
+    """Build a stable source identity independent of the deployment root."""
+    normalized = str(file_path or "").replace("\\", "/").rstrip("/")
+    lowered = normalized.lower()
+    for marker in ("/docs/knowledge-base/", "/uploads/"):
+        position = lowered.rfind(marker)
+        if position >= 0:
+            return normalized[position + 1 :]
+    return Path(normalized).name or "document"
+
+
 def _same_markdown_heading(left: Document, right: Document) -> bool:
     """Return True when two chunks share the same Markdown heading metadata."""
     heading_keys = ("h1", "h2")
     return all(left.metadata.get(key) == right.metadata.get(key) for key in heading_keys)
+
+
+def _merge_adjacent_content(left: str, right: str, *, max_overlap: int) -> str:
+    """Merge adjacent chunks without duplicating splitter overlap."""
+    overlap_limit = min(max_overlap, len(left), len(right))
+    for overlap in range(overlap_limit, 0, -1):
+        if left[-overlap:] == right[:overlap]:
+            return left + right[overlap:]
+    return f"{left}\n\n{right}"
 
 
 def build_version_metadata(

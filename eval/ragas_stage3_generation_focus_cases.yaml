@@ -1,0 +1,63 @@
+schema_version: "1.0"
+dataset_version: "2026.07.13-generation-focus"
+description: "Focused runtime validation for evidence coverage in existing RAG answers."
+cases:
+  - id: stage3_cpu_evidence
+    query: "billing-service CPU 持续 95%，如何收集进程和线程证据并给出处置边界？"
+    expected_source: cpu_high_usage.md
+    reference_answer: >
+      先确认告警时间窗、进程 CPU 和线程热点，再结合日志判断是否为死循环或流量突增。
+      扩容、限流、重启或回滚必须保留审批、dry-run 和回滚边界。
+    reference_context_ids: [cpu_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含进程或线程级 CPU 证据
+      - 区分诊断证据和处置动作
+      - 处置动作保留审批或回滚边界
+
+  - id: stage3_disk_inode
+    query: "写文件失败时怎样区分磁盘空间耗尽、inode 耗尽和大目录占用？"
+    expected_source: disk_high_usage.md
+    reference_answer: >
+      应检查 df、inode 使用率、目录和大文件占用，再定位日志、临时文件或容器资源。
+      删除、截断或清理前必须确认影响范围并走安全变更。
+    reference_context_ids: [disk_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 覆盖空间、inode 和目录证据
+      - 不直接执行删除或截断
+      - 包含审批或 dry-run 边界
+
+  - id: stage3_k8s_backend
+    query: "Kubernetes 请求不通时，如何同时验证 Pod 与 Service EndpointSlice？"
+    expected_sources:
+      - official_kubernetes_debug_pods.md
+      - official_kubernetes_debug_services.md
+    reference_answer: >
+      先 describe Pod 并检查状态、事件和就绪情况，再验证 Service selector、
+      EndpointSlice 和后端 Pod，避免只凭 ClusterIP 或 DNS 下结论。
+    reference_context_ids:
+      - official_kubernetes_debug_pods.md
+      - official_kubernetes_debug_services.md
+    ragas_tags: [core_interview, multi_source]
+    business_rubric:
+      - 同时覆盖 Pod 和 Service 证据
+      - 包含 selector 或 EndpointSlice
+      - 证据不足时不强行下结论
+
+  - id: stage3_loki_ingestion
+    query: "Loki 写入异常时，如何使用 discarded 指标定位并设计症状告警？"
+    expected_sources:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    reference_answer: >
+      检查 loki_discarded_samples_total 和 loki_discarded_bytes_total，
+      再基于用户可见影响设计少量症状告警，而不是枚举所有内部原因。
+    reference_context_ids:
+      - official_loki_troubleshoot_ingest.md
+      - official_prometheus_alerting_practices.md
+    ragas_tags: [core_interview, multi_source]
+    business_rubric:
+      - 包含 Loki discarded 指标
+      - 告警面向用户可见症状
+      - 不把静态文档描述成实时证据

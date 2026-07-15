@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -12,14 +13,39 @@ from app.services.rag_retrieval_service import NO_TRUSTED_KNOWLEDGE
 
 def build_grounded_question(question: str, retrieval_payload: dict[str, Any]) -> str:
     """Build the final LLM prompt from trusted retrieval context."""
-    context = str(retrieval_payload.get("content") or "").strip()
+    context = build_generation_context(retrieval_payload)
     return (
         "请只基于下面的知识库检索结果回答用户问题。"
-        "不要使用未出现在知识库中的事实；如果知识不足，请明确说明无法回答。\n\n"
+        "不要使用未出现在知识库中的事实；如果知识不足或主题不匹配，请明确说明"
+        "“当前知识库无法回答该问题”，不要引用无关片段。\n\n"
         f"{context}\n\n"
         f"用户问题: {question}\n\n"
-        "回答要求: 将答案和依据说清楚，末尾必须列出引用来源，格式为 "
-        "source_file + chunk_id。"
+        "回答要求:\n"
+        "1. 按用户问题中的子问题逐项回答，最多写 4 条要点；不要遗漏明确询问的取证、"
+        "判断或处置边界。\n"
+        "2. 不复述整份 Runbook，不补充用户未询问的步骤、通用建议或常识。\n"
+        "3. 命令、参数、数值、原因和动作必须由证据片段直接提供；允许忠实转述，"
+        "但不得推导新的因果关系或操作。\n"
+        "4. 静态 Runbook 只能写成“建议检查”，不得写成当前事件已经观测到的事实。\n"
+        "5. 处置动作仅在片段明确支持时保留，并原样保留审批、验证或回滚边界。\n"
+        "6. 每条要点末尾标注唯一直接支持它的 [source_file | chunk_id]；"
+        "不要列出未被正文使用的来源。\n"
+        "7. 只要至少一个片段能回答部分问题，就回答有证据的部分；不要因为缺少另一部分"
+        "而整体拒答。\n"
+        "8. 不得把通配符、示例值或占位符替换成用户问题中的服务名、阈值或参数。\n"
+        "9. 不得从“需要检查某项证据”推导“满足该证据后即可重启、扩容、清理或回滚”；"
+        "动作条件必须由片段直接给出。\n"
+        "10. 告警名只能作为检查线索，不能单独推出原因、文件特征或处理方案。\n"
+        "11. 当片段只能回答部分问题时，先给出有证据的要点，最后用一句“当前片段未提供"
+        "其余问题的依据”说明具体缺口；只有确实存在未回答子问题时才写这句，已经完整"
+        "回答时禁止追加泛化缺口；不要使用“知识库无法回答”这类整体拒答措辞。\n"
+        "12. 输出前逐项检查证据覆盖：问题要求多个来源时，每个必要来源至少支持一条要点；"
+        "片段已提供审批、dry-run、验证、回滚或人工接管边界时，必须在相关动作或判断中"
+        "保留该边界。\n"
+        "13. 命令、标签选择器、路径、IP、端口、通配符和占位符必须按片段原样引用；"
+        "不得替换成新的示例值，也不要要求用户把片段中的示例改成实际值。\n"
+        "14. 对调查型问题优先写成“检查项 -> 如何判断 -> 证据边界”；不要把文档中的"
+        "示例成功输出写成当前环境的预期事实。"
     )
 
 
@@ -27,8 +53,106 @@ def build_grounded_system_prompt() -> str:
     """Return the strict system prompt used for tool-free grounded generation."""
     return (
         "你是知识库问答助手。你不能调用工具，也不能补充知识库之外的事实。"
-        "如果检索片段不足以回答，请明确说明无法从当前知识库确认。"
+        "只能复述或紧密归纳当前检索片段已明确提供的信息。"
+        "不得引入检索片段中未出现的命令、工具名、监控方法、参数或处置动作。"
+        "将每个句子视为需要证据支持的独立 claim；无法指出支持片段就删除该句。"
+        "答案最多 4 条要点，并覆盖用户明确询问的证据、判断和边界。"
+        "只要有片段能支持部分答案，就回答该部分，不要整体拒答。"
+        "保留片段中的通配符和示例值，不得用用户问题中的实体替换。"
+        "不得从诊断证据推导动作资格，也不得从告警名称扩写原因或处理方案。"
+        "部分证据不足时只声明具体缺口，不要使用整体知识库拒答措辞。"
+        "回答前检查问题的每个子问题和每个必要来源是否都有直接证据覆盖。"
+        "检索片段已经包含审批、dry-run、验证、回滚或人工接管边界时不得遗漏。"
+        "命令、选择器、路径、IP、端口、通配符和占位符必须原样引用，不得改写示例。"
+        "只有确实存在未回答子问题时才能声明具体缺口，完整回答不得追加泛化缺口。"
+        "如果检索片段不足以回答或与问题主题不匹配，请明确说明当前知识库无法回答，"
+        "并且不要引用无关片段。"
     )
+
+
+def build_generation_context(retrieval_payload: dict[str, Any]) -> str:
+    """Build a de-duplicated evidence block without changing retrieval results."""
+    results = retrieval_payload.get("retrieval_results") or []
+    if not isinstance(results, list) or not results:
+        return str(retrieval_payload.get("content") or "").strip()
+
+    evidence_blocks: list[str] = []
+    seen_content: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        normalized = normalize_evidence_text(content)
+        if not content or any(
+            evidence_texts_are_redundant(normalized, previous) for previous in seen_content
+        ):
+            continue
+        seen_content.append(normalized)
+        source_file = str(item.get("source_file") or "未知来源").strip()
+        chunk_id = str(item.get("chunk_id") or "unknown").strip()
+        evidence_blocks.append(
+            f"[证据 {len(evidence_blocks) + 1}: source_file={source_file}; "
+            f"chunk_id={chunk_id}]\n{content}"
+        )
+    return "\n\n".join(evidence_blocks)
+
+
+def normalize_evidence_text(content: str) -> str:
+    """Normalize formatting differences before comparing retrieved chunks."""
+    return re.sub(r"\s+", " ", str(content or "")).strip().lower()
+
+
+def evidence_texts_are_redundant(left: str, right: str) -> bool:
+    """Treat exact and near-duplicate copies as one generation-time evidence block."""
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    if len(shorter) < 50:
+        return False
+    return shorter in longer and len(shorter) / len(longer) >= 0.65
+
+
+def select_supporting_citations(
+    answer: str,
+    citations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only unique citations explicitly used by the generated answer."""
+    answer_text = str(answer or "")
+    selected = [
+        item
+        for item in citations
+        if str(item.get("chunk_id") or "").strip()
+        and str(item.get("chunk_id") or "").strip() in answer_text
+    ]
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in selected:
+        key = (
+            str(item.get("source_file") or "").strip(),
+            str(item.get("chunk_id") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def is_explicit_knowledge_refusal(answer: str) -> bool:
+    """Recognize a grounded model refusal without estimating from text length."""
+    normalized = "".join(str(answer or "").lower().split())
+    markers = (
+        "当前知识库无法回答",
+        "无法基于当前的知识库回答",
+        "无法从当前知识库确认",
+        "知识库中没有",
+        "没有关于",
+        "未涉及",
+        "无相关信息",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def message_content_to_text(content: Any) -> str:

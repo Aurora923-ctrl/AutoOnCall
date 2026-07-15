@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app import main as main_module
+from app.config import Settings
 from scripts.maintenance.hygiene_check import find_hygiene_issues, main as hygiene_main
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,11 +73,13 @@ def test_container_delivery_files_exclude_local_runtime_artifacts() -> None:
 
     assert "FROM python:3.11-slim" in dockerfile
     assert "python -m pip install ." in dockerfile
-    assert "/health/live" in dockerfile
+    assert "http://127.0.0.1:${PORT}/health/live" in dockerfile
     assert "COPY app ./app" in dockerfile
     assert "COPY docs/knowledge-base ./docs/knowledge-base" in dockerfile
     assert "COPY static ./static" in dockerfile
     assert "COPY config ./config" in dockerfile
+    assert "USER autooncall" in dockerfile
+    assert '--host \\"${HOST}\\" --port \\"${PORT}\\"' in dockerfile
 
     for ignored_path in [
         ".env",
@@ -232,11 +235,13 @@ def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> Non
     monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+    monkeypatch.setattr(main_module.config, "aiops_mock_fallback_enabled", True)
 
     warnings = main_module.production_exposure_warnings()
 
     assert "API auth is disabled while binding to a non-local host" in warnings
     assert "CORS allows all origins while binding to a non-local host" in warnings
+    assert "AIOps mock fallback is enabled while binding to a non-local host" in warnings
 
 
 def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
@@ -249,9 +254,108 @@ def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
         main_module.enforce_production_exposure_policy()
 
 
+def test_production_exposure_rejects_enabled_auth_without_usable_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "api_auth_enabled", True)
+    monkeypatch.setattr(main_module.config, "api_read_token", "replace-with-read-token")
+    monkeypatch.setattr(main_module.config, "api_operator_token", "")
+    monkeypatch.setattr(main_module.config, "api_approver_token", "")
+    monkeypatch.setattr(main_module.config, "api_admin_token", "")
+    monkeypatch.setattr(main_module.config, "api_auth_tokens", "")
+
+    assert (
+        "API auth has no usable tokens while binding to a non-local host"
+        in main_module.production_exposure_warnings()
+    )
+
+
 def test_production_exposure_warnings_ignore_local_bind(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "127.0.0.1")
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+    monkeypatch.setattr(main_module.config, "aiops_mock_fallback_enabled", True)
 
     assert main_module.production_exposure_warnings() == []
+
+
+@pytest.mark.parametrize(
+    ("host", "externally_bound"),
+    [
+        ("127.0.0.1", False),
+        ("::1", False),
+        ("localhost", False),
+        ("0.0.0.0", True),
+        ("::", True),
+        ("192.168.1.20", True),
+        ("autooncall.internal", True),
+        ("", True),
+    ],
+)
+def test_external_bind_detection_covers_non_loopback_hosts(
+    host: str,
+    externally_bound: bool,
+) -> None:
+    assert main_module.is_externally_bound_host(host) is externally_bound
+
+
+def test_empty_cors_configuration_does_not_fall_back_to_wildcard() -> None:
+    settings = Settings(_env_file=None, cors_allowed_origins="")
+
+    assert settings.cors_origins == []
+
+
+def test_cors_configuration_normalizes_duplicates_and_trailing_slashes() -> None:
+    settings = Settings(
+        _env_file=None,
+        cors_allowed_origins="https://ops.example/, https://ops.example, http://localhost:9900/",
+    )
+
+    assert settings.cors_origins == ["https://ops.example", "http://localhost:9900"]
+
+
+def test_embedding_batch_size_normalizes_legacy_values_to_provider_limit() -> None:
+    settings = Settings(_env_file=None, dashscope_embedding_batch_size=64)
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert settings.dashscope_embedding_batch_size == 10
+    assert "DASHSCOPE_EMBEDDING_BATCH_SIZE=10" in env_example
+
+
+def test_static_assets_are_resolved_from_the_repository_root() -> None:
+    assert main_module.STATIC_DIR == ROOT / "static"
+    assert (main_module.STATIC_DIR / "index.html").exists()
+
+
+def test_production_app_disables_interactive_api_documentation() -> None:
+    assert main_module.config.debug is False
+    assert main_module.app.docs_url is None
+    assert main_module.app.redoc_url is None
+    assert main_module.app.openapi_url is None
+
+
+def test_cors_does_not_enable_cookie_credentials() -> None:
+    cors_middleware = next(
+        middleware
+        for middleware in main_module.app.user_middleware
+        if middleware.cls.__name__ == "CORSMiddleware"
+    )
+
+    assert cors_middleware.kwargs["allow_credentials"] is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_milvus_when_application_body_fails(monkeypatch) -> None:
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        closed = True
+
+    monkeypatch.setattr(main_module, "enforce_production_exposure_policy", lambda: None)
+    monkeypatch.setattr(main_module.milvus_manager, "close", close)
+
+    with pytest.raises(RuntimeError, match="lifespan body failed"):
+        async with main_module.lifespan(main_module.app):
+            raise RuntimeError("lifespan body failed")
+
+    assert closed is True

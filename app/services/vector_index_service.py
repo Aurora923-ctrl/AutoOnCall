@@ -1,9 +1,11 @@
 """向量索引服务模块"""
 
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
 from loguru import logger
 
 from app.config import config
@@ -206,6 +208,7 @@ class VectorIndexService:
     def __init__(self) -> None:
         """初始化向量索引服务"""
         self.upload_path = config.upload_dir
+        self._source_lock_dir = Path(config.rag_lexical_index_path).parent / ".index-locks"
         logger.info("向量索引服务初始化完成")
 
     def index_directory(self, directory_path: str | None = None) -> IndexingResult:
@@ -344,51 +347,8 @@ class VectorIndexService:
         normalized_path = path.as_posix()
 
         try:
-            loader = document_loader_registry.get_loader(path)
-            loaded_documents, cleaning_report = loader.load(path)
-            logger.info(
-                f"读取文件: {path}, loader={loader.loader_type}, "
-                f"有效单元={len(loaded_documents)}, raw_units={cleaning_report.raw_units}"
-            )
-
-            documents = document_splitter_service.split_loaded_documents(
-                loaded_documents,
-                normalized_path,
-            )
-            logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
-
-            if documents:
-                vector_ids = vector_store_manager.add_documents(documents)
-                vector_store_manager.delete_by_source_except_ids(
-                    normalized_path,
-                    vector_ids,
-                )
-                lexical_index_service.upsert_source(normalized_path, documents)
-                logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
-                return SingleFileIndexingResult(
-                    file_path=normalized_path,
-                    status="success",
-                    chunk_count=len(documents),
-                    message="文件索引完成",
-                    cleaning_report=cleaning_report.model_dump(mode="json"),
-                ).finish()
-            else:
-                vector_deleted = vector_store_manager.delete_by_source(
-                    normalized_path,
-                    raise_on_error=True,
-                )
-                lexical_deleted = lexical_index_service.delete_source(normalized_path)
-                logger.warning(f"文件内容为空或无法分割: {file_path}")
-                return SingleFileIndexingResult(
-                    file_path=normalized_path,
-                    status="empty",
-                    chunk_count=0,
-                    message=(
-                        "文件内容为空或无法切分，未写入向量索引；"
-                        f"已清理旧索引 vector={vector_deleted}, lexical={lexical_deleted}"
-                    ),
-                    cleaning_report=cleaning_report.model_dump(mode="json"),
-                ).finish()
+            with self._source_lock(normalized_path):
+                return self._index_single_file_locked(path, normalized_path)
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")
@@ -397,6 +357,87 @@ class VectorIndexService:
             except Exception as stale_exc:
                 logger.warning(f"标记陈旧索引失败: {normalized_path}, 错误: {stale_exc}")
             raise RuntimeError(f"索引文件失败: {e}") from e
+
+    def _index_single_file_locked(
+        self,
+        path: Path,
+        normalized_path: str,
+    ) -> SingleFileIndexingResult:
+        """Index one source while holding its cross-process transaction lock."""
+        self._mark_source_stale(normalized_path, "indexing_in_progress")
+        loader = document_loader_registry.get_loader(path)
+        loaded_documents, cleaning_report = loader.load(path)
+        logger.info(
+            f"读取文件: {path}, loader={loader.loader_type}, "
+            f"有效单元={len(loaded_documents)}, raw_units={cleaning_report.raw_units}"
+        )
+
+        documents = document_splitter_service.split_loaded_documents(
+            loaded_documents,
+            normalized_path,
+        )
+        logger.info(f"文档分割完成: {path} -> {len(documents)} 个分片")
+
+        if documents:
+            vector_ids = vector_store_manager.add_documents(documents)
+            try:
+                lexical_index_service.upsert_source(
+                    normalized_path,
+                    documents,
+                    clear_stale=False,
+                )
+                vector_store_manager.delete_by_source_except_ids(
+                    normalized_path,
+                    vector_ids,
+                    raise_on_error=True,
+                )
+                lexical_index_service.clear_source_stale(normalized_path)
+            except Exception:
+                try:
+                    vector_store_manager.delete_by_ids(vector_ids, raise_on_error=True)
+                except Exception as rollback_exc:
+                    logger.error(
+                        f"双索引提交失败且向量补偿失败: source={normalized_path}, "
+                        f"rollback_error={rollback_exc}"
+                    )
+                raise
+            logger.info(f"文件索引完成: {path}, 共 {len(documents)} 个分片")
+            return SingleFileIndexingResult(
+                file_path=normalized_path,
+                status="success",
+                chunk_count=len(documents),
+                message="文件索引完成",
+                cleaning_report=cleaning_report.model_dump(mode="json"),
+            ).finish()
+
+        vector_deleted = vector_store_manager.delete_by_source(
+            normalized_path,
+            raise_on_error=True,
+        )
+        lexical_deleted = lexical_index_service.delete_source(normalized_path)
+        logger.warning(f"文件内容为空或无法分割: {path}")
+        return SingleFileIndexingResult(
+            file_path=normalized_path,
+            status="empty",
+            chunk_count=0,
+            message=(
+                "文件内容为空或无法切分，未写入向量索引；"
+                f"已清理旧索引 vector={vector_deleted}, lexical={lexical_deleted}"
+            ),
+            cleaning_report=cleaning_report.model_dump(mode="json"),
+        ).finish()
+
+    def _source_lock(self, source_path: str) -> FileLock:
+        """Serialize updates for one source across threads and worker processes."""
+        self._source_lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_id = hashlib.sha256(source_path.encode("utf-8")).hexdigest()
+        return FileLock(str(self._source_lock_dir / f"{lock_id}.lock"))
+
+    @staticmethod
+    def _mark_source_stale(source_path: str, reason: str) -> None:
+        marker = getattr(lexical_index_service, "mark_source_stale", None)
+        if callable(marker):
+            marker(source_path, reason)
 
     def _ensure_directory_allowed(self, dir_path: Path) -> None:
         """Ensure batch indexing cannot read arbitrary local directories."""

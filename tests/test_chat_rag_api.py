@@ -22,6 +22,12 @@ def test_chat_request_models_reject_unbounded_session_and_question_inputs() -> N
         ClearRequest(sessionId="s" * 129)
     with pytest.raises(ValidationError):
         ClearRequest(sessionId="   ")
+    with pytest.raises(ValidationError):
+        ChatRequest(Id="session-\nforged", Question="hello")
+    with pytest.raises(ValidationError):
+        ClearRequest(sessionId="session-\tforged")
+
+    assert ChatRequest(Id="中文会话", Question="hello").id == "中文会话"
 
 
 @pytest.mark.asyncio

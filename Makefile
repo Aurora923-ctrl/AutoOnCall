@@ -26,8 +26,8 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
-        install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
-        api-contract-verify knowledge-quality benchmark-baseline official-baseline performance-smoke performance-real-model controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
+        install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-ragas-full-core eval-ragas-full-generated-core eval-ragas-full-runtime-core eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
+        api-contract-verify knowledge-quality benchmark-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
         interview-up interview-down interview-status sandbox-verify sandbox-demo refresh-quality-artifacts
@@ -706,6 +706,18 @@ eval-ragas:  ## Run optional RAGAS quality evaluation for RAG answers
 	@echo "$(YELLOW)🧪 Running optional RAGAS quality evaluation...$(NC)"
 	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/ragas_eval_summary.json --summary-md logs/ragas_eval_summary.md
 
+eval-ragas-full-core:  ## Run the frozen core set with full Judge metrics three times
+	@echo "$(YELLOW)Running frozen-core RAGAS full Judge evaluation...$(NC)"
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/ragas_stage3_core_cases.yaml --docs-dir $(DOCS_DIR) --metrics-profile full --repeat-count 3 --summary-json logs/ragas_full_core_summary.json --summary-md logs/ragas_full_core_summary.md --failed-cases-json logs/ragas_full_core_failed_cases.json
+
+eval-ragas-full-generated-core:  ## Run fixed retrieval plus real grounded LLM generation
+	@echo "$(YELLOW)Running RAGAS full evaluation with fixed retrieval and real generation...$(NC)"
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/ragas_stage3_core_cases.yaml --docs-dir $(DOCS_DIR) --answer-source context-fixture --metrics-profile full --repeat-count 3 --summary-json logs/ragas_full_generated_core_summary.json --summary-md logs/ragas_full_generated_core_summary.md --failed-cases-json logs/ragas_full_generated_core_failed_cases.json
+
+eval-ragas-full-runtime-core:  ## Run Milvus retrieval plus real grounded LLM generation once
+	@echo "$(YELLOW)Running runtime RAGAS full evaluation against Milvus...$(NC)"
+	$(PYTHON) scripts/eval/eval_ragas_cases.py --cases eval/ragas_stage3_core_cases.yaml --mode runtime --answer-source runtime --metrics-profile full --repeat-count 1 --summary-json logs/ragas_full_runtime_core_summary.json --summary-md logs/ragas_full_runtime_core_summary.md --failed-cases-json logs/ragas_full_runtime_core_failed_cases.json
+
 eval-change:  ## 运行安全变更离线评测
 	@echo "$(YELLOW)🧪 运行安全变更离线评测...$(NC)"
 	$(PYTHON) scripts/eval/eval_change_cases.py --cases eval/change_cases.yaml --summary-json logs/change_eval_summary.json --summary-md logs/change_eval_summary.md
@@ -729,6 +741,9 @@ performance-smoke:  ## Run a bounded performance evaluator smoke check
 
 performance-real-model:  ## Evaluate persisted real-model traces for the stage-6 minimum
 	$(PYTHON) scripts/performance/run_real_model_acceptance.py --rag-requests 20 --aiops-requests 10 --summary-json logs/performance_real_model.json --summary-md logs/performance_real_model.md
+
+performance-rag-runtime:  ## Benchmark the real Milvus RAG path with stage observations
+	$(PYTHON) scripts/performance/run_rag_runtime_benchmark.py --limit 20
 
 controlled-fault-readiness:  ## Verify controlled-fault implementation and summary tests
 	$(PYTHON) -m pytest tests/test_controlled_fault.py -q

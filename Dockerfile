@@ -24,9 +24,16 @@ COPY static ./static
 RUN python -m pip install --upgrade pip \
     && python -m pip install .
 
+RUN addgroup --system autooncall \
+    && adduser --system --ingroup autooncall --home /app autooncall \
+    && mkdir -p /app/data /app/logs /app/uploads \
+    && chown -R autooncall:autooncall /app
+
+USER autooncall
+
 EXPOSE 9900
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:9900/health/live || exit 1
+    CMD curl -fsS http://127.0.0.1:${PORT}/health/live || exit 1
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9900"]
+CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host \"${HOST}\" --port \"${PORT}\""]

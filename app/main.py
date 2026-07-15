@@ -3,8 +3,9 @@
 主应用程序，配置路由、中间件、静态文件等
 """
 
-import os
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,26 +26,45 @@ from app.api import (
     incidents,
 )
 from app.config import config
+from app.core.auth import configured_token_scopes
 from app.core.milvus_client import milvus_manager
+from app.services.vector_store_manager import vector_store_manager
 
 # Used only to detect risky configuration values; this constant does not bind a socket.
 EXTERNALLY_BOUND_HOSTS = {"0.0.0.0", "::", "[::]"}  # nosec B104
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATIC_DIR = PROJECT_ROOT / "static"
 
 
 def production_exposure_warnings() -> list[str]:
     """Return warnings for demo defaults that are risky on externally bound hosts."""
 
-    host = str(config.host).strip()
-    externally_bound = host in EXTERNALLY_BOUND_HOSTS
-    if not externally_bound:
+    if not is_externally_bound_host(config.host):
         return []
 
     warnings: list[str] = []
     if not config.api_auth_enabled:
         warnings.append("API auth is disabled while binding to a non-local host")
+    elif not configured_token_scopes():
+        warnings.append("API auth has no usable tokens while binding to a non-local host")
     if "*" in config.cors_origins:
         warnings.append("CORS allows all origins while binding to a non-local host")
+    if config.aiops_mock_fallback_enabled:
+        warnings.append("AIOps mock fallback is enabled while binding to a non-local host")
     return warnings
+
+
+def is_externally_bound_host(host: object) -> bool:
+    """Return whether a uvicorn bind host is reachable beyond loopback."""
+    normalized = str(host or "").strip().lower().removeprefix("[").removesuffix("]")
+    if normalized in {"localhost", "ip6-localhost"}:
+        return False
+    if normalized in EXTERNALLY_BOUND_HOSTS or not normalized:
+        return True
+    try:
+        return not ip_address(normalized).is_loopback
+    except ValueError:
+        return True
 
 
 def enforce_production_exposure_policy() -> None:
@@ -67,7 +87,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"🚀 {config.app_name} v{config.app_version} 启动中...")
     logger.info(f"📝 环境: {'开发' if config.debug else '生产'}")
     logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
-    logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
+    if config.debug:
+        logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
 
     enforce_production_exposure_policy()
 
@@ -75,11 +96,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("=" * 60)
 
-    yield
-
-    logger.info("🔌 正在关闭 Milvus 连接...")
-    milvus_manager.close()
-    logger.info(f"👋 {config.app_name} 关闭")
+    try:
+        yield
+    finally:
+        logger.info("🔌 正在关闭 Milvus 连接...")
+        await vector_store_manager.aclose()
+        milvus_manager.close()
+        logger.info(f"👋 {config.app_name} 关闭")
 
 
 app = FastAPI(
@@ -87,12 +110,15 @@ app = FastAPI(
     version=config.app_version,
     description="基于 LangChain 的智能oncall运维系统",
     lifespan=lifespan,
+    docs_url="/docs" if config.debug else None,
+    redoc_url="/redoc" if config.debug else None,
+    openapi_url="/openapi.json" if config.debug else None,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -109,23 +135,24 @@ app.include_router(feedback.router, prefix="/api", tags=["反馈闭环"])
 app.include_router(a2a.discovery_router, tags=["A2A Agent"])
 app.include_router(a2a.router, prefix=config.normalized_a2a_base_path, tags=["A2A Agent"])
 
-static_dir = "static"
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")
 async def root():
     """返回首页"""
-    index_path = os.path.join(static_dir, "index.html")
+    index_path = STATIC_DIR / "index.html"
 
-    if os.path.exists(index_path):
+    if index_path.exists():
         return FileResponse(index_path)
 
-    return {
+    response = {
         "message": f"Welcome to {config.app_name} API",
         "version": config.app_version,
-        "docs": "/docs",
     }
+    if config.debug:
+        response["docs"] = "/docs"
+    return response
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
@@ -41,6 +42,12 @@ ROLE_SCOPES = {
 }
 
 bearer_scheme = HTTPBearer(auto_error=False)
+_SAFE_TOKEN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
+_PLACEHOLDER_TOKEN_RE = re.compile(
+    r"^(?:replace[-_ ]?with|change[-_ ]?me|your[-_ ]?|example|sample|dummy|placeholder)",
+    re.IGNORECASE,
+)
+_MIN_TOKEN_LENGTH = 16
 
 
 @dataclass(frozen=True)
@@ -81,7 +88,7 @@ def authenticate_request(
 ) -> AuthPrincipal:
     """Authenticate one request and enforce the required scope."""
     if not config.api_auth_enabled:
-        return AuthPrincipal(enabled=False, token_name="auth-disabled")
+        return AuthPrincipal(enabled=False)
 
     token_registry = configured_token_scopes()
     if not token_registry:
@@ -152,7 +159,7 @@ def _parse_json_token_registry(raw_value: str) -> dict[str, dict[str, Any]]:
     registry: dict[str, dict[str, Any]] = {}
     for token, value in payload.items():
         token_text = str(token).strip()
-        if not token_text:
+        if not _is_usable_token(token_text):
             continue
         scopes = _expand_scopes(value)
         if not scopes:
@@ -169,15 +176,26 @@ def _add_role_token(
     role: str,
 ) -> None:
     token_text = (token or "").strip()
-    if not token_text:
+    if not _is_usable_token(token_text):
         return
     registry[token_name] = {"token": token_text, "scopes": ROLE_SCOPES[role]}
 
 
+def _is_usable_token(token: str) -> bool:
+    """Reject empty, weak, or obvious example credentials."""
+    return (
+        len(token) >= _MIN_TOKEN_LENGTH
+        and not any(character.isspace() or ord(character) < 32 for character in token)
+        and _PLACEHOLDER_TOKEN_RE.match(token) is None
+    )
+
+
 def _token_name(value: Any, token: str) -> str:
-    if isinstance(value, dict) and value.get("name"):
-        return str(value["name"])
-    return f"json_token_{sha256(token.encode('utf-8')).hexdigest()[:12]}"
+    fallback = f"json_token_{sha256(token.encode('utf-8')).hexdigest()[:12]}"
+    if not isinstance(value, dict) or not value.get("name"):
+        return fallback
+    candidate = str(value["name"]).strip()
+    return candidate if _SAFE_TOKEN_NAME_RE.fullmatch(candidate) else fallback
 
 
 def _expand_scopes(value: Any) -> set[str]:

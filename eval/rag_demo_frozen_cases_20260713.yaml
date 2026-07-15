@@ -1,0 +1,98 @@
+schema_version: "1.0"
+dataset_version: "2026.07.13-demo-freeze-candidate"
+status: candidate
+frozen_at: "2026-07-13"
+description: >
+  Candidate case freeze for the five-minute RAG demonstration. Case selection and
+  claim-to-chunk decisions are frozen; retrieval and prompt tuning must not be
+  changed to improve these cases.
+source_case_set: eval/ragas_stage3_core_cases.yaml
+source_case_set_sha256: 365F2C6FEC8A8DD4F876962A9731F2CDD8AF6F7D48D4038D7E254EA608BF3817
+source_runtime_artifact: logs/ragas_full_runtime_core_retrieval_polished_summary.json
+source_runtime_artifact_sha256: A07EB56BC14F10C84A91DF159F8CDE07ADF8728E82410FE0EE337982EB570605
+source_runtime_embedded_case_set_sha256: BC8130347118A4D6D68E65A751E4C0C6F4751571CF0EB4E2C134F3553A9AE613
+provenance_warnings:
+  - >
+    The runtime artifact embedded a different case-set SHA256 than the current
+    eval/ragas_stage3_core_cases.yaml file. Case ids and queries were manually
+    matched, but Step 2 must rerun this frozen file before any official claim.
+baseline_eligible: false
+baseline_ineligible_reasons:
+  - dirty_worktree
+freeze_rules:
+  - Do not change retrieval rules, Top-K, reranking, trust gate, prompt, or reference answers.
+  - Step 2 may rerun the frozen cases for streaming, API-contract, latency, model, and token validation.
+  - A runtime answer may be shown only when every displayed claim is supported by an approved chunk.
+  - If a frozen success case regresses, report the regression; do not tune against the frozen set.
+cases:
+  - id: stage3_redis_capacity
+    role: primary_success
+    query: "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？"
+    required_sources:
+      - official_redis_clients.md
+      - redis_postmortem.pdf
+    approved_chunk_ids:
+      - redis_postmortem.pdf#0001
+      - official_redis_clients.md#0004
+      - official_redis_clients.md#0002
+    acceptance:
+      answer_policy: answer_with_citations
+      required_claims:
+        - Distinguish incident-window evidence from the general Redis client limit.
+        - Explain that the effective maxclients value is constrained by the OS file-descriptor limit.
+        - Keep maxclients, restart, and connection-pool changes behind human approval.
+      forbidden_claims:
+        - Describe the historical incident values as current live observations.
+        - Recommend an unapproved production change.
+
+  - id: stage3_mysql_slow_query
+    role: primary_success
+    query: "payment-service 的 pool_waiting 和 active_connections 上升，如何排查慢查询？"
+    required_sources:
+      - payment_wiki.html
+    approved_chunk_ids:
+      - payment_wiki.html#0001
+      - mysql_slow_query_postmortem.pdf#0001
+    acceptance:
+      answer_policy: answer_with_citations
+      required_claims:
+        - Check the slow-query digest, active_connections, pool_waiting, and recent deploy history.
+        - Run EXPLAIN only after identifying the SQL digest and use a read-only path.
+        - Keep index, SQL, pool, and restart changes behind approval and a change window.
+      forbidden_claims:
+        - Present golden-case metric values as current live observations.
+        - Treat deploy correlation as a proven root cause.
+
+  - id: stage3_refusal_resume
+    role: primary_ood
+    query: "秋招简历项目经历应该怎么包装？"
+    should_reject: true
+    required_sources: []
+    approved_chunk_ids: []
+    acceptance:
+      answer_policy: refuse_without_trusted_source
+      citations_must_be_empty: true
+      required_claims:
+        - State that the current knowledge base has insufficient trusted evidence.
+      forbidden_claims:
+        - Provide resume-writing advice from unrelated OnCall documents.
+
+standby_cases:
+  - id: stage3_ticket_history
+    reason: >
+      Retrieval contains the ticket and postmortem evidence, but the current answer
+      omits the explicit boundary that historical handling does not prove the current
+      incident or authorize an automatic change.
+  - id: stage3_deploy_history
+    reason: >
+      Retrieval contains deploy history and MySQL evidence, but the current answer
+      does not clearly state that correlation is not root-cause proof and does not
+      provide a complete rollback decision boundary.
+explainable_failure:
+  id: stage3_cpu_evidence
+  reason: >
+    The retrieved chunk supports process and log evidence collection but does not
+    contain the requested approval, rollback, restart, scale, or rate-limit boundary.
+  presentation_boundary: >
+    Show it as a context-completeness failure. Do not let generation invent the
+    missing operational boundary.

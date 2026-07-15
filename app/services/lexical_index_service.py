@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from filelock import FileLock
 from langchain_core.documents import Document
 from loguru import logger
 
@@ -25,11 +26,18 @@ class LexicalIndexService:
     def __init__(self, index_path: str | Path = DEFAULT_LEXICAL_INDEX_PATH) -> None:
         self.index_path = Path(index_path)
         self._lock = threading.Lock()
+        self.lock_path = self.index_path.with_name(f".{self.index_path.name}.lock")
 
-    def upsert_source(self, source_path: str, documents: list[Document]) -> None:
+    def upsert_source(
+        self,
+        source_path: str,
+        documents: list[Document],
+        *,
+        clear_stale: bool = True,
+    ) -> None:
         """Replace all chunks for one source in the local lexical index."""
-        with self._lock:
-            payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
             chunks = [
                 self._document_to_record(document, source_path=source_path, rank=rank)
                 for rank, document in enumerate(documents, 1)
@@ -38,14 +46,15 @@ class LexicalIndexService:
                 chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
             ]
             payload["chunks"].extend(chunks)
-            payload["stale_sources"].pop(source_path, None)
+            if clear_stale:
+                payload["stale_sources"].pop(source_path, None)
             self._save_index(payload)
         logger.info(f"本地词法索引更新完成: source={source_path}, chunks={len(chunks)}")
 
     def delete_source(self, source_path: str) -> int:
         """Delete all lexical chunks for one source."""
-        with self._lock:
-            payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
             before = len(payload["chunks"])
             payload["chunks"] = [
                 chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
@@ -59,16 +68,16 @@ class LexicalIndexService:
 
     def mark_source_stale(self, source_path: str, reason: str) -> None:
         """Mark a source as stale so retrieval will not trust old chunks for it."""
-        with self._lock:
-            payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
             payload["stale_sources"][source_path] = str(reason or "indexing_failed")[:500]
             self._save_index(payload)
         logger.warning(f"本地词法索引标记为陈旧: source={source_path}, reason={reason}")
 
     def clear_source_stale(self, source_path: str) -> None:
         """Clear the stale marker for a source after a successful index update."""
-        with self._lock:
-            payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
             if source_path not in payload["stale_sources"]:
                 return
             payload["stale_sources"].pop(source_path, None)
@@ -76,7 +85,8 @@ class LexicalIndexService:
 
     def is_source_stale(self, source_path: str) -> bool:
         """Return True when a source should be excluded from retrieval."""
-        payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
         return source_path in payload["stale_sources"]
 
     def search(
@@ -87,7 +97,8 @@ class LexicalIndexService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[tuple[Document, float]]:
         """Search the local lexical index and return Document/score pairs."""
-        payload = self._load_index()
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
         query_terms = extract_lexical_terms(query)
         if not query_terms:
             return []
@@ -141,12 +152,18 @@ class LexicalIndexService:
             "terms": sorted(extract_lexical_terms(_searchable_text(content, metadata))),
         }
 
-    def _load_index(self) -> dict[str, Any]:
+    def _locked_payload(self) -> _CombinedLock:
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        return _CombinedLock(self._lock, FileLock(str(self.lock_path)))
+
+    def _load_index(self, *, strict: bool = False) -> dict[str, Any]:
         if not self.index_path.exists():
             return {"version": 1, "chunks": [], "stale_sources": {}}
         try:
             payload = json.loads(self.index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
+            if strict:
+                raise RuntimeError(f"读取本地词法索引失败: {exc}") from exc
             logger.warning(f"读取本地词法索引失败，将使用空索引: {exc}")
             return {"version": 1, "chunks": [], "stale_sources": {}}
         chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
@@ -167,6 +184,27 @@ class LexicalIndexService:
             os.replace(temp_path, self.index_path)
         finally:
             temp_path.unlink(missing_ok=True)
+
+
+class _CombinedLock:
+    def __init__(self, thread_lock: threading.Lock, file_lock: FileLock) -> None:
+        self.thread_lock = thread_lock
+        self.file_lock = file_lock
+
+    def __enter__(self) -> _CombinedLock:
+        self.thread_lock.acquire()
+        try:
+            self.file_lock.acquire()
+        except Exception:
+            self.thread_lock.release()
+            raise
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        try:
+            self.file_lock.release()
+        finally:
+            self.thread_lock.release()
 
 
 def extract_lexical_terms(text: str) -> set[str]:

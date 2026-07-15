@@ -1,7 +1,10 @@
 """向量嵌入服务模块 - 基于 LangChain Embeddings 标准接口"""
 
+import math
 import time
+from collections.abc import Iterable
 from threading import RLock
+from typing import SupportsFloat, SupportsIndex, cast
 
 from langchain_core.embeddings import Embeddings
 from loguru import logger
@@ -39,11 +42,13 @@ class DashScopeEmbeddings(Embeddings):
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url or config.dashscope_api_base,
+            timeout=config.dashscope_embedding_timeout_seconds,
+            max_retries=0,
         )
 
         self.model = model
         self.dimensions = dimensions
-        self.batch_size = max(1, int(config.dashscope_embedding_batch_size))
+        self.batch_size = int(config.dashscope_embedding_batch_size)
         self.max_retries = max(0, int(config.dashscope_embedding_max_retries))
 
         masked_key = self._mask_api_key(api_key)
@@ -54,10 +59,8 @@ class DashScopeEmbeddings(Embeddings):
 
     @staticmethod
     def _mask_api_key(api_key: str) -> str:
-        """掩码 API Key 用于日志"""
-        if len(api_key) > 8:
-            return f"{api_key[:8]}...{api_key[-4:]}"
-        return "***"
+        """Return a presence marker without exposing any credential characters."""
+        return "configured" if api_key else "missing"
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """
@@ -111,7 +114,10 @@ class DashScopeEmbeddings(Embeddings):
                     raise RuntimeError(
                         f"Embedding 返回数量不一致: expected={len(batch)}, actual={len(embeddings)}"
                     )
-                return embeddings
+                return [
+                    self._validate_embedding(embedding, label=f"document batch {batch_index}")
+                    for embedding in embeddings
+                ]
             except Exception as exc:
                 last_error = exc
                 if attempt >= self.max_retries:
@@ -137,21 +143,52 @@ class DashScopeEmbeddings(Embeddings):
         if not text or not text.strip():
             raise ValueError("查询文本不能为空")
 
+        logger.debug(f"嵌入查询, 长度: {len(text)} 字符")
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=text,
+                    dimensions=self.dimensions,
+                    encoding_format="float",
+                )
+                if len(response.data) != 1:
+                    raise RuntimeError(
+                        f"查询 Embedding 返回数量不一致: expected=1, actual={len(response.data)}"
+                    )
+                embedding = self._validate_embedding(response.data[0].embedding, label="query")
+                logger.debug(f"查询嵌入完成, 维度: {len(embedding)}")
+                return embedding
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    break
+                sleep_seconds = min(2**attempt, 5)
+                logger.warning(f"查询嵌入失败，准备重试 ({attempt + 1}/{self.max_retries}): {exc}")
+                time.sleep(sleep_seconds)
+        logger.error(f"查询嵌入失败: {last_error}")
+        raise RuntimeError(f"查询嵌入失败: {last_error}") from last_error
+
+    def _validate_embedding(self, embedding: object, *, label: str) -> list[float]:
+        """Validate provider output before Milvus sees it."""
+        if isinstance(embedding, str) or not isinstance(embedding, Iterable):
+            raise RuntimeError(f"{label} Embedding 返回格式无效")
         try:
-            logger.debug(f"嵌入查询, 长度: {len(text)} 字符")
-
-            response = self.client.embeddings.create(
-                model=self.model, input=text, dimensions=self.dimensions, encoding_format="float"
+            values = cast(Iterable[str | SupportsFloat | SupportsIndex], embedding)
+            vector = [float(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{label} Embedding 包含非数值元素") from exc
+        if len(vector) != self.dimensions:
+            raise RuntimeError(
+                f"{label} Embedding 维度不一致: expected={self.dimensions}, actual={len(vector)}"
             )
-
-            embedding = response.data[0].embedding
-            logger.debug(f"查询嵌入完成, 维度: {len(embedding)}")
-
-            return embedding
-
-        except Exception as e:
-            logger.error(f"查询嵌入失败: {e}")
-            raise RuntimeError(f"查询嵌入失败: {e}") from e
+        if not all(math.isfinite(value) for value in vector):
+            raise RuntimeError(f"{label} Embedding 包含 NaN 或 Infinity")
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 1e-12:
+            raise RuntimeError(f"{label} Embedding 是零向量")
+        return [value / norm for value in vector]
 
 
 class LazyDashScopeEmbeddings(Embeddings):
@@ -168,7 +205,7 @@ class LazyDashScopeEmbeddings(Embeddings):
                     self._service = DashScopeEmbeddings(
                         api_key=config.dashscope_api_key,
                         model=config.dashscope_embedding_model,
-                        dimensions=1024,
+                        dimensions=config.dashscope_embedding_dimensions,
                         base_url=config.dashscope_api_base,
                     )
         return self._service

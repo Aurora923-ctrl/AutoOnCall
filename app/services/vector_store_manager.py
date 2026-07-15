@@ -37,8 +37,8 @@ class VectorStoreManager:
             _ = milvus_manager.connect()
 
             connection_args = {
-                "host": config.milvus_host,
-                "port": config.milvus_port,
+                "uri": f"http://{config.milvus_host}:{config.milvus_port}",
+                "timeout": config.milvus_timeout / 1000,
             }
 
             self.vector_store = Milvus(
@@ -51,6 +51,7 @@ class VectorStoreManager:
                 vector_field="vector",  # 向量存储到 vector 字段
                 primary_field="id",  # 主键字段
                 metadata_field="metadata",  # 元数据字段
+                timeout=config.milvus_timeout / 1000,
             )
 
             logger.info(
@@ -98,12 +99,27 @@ class VectorStoreManager:
             for document, document_id in zip(documents, ids, strict=True):
                 document.metadata["_vector_id"] = document_id
 
-            if self._collection_exists(vector_store) and hasattr(vector_store, "upsert"):
-                cast(Any, vector_store).upsert(ids=ids, documents=documents)
-                result_ids = ids
-            else:
-                vector_store.add_documents(documents, ids=ids)
-                result_ids = ids
+            if not hasattr(vector_store, "upsert"):
+                raise RuntimeError(
+                    f"Milvus collection '{self.collection_name}' 未就绪，拒绝降级为 insert"
+                )
+            try:
+                cast(Any, vector_store).upsert(
+                    ids=ids,
+                    documents=documents,
+                    batch_size=len(documents),
+                    timeout=config.milvus_timeout / 1000,
+                )
+            except Exception:
+                self._delete_vector_ids_with_store(
+                    vector_store,
+                    ids,
+                    raise_on_error=False,
+                )
+                raise
+            result_ids = ids
+
+            self._flush(vector_store)
 
             elapsed = time.time() - start_time
             logger.info(
@@ -124,8 +140,53 @@ class VectorStoreManager:
         try:
             return bool(client.has_collection(collection_name))
         except Exception as exc:
-            logger.warning(f"检查 Milvus collection 是否存在失败，将使用 insert: {exc}")
-            return False
+            raise RuntimeError(f"检查 Milvus collection 是否存在失败: {exc}") from exc
+
+    def _flush(self, vector_store: Milvus) -> None:
+        """Wait for a completed write to become visible before cleanup starts."""
+        client = getattr(vector_store, "client", None)
+        if client is None or not hasattr(client, "flush"):
+            raise RuntimeError("Milvus client 不支持 flush，无法确认写入可见性")
+        client.flush(
+            collection_name=self.collection_name,
+            timeout=config.milvus_timeout / 1000,
+        )
+
+    def _delete_vector_ids_with_store(
+        self,
+        vector_store: Milvus,
+        vector_ids: list[str],
+        *,
+        raise_on_error: bool,
+    ) -> int:
+        """Delete a known batch using the same Milvus client that performed the write."""
+        unique_ids = sorted({str(item) for item in vector_ids if str(item)})
+        if not unique_ids:
+            return 0
+        client = getattr(vector_store, "client", None)
+        if client is None or not hasattr(client, "delete"):
+            if raise_on_error:
+                raise RuntimeError("Milvus client 不支持 delete，无法补偿部分写入")
+            return 0
+        try:
+            result = client.delete(
+                collection_name=self.collection_name,
+                ids=unique_ids,
+                timeout=config.milvus_timeout / 1000,
+            )
+            self._flush(vector_store)
+            deleted_count = (
+                result.delete_count if hasattr(result, "delete_count") else len(unique_ids)
+            )
+            logger.info(
+                f"同客户端补偿删除向量批次完成: ids={len(unique_ids)}, deleted={deleted_count}"
+            )
+            return deleted_count
+        except Exception as exc:
+            logger.error(f"同客户端补偿删除向量批次失败: {exc}")
+            if raise_on_error:
+                raise
+            return 0
 
     def delete_by_source(self, file_path: str, *, raise_on_error: bool = False) -> int:
         """
@@ -143,7 +204,8 @@ class VectorStoreManager:
 
             expr = f'metadata["_source"] == {_quote_expr_value(file_path)}'
 
-            result = collection.delete(expr)
+            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+            collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(f"删除文件旧数据: {file_path}, 删除数量: {deleted_count}")
@@ -174,7 +236,8 @@ class VectorStoreManager:
                 f'and metadata["_document_version"] != {_quote_expr_value(document_version)}'
             )
 
-            result = collection.delete(expr)
+            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+            collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(
@@ -189,7 +252,13 @@ class VectorStoreManager:
                 raise
             return 0
 
-    def delete_by_source_except_ids(self, file_path: str, vector_ids: list[str]) -> int:
+    def delete_by_source_except_ids(
+        self,
+        file_path: str,
+        vector_ids: list[str],
+        *,
+        raise_on_error: bool = True,
+    ) -> int:
         """Delete chunks for one source that are not part of the latest indexed batch."""
         unique_ids = sorted({str(item) for item in vector_ids if str(item)})
         if not unique_ids:
@@ -203,7 +272,8 @@ class VectorStoreManager:
                 f'metadata["_source"] == {_quote_expr_value(file_path)} and id not in [{id_list}]'
             )
 
-            result = collection.delete(expr)
+            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+            collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(
@@ -214,7 +284,32 @@ class VectorStoreManager:
 
         except Exception as e:
             logger.error(f"删除非当前批次数据失败: {e}")
-            raise RuntimeError(f"删除非当前批次向量数据失败: {e}") from e
+            if raise_on_error:
+                raise RuntimeError(f"删除非当前批次向量数据失败: {e}") from e
+            return 0
+
+    def delete_by_ids(self, vector_ids: list[str], *, raise_on_error: bool = False) -> int:
+        """Delete a known batch of vector IDs for failed cross-index compensation."""
+        unique_ids = sorted({str(item) for item in vector_ids if str(item)})
+        if not unique_ids:
+            return 0
+        try:
+            _ = milvus_manager.connect()
+            collection = milvus_manager.get_collection()
+            id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
+            result = collection.delete(
+                f"id in [{id_list}]",
+                timeout=config.milvus_timeout / 1000,
+            )
+            collection.flush(timeout=config.milvus_timeout / 1000)
+            deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
+            logger.info(f"补偿删除向量批次完成: ids={len(unique_ids)}, deleted={deleted_count}")
+            return deleted_count
+        except Exception as exc:
+            logger.error(f"补偿删除向量批次失败: {exc}")
+            if raise_on_error:
+                raise
+            return 0
 
     def get_vector_store(self) -> Milvus:
         """
@@ -255,6 +350,42 @@ class VectorStoreManager:
             logger.error(f"相似度搜索失败: {e}")
             return []
 
+    def close(self) -> None:
+        """Close clients owned by the LangChain vector store."""
+        vector_store = self._detach_vector_store()
+        if vector_store is None:
+            return
+        client = getattr(vector_store, "client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception as exc:
+                logger.warning(f"关闭 VectorStore MilvusClient 失败: {exc}")
+
+    async def aclose(self) -> None:
+        """Close both synchronous and asynchronous clients owned by the vector store."""
+        vector_store = self._detach_vector_store()
+        if vector_store is None:
+            return
+        async_client = getattr(vector_store, "_async_milvus_client", None)
+        if async_client is not None and hasattr(async_client, "close"):
+            try:
+                await async_client.close()
+            except Exception as exc:
+                logger.warning(f"关闭 VectorStore AsyncMilvusClient 失败: {exc}")
+        client = getattr(vector_store, "client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception as exc:
+                logger.warning(f"关闭 VectorStore MilvusClient 失败: {exc}")
+
+    def _detach_vector_store(self) -> Milvus | None:
+        with self._lock:
+            vector_store = self.vector_store
+            self.vector_store = None
+        return vector_store
+
 
 vector_store_manager = VectorStoreManager()
 
@@ -273,11 +404,25 @@ def build_vector_document_id(document: Document, index: int = 1) -> str:
     """Build a stable Milvus primary key for one document chunk."""
     metadata = dict(document.metadata or {})
     identity_parts = [
-        str(metadata.get("_source") or metadata.get("source") or ""),
+        _canonical_source_id(metadata),
         str(metadata.get("_document_hash") or metadata.get("_document_version") or ""),
         str(metadata.get("_chunk_id") or index),
         str(metadata.get("_chunk_hash") or ""),
-        str(document.page_content or ""),
     ]
     identity = "\x1f".join(identity_parts)
     return f"vec-{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_source_id(metadata: dict[str, Any]) -> str:
+    explicit = str(metadata.get("_source_id") or "").strip()
+    if explicit:
+        return explicit
+    source = str(
+        metadata.get("_source") or metadata.get("source") or metadata.get("_doc_id") or ""
+    ).replace("\\", "/")
+    lowered = source.lower()
+    for marker in ("/docs/knowledge-base/", "/uploads/"):
+        position = lowered.rfind(marker)
+        if position >= 0:
+            return source[position + 1 :]
+    return source.rsplit("/", 1)[-1]

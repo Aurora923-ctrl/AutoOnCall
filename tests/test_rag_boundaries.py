@@ -1,6 +1,7 @@
 """RAG dependency boundary tests."""
 
 import importlib
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -38,13 +39,97 @@ def test_dashscope_embedding_batches_documents_and_retries(monkeypatch) -> None:
     monkeypatch.setattr(embedding_module.config, "dashscope_embedding_max_retries", 1)
     monkeypatch.setattr(embedding_module.time, "sleep", lambda _seconds: None)
 
-    service = embedding_module.DashScopeEmbeddings(api_key="test-key")
+    service = embedding_module.DashScopeEmbeddings(api_key="test-key", dimensions=2)
     service.client = SimpleNamespace(embeddings=FakeEmbeddingsClient())
 
     embeddings = service.embed_documents(["a", "bb", "ccc"])
 
     assert calls == [["a", "bb"], ["a", "bb"], ["ccc"]]
-    assert embeddings == [[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]]
+    assert all(
+        math.isclose(math.sqrt(sum(value * value for value in item)), 1.0) for item in embeddings
+    )
+
+
+def test_dashscope_embedding_configures_bounded_sdk_timeout_and_disables_sdk_retries(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(embedding_module, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_timeout_seconds", 12.5)
+
+    embedding_module.DashScopeEmbeddings(api_key="test-key", dimensions=2)
+
+    assert captured["timeout"] == 12.5
+    assert captured["max_retries"] == 0
+
+
+def test_dashscope_embedding_log_mask_never_exposes_key_characters() -> None:
+    api_key = "sk-sensitive-secret-value"
+
+    masked = embedding_module.DashScopeEmbeddings._mask_api_key(api_key)
+
+    assert masked == "configured"
+    assert not any(fragment in masked for fragment in ("sk-", "sensitive", "value"))
+
+
+def test_dashscope_query_embedding_retries_with_same_bounded_policy(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    class FakeEmbeddingsClient:
+        def create(self, **_kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("temporary provider error")
+            return SimpleNamespace(data=[SimpleNamespace(embedding=[1.0, 2.0])])
+
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_max_retries", 1)
+    monkeypatch.setattr(embedding_module.time, "sleep", lambda _seconds: None)
+    service = embedding_module.DashScopeEmbeddings(api_key="test-key", dimensions=2)
+    service.client = SimpleNamespace(embeddings=FakeEmbeddingsClient())
+
+    embedding = service.embed_query("Redis timeout")
+    assert math.isclose(math.sqrt(sum(value * value for value in embedding)), 1.0)
+    assert attempts["count"] == 2
+
+
+def test_dashscope_embedding_rejects_wrong_dimension_and_non_finite_values(monkeypatch) -> None:
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_max_retries", 0)
+    service = embedding_module.DashScopeEmbeddings(api_key="test-key", dimensions=2)
+
+    class FakeEmbeddingsClient:
+        def __init__(self) -> None:
+            self.responses = [
+                SimpleNamespace(data=[SimpleNamespace(embedding=[1.0])]),
+                SimpleNamespace(data=[SimpleNamespace(embedding=[1.0, float("nan")])]),
+            ]
+
+        def create(self, **_kwargs):
+            return self.responses.pop(0)
+
+    service.client = SimpleNamespace(embeddings=FakeEmbeddingsClient())
+
+    with pytest.raises(RuntimeError, match="维度不一致"):
+        service.embed_query("first")
+    with pytest.raises(RuntimeError, match="NaN"):
+        service.embed_query("second")
+
+
+def test_dashscope_embedding_rejects_zero_vectors(monkeypatch) -> None:
+    monkeypatch.setattr(embedding_module.config, "dashscope_embedding_max_retries", 0)
+    service = embedding_module.DashScopeEmbeddings(api_key="test-key", dimensions=2)
+    service.client = SimpleNamespace(
+        embeddings=SimpleNamespace(
+            create=lambda **_kwargs: SimpleNamespace(data=[SimpleNamespace(embedding=[0.0, 0.0])])
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="零向量"):
+        service.embed_query("zero")
 
 
 def test_vector_store_manager_does_not_connect_milvus_during_construction(monkeypatch) -> None:
@@ -68,6 +153,31 @@ def test_vector_store_manager_skips_empty_document_list_without_connecting(monke
 
     manager = vector_store_module.VectorStoreManager()
     assert manager.add_documents([]) == []
+    assert manager.vector_store is None
+
+
+@pytest.mark.asyncio
+async def test_vector_store_manager_closes_sync_and_async_clients() -> None:
+    closed: list[str] = []
+
+    class SyncClient:
+        def close(self) -> None:
+            closed.append("sync")
+
+    class AsyncClient:
+        async def close(self) -> None:
+            closed.append("async")
+
+    class FakeVectorStore:
+        client = SyncClient()
+        _async_milvus_client = AsyncClient()
+
+    manager = vector_store_module.VectorStoreManager()
+    manager.vector_store = FakeVectorStore()  # type: ignore[assignment]
+
+    await manager.aclose()
+
+    assert closed == ["async", "sync"]
     assert manager.vector_store is None
 
 

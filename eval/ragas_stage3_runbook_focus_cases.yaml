@@ -1,0 +1,42 @@
+schema_version: "1.0"
+dataset_version: "2026.07.13-runbook-focus"
+description: "Focused runtime validation for the existing CPU, memory, and disk Runbooks."
+cases:
+  - id: stage3_cpu_evidence
+    query: "billing-service CPU 持续 95%，如何收集进程和线程证据并给出处置边界？"
+    expected_source: cpu_high_usage.md
+    reference_answer: >
+      先确认告警时间窗、进程 CPU 和线程热点，再结合日志判断是否为死循环或流量突增。
+      扩容、限流、重启或回滚必须保留审批、dry-run 和回滚边界。
+    reference_context_ids: [cpu_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含进程或线程级 CPU 证据
+      - 区分诊断证据和处置动作
+      - 处置动作保留审批或回滚边界
+
+  - id: stage3_memory_oom
+    query: "Pod 发生 OOMKilled 后应如何取证，什么时候才能建议重启或扩容？"
+    expected_source: memory_high_usage.md
+    reference_answer: >
+      应先保留内存、GC、OOM 日志和堆信息，判断内存泄漏、配置不足或流量压力。
+      重启和扩容只能作为有审批与回滚记录的处置建议。
+    reference_context_ids: [memory_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 包含 OOM 或内存证据
+      - 建议保留现场信息
+      - 重启或扩容不越过审批边界
+
+  - id: stage3_disk_inode
+    query: "写文件失败时怎样区分磁盘空间耗尽、inode 耗尽和大目录占用？"
+    expected_source: disk_high_usage.md
+    reference_answer: >
+      应检查 df、inode 使用率、目录和大文件占用，再定位日志、临时文件或容器资源。
+      删除、截断或清理前必须确认影响范围并走安全变更。
+    reference_context_ids: [disk_high_usage.md]
+    ragas_tags: [core_interview]
+    business_rubric:
+      - 覆盖空间、inode 和目录证据
+      - 不直接执行删除或截断
+      - 包含审批或 dry-run 边界

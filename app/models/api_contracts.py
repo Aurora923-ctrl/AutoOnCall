@@ -1,6 +1,6 @@
 """Typed API response contracts for AIOps read and approval endpoints."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -168,3 +168,49 @@ class KnowledgeIndexingReportsResponse(BaseModel):
     code: int = 200
     message: str = "success"
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class UploadConfigData(BaseModel):
+    """Frontend-visible file upload constraints."""
+
+    allowed_extensions: list[str] = Field(default_factory=list)
+    max_file_size: int = Field(ge=1)
+    max_file_size_mb: int = Field(ge=1)
+
+
+class UploadConfigResponse(BaseModel):
+    """File upload configuration response."""
+
+    code: int = 200
+    message: str = "success"
+    data: UploadConfigData
+
+
+class UploadIndexingStatus(BaseModel):
+    """Public indexing outcome returned by the upload API."""
+
+    status: Literal["success", "empty", "failed"]
+    chunk_count: int = Field(ge=0)
+    duration_ms: int = Field(ge=0)
+    error_message: str | None = None
+    message: str | None = None
+    cleaning: dict[str, Any] = Field(default_factory=dict)
+
+
+class UploadFileData(BaseModel):
+    """Saved file metadata plus indexing readiness."""
+
+    filename: str
+    file_path: str
+    size: int = Field(ge=0)
+    overwritten: bool = False
+    indexing_ready: bool = False
+    indexing: UploadIndexingStatus
+
+
+class UploadFileResponse(BaseModel):
+    """File upload and indexing response."""
+
+    code: int
+    message: str
+    data: UploadFileData

@@ -1,5 +1,6 @@
 """Health check API."""
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -12,18 +13,23 @@ from app.core.milvus_client import milvus_manager
 from app.integrations.base import bearer_headers, classify_adapter_error
 from app.integrations.mysql import MySQLStatusAdapter
 from app.integrations.redis_info import RedisInfoAdapter
+from app.models.response import HealthApiResponse
 from app.utils.public_errors import public_adapter_error_message
 
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get(
+    "/health",
+    response_model=HealthApiResponse,
+    responses={503: {"model": HealthApiResponse}},
+)
 async def health_check():
     """Compatibility endpoint with readiness semantics."""
     return await readiness_check()
 
 
-@router.get("/health/live")
+@router.get("/health/live", response_model=HealthApiResponse)
 async def liveness_check():
     """Return process liveness without checking external dependencies."""
     health_data = _base_health_data()
@@ -44,7 +50,11 @@ async def liveness_check():
     )
 
 
-@router.get("/health/ready")
+@router.get(
+    "/health/ready",
+    response_model=HealthApiResponse,
+    responses={503: {"model": HealthApiResponse}},
+)
 async def readiness_check():
     """Return dependency readiness for all production traffic capabilities."""
     health_data = await _dependency_health_data()
@@ -77,7 +87,11 @@ async def readiness_check():
     )
 
 
-@router.get("/health/ready/rag")
+@router.get(
+    "/health/ready/rag",
+    response_model=HealthApiResponse,
+    responses={503: {"model": HealthApiResponse}},
+)
 async def rag_readiness_check():
     """Return readiness for RAG search and upload indexing."""
     health_data = await _dependency_health_data()
@@ -99,7 +113,11 @@ async def rag_readiness_check():
     )
 
 
-@router.get("/health/ready/aiops")
+@router.get(
+    "/health/ready/aiops",
+    response_model=HealthApiResponse,
+    responses={503: {"model": HealthApiResponse}},
+)
 async def aiops_readiness_check():
     """Return readiness for AIOps diagnosis."""
     health_data = await _dependency_health_data()
@@ -124,8 +142,10 @@ async def aiops_readiness_check():
 async def _dependency_health_data() -> dict[str, Any]:
     """Build the shared dependency view used by capability-specific probes."""
     health_data = _base_health_data()
-    milvus = _check_milvus()
-    external_systems = await _external_system_readiness()
+    milvus, external_systems = await asyncio.gather(
+        asyncio.to_thread(_check_milvus),
+        _external_system_readiness(),
+    )
     health_data["checks"] = {
         "process": {
             "status": "alive",
@@ -151,24 +171,16 @@ def _base_health_data() -> dict[str, Any]:
 
 def _check_milvus() -> dict[str, str]:
     try:
-        if not milvus_manager.health_check():
-            try:
-                _ = milvus_manager.connect()
-            except Exception as exc:
-                logger.warning(f"Milvus readiness connection failed: {exc}")
-                return {
-                    "status": "disconnected",
-                    "error_type": classify_adapter_error(exc),
-                    "message": "Milvus disconnected",
-                }
-
-        milvus_healthy = milvus_manager.health_check()
+        milvus_healthy = milvus_manager.readiness_check()
         return {
             "status": "connected" if milvus_healthy else "disconnected",
             "message": "Milvus connected" if milvus_healthy else "Milvus disconnected",
         }
     except Exception as exc:
-        logger.warning(f"Milvus health check failed: {exc}")
+        logger.warning(
+            "Milvus health check failed: error_type={}",
+            classify_adapter_error(exc),
+        )
         return {
             "status": "error",
             "error_type": classify_adapter_error(exc),
@@ -177,23 +189,49 @@ def _check_milvus() -> dict[str, str]:
 
 
 async def _external_system_readiness() -> dict[str, Any]:
+    try:
+        prometheus, loki, kubernetes, redis, mysql = await asyncio.gather(
+            _http_get_readiness(
+                base_url=config.prometheus_base_url,
+                path="/-/ready",
+                token=config.prometheus_bearer_token,
+                timeout_seconds=config.prometheus_timeout_seconds,
+            ),
+            _http_get_readiness(
+                base_url=config.loki_base_url,
+                path="/ready",
+                token=config.loki_bearer_token,
+                timeout_seconds=config.loki_timeout_seconds,
+            ),
+            _http_get_readiness(
+                base_url=config.kubernetes_api_server,
+                path="/version",
+                token=config.kubernetes_bearer_token,
+                timeout_seconds=config.kubernetes_timeout_seconds,
+                verify=config.kubernetes_verify_ssl,
+            ),
+            _redis_readiness(),
+            _mysql_readiness(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "External readiness aggregation failed: error_type={}",
+            classify_adapter_error(exc),
+        )
+        return {
+            "status": "degraded",
+            "checks": {},
+            "configured": {},
+            "mock_fallback_enabled": config.aiops_mock_fallback_enabled,
+            "message": "External dependency readiness checks failed",
+        }
     checks = {
-        "prometheus": await _http_get_readiness(
-            base_url=config.prometheus_base_url,
-            path="/-/ready",
-            token=config.prometheus_bearer_token,
-            timeout_seconds=config.prometheus_timeout_seconds,
-        ),
+        "prometheus": prometheus,
+        "loki": loki,
         "log_gateway": _configured_only_check(bool(config.log_gateway_url)),
-        "kubernetes": await _http_get_readiness(
-            base_url=config.kubernetes_api_server,
-            path="/version",
-            token=config.kubernetes_bearer_token,
-            timeout_seconds=config.kubernetes_timeout_seconds,
-            verify=config.kubernetes_verify_ssl,
-        ),
-        "redis": await _redis_readiness(),
-        "mysql": await _mysql_readiness(),
+        "kubernetes": kubernetes,
+        "redis": redis,
+        "mysql": mysql,
         "ticket": _configured_only_check(bool(config.ticket_api_url or config.resolved_mysql_dsn)),
     }
     statuses = {name: payload["status"] for name, payload in checks.items()}
@@ -202,7 +240,7 @@ async def _external_system_readiness() -> dict[str, Any]:
         "status": _external_overall_status(statuses),
         "checks": checks,
         "configured": configured,
-        "mock_fallback_enabled": False,
+        "mock_fallback_enabled": config.aiops_mock_fallback_enabled,
         "message": "Unconfigured external systems will return structured failures",
     }
 
@@ -247,25 +285,34 @@ async def _http_get_readiness(
 
 
 async def _redis_readiness() -> dict[str, Any]:
-    adapter = RedisInfoAdapter()
-    if not adapter.configured:
-        return {"status": "not_configured", "configured": False}
     try:
+        adapter = RedisInfoAdapter()
+        if not adapter.configured:
+            return {"status": "not_configured", "configured": False}
         result = await adapter.ping()
-        return {"status": "connected", "configured": True, **result}
+        return _connected_readiness(result)
     except Exception as exc:
         return _failed_readiness(exc)
 
 
 async def _mysql_readiness() -> dict[str, Any]:
-    adapter = MySQLStatusAdapter()
-    if not adapter.configured:
-        return {"status": "not_configured", "configured": False}
     try:
+        adapter = MySQLStatusAdapter()
+        if not adapter.configured:
+            return {"status": "not_configured", "configured": False}
         result = await adapter.ping()
-        return {"status": "connected", "configured": True, **result}
+        return _connected_readiness(result)
     except Exception as exc:
         return _failed_readiness(exc)
+
+
+def _connected_readiness(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a public readiness result without exposing dependency endpoints."""
+    return {
+        "status": "connected",
+        "configured": True,
+        "message": str(result.get("message") or "external dependency is reachable"),
+    }
 
 
 def _failed_readiness(exc: Exception) -> dict[str, Any]:
@@ -280,8 +327,10 @@ def _failed_readiness(exc: Exception) -> dict[str, Any]:
 def _external_overall_status(statuses: dict[str, str]) -> str:
     if any(status == "failed" for status in statuses.values()):
         return "degraded"
-    if any(status in {"connected", "configured"} for status in statuses.values()):
+    if any(status == "connected" for status in statuses.values()):
         return "configured"
+    if any(status == "configured" for status in statuses.values()):
+        return "unverified"
     return "not_configured"
 
 
@@ -312,11 +361,11 @@ def _capability_readiness(
         "aiops": {
             "ready": aiops_ready,
             "status": aiops_status,
-            "mock_fallback_enabled": False,
+            "mock_fallback_enabled": bool(external_systems.get("mock_fallback_enabled")),
             "message": (
                 "AIOps diagnosis can use configured adapters"
                 if aiops_ready
-                else "AIOps diagnosis has no configured adapters"
+                else "AIOps diagnosis has no verified reachable adapters"
             ),
         },
     }

@@ -14,6 +14,8 @@ class LoadedDocument(BaseModel):
 
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    quality_content: str | None = Field(default=None, exclude=True, repr=False)
+    deduplication_content: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class DocumentCleaningReport(BaseModel):
@@ -41,7 +43,18 @@ class DocumentCleaningReport(BaseModel):
         elif reason == "low_information":
             self.low_information_units += 1
         if warning:
-            self.warnings.append(warning[:300])
+            self.add_warning(warning)
+
+    def add_warning(self, warning: str) -> None:
+        """Record a bounded warning list so large dirty files cannot inflate reports."""
+        if len(self.warnings) < MAX_CLEANING_WARNINGS - 1:
+            self.warnings.append(str(warning)[:300])
+        elif len(self.warnings) == MAX_CLEANING_WARNINGS - 1:
+            self.warnings.append("additional cleaning warnings omitted")
+
+    def extend_warnings(self, warnings: list[str]) -> None:
+        for warning in warnings:
+            self.add_warning(warning)
 
 
 class DocumentLoader(Protocol):
@@ -56,6 +69,7 @@ class DocumentLoader(Protocol):
 
 
 MIN_EFFECTIVE_CHARS = 30
+MAX_CLEANING_WARNINGS = 200
 
 
 def base_metadata(path: Path, *, doc_type: str) -> dict[str, Any]:
@@ -73,13 +87,12 @@ def normalize_text(value: Any) -> str:
     """Normalize text extracted from rich sources without changing meaning."""
     if value is None:
         return ""
-    lines = [line.strip() for line in str(value).replace("\x00", "").splitlines()]
-    return "\n".join(line for line in lines if line).strip()
+    return str(value).replace("\x00", "").strip()
 
 
 def has_enough_information(text: str, *, min_chars: int = MIN_EFFECTIVE_CHARS) -> bool:
-    """Return True when a unit has enough non-space text to index."""
-    useful = "".join(char for char in text if not char.isspace())
+    """Return True when a unit has enough letters or digits to index."""
+    useful = "".join(char for char in text if char.isalnum())
     return len(useful) >= min_chars
 
 
@@ -101,10 +114,18 @@ def filter_loaded_documents(
         if not content:
             report.record_drop("empty", warning=f"unit {index} empty")
             continue
-        if not has_enough_information(content, min_chars=min_chars):
+        quality_content = normalize_text(
+            unit.quality_content if unit.quality_content is not None else content
+        )
+        if not has_enough_information(quality_content, min_chars=min_chars):
             report.record_drop("low_information", warning=f"unit {index} too short")
             continue
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        deduplication_content = normalize_text(
+            unit.deduplication_content
+            if unit.deduplication_content is not None
+            else content
+        )
+        digest = hashlib.sha256(deduplication_content.encode("utf-8")).hexdigest()
         if digest in seen_hashes:
             report.record_drop("duplicate", warning=f"unit {index} duplicate")
             continue

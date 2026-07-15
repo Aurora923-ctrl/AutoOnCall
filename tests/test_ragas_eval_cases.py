@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 
 import pytest
 
 from scripts.eval.eval_ragas_cases import (
     RagasCaseSample,
+    answer_for_judge,
     build_case_result,
     build_failed_payload,
     build_human_review_template,
     build_quality_contract,
+    business_domain_hit,
+    business_evidence_hit,
+    business_operation_hit,
     business_requirement_hit,
     business_token_overlap,
     citation_quality_scores,
     compare_human_reviews,
     context_ids_from_retrieval,
+    contexts_for_citations,
     evaluate_cases,
     extract_business_tokens,
     judge_execution_status,
@@ -28,6 +34,35 @@ from scripts.eval.eval_ragas_cases import (
     safe_float,
     write_eval_artifacts,
 )
+
+
+def test_answer_for_judge_removes_inline_and_footer_citation_metadata() -> None:
+    answer = (
+        "建议检查 EndpointSlice [services.md | services.md#0013]。\n\n"
+        "引用来源：\n"
+        "- source_file: services.md; chunk_id: services.md#0013"
+    )
+
+    assert answer_for_judge(answer) == "建议检查 EndpointSlice 。"
+
+
+def test_business_metrics_recognize_normal_chinese_oncall_language() -> None:
+    answer = "建议检查系统日志和内存指标，确认影响后进入人工审批。"
+
+    assert business_evidence_hit(answer)
+    assert business_operation_hit(answer)
+    sample = RagasCaseSample(
+        case={"query": "内存持续升高怎么办", "expected_source": "memory_high_usage.md"},
+        retrieved_contexts=["内存 Runbook"],
+        retrieved_context_ids=["memory_high_usage.md"],
+        reference_context_ids=["memory_high_usage.md"],
+        answer=answer,
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[{"source_file": "memory_high_usage.md", "chunk_id": "memory.md#1"}],
+        retrieval={},
+    )
+    assert business_domain_hit(sample)
 
 
 def test_ragas_context_ids_use_file_level_granularity() -> None:
@@ -47,6 +82,54 @@ def test_ragas_context_ids_use_file_level_granularity() -> None:
 
     assert context_ids_from_retrieval(payload) == ["cpu_high_usage.md", "slow_response.md"]
     assert reference_context_ids(case) == ["cpu_high_usage.md"]
+
+
+def test_contexts_for_citations_aligns_text_by_chunk_id_and_citation_order() -> None:
+    retrieval = {
+        "retrieval_results": [
+            {
+                "source_file": "wiki.html",
+                "chunk_id": "wiki.html#0001",
+                "content": "Background context that the answer did not cite.",
+            },
+            {
+                "source_file": "tickets.csv",
+                "chunk_id": "tickets.csv#0002",
+                "content": "INC-REDIS-009 ticket row.",
+            },
+            {
+                "source_file": "postmortem.pdf",
+                "chunk_id": "postmortem.pdf#0001",
+                "content": "Redis maxclients incident evidence.",
+            },
+        ]
+    }
+    citations = [
+        {"source_file": "postmortem.pdf", "chunk_id": "postmortem.pdf#0001"},
+        {"source_file": "tickets.csv", "chunk_id": "tickets.csv#0002"},
+    ]
+
+    assert contexts_for_citations(retrieval, citations) == [
+        "Redis maxclients incident evidence.",
+        "INC-REDIS-009 ticket row.",
+    ]
+
+
+def test_contexts_for_citations_falls_back_when_citation_is_not_in_retrieval() -> None:
+    retrieval = {
+        "retrieval_results": [
+            {
+                "source_file": "runbook.md",
+                "chunk_id": "runbook.md#0001",
+                "content": "Trusted runbook context.",
+            }
+        ]
+    }
+
+    assert contexts_for_citations(
+        retrieval,
+        [{"source_file": "missing.md", "chunk_id": "missing.md#0001"}],
+    ) == ["Trusted runbook context."]
 
 
 def test_ragas_context_ids_fallback_to_source_path_and_chunk_id() -> None:
@@ -134,6 +217,7 @@ def test_ragas_default_cli_uses_reproducible_smoke_profile() -> None:
     assert args.metrics_profile == "id-smoke"
     assert args.answer_source == "product-offline"
     assert args.repeat_count == 1
+    assert args.failed_cases_json is None
 
 
 def test_stage3_core_dataset_has_reviewable_enterprise_shape() -> None:
@@ -433,9 +517,64 @@ cases:
     )
 
     assert payload["run"]["answer_source"] == "product-offline"
+    assert payload["run"]["answer_generation_mode"] == "reference_fixture_via_product_contract"
+    assert payload["run"]["retrieval_evidence_mode"] == "fixed_offline_retrieval"
     assert len(calls) == 2
     assert payload["summary"]["status"] == "passed"
     assert payload["case_scores"][1]["answer_policy"] == "refuse_without_trusted_source"
+
+
+@pytest.mark.asyncio
+async def test_context_fixture_uses_real_grounded_generation_with_fixed_retrieval(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "redis.md").write_text(
+        "Redis maxclients requires checking connected_clients before approved changes.",
+        encoding="utf-8",
+    )
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: redis_generated
+    query: Redis maxclients connected_clients approval
+    expected_source: redis.md
+    reference_context_ids:
+      - redis.md
+    reference_answer: Check Redis connected_clients before approved changes.
+    business_rubric:
+      - Redis maxclients evidence
+      - approval boundary
+""",
+        encoding="utf-8",
+    )
+    generated_prompts: list[str] = []
+
+    async def fake_query_grounded(self, grounded_question, session_id, *, history_question=None):
+        generated_prompts.append(grounded_question)
+        return "Generated from the supplied context: check connected_clients before approval."
+
+    monkeypatch.setattr(
+        "scripts.eval.eval_ragas_cases.RagAgentService.query_grounded",
+        fake_query_grounded,
+    )
+
+    payload = await evaluate_cases(
+        cases_path,
+        docs_dir=docs_dir,
+        answer_source="context-fixture",
+        top_k=1,
+        min_score=0.1,
+        human_review_path=None,
+    )
+
+    assert generated_prompts
+    assert payload["run"]["answer_generation_mode"] == "real_grounded_llm"
+    assert payload["run"]["retrieval_evidence_mode"] == "fixed_offline_retrieval"
+    assert "Generated from the supplied context" in payload["case_scores"][0]["answer"]
 
 
 def test_ragas_setup_failure_payload_is_structured() -> None:
@@ -594,6 +733,103 @@ cases:
     assert payload["summary"]["faithfulness_avg"] is None
     assert len(payload["case_scores"]) == 1
     assert payload["case_scores"][0]["judge_metrics_status"] == "not_run"
+
+
+@pytest.mark.asyncio
+async def test_full_profile_failed_case_artifact_keeps_judge_diagnostics(tmp_path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "redis.md").write_text(
+        "Redis connected_clients maxclients incident-window evidence approval.",
+        encoding="utf-8",
+    )
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: redis_full
+    query: Redis connected_clients maxclients approval
+    expected_source: redis.md
+    reference_context_ids:
+      - redis.md
+    reference_answer: Check Redis connected_clients in the incident-window before approval.
+    ragas_tags:
+      - core_interview
+    business_rubric:
+      - Redis evidence
+      - approval boundary
+""",
+        encoding="utf-8",
+    )
+
+    def runner(samples, runner_context):
+        runner_context["judge_diagnostics"].append(
+            {
+                "case_id": "redis_full",
+                "repeat_index": runner_context["repeat_index"],
+                "metric": "answer_relevancy",
+                "status": "unavailable",
+                "raw_value": "nan",
+                "raw_value_type": "float",
+                "value": None,
+                "is_finite": False,
+                "duration_ms": 1.0,
+                "error": "provider returned NaN",
+            }
+        )
+        return {
+            "redis_full": {
+                "faithfulness": 1.0,
+                "answer_relevancy": None,
+                "judge_oncall_actionability": 1.0,
+                "answer_completeness": 1.0,
+                "id_based_context_precision": 1.0,
+                "id_based_context_recall": 1.0,
+            }
+        }
+
+    payload = await evaluate_cases(
+        cases_path,
+        docs_dir=docs_dir,
+        answer_source="reference-fixture",
+        metric_profile="full",
+        metrics_runner=runner,
+        human_review_path=None,
+    )
+    failed_path = tmp_path / "ragas_full_core_failed_cases.json"
+    write_eval_artifacts(
+        payload,
+        summary_json_path=tmp_path / "summary.json",
+        summary_md_path=tmp_path / "summary.md",
+        failed_cases_path=failed_path,
+    )
+
+    failed_case = payload["summary"]["failed_cases"][0]
+    assert payload["run"]["case_set_sha256"]
+    assert "answer_relevancy_unavailable" in failed_case["failed_metrics"]
+    assert failed_case["judge_diagnostics"][0]["error"] == "provider returned NaN"
+    artifact = json.loads(failed_path.read_text(encoding="utf-8"))
+    assert artifact["failed_cases"][0]["answer"]
+    assert artifact["failed_cases"][0]["retrieved_contexts"]
+
+
+def test_ragas_artifacts_replace_non_finite_values_with_null(tmp_path) -> None:
+    payload = {
+        "run": {},
+        "thresholds": {},
+        "summary": {"failed_cases": []},
+        "case_scores": [{"metrics": {"answer_relevancy": math.nan}}],
+    }
+
+    write_eval_artifacts(
+        payload,
+        summary_json_path=tmp_path / "summary.json",
+        summary_md_path=None,
+        failed_cases_path=tmp_path / "failed.json",
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["case_scores"][0]["metrics"]["answer_relevancy"] is None
 
 
 def test_human_review_template_is_blind_and_uses_zero_to_two_scale() -> None:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import UploadFile
@@ -12,6 +15,7 @@ from app.api import file as file_api
 from app.services.indexing_quality_service import (
     IndexingQualityService,
     build_indexing_quality_report,
+    build_quality_record,
 )
 from app.services.vector_index_service import IndexingResult, SingleFileIndexingResult
 
@@ -95,7 +99,174 @@ def test_quality_service_records_directory_failures(tmp_path) -> None:
     assert records[0].status == "failed"
     assert records[0].source_file == "broken.pdf"
     assert records[0].doc_type == "pdf"
+    assert records[0].error_message == "索引失败，请检查服务端日志"
+    assert "xref" not in records[0].error_message
     assert service.build_report()["summary"]["failed_file_count"] == 1
+
+
+def test_quality_service_serializes_concurrent_jsonl_writes(tmp_path) -> None:
+    storage_path = tmp_path / "quality.jsonl"
+    services = [IndexingQualityService(storage_path) for _ in range(4)]
+
+    def record(index: int) -> None:
+        services[index % len(services)].record_failed_file(
+            source_path=str(tmp_path / f"broken-{index}.pdf"),
+            operation="upload",
+            error_message="索引失败，请检查服务端日志",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(record, range(100)))
+
+    lines = storage_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 100
+    assert all(json.loads(line)["status"] == "failed" for line in lines)
+    assert len(IndexingQualityService(storage_path).list_records(limit=500)) == 100
+
+
+def test_quality_service_serializes_cross_process_jsonl_writes(tmp_path) -> None:
+    storage_path = tmp_path / "quality.jsonl"
+    worker = """
+import sys
+
+from app.services.indexing_quality_service import IndexingQualityService
+
+storage_path, prefix = sys.argv[1:3]
+service = IndexingQualityService(storage_path)
+for index in range(50):
+    service.record_failed_file(
+        source_path=f"{prefix}-{index}.pdf",
+        operation="upload",
+        error_message="indexing failed",
+    )
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker, str(storage_path), prefix],
+            cwd=tmp_path,
+        )
+        for prefix in ("worker-a", "worker-b")
+    ]
+
+    assert [process.wait(timeout=30) for process in processes] == [0, 0]
+    lines = storage_path.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+
+    assert len(records) == 100
+    assert len({record["source_file"] for record in records}) == 100
+    assert all(record["status"] == "failed" for record in records)
+
+
+def test_quality_service_creates_missing_parent_before_locking(tmp_path) -> None:
+    storage_path = tmp_path / "nested" / "reports" / "quality.jsonl"
+    service = IndexingQualityService(storage_path)
+
+    service.record_failed_file(
+        source_path=str(tmp_path / "broken.pdf"),
+        operation="upload",
+        error_message="xref table missing at C:/private/path",
+    )
+
+    record = service.list_records()[0]
+    assert storage_path.exists()
+    assert record.error_message == "索引失败，请检查服务端日志"
+    assert "private" not in record.error_message
+
+
+def test_quality_service_warns_when_corrupt_lines_are_skipped(monkeypatch, tmp_path) -> None:
+    storage_path = tmp_path / "quality.jsonl"
+    service = IndexingQualityService(storage_path)
+    service.record_failed_file(
+        source_path=str(tmp_path / "broken.pdf"),
+        operation="upload",
+        error_message="indexing failed",
+    )
+    with storage_path.open("a", encoding="utf-8") as handle:
+        handle.write("{broken\n")
+        handle.write("{}\n")
+
+    warnings: list[str] = []
+
+    def capture_warning(message: str, *args: object) -> None:
+        warnings.append(message.format(*args))
+
+    monkeypatch.setattr(
+        "app.services.indexing_quality_service.logger.warning",
+        capture_warning,
+    )
+
+    records = service.list_records()
+
+    assert len(records) == 1
+    assert len(warnings) == 1
+    assert "file=quality.jsonl" in warnings[0]
+    assert "invalid_count=2" in warnings[0]
+    assert "lines=[2, 3]" in warnings[0]
+    assert "{broken" not in warnings[0]
+
+
+def test_quality_service_sanitizes_failed_result_objects_and_windows_paths(tmp_path) -> None:
+    service = IndexingQualityService(tmp_path / "quality.jsonl")
+    result = SingleFileIndexingResult(
+        file_path=r"C:\private\uploads\broken.pdf",
+        status="failed",
+        chunk_count=0,
+        error_message=r"xref missing at C:\private\uploads\broken.pdf",
+    ).finish()
+
+    record = service.record_single_file_result(result, operation="upload")
+
+    assert record.source_path == "broken.pdf"
+    assert record.error_message == "索引失败，请检查服务端日志"
+    assert "private" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("warnings", "expected"),
+    [
+        ("single warning", ["single warning"]),
+        ({"detail": "bad source"}, ["{'detail': 'bad source'}"]),
+    ],
+)
+def test_quality_service_normalizes_malformed_warning_collections(
+    warnings,
+    expected,
+) -> None:
+    record = build_quality_record(
+        report={"warnings": warnings},
+        source_path="runbook.md",
+        operation="upload",
+        status="empty",
+    )
+
+    assert record.warnings == expected
+
+
+def test_quality_record_normalizes_malformed_loader_fields() -> None:
+    record = build_quality_record(
+        report={
+            "source_file": r"C:\private\uploads\runbook.md",
+            "raw_units": "invalid",
+            "indexed_units": -2,
+            "dropped_units": None,
+            "warnings": [f"warning-{index}" for index in range(1000)],
+        },
+        source_path=r"C:\private\uploads\runbook.md",
+        operation="upload",
+        status="unexpected",
+        chunk_count=-3,
+        duration_ms=-5,
+    )
+
+    assert record.source_file == "runbook.md"
+    assert record.source_path == "runbook.md"
+    assert record.status == "unknown"
+    assert record.chunk_count == 0
+    assert record.duration_ms == 0
+    assert record.raw_units == 0
+    assert record.indexed_units == 0
+    assert len(record.warnings) == 200
+    assert "private" not in record.model_dump_json()
 
 
 @pytest.mark.asyncio

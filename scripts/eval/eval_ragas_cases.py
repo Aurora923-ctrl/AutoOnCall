@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
+import re
 import statistics
 import sys
 import time
@@ -85,7 +87,7 @@ HUMAN_REVIEW_DIMENSIONS = [
     "boundary_safety",
 ]
 
-MetricRunner = Callable[[list["RagasCaseSample"], dict[str, Any]], dict[str, dict[str, float]]]
+MetricRunner = Callable[[list["RagasCaseSample"], dict[str, Any]], dict[str, dict[str, Any]]]
 
 
 @dataclass(slots=True)
@@ -153,6 +155,8 @@ async def evaluate_cases(
         min_score=min_score,
         metric_profile=metric_profile,
     )
+    runner_context["case_set_sha256"] = case_set_sha256(cases)
+    generation_mode = answer_generation_mode(answer_source)
     judge_requested = metric_profile == "full"
     judge_available = judge_status["status"] == "ready"
     effective_metric_profile = "full" if judge_available else "id-smoke"
@@ -160,6 +164,7 @@ async def evaluate_cases(
     repeated_results: list[list[dict[str, Any]]] = []
     first_samples: list[RagasCaseSample] = []
     for repeat_index in range(1, repeat_count + 1):
+        runner_context["repeat_index"] = repeat_index
         samples = [
             await build_case_sample(
                 case,
@@ -203,6 +208,11 @@ async def evaluate_cases(
                         metric_scores.get(str(sample.case.get("id")), {}),
                         metric_profile=metric_profile,
                         judge_metrics_available=judge_available,
+                        judge_diagnostics=judge_diagnostics_for_case(
+                            runner_context,
+                            str(sample.case.get("id") or ""),
+                            repeat_index=repeat_index,
+                        ),
                     ),
                     "repeat_index": repeat_index,
                 }
@@ -239,13 +249,16 @@ async def evaluate_cases(
             "ended_at": datetime.now(UTC).isoformat(),
             "duration_ms": round((time.perf_counter() - timer) * 1000, 2),
             "evaluation_scope": (
-                "optional RAGAS quality regression for fixed AutoOnCall RAG cases; "
+                "RAGAS quality regression for fixed AutoOnCall RAG cases; "
+                f"retrieval={retrieval_evidence_mode(mode)}, generation={generation_mode}; "
                 "not a production accuracy claim"
             ),
             "cases_path": str(Path(cases_path)),
             "docs_dir": str(Path(docs_dir)),
             "mode": mode,
             "answer_source": answer_source,
+            "answer_generation_mode": generation_mode,
+            "retrieval_evidence_mode": retrieval_evidence_mode(mode),
             "metric_profile": metric_profile,
             "repeat_count": repeat_count,
             "target_shape": {
@@ -263,7 +276,9 @@ async def evaluate_cases(
                     else (
                         "unavailable_from_ragas_result"
                         if judge_status["status"] == "ready"
-                        else "failed" if judge_status["status"] == "failed" else "not_required"
+                        else "failed"
+                        if judge_status["status"] == "failed"
+                        else "not_required"
                     )
                 ),
                 "input_tokens": None,
@@ -274,6 +289,7 @@ async def evaluate_cases(
             "top_k": top_k,
             "min_score": min_score,
             "case_ids": [str(case.get("id", "")) for case in cases],
+            "case_set_sha256": runner_context["case_set_sha256"],
             "metrics": metrics_for_profile(metric_profile),
             "supported_metrics": RAGAS_METRICS,
             "ragas_version": safe_package_version("ragas"),
@@ -444,6 +460,7 @@ async def query_product_behavior(
 
     original_retrieve = rag_agent_module.retrieve_structured_knowledge
     original_query_grounded = agent.query_grounded
+    original_query_grounded_observed = agent.query_grounded_observed
 
     async def fixture_query_grounded(
         _grounded_question: str,
@@ -461,9 +478,28 @@ async def query_product_behavior(
         ]
         return build_reference_fixture_answer(case, retrieval_payload, citations)
 
+    async def fixture_query_grounded_observed(
+        grounded_question: str,
+        session_id: str,
+        *,
+        history_question: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        answer = await fixture_query_grounded(
+            grounded_question,
+            session_id,
+            history_question=history_question,
+        )
+        return answer, {
+            "llm_generation_ms": 0.0,
+            "llm_ttft_ms": "not_run",
+            "token_usage": {"status": "not_run"},
+            "model": "reference-fixture",
+        }
+
     try:
         rag_agent_module.retrieve_structured_knowledge = lambda *_args, **_kwargs: retrieval_payload
         agent.query_grounded = fixture_query_grounded  # type: ignore[method-assign]
+        agent.query_grounded_observed = fixture_query_grounded_observed  # type: ignore[method-assign]
         return await agent.query_with_retrieval(
             query,
             session_id=f"ragas-offline-{case.get('id', 'case')}",
@@ -471,6 +507,7 @@ async def query_product_behavior(
     finally:
         rag_agent_module.retrieve_structured_knowledge = original_retrieve
         agent.query_grounded = original_query_grounded  # type: ignore[method-assign]
+        agent.query_grounded_observed = original_query_grounded_observed  # type: ignore[method-assign]
 
 
 def sample_from_chat_payload(
@@ -484,17 +521,21 @@ def sample_from_chat_payload(
     retrieval_payload = retrieval if isinstance(retrieval, dict) else fallback_retrieval
     citations = chat_payload.get("citations")
     citation_items = citations if isinstance(citations, list) else []
+    normalized_citations = [item for item in citation_items if isinstance(item, dict)]
     return RagasCaseSample(
         case=case,
-        retrieved_contexts=contexts_from_retrieval(retrieval_payload),
-        retrieved_context_ids=context_ids_from_retrieval(retrieval_payload),
+        retrieved_contexts=contexts_for_citations(
+            fallback_retrieval,
+            normalized_citations,
+        ),
+        retrieved_context_ids=context_ids_from_retrieval(fallback_retrieval),
         reference_context_ids=reference_context_ids(case),
         answer=str(chat_payload.get("answer") or ""),
         answer_policy=str(
             chat_payload.get("answer_policy") or retrieval_payload.get("answer_policy") or ""
         ),
         no_answer=bool(chat_payload.get("no_answer")),
-        citations=[item for item in citation_items if isinstance(item, dict)],
+        citations=normalized_citations,
         retrieval=retrieval_payload,
     )
 
@@ -504,13 +545,13 @@ def build_reference_fixture_answer(
     retrieval_payload: dict[str, Any],
     citations: list[dict[str, Any]],
 ) -> str:
-    """Build a deterministic answer fixture for smoke runs."""
-    reference = str(case.get("reference_answer") or "").strip()
-    if not reference:
-        reference = build_fallback_reference_answer(case, retrieval_payload)
+    """Build a concise deterministic answer fixture for the product retrieval path."""
+    answer = str(case.get("reference_answer") or "").strip()
+    if not answer:
+        answer = build_fallback_reference_answer(case, retrieval_payload)
     answer = "\n\n".join(
         [
-            reference,
+            answer,
             (
                 "OnCall decision: check metric/log evidence in the incident-window, "
                 "confirm the retrieved source_file/chunk_id, and keep approval boundaries "
@@ -519,6 +560,32 @@ def build_reference_fixture_answer(
         ]
     )
     return ensure_citation_block(answer, citations)
+
+
+def answer_for_judge(answer: str) -> str:
+    """Remove mechanical citation metadata before semantic LLM-as-judge scoring."""
+    lines = str(answer or "").splitlines()
+    citation_start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(r"^\s*-\s*source_file\s*:", line, flags=re.IGNORECASE)
+        ),
+        None,
+    )
+    content = lines if citation_start is None else lines[:citation_start]
+    while content and not content[-1].strip():
+        content.pop()
+    if content and (
+        "source" in content[-1].lower() or content[-1].strip().startswith("引用来源")
+    ):
+        content.pop()
+    semantic_answer = "\n".join(content).strip()
+    return re.sub(
+        r"\[\s*[^]\n|]+\s*\|\s*[^]\n]+\s*\]",
+        "",
+        semantic_answer,
+    ).strip()
 
 
 def build_fallback_reference_answer(case: dict[str, Any], retrieval_payload: dict[str, Any]) -> str:
@@ -564,8 +631,8 @@ def refusal_fixture_sample(
 def run_ragas_metrics(
     samples: list[RagasCaseSample],
     runner_context: dict[str, Any],
-) -> dict[str, dict[str, float]]:
-    """Run RAGAS metrics for quality samples."""
+) -> dict[str, dict[str, Any]]:
+    """Run Judge metrics independently so one provider failure stays diagnosable."""
     if not samples:
         return {}
     try:
@@ -602,7 +669,7 @@ def run_ragas_metrics(
                 retrieved_contexts=sample.retrieved_contexts,
                 retrieved_context_ids=sample.retrieved_context_ids,
                 reference_context_ids=sample.reference_context_ids,
-                response=sample.answer,
+                response=answer_for_judge(sample.answer),
                 reference=str(sample.case.get("reference_answer") or ""),
                 rubrics=rubrics_from_case(sample.case),
             )
@@ -623,45 +690,80 @@ def run_ragas_metrics(
         base_url=config.dashscope_api_base,
         timeout=60,
         max_retries=2,
+        # DashScope's OpenAI-compatible embedding endpoint accepts strings, but
+        # rejects the token-id lists produced by LangChain's tiktoken safety path.
+        check_embedding_ctx_length=False,
     )
-    result = evaluate(
-        dataset,
-        metrics=[
-            Faithfulness(),
-            ResponseRelevancy(strictness=1),
-            AspectCritic(
-                name="judge_oncall_actionability",
-                definition=(
-                    "The response gives concrete incident evidence checks and bounded OnCall "
-                    "actions, preserving approval, dry-run, rollback, and human takeover boundaries."
-                ),
-                strictness=3,
+    metric_factories: dict[str, Callable[[], Any]] = {
+        "faithfulness": Faithfulness,
+        "answer_relevancy": lambda: ResponseRelevancy(strictness=1),
+        "judge_oncall_actionability": lambda: AspectCritic(
+            name="judge_oncall_actionability",
+            definition=(
+                "The response gives concrete incident evidence checks and bounded OnCall "
+                "actions, preserving approval, dry-run, rollback, and human takeover boundaries."
             ),
-            AspectCritic(
-                name="answer_completeness",
-                definition=(
-                    "The response covers the important facts, evidence checks, citations, "
-                    "remediation options, and safety boundaries needed to answer the user."
-                ),
-                strictness=3,
+            strictness=3,
+        ),
+        "answer_completeness": lambda: AspectCritic(
+            name="answer_completeness",
+            definition=(
+                "The response covers the important facts, evidence checks, citations, "
+                "remediation options, and safety boundaries needed to answer the user."
             ),
-            IDBasedContextPrecision(),
-            IDBasedContextRecall(),
-        ],
-        llm=llm,
-        embeddings=embeddings,
-        raise_exceptions=False,
-        show_progress=False,
-    )
-    rows = result.to_pandas().to_dict(orient="records")
-    return {
-        str(sample.case.get("id")): {
-            metric: optional_metric_float(row.get(metric))
-            for metric in RAGAS_METRICS
-            if row.get(metric) is not None
-        }
-        for sample, row in zip(samples, rows, strict=False)
+            strictness=3,
+        ),
+        "id_based_context_precision": IDBasedContextPrecision,
+        "id_based_context_recall": IDBasedContextRecall,
     }
+    scores = {str(sample.case.get("id")): {} for sample in samples}
+    diagnostics = runner_context.setdefault("judge_diagnostics", [])
+    repeat_index = int(runner_context.get("repeat_index") or 1)
+
+    for metric_name, metric_factory in metric_factories.items():
+        started_at = time.perf_counter()
+        try:
+            result = evaluate(
+                dataset,
+                metrics=[metric_factory()],
+                llm=llm,
+                embeddings=embeddings if metric_name == "answer_relevancy" else None,
+                raise_exceptions=False,
+                show_progress=False,
+            )
+            rows = result.to_pandas().to_dict(orient="records")
+            for sample, row in zip(samples, rows, strict=False):
+                case_id = str(sample.case.get("id"))
+                raw_value = row.get(metric_name)
+                value = optional_metric_float(raw_value)
+                scores[case_id][metric_name] = value
+                diagnostics.append(
+                    judge_metric_diagnostic(
+                        case_id=case_id,
+                        repeat_index=repeat_index,
+                        metric=metric_name,
+                        raw_value=raw_value,
+                        value=value,
+                        duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+                    )
+                )
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            for sample in samples:
+                case_id = str(sample.case.get("id"))
+                scores[case_id][metric_name] = None
+                diagnostics.append(
+                    judge_metric_diagnostic(
+                        case_id=case_id,
+                        repeat_index=repeat_index,
+                        metric=metric_name,
+                        raw_value=None,
+                        value=None,
+                        duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+                        error=reason,
+                    )
+                )
+    return scores
 
 
 def metric_runner_for_profile(metric_profile: str) -> MetricRunner:
@@ -1177,10 +1279,11 @@ def write_human_review_template(
 
 def build_case_result(
     sample: RagasCaseSample,
-    scores: dict[str, float],
+    scores: dict[str, Any],
     *,
     metric_profile: str = "full",
     judge_metrics_available: bool = True,
+    judge_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one case score record and apply AutoOnCall gates."""
     case = sample.case
@@ -1229,6 +1332,7 @@ def build_case_result(
             "retrieved_sources": retrieved_sources(sample),
             "expected_sources": expected_sources(case),
             "suggested_backlog_category": "hallucination_risk" if failed_metrics else "",
+            "judge_diagnostics": judge_diagnostics or [],
         }
 
     business_scores = business_metric_scores(sample)
@@ -1270,7 +1374,9 @@ def build_case_result(
         "judge_metrics_status": (
             "failed"
             if unavailable_judge_metrics
-            else "available" if judge_metrics_available else "not_run"
+            else "available"
+            if judge_metrics_available
+            else "not_run"
         ),
         "metrics": metrics,
         "failed_metrics": failed_metrics,
@@ -1285,6 +1391,7 @@ def build_case_result(
         "retrieved_sources": retrieved_sources(sample),
         "expected_sources": expected_sources(case),
         "suggested_backlog_category": suggested_backlog_category(failed_metrics),
+        "judge_diagnostics": judge_diagnostics or [],
     }
 
 
@@ -1308,6 +1415,22 @@ def build_summary(
             "expected_sources": result.get("expected_sources", []),
             "suggested_backlog_category": result.get("suggested_backlog_category", ""),
             "judge_model": config.effective_ragas_eval_model,
+            "query": result.get("query", ""),
+            "answer": result.get("answer", ""),
+            "citations": result.get("citations", []),
+            "retrieved_contexts": result.get("retrieved_contexts", []),
+            "retrieved_context_ids": result.get("retrieved_context_ids", []),
+            "reference_context_ids": result.get("reference_context_ids", []),
+            "judge_diagnostics": result.get("judge_diagnostics", []),
+            "repeat_results": [
+                {
+                    "repeat_index": item.get("repeat_index"),
+                    "failed_metrics": item.get("failed_metrics", []),
+                    "metrics": item.get("metrics", {}),
+                    "judge_diagnostics": item.get("judge_diagnostics", []),
+                }
+                for item in result.get("repeat_results", [])
+            ],
         }
         for result in results
         if not result["passed"]
@@ -1491,7 +1614,9 @@ def build_quality_contract(
         "status": (
             "not_run"
             if metric_profile == "full" and judge_status == "not_run"
-            else "passed" if summary.get("status") == "passed" and contract_passed else "failed"
+            else "passed"
+            if summary.get("status") == "passed" and contract_passed
+            else "failed"
         ),
         "profile": metric_profile,
         "case_mix": {
@@ -1783,10 +1908,7 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- Cases: `{summary['passed_count']}/{summary['case_count']}`",
         f"- Core case pass rate: `{summary['core_case_pass_rate']:.0%}`",
         f"- Faithfulness avg: `{format_contract_value(summary['faithfulness_avg'])}`",
-        (
-            "- Response relevancy avg: "
-            f"`{format_contract_value(summary['response_relevancy_avg'])}`"
-        ),
+        (f"- Response relevancy avg: `{format_contract_value(summary['response_relevancy_avg'])}`"),
         (
             "- Judge OnCall actionability avg: "
             f"`{format_contract_value(summary.get('judge_oncall_actionability_avg'))}`"
@@ -1902,6 +2024,7 @@ def write_eval_artifacts(
     *,
     summary_json_path: str | Path | None,
     summary_md_path: str | Path | None,
+    failed_cases_path: str | Path | None = None,
 ) -> dict[str, str]:
     """Write JSON and Markdown RAGAS summaries."""
     written: dict[str, str] = {}
@@ -1909,15 +2032,39 @@ def write_eval_artifacts(
         written["summary_json"] = str(Path(summary_json_path))
     if summary_md_path:
         written["summary_md"] = str(Path(summary_md_path))
+    if failed_cases_path:
+        written["failed_cases_json"] = str(Path(failed_cases_path))
     payload["run"]["artifacts"] = written
     if summary_json_path:
         path = Path(summary_json_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(json_safe_payload(payload), ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
     if summary_md_path:
         path = Path(summary_md_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render_markdown_summary(payload), encoding="utf-8")
+    if failed_cases_path:
+        path = Path(failed_cases_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                json_safe_payload(
+                    {
+                        "schema_version": 1,
+                        "run": payload.get("run", {}),
+                        "thresholds": payload.get("thresholds", {}),
+                        "failed_cases": payload.get("summary", {}).get("failed_cases", []),
+                    }
+                ),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
     return written
 
 
@@ -1933,6 +2080,8 @@ def build_runner_context(
     return {
         "mode": mode,
         "answer_source": answer_source,
+        "answer_generation_mode": answer_generation_mode(answer_source),
+        "retrieval_evidence_mode": retrieval_evidence_mode(mode),
         "top_k": top_k,
         "min_score": min_score,
         "metric_profile": metric_profile,
@@ -1940,7 +2089,84 @@ def build_runner_context(
         "embedding_model": config.effective_ragas_eval_embedding_model,
         "api_base": config.dashscope_api_base,
         "temperature": 0,
+        "judge_diagnostics": [],
     }
+
+
+def answer_generation_mode(answer_source: str) -> str:
+    """Describe whether a run evaluates fixture text or actual grounded generation."""
+    modes = {
+        "product-offline": "reference_fixture_via_product_contract",
+        "reference-fixture": "reference_fixture_direct",
+        "context-fixture": "real_grounded_llm",
+        "runtime": "real_grounded_llm",
+    }
+    return modes.get(answer_source, "unknown")
+
+
+def retrieval_evidence_mode(mode: str) -> str:
+    """Describe whether retrieval is deterministic offline data or the runtime stack."""
+    return "fixed_offline_retrieval" if mode == "offline" else "runtime_milvus_retrieval"
+
+
+def case_set_sha256(cases: list[dict[str, Any]]) -> str:
+    """Fingerprint the frozen case content, not only its file path."""
+    canonical = json.dumps(cases, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def json_safe_payload(value: Any) -> Any:
+    """Replace non-finite values before writing portable JSON artifacts."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe_payload(item) for item in value]
+    return value
+
+
+def judge_metric_diagnostic(
+    *,
+    case_id: str,
+    repeat_index: int,
+    metric: str,
+    raw_value: Any,
+    value: float | None,
+    duration_ms: float,
+    error: str = "",
+) -> dict[str, Any]:
+    """Persist enough Judge state to diagnose NaN, field, timeout, and API failures."""
+    raw_type = type(raw_value).__name__ if raw_value is not None else "NoneType"
+    return {
+        "case_id": case_id,
+        "repeat_index": repeat_index,
+        "metric": metric,
+        "status": "available" if value is not None else "unavailable",
+        "raw_value": str(raw_value) if raw_value is not None else None,
+        "raw_value_type": raw_type,
+        "value": value,
+        "is_finite": value is not None,
+        "duration_ms": duration_ms,
+        "error": error,
+    }
+
+
+def judge_diagnostics_for_case(
+    runner_context: dict[str, Any],
+    case_id: str,
+    *,
+    repeat_index: int,
+) -> list[dict[str, Any]]:
+    """Return this case's per-metric Judge attempts for its repeat."""
+    diagnostics = runner_context.get("judge_diagnostics", [])
+    return [
+        item
+        for item in diagnostics
+        if item.get("case_id") == case_id and item.get("repeat_index") == repeat_index
+    ]
 
 
 def contexts_from_retrieval(payload: dict[str, Any]) -> list[str]:
@@ -1953,6 +2179,40 @@ def contexts_from_retrieval(payload: dict[str, Any]) -> list[str]:
         if content:
             contexts.append(content)
     return contexts
+
+
+def contexts_for_citations(
+    retrieval_payload: dict[str, Any],
+    citations: list[dict[str, Any]],
+) -> list[str]:
+    """Return semantic Judge contexts in the same order as answer citations."""
+    if not citations:
+        return contexts_from_retrieval(retrieval_payload)
+
+    results = [
+        item
+        for item in retrieval_payload.get("retrieval_results", []) or []
+        if isinstance(item, dict)
+    ]
+    result_by_chunk = {
+        str(item.get("chunk_id") or "").strip(): item
+        for item in results
+        if str(item.get("chunk_id") or "").strip()
+    }
+    contexts: list[str] = []
+    seen_chunks: set[str] = set()
+    for citation in citations:
+        chunk_id = str(citation.get("chunk_id") or "").strip()
+        if not chunk_id or chunk_id in seen_chunks:
+            continue
+        item = result_by_chunk.get(chunk_id)
+        if item is None:
+            continue
+        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        if content:
+            contexts.append(content)
+            seen_chunks.add(chunk_id)
+    return contexts or contexts_from_retrieval(retrieval_payload)
 
 
 def context_ids_from_retrieval(payload: dict[str, Any]) -> list[str]:
@@ -2189,10 +2449,10 @@ def business_domain_hit(sample: RagasCaseSample) -> bool:
     query = str(sample.case.get("query") or "").lower()
     source_terms = {
         "cpu": ["cpu"],
-        "memory": ["memory", "oom", "jvm", "gc", "鍐呭瓨"],
-        "disk": ["disk", "docker", "inode", "纾佺洏"],
-        "slow_response": ["slow", "sql", "mysql", "pool", "鎱", "杩炴帴姹"],
-        "service_unavailable": ["503", "5xx", "redis", "mq", "timeout", "渚濊禆", "瓒呮椂"],
+        "memory": ["memory", "oom", "jvm", "gc", "内存"],
+        "disk": ["disk", "docker", "inode", "磁盘"],
+        "slow_response": ["slow", "sql", "mysql", "pool", "慢", "连接池"],
+        "service_unavailable": ["503", "5xx", "redis", "mq", "timeout", "依赖", "超时"],
         "redis": ["redis", "maxclients", "connected_clients"],
         "mysql": ["mysql", "sql", "active_connections", "pool_waiting", "explain"],
         "payment": ["payment", "mysql", "pool_waiting", "explain"],
@@ -2219,11 +2479,11 @@ def business_evidence_hit(answer: str) -> bool:
             "chunk_id",
             "incident-window",
             "runbook",
-            "璇佹嵁",
-            "鎸囨爣",
-            "鏃ュ織",
-            "鐭ヨ瘑搴",
-            "澶嶇洏",
+            "证据",
+            "指标",
+            "日志",
+            "知识库",
+            "复盘",
         ]
     )
 
@@ -2247,17 +2507,12 @@ def business_operation_hit(answer: str) -> bool:
             "确认",
             "回滚",
             "审批",
+            "检查",
+            "建议检查",
             "限流",
             "扩容",
             "降级",
             "重启",
-            "鎺掓煡",
-            "纭",
-            "鍥炴粴",
-            "瀹℃壒",
-            "闄愭祦",
-            "鎵╁",
-            "闄嶇骇",
         ]
     )
 
@@ -2630,6 +2885,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--summary-json", default=str(DEFAULT_SUMMARY_JSON_PATH))
     parser.add_argument("--summary-md", default=str(DEFAULT_SUMMARY_MD_PATH))
+    parser.add_argument(
+        "--failed-cases-json",
+        help=(
+            "Optional focused failure artifact. Use this for the full frozen-core profile "
+            "so each failed answer keeps contexts, citations, and Judge diagnostics."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     return parser.parse_args(argv)
 
@@ -2658,6 +2920,7 @@ def main(argv: list[str] | None = None) -> int:
         payload,
         summary_json_path=args.summary_json,
         summary_md_path=args.summary_md,
+        failed_cases_path=args.failed_cases_json,
     )
     if args.export_human_review_template:
         written["human_review_template"] = write_human_review_template(

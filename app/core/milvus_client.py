@@ -1,5 +1,6 @@
 """Milvus 客户端工厂模块"""
 
+import time
 from threading import RLock
 
 from loguru import logger
@@ -16,44 +17,12 @@ from pymilvus import (
 
 from app.config import config
 
-_PYMILVUS_ORM_ALIAS_PATCHED = False
-
-
-def _patch_pymilvus_milvus_client_orm_alias() -> None:
-    """
-    langchain_milvus 内部创建的 MilvusClient 会将 _using 设为 ``cm-{id}``，
-    该别名未在 pymilvus.orm.connections 中注册；随后 ORM ``Collection(..., using=...)``
-    会抛出 ConnectionNotExistException: should create connection first.
-
-    在已通过 ``connections.connect(alias="default", ...)`` 建立连接后，
-    强制让 MilvusClient 使用 ``default`` 别名，与 ORM 一致。
-    """
-    global _PYMILVUS_ORM_ALIAS_PATCHED
-
-    if _PYMILVUS_ORM_ALIAS_PATCHED:
-        return
-    try:
-        from pymilvus.milvus_client.milvus_client import MilvusClient
-    except ImportError:
-        return
-
-    _orig_init = MilvusClient.__init__
-
-    def _wrapped_init(self, *args: object, **kwargs: object) -> None:
-        _orig_init(self, *args, **kwargs)
-        self._using = "default"
-
-    MilvusClient.__init__ = _wrapped_init
-
-    _PYMILVUS_ORM_ALIAS_PATCHED = True
-
 
 class MilvusClientManager:
     """Milvus 客户端管理器"""
 
     COLLECTION_NAME: str = "biz"
-
-    VECTOR_DIM: int = 1024  # 统一使用 1024 维
+    CONNECTION_ALIAS: str = "autooncall-schema"
 
     ID_MAX_LENGTH: int = 100
 
@@ -66,6 +35,11 @@ class MilvusClientManager:
         self._client: MilvusClient | None = None
         self._collection: Collection | None = None
         self._lock = RLock()
+
+    @property
+    def vector_dim(self) -> int:
+        """Return the configured embedding dimension used by the collection schema."""
+        return int(config.dashscope_embedding_dimensions)
 
     def connect(self) -> MilvusClient:
         """
@@ -87,21 +61,9 @@ class MilvusClientManager:
                 return self._client
 
             try:
-                _patch_pymilvus_milvus_client_orm_alias()
-
                 logger.info(f"正在连接到 Milvus: {config.milvus_host}:{config.milvus_port}")
 
-                connections.connect(
-                    alias="default",
-                    host=config.milvus_host,
-                    port=str(config.milvus_port),
-                    timeout=config.milvus_timeout / 1000,  # 转换为秒
-                )
-
-                uri = f"http://{config.milvus_host}:{config.milvus_port}"
-                self._client = MilvusClient(uri=uri)
-
-                logger.info("成功连接到 Milvus")
+                self._connect_with_retry()
 
                 if not self._collection_exists():
                     logger.info(f"collection '{self.COLLECTION_NAME}' 不存在，正在创建...")
@@ -109,7 +71,10 @@ class MilvusClientManager:
                     logger.info(f"成功创建 collection '{self.COLLECTION_NAME}'")
                 else:
                     logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
-                    self._collection = Collection(self.COLLECTION_NAME)
+                    self._collection = Collection(
+                        self.COLLECTION_NAME,
+                        using=self.CONNECTION_ALIAS,
+                    )
 
                     schema = self._collection.schema
                     vector_field = None
@@ -125,10 +90,12 @@ class MilvusClientManager:
                         and "dim" in vector_field.params
                     ):
                         existing_dim = int(vector_field.params["dim"])
-                        if existing_dim != self.VECTOR_DIM:
+                        if existing_dim != self.vector_dim:
                             self._handle_vector_dimension_mismatch(existing_dim)
                         else:
-                            logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+                            logger.info(f"向量维度匹配: {self.vector_dim}")
+
+                    self._validate_collection_schema(schema)
 
                 self._load_collection()
 
@@ -147,17 +114,62 @@ class MilvusClientManager:
                 self.close()
                 raise RuntimeError(f"连接 Milvus 失败: {e}") from e
 
+    def _connect_with_retry(self) -> None:
+        """Create both ORM and client connections with bounded retries."""
+        max_retries = int(config.milvus_connect_max_retries)
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                connections.connect(
+                    alias=self.CONNECTION_ALIAS,
+                    host=config.milvus_host,
+                    port=str(config.milvus_port),
+                    timeout=config.milvus_timeout / 1000,
+                )
+                uri = f"http://{config.milvus_host}:{config.milvus_port}"
+                self._client = MilvusClient(
+                    uri=uri,
+                    timeout=config.milvus_timeout / 1000,
+                    alias=self.CONNECTION_ALIAS,
+                )
+                logger.info("成功连接到 Milvus")
+                return
+            except Exception as exc:
+                last_error = exc
+                try:
+                    if connections.has_connection(self.CONNECTION_ALIAS):
+                        connections.disconnect(self.CONNECTION_ALIAS)
+                except Exception:
+                    logger.warning("清理失败的 Milvus 连接尝试时出现异常")
+                self._client = None
+                if attempt >= max_retries:
+                    break
+                delay = float(config.milvus_connect_retry_delay_seconds) * (2**attempt)
+                logger.warning(
+                    f"连接 Milvus 失败，准备重试 ({attempt + 1}/{max_retries}): "
+                    f"error_type={type(exc).__name__}"
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        if last_error is None:
+            raise RuntimeError("连接 Milvus 失败")
+        raise last_error
+
     def _collection_exists(self) -> bool:
         """检查 collection 是否存在"""
         # pymilvus 的类型标注可能不准确，实际返回 bool
-        result = utility.has_collection(self.COLLECTION_NAME)
+        result = utility.has_collection(
+            self.COLLECTION_NAME,
+            using=self.CONNECTION_ALIAS,
+            timeout=config.milvus_timeout / 1000,
+        )
         return bool(result)
 
     def _handle_vector_dimension_mismatch(self, existing_dim: int) -> None:
         """Handle an existing collection whose vector dimension is incompatible."""
         message = (
             f"检测到向量维度不匹配！collection '{self.COLLECTION_NAME}' 当前维度: "
-            f"{existing_dim}, 配置维度: {self.VECTOR_DIM}"
+            f"{existing_dim}, 配置维度: {self.vector_dim}"
         )
         logger.warning(message)
 
@@ -172,9 +184,52 @@ class MilvusClientManager:
             "MILVUS_RECREATE_ON_DIMENSION_MISMATCH=true，允许删除并重建 "
             f"collection '{self.COLLECTION_NAME}'"
         )
-        _ = utility.drop_collection(self.COLLECTION_NAME)
+        _ = utility.drop_collection(
+            self.COLLECTION_NAME,
+            using=self.CONNECTION_ALIAS,
+            timeout=config.milvus_timeout / 1000,
+        )
         self._create_collection()
-        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
+        logger.info(f"成功重新创建 collection，维度: {self.vector_dim}")
+
+    def _validate_collection_schema(self, schema: CollectionSchema) -> None:
+        """Reject an existing collection that cannot satisfy the application contract."""
+        fields = {field.name: field for field in schema.fields}
+        required_types = {
+            "id": DataType.VARCHAR,
+            "vector": DataType.FLOAT_VECTOR,
+            "content": DataType.VARCHAR,
+            "metadata": DataType.JSON,
+        }
+        for name, expected_type in required_types.items():
+            field = fields.get(name)
+            if field is None or field.dtype != expected_type:
+                raise RuntimeError(
+                    f"collection '{self.COLLECTION_NAME}' schema 不兼容: "
+                    f"field={name}, expected={expected_type}, "
+                    f"actual={getattr(field, 'dtype', None)}"
+                )
+        if not bool(getattr(fields["id"], "is_primary", False)):
+            raise RuntimeError(f"collection '{self.COLLECTION_NAME}' schema 不兼容: id 不是主键")
+        if bool(getattr(fields["id"], "auto_id", False)):
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: id 不应启用 auto_id"
+            )
+        self._validate_varchar_length(fields["id"], self.ID_MAX_LENGTH)
+        self._validate_varchar_length(fields["content"], self.CONTENT_MAX_LENGTH)
+        if bool(getattr(schema, "enable_dynamic_field", False)):
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: dynamic field 已启用"
+            )
+
+    def _validate_varchar_length(self, field: FieldSchema, expected: int) -> None:
+        """Reject VARCHAR fields whose declared limits differ from the application contract."""
+        actual = int(getattr(field, "params", {}).get("max_length") or 0)
+        if actual != expected:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: "
+                f"field={field.name}, expected_max_length={expected}, actual={actual}"
+            )
 
     def _create_collection(self) -> None:
         """创建 biz collection"""
@@ -188,7 +243,7 @@ class MilvusClientManager:
             FieldSchema(
                 name="vector",
                 dtype=DataType.FLOAT_VECTOR,
-                dim=self.VECTOR_DIM,
+                dim=self.vector_dim,
             ),
             FieldSchema(
                 name="content",
@@ -210,6 +265,7 @@ class MilvusClientManager:
         self._collection = Collection(
             name=self.COLLECTION_NAME,
             schema=schema,
+            using=self.CONNECTION_ALIAS,
             num_shards=self.DEFAULT_SHARD_NUMBER,
         )
 
@@ -236,11 +292,15 @@ class MilvusClientManager:
     def _load_collection(self) -> None:
         """加载 collection 到内存"""
         if self._collection is None:
-            self._collection = Collection(self.COLLECTION_NAME)
+            self._collection = Collection(self.COLLECTION_NAME, using=self.CONNECTION_ALIAS)
 
         # 检查 collection 是否已加载（兼容多版本）
         try:
-            load_state = utility.load_state(self.COLLECTION_NAME)
+            load_state = utility.load_state(
+                self.COLLECTION_NAME,
+                using=self.CONNECTION_ALIAS,
+                timeout=config.milvus_timeout / 1000,
+            )
             # load_state 返回字符串或枚举，如 "Loaded" 或 "NotLoad"
             state_name = getattr(load_state, "name", str(load_state))
             if state_name != "Loaded":
@@ -287,11 +347,17 @@ class MilvusClientManager:
             if self._client is None:
                 return False
 
-            if not connections.has_connection("default"):
+            if not connections.has_connection(self.CONNECTION_ALIAS):
                 self.close()
                 return False
 
-            if not bool(utility.has_collection(self.COLLECTION_NAME)):
+            if not bool(
+                utility.has_collection(
+                    self.COLLECTION_NAME,
+                    using=self.CONNECTION_ALIAS,
+                    timeout=config.milvus_timeout / 1000,
+                )
+            ):
                 logger.warning(f"Milvus collection '{self.COLLECTION_NAME}' 不存在")
                 self.close()
                 return False
@@ -307,6 +373,31 @@ class MilvusClientManager:
             self.close()
             return False
 
+    def readiness_check(self) -> bool:
+        """Probe Milvus and the required collection without creating or loading data."""
+        if self.health_check():
+            return True
+
+        client: MilvusClient | None = None
+        try:
+            uri = f"http://{config.milvus_host}:{config.milvus_port}"
+            client = MilvusClient(uri=uri, timeout=config.milvus_timeout / 1000)
+            return bool(
+                client.has_collection(
+                    collection_name=self.COLLECTION_NAME,
+                    timeout=config.milvus_timeout / 1000,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Milvus readiness probe failed: error_type={}", type(exc).__name__)
+            return False
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.warning("Milvus readiness probe client close failed")
+
     def close(self) -> None:
         """关闭连接"""
         with self._lock:
@@ -320,8 +411,14 @@ class MilvusClientManager:
                 errors.append(f"释放 collection 失败: {e}")
 
             try:
-                if connections.has_connection("default"):
-                    connections.disconnect("default")
+                if self._client is not None:
+                    self._client.close()
+            except Exception as e:
+                errors.append(f"关闭 MilvusClient 失败: {e}")
+
+            try:
+                if connections.has_connection(self.CONNECTION_ALIAS):
+                    connections.disconnect(self.CONNECTION_ALIAS)
             except Exception as e:
                 errors.append(f"断开连接失败: {e}")
 

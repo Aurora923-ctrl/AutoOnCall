@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from app.services.document_loaders.base import (
     DocumentCleaningReport,
@@ -15,6 +16,9 @@ from app.services.document_loaders.base import (
     normalize_text,
 )
 
+MAX_HTML_SECTIONS = 10_000
+HTML_CONTENT_TAGS = {"h1", "h2", "h3", "p", "li", "pre", "code", "td", "th"}
+
 
 class HtmlDocumentLoader:
     """Load local HTML files while removing navigation and script noise."""
@@ -23,8 +27,7 @@ class HtmlDocumentLoader:
     supported_extensions = {"html", "htm"}
 
     def load(self, path: Path) -> tuple[list[LoadedDocument], DocumentCleaningReport]:
-        html = path.read_text(encoding="utf-8", errors="ignore")
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(path.read_bytes(), "html.parser")
         for tag in soup(
             [
                 "script",
@@ -45,7 +48,7 @@ class HtmlDocumentLoader:
         ):
             tag.decompose()
 
-        raw_units = _extract_heading_sections(path, soup)
+        raw_units, truncated = _extract_heading_sections(path, soup)
         if not raw_units:
             text = normalize_text(soup.get_text("\n"))
             raw_units = [
@@ -54,20 +57,35 @@ class HtmlDocumentLoader:
                     metadata=base_metadata(path, doc_type="html") | {"heading_path": ""},
                 )
             ]
-        return filter_loaded_documents(path, loader_type=self.loader_type, raw_units=raw_units)
+        documents, report = filter_loaded_documents(
+            path,
+            loader_type=self.loader_type,
+            raw_units=raw_units,
+        )
+        if truncated:
+            report.add_warning(f"HTML ignored sections after {MAX_HTML_SECTIONS}")
+        return documents, report
 
 
-def _extract_heading_sections(path: Path, soup: BeautifulSoup) -> list[LoadedDocument]:
+def _extract_heading_sections(
+    path: Path,
+    soup: BeautifulSoup,
+) -> tuple[list[LoadedDocument], bool]:
     metadata_base = base_metadata(path, doc_type="html")
     sections: list[LoadedDocument] = []
+    truncated = False
     current_headings: dict[int, str] = {}
     current_title = ""
     current_parts: list[str] = []
 
     def flush() -> None:
-        nonlocal current_parts
+        nonlocal current_parts, truncated
         content = normalize_text("\n".join(current_parts))
         if not content:
+            current_parts = []
+            return
+        if len(sections) >= MAX_HTML_SECTIONS:
+            truncated = True
             current_parts = []
             return
         heading_path = _heading_path(current_headings)
@@ -85,7 +103,9 @@ def _extract_heading_sections(path: Path, soup: BeautifulSoup) -> list[LoadedDoc
         current_parts = []
 
     body = soup.body or soup
-    for element in body.find_all(["h1", "h2", "h3", "p", "li", "pre", "code", "td", "th"]):
+    for element in body.find_all(HTML_CONTENT_TAGS):
+        if _has_content_tag_ancestor(element, body):
+            continue
         name = str(element.name or "").lower()
         text = normalize_text(element.get_text(" "))
         if not text:
@@ -103,7 +123,17 @@ def _extract_heading_sections(path: Path, soup: BeautifulSoup) -> list[LoadedDoc
             continue
         current_parts.append(text)
     flush()
-    return sections
+    return sections, truncated
+
+
+def _has_content_tag_ancestor(element: Tag, body: Tag) -> bool:
+    """Avoid indexing nested semantic blocks twice, such as li > p or pre > code."""
+    parent = element.parent
+    while isinstance(parent, Tag) and parent is not body:
+        if str(parent.name or "").lower() in HTML_CONTENT_TAGS:
+            return True
+        parent = parent.parent
+    return False
 
 
 def _heading_path(headings: dict[int, str]) -> str:

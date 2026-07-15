@@ -1,5 +1,6 @@
 """VectorStore manager boundary tests."""
 
+import pytest
 from langchain_core.documents import Document
 
 from app.services import vector_store_manager as vector_store_module
@@ -12,10 +13,14 @@ class FakeDeleteResult:
 class FakeCollection:
     def __init__(self) -> None:
         self.expr = ""
+        self.flushed = False
 
-    def delete(self, expr: str) -> FakeDeleteResult:
+    def delete(self, expr: str, *, timeout: float | None = None) -> FakeDeleteResult:
         self.expr = expr
         return FakeDeleteResult()
+
+    def flush(self, *, timeout: float | None = None) -> None:
+        self.flushed = True
 
 
 def test_delete_by_source_escapes_milvus_metadata_expression(monkeypatch) -> None:
@@ -36,10 +41,24 @@ def test_add_documents_uses_stable_vector_ids(monkeypatch) -> None:
     manager = vector_store_module.VectorStoreManager()
 
     class FakeVectorStore:
-        def add_documents(self, documents, ids):
+        class FakeClient:
+            def __init__(self) -> None:
+                self.deleted_ids = []
+
+            def flush(self, *, collection_name, timeout):
+                captured["flushed"] = (collection_name, timeout)
+
+            def delete(self, *, collection_name, ids, timeout):
+                self.deleted_ids.append(ids)
+                return FakeDeleteResult()
+
+        client = FakeClient()
+
+        def upsert(self, documents, ids, batch_size, timeout):
             captured["documents"] = documents
             captured["ids"] = ids
-            return ids
+            captured["batch_size"] = batch_size
+            captured["timeout"] = timeout
 
     documents = [
         Document(
@@ -73,6 +92,7 @@ def test_add_documents_uses_stable_vector_ids(monkeypatch) -> None:
     assert first_ids == second_ids
     assert first_ids[0].startswith("vec-")
     assert captured["ids"] == second_ids
+    assert captured["flushed"][0] == "biz"
     assert documents[0].metadata["_vector_id"] == first_ids[0]
 
 
@@ -85,13 +105,18 @@ def test_add_documents_upserts_when_collection_exists(monkeypatch) -> None:
             captured["collection_name"] = collection_name
             return True
 
+        def flush(self, *, collection_name: str, timeout: float) -> None:
+            captured["flushed"] = collection_name
+
     class FakeVectorStore:
         collection_name = "biz"
         client = FakeClient()
 
-        def upsert(self, ids, documents):
+        def upsert(self, ids, documents, batch_size, timeout):
             captured["upsert_ids"] = ids
             captured["upsert_documents"] = documents
+            captured["batch_size"] = batch_size
+            captured["timeout"] = timeout
 
         def add_documents(self, documents, ids):
             raise AssertionError("existing collection should use upsert")
@@ -107,9 +132,11 @@ def test_add_documents_upserts_when_collection_exists(monkeypatch) -> None:
 
     result_ids = manager.add_documents(documents)
 
-    assert captured["collection_name"] == "biz"
     assert captured["upsert_ids"] == result_ids
     assert captured["upsert_documents"] == documents
+    assert captured["batch_size"] == len(documents)
+    assert captured["timeout"] == vector_store_module.config.milvus_timeout / 1000
+    assert captured["flushed"] == "biz"
 
 
 def test_delete_by_source_except_ids_keeps_current_batch(monkeypatch) -> None:
@@ -125,3 +152,133 @@ def test_delete_by_source_except_ids_keeps_current_batch(monkeypatch) -> None:
     assert collection.expr == (
         'metadata["_source"] == "/tmp/runbook\\"quoted.md" and id not in ["vec-a", "vec-b"]'
     )
+    assert collection.flushed is True
+
+
+def test_vector_id_is_stable_across_deployment_roots() -> None:
+    left = Document(
+        page_content="same content",
+        metadata={
+            "_source": "C:/repo/docs/knowledge-base/redis.md",
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "document-hash",
+            "_chunk_hash": "chunk-hash",
+        },
+    )
+    right = Document(
+        page_content="same content",
+        metadata={
+            "_source": "/srv/app/docs/knowledge-base/redis.md",
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "document-hash",
+            "_chunk_hash": "chunk-hash",
+        },
+    )
+
+    assert vector_store_module.build_vector_document_id(
+        left
+    ) == vector_store_module.build_vector_document_id(right)
+
+
+def test_vector_id_changes_when_chunk_version_changes() -> None:
+    old = Document(
+        page_content="old content",
+        metadata={
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "old-document",
+            "_chunk_hash": "old-chunk",
+        },
+    )
+    new = Document(
+        page_content="new content",
+        metadata={
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "new-document",
+            "_chunk_hash": "new-chunk",
+        },
+    )
+
+    assert vector_store_module.build_vector_document_id(
+        old
+    ) != vector_store_module.build_vector_document_id(new)
+
+
+def test_add_documents_fails_when_flush_cannot_confirm_visibility(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+
+    class FakeVectorStore:
+        def upsert(self, ids, documents, batch_size, timeout) -> None:
+            return None
+
+    monkeypatch.setattr(manager, "_ensure_vector_store", lambda: FakeVectorStore())
+
+    with pytest.raises(RuntimeError, match="flush"):
+        manager.add_documents(
+            [
+                Document(
+                    page_content="Redis timeout",
+                    metadata={"_source_id": "uploads/redis.md", "_chunk_id": "redis.md#0001"},
+                )
+            ]
+        )
+
+
+def test_add_documents_compensates_known_ids_when_upsert_raises(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def delete(self, *, collection_name, ids, timeout):
+            captured["deleted"] = (collection_name, ids, timeout)
+            return FakeDeleteResult()
+
+        def flush(self, *, collection_name, timeout):
+            captured["flushed"] = (collection_name, timeout)
+
+    class FakeVectorStore:
+        client = FakeClient()
+
+        def upsert(self, ids, documents, batch_size, timeout) -> None:
+            raise RuntimeError("partial upsert")
+
+    monkeypatch.setattr(manager, "_ensure_vector_store", lambda: FakeVectorStore())
+
+    with pytest.raises(RuntimeError, match="partial upsert"):
+        manager.add_documents(
+            [
+                Document(
+                    page_content="Redis timeout",
+                    metadata={
+                        "_source_id": "uploads/redis.md",
+                        "_chunk_id": "redis.md#0001",
+                        "_document_hash": "doc",
+                        "_chunk_hash": "chunk",
+                    },
+                )
+            ]
+        )
+
+    deleted = captured["deleted"]
+    flushed = captured["flushed"]
+    assert isinstance(deleted, tuple)
+    assert isinstance(flushed, tuple)
+    assert deleted[0] == "biz"
+    assert len(deleted[1]) == 1
+    assert flushed[0] == "biz"
+
+
+def test_delete_by_ids_builds_bounded_compensation_expression(monkeypatch) -> None:
+    collection = FakeCollection()
+    manager = vector_store_module.VectorStoreManager()
+    monkeypatch.setattr(vector_store_module.milvus_manager, "connect", lambda: object())
+    monkeypatch.setattr(vector_store_module.milvus_manager, "get_collection", lambda: collection)
+
+    deleted = manager.delete_by_ids(["vec-b", "vec-a", "vec-a"], raise_on_error=True)
+
+    assert deleted == 3
+    assert collection.expr == 'id in ["vec-a", "vec-b"]'
+    assert collection.flushed is True

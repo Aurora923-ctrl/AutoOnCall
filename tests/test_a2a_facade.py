@@ -357,8 +357,8 @@ async def test_a2a_message_auth_uses_read_scope_for_read_only_skills(monkeypatch
         monkeypatch,
         enabled=True,
         auth_enabled=True,
-        read_token="read-secret",
-        operator_token="operator-secret",
+        read_token="read-secret-token",
+        operator_token="operator-secret-token",
     )
 
     runbook_payload = {
@@ -400,17 +400,17 @@ async def test_a2a_message_auth_uses_read_scope_for_read_only_skills(monkeypatch
     ) as client:
         read_only = await client.post(
             "/a2a/v1/message:send",
-            headers={"X-AutoOnCall-Token": "read-secret"},
+            headers={"X-AutoOnCall-Token": "read-secret-token"},
             json=runbook_payload,
         )
         read_token_diagnosis = await client.post(
             "/a2a/v1/message:send",
-            headers={"X-AutoOnCall-Token": "read-secret"},
+            headers={"X-AutoOnCall-Token": "read-secret-token"},
             json=diagnosis_payload,
         )
         operator_diagnosis = await client.post(
             "/a2a/v1/message:send",
-            headers={"Authorization": "Bearer operator-secret"},
+            headers={"Authorization": "Bearer operator-secret-token"},
             json=diagnosis_payload,
         )
 

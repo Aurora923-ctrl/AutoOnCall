@@ -44,7 +44,7 @@ class AIOpsRequest(BaseModel):
     @classmethod
     def strip_session_id(cls, value: Any) -> Any:
         """Trim optional session IDs before length validation."""
-        return value.strip() if isinstance(value, str) else value
+        return _strip_identifier(value)
 
 
 class AIOpsResumeRequest(BaseModel):
@@ -76,7 +76,16 @@ class AIOpsResumeRequest(BaseModel):
     @classmethod
     def strip_optional_ids(cls, value: Any) -> Any:
         """Trim optional IDs before length validation."""
-        return value.strip() if isinstance(value, str) else value
+        return _strip_identifier(value)
+
+
+def _strip_identifier(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in stripped):
+        raise ValueError("control characters are not allowed")
+    return stripped
 
 
 class AlertInfo(BaseModel):

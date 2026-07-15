@@ -4,9 +4,11 @@ import pytest
 from langchain_core.documents import Document
 
 from app.config import config
+from app.services import rag_retrieval_service
 from app.services.lexical_index_service import LexicalIndexService
 from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
+    build_targeted_lexical_queries,
     infer_retrieval_preferences,
     normalize_metadata_filter,
     rerank_retrieval_candidates,
@@ -335,6 +337,228 @@ def test_retrieval_preferences_only_use_explicit_source_intent() -> None:
     assert preferences["preferred_extensions"] == {".pdf"}
 
 
+def test_idle_client_query_prefers_redis_sources() -> None:
+    preferences = infer_retrieval_preferences("空闲客户端连接何时会被服务端关闭？")
+
+    assert "redis" in preferences["dominant_source_terms"]
+
+
+def test_response_latency_query_prefers_slow_response_sources() -> None:
+    preferences = infer_retrieval_preferences("慢 SQL 应参考哪段响应延迟原因分析？")
+
+    assert "slow_response" in preferences["dominant_source_terms"]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_heading"),
+    [
+        (
+            "billing-service CPU 持续 95%，如何收集进程和线程证据并给出处置边界？",
+            "升级与审批",
+        ),
+        (
+            "Pod 发生 OOMKilled 后应如何取证，什么时候才能建议重启或扩容？",
+            "相关工具命令",
+        ),
+        (
+            "写文件失败时怎样区分磁盘空间耗尽、inode 耗尽和大目录占用？",
+            "常用命令",
+        ),
+    ],
+)
+def test_runbook_query_promotes_direct_evidence_headings(
+    query: str,
+    expected_heading: str,
+) -> None:
+    candidates = [
+        {
+            "doc_id": "runbook",
+            "source_file": "cpu_high_usage.md",
+            "chunk_id": "background",
+            "score": 0.2,
+            "heading_path": "CPU使用率过高告警处理方案 > 问题描述",
+            "content": "CPU 使用率过高会导致响应变慢。",
+            "metadata": {"_retrieval_source": "vector"},
+        },
+        {
+            "doc_id": "runbook",
+            "source_file": "cpu_high_usage.md",
+            "chunk_id": "direct",
+            "score": 0.35,
+            "heading_path": f"CPU使用率过高告警处理方案 > {expected_heading}",
+            "content": "检查进程、线程、空间或 inode，并保留审批和 dry-run 边界。",
+            "metadata": {"_retrieval_source": "vector"},
+        },
+    ]
+
+    ranked = rerank_retrieval_candidates(
+        query,
+        candidates,
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+    )
+
+    assert ranked[0]["chunk_id"] == "direct"
+
+
+@pytest.mark.parametrize(
+    ("query", "required_sources"),
+    [
+        (
+            "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？",
+            ("official_redis_clients.md", "redis_postmortem.pdf"),
+        ),
+        (
+            "Kubernetes 请求不通时，如何同时验证 Pod 与 Service EndpointSlice？",
+            (
+                "official_kubernetes_debug_pods.md",
+                "official_kubernetes_debug_services.md",
+            ),
+        ),
+        (
+            "Loki 写入异常时，如何使用 discarded 指标定位并设计症状告警？",
+            (
+                "official_loki_troubleshoot_ingest.md",
+                "official_prometheus_alerting_practices.md",
+            ),
+        ),
+    ],
+)
+def test_explicit_multi_source_query_reserves_each_required_source(
+    query: str,
+    required_sources: tuple[str, str],
+) -> None:
+    candidates = [
+        {
+            "doc_id": "primary",
+            "source_file": required_sources[0],
+            "chunk_id": "primary#1",
+            "score": 0.1,
+            "content": query,
+            "metadata": {"_retrieval_source": "vector"},
+        },
+        {
+            "doc_id": "primary",
+            "source_file": required_sources[0],
+            "chunk_id": "primary#2",
+            "score": 0.12,
+            "content": query,
+            "metadata": {"_retrieval_source": "vector"},
+        },
+        {
+            "doc_id": "secondary",
+            "source_file": required_sources[1],
+            "chunk_id": "secondary#1",
+            "score": 0.45,
+            "content": query,
+            "metadata": {"_retrieval_source": "vector"},
+        },
+    ]
+
+    ranked = rerank_retrieval_candidates(
+        query,
+        candidates,
+        top_k=2,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+        prune_low_relevance=False,
+    )
+
+    assert {item["source_file"] for item in ranked} == set(required_sources)
+
+
+def test_structured_retrieval_keeps_trusted_required_source_after_relative_pruning() -> None:
+    postmortem = Document(
+        page_content="Redis incident connected_clients=9940 maxclients=10000",
+        metadata={
+            "_file_name": "redis_postmortem.pdf",
+            "_chunk_id": "postmortem#1",
+            "doc_type": "pdf",
+        },
+    )
+    official = Document(
+        page_content="Redis checks maxclients before accepting a new client connection.",
+        metadata={
+            "_file_name": "official_redis_clients.md",
+            "_chunk_id": "official#1",
+            "doc_type": "markdown",
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？",
+        top_k=2,
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(postmortem, 0.1), (official, 0.8)]),
+    )
+
+    assert {item["source_file"] for item in payload["retrieval_results"]} == {
+        "official_redis_clients.md",
+        "redis_postmortem.pdf",
+    }
+
+
+def test_targeted_lexical_queries_only_expand_explicit_subgoals() -> None:
+    assert build_targeted_lexical_queries("Redis timeout") == {}
+
+    multi_source = build_targeted_lexical_queries(
+        "Loki 写入异常时，如何使用 discarded 指标定位并设计症状告警？"
+    )
+    assert set(multi_source) == {
+        "official_loki_troubleshoot_ingest.md",
+        "official_prometheus_alerting_practices.md",
+    }
+    assert "user-visible" in multi_source["official_prometheus_alerting_practices.md"]
+
+    runbook = build_targeted_lexical_queries(
+        "写文件失败时怎样区分磁盘空间耗尽、inode 耗尽和大目录占用？"
+    )
+    assert set(runbook) == {"disk_high_usage.md"}
+    assert "常用命令" in runbook["disk_high_usage.md"]
+
+
+def test_runtime_targeted_lexical_recall_uses_existing_filtered_index(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    prometheus = Document(
+        page_content="Alert on symptoms associated with end-user pain.",
+        metadata={
+            "_source": "docs/knowledge-base/official_prometheus_alerting_practices.md",
+            "_file_name": "official_prometheus_alerting_practices.md",
+            "_doc_id": "docs/knowledge-base/official_prometheus_alerting_practices.md",
+            "_chunk_id": "prometheus#1",
+        },
+    )
+    loki = Document(
+        page_content="loki_discarded_samples_total monitors ingestion errors.",
+        metadata={
+            "_source": "docs/knowledge-base/official_loki_troubleshoot_ingest.md",
+            "_file_name": "official_loki_troubleshoot_ingest.md",
+            "_doc_id": "docs/knowledge-base/official_loki_troubleshoot_ingest.md",
+            "_chunk_id": "loki#1",
+        },
+    )
+    index.upsert_source(str(prometheus.metadata["_source"]), [prometheus])
+    index.upsert_source(str(loki.metadata["_source"]), [loki])
+    monkeypatch.setattr(config, "rag_min_lexical_trust_score", 0.0)
+
+    payload = retrieve_structured_knowledge(
+        "Loki 写入异常时，如何使用 discarded 指标定位并设计症状告警？",
+        top_k=2,
+        max_distance=1.0,
+        lexical_index=index,
+        vector_store_provider=lambda: FakeVectorStore([]),
+    )
+
+    assert {item["source_file"] for item in payload["retrieval_results"]} == {
+        "official_loki_troubleshoot_ingest.md",
+        "official_prometheus_alerting_practices.md",
+    }
+
+
 def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) -> None:
     index = LexicalIndexService(tmp_path / "lexical.json")
     document = Document(
@@ -517,3 +741,15 @@ async def test_search_runbook_tool_hides_vector_error_detail(monkeypatch) -> Non
     assert result.output["vector_error_message"] == "向量检索暂不可用，已降级使用本地词法索引。"
     assert "vector_error_detail" not in result.output
     assert "milvus.internal" not in str(result.output)
+def test_stale_registry_read_failure_filters_vector_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.lexical_index_service.is_source_stale",
+        lambda _source: (_ for _ in ()).throw(OSError("corrupt index")),
+    )
+
+    assert (
+        rag_retrieval_service.is_stale_retrieval_source(
+            {"source_path": "docs/knowledge-base/redis.md"}
+        )
+        is True
+    )

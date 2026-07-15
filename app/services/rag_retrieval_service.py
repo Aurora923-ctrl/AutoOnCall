@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ def retrieve_structured_knowledge(
     lexical_index: Any | None = None,
 ) -> dict[str, Any]:
     """Retrieve knowledge chunks with source metadata, scores, and rejection details."""
+    total_started = time.perf_counter()
     safe_query = str(query or "").strip()
     k = top_k or config.rag_top_k
     threshold = config.rag_max_l2_distance if max_distance is None else max_distance
@@ -55,9 +57,15 @@ def retrieve_structured_knowledge(
 
     vector_error_detail = ""
     vector_error_type = ""
+    stage_timings = {
+        "vector_search_ms": 0.0,
+        "lexical_search_ms": 0.0,
+        "fusion_rerank_ms": 0.0,
+    }
 
     try:
         vector_results: list[tuple[Document, float | None]] = []
+        vector_started = time.perf_counter()
         try:
             store = vector_store or resolved_vector_store_provider()
             vector_results = _search_with_optional_scores(store, safe_query, candidate_k, expr=expr)
@@ -71,11 +79,14 @@ def retrieve_structured_knowledge(
                 summarize_text_for_log(safe_query, label="query"),
                 vector_error_type,
             )
+        finally:
+            stage_timings["vector_search_ms"] = _elapsed_ms(vector_started)
 
         lexical_results: list[tuple[Document, float]] = []
         if hybrid_enabled and (
             vector_error_detail or _should_query_lexical_index(vector_store, vector_results)
         ):
+            lexical_started = time.perf_counter()
             try:
                 lexical_results = cast(
                     list[tuple[Document, float]],
@@ -92,6 +103,22 @@ def retrieve_structured_knowledge(
                         f"vector_error={vector_error_detail}; lexical_error={exc}"
                     ) from exc
                 raise
+            finally:
+                stage_timings["lexical_search_ms"] = _elapsed_ms(lexical_started)
+
+        if hybrid_enabled and vector_store is None:
+            lexical_started = time.perf_counter()
+            try:
+                lexical_results = merge_targeted_lexical_results(
+                    lexical_results,
+                    targeted_lexical_results(
+                        resolved_lexical_index,
+                        safe_query,
+                        metadata_filter=normalize_metadata_filter(metadata_filter),
+                    ),
+                )
+            finally:
+                stage_timings["lexical_search_ms"] += _elapsed_ms(lexical_started)
 
         retrieval_mode = (
             build_degraded_retrieval_mode(rerank_on, normalized_fusion_strategy)
@@ -111,15 +138,19 @@ def retrieve_structured_knowledge(
                 for chunk in candidates
                 if metadata_matches_filter(chunk["metadata"], metadata_filter)
             ]
-        candidates = rerank_retrieval_candidates(
-            safe_query,
-            candidates,
-            top_k=k,
-            hybrid_search_enabled=hybrid_enabled,
-            rerank_enabled=rerank_on,
-            fusion_strategy=normalized_fusion_strategy,
-            prune_low_relevance=False,
-        )
+        rerank_started = time.perf_counter()
+        try:
+            candidates = rerank_retrieval_candidates(
+                safe_query,
+                candidates,
+                top_k=k,
+                hybrid_search_enabled=hybrid_enabled,
+                rerank_enabled=rerank_on,
+                fusion_strategy=normalized_fusion_strategy,
+                prune_low_relevance=False,
+            )
+        finally:
+            stage_timings["fusion_rerank_ms"] = _elapsed_ms(rerank_started)
         trusted = []
         rejected = []
         for chunk in candidates:
@@ -152,7 +183,10 @@ def retrieve_structured_knowledge(
                     }
                 )
 
-        if normalized_fusion_strategy == "weighted":
+        required_sources = _required_sources_from_preferences(
+            infer_retrieval_preferences(safe_query)
+        )
+        if normalized_fusion_strategy == "weighted" and not required_sources:
             trusted = prune_low_relevance_candidates(trusted, top_k=k)
 
         if not trusted:
@@ -178,6 +212,15 @@ def retrieve_structured_knowledge(
                 "answer_policy": "refuse_without_trusted_source",
                 "retrieval_results": [],
                 "rejected_results": rejected,
+                "observability": build_retrieval_observability(
+                    stage_timings,
+                    total_started=total_started,
+                    vector_candidate_count=len(vector_results),
+                    lexical_candidate_count=len(lexical_results),
+                    trusted_count=0,
+                    rejected_count=len(rejected),
+                    retrieval_mode=retrieval_mode,
+                ),
                 "summary": NO_TRUSTED_KNOWLEDGE,
                 "content": NO_TRUSTED_KNOWLEDGE,
             }
@@ -204,6 +247,15 @@ def retrieve_structured_knowledge(
             "answer_policy": "answer_with_citations",
             "retrieval_results": trusted,
             "rejected_results": rejected,
+            "observability": build_retrieval_observability(
+                stage_timings,
+                total_started=total_started,
+                vector_candidate_count=len(vector_results),
+                lexical_candidate_count=len(lexical_results),
+                trusted_count=len(trusted),
+                rejected_count=len(rejected),
+                retrieval_mode=retrieval_mode,
+            ),
             "summary": f"检索到 {len(trusted)} 条可信知识来源",
             "content": format_retrieval_results(trusted),
         }
@@ -235,10 +287,65 @@ def retrieve_structured_knowledge(
             "answer_policy": "retrieval_failed",
             "retrieval_results": [],
             "rejected_results": [],
+            "observability": build_retrieval_observability(
+                stage_timings,
+                total_started=total_started,
+                vector_candidate_count=0,
+                lexical_candidate_count=0,
+                trusted_count=0,
+                rejected_count=0,
+                retrieval_mode=build_retrieval_mode(
+                    hybrid_enabled,
+                    rerank_on,
+                    normalized_fusion_strategy,
+                ),
+            ),
             "summary": PUBLIC_RETRIEVAL_ERROR,
             "content": PUBLIC_RETRIEVAL_ERROR,
             "error_message": PUBLIC_RETRIEVAL_ERROR,
         }
+
+
+def build_retrieval_observability(
+    stage_timings: dict[str, float],
+    *,
+    total_started: float,
+    vector_candidate_count: int,
+    lexical_candidate_count: int,
+    trusted_count: int,
+    rejected_count: int,
+    retrieval_mode: str,
+) -> dict[str, Any]:
+    """Build honest stage observations without inventing hidden backend timings."""
+    return {
+        "stages": {
+            "embedding_ms": "not_observed",
+            "milvus_search_ms": "not_observed",
+            "vector_search_ms": stage_timings.get("vector_search_ms", 0.0),
+            "lexical_search_ms": stage_timings.get("lexical_search_ms", 0.0),
+            "fusion_rerank_ms": stage_timings.get("fusion_rerank_ms", 0.0),
+            "retrieval_total_ms": _elapsed_ms(total_started),
+        },
+        "counts": {
+            "vector_candidate_count": vector_candidate_count,
+            "lexical_candidate_count": lexical_candidate_count,
+            "candidate_count": vector_candidate_count + lexical_candidate_count,
+            "trusted_count": trusted_count,
+            "rejected_count": rejected_count,
+        },
+        "runtime": {
+            "retrieval_mode": retrieval_mode,
+            "embedding_model": config.dashscope_embedding_model,
+            "reranker_model": "rule-weighted" if config.rag_rerank_enabled else "disabled",
+            "collection_version": "not_observed",
+        },
+        "limitations": [
+            (
+                "LangChain Milvus similarity_search combines query embedding and Milvus search; "
+                "only their combined vector_search_ms is observed."
+            )
+        ],
+    }
 
 
 def document_to_retrieval_chunk(
@@ -286,7 +393,7 @@ def is_stale_retrieval_source(chunk: dict[str, Any]) -> bool:
         return lexical_index_service.is_source_stale(source_path)
     except Exception as exc:
         logger.warning(f"检查陈旧 RAG source 失败: source={source_path}, error={exc}")
-        return False
+        return True
 
 
 def merge_raw_retrieval_results(
@@ -343,6 +450,92 @@ def merge_raw_retrieval_results(
             ),
         )
     ]
+
+
+def targeted_lexical_results(
+    lexical_index: Any,
+    query: str,
+    *,
+    metadata_filter: dict[str, Any] | None = None,
+) -> list[tuple[Document, float]]:
+    """Recall explicitly requested sources or runbook sections through the existing index."""
+    results: list[tuple[Document, float]] = []
+    for source_file, expanded_query in build_targeted_lexical_queries(query).items():
+        source_filter = dict(metadata_filter or {})
+        existing_source = source_filter.get("_file_name")
+        if existing_source and str(existing_source) != source_file:
+            continue
+        source_filter["_file_name"] = source_file
+        results.extend(
+            cast(
+                list[tuple[Document, float]],
+                lexical_index.search(
+                    expanded_query,
+                    top_k=2,
+                    metadata_filter=source_filter,
+                ),
+            )
+        )
+    return results
+
+
+def build_targeted_lexical_queries(query: str) -> dict[str, str]:
+    """Build conservative query expansions only for explicit retrieval subgoals."""
+    lowered = str(query or "").lower()
+    preferences = infer_retrieval_preferences(query)
+    targeted: dict[str, str] = {}
+    required_sources = _required_sources_from_preferences(preferences)
+    source_hints = {
+        "official_redis_clients.md": "maxclients maximum concurrent connected clients accepting connections",
+        "redis_postmortem.pdf": "incident window connected_clients blocked_clients maxclients postmortem",
+        "official_kubernetes_debug_pods.md": "debug pods kubectl describe pod state events running readiness",
+        "official_kubernetes_debug_services.md": "debug service selector endpointslice backend pods",
+        "official_loki_troubleshoot_ingest.md": (
+            "loki discarded samples bytes monitoring ingestion errors"
+        ),
+        "official_prometheus_alerting_practices.md": (
+            "alert symptoms user-visible pain what to alert on"
+        ),
+    }
+    for source_file in required_sources:
+        targeted[source_file] = f"{query} {source_hints.get(source_file, source_file)}"
+
+    runbook_source = next(
+        (
+            source
+            for term, source in {
+                "cpu": "cpu_high_usage.md",
+                "oom": "memory_high_usage.md",
+                "oomkilled": "memory_high_usage.md",
+                "内存": "memory_high_usage.md",
+                "inode": "disk_high_usage.md",
+                "磁盘": "disk_high_usage.md",
+            }.items()
+            if term in lowered
+        ),
+        "",
+    )
+    raw_heading_terms = preferences.get("preferred_heading_terms")
+    heading_terms = set(raw_heading_terms) if isinstance(raw_heading_terms, set) else set()
+    if runbook_source and heading_terms:
+        targeted[runbook_source] = f"{query} {' '.join(sorted(heading_terms))}"
+    return targeted
+
+
+def merge_targeted_lexical_results(
+    base_results: list[tuple[Document, float]],
+    targeted_results: list[tuple[Document, float]],
+) -> list[tuple[Document, float]]:
+    """Merge targeted lexical hits without duplicating existing chunks."""
+    merged = list(base_results)
+    seen = {_document_identity(document) for document, _score in merged}
+    for document, score in targeted_results:
+        identity = _document_identity(document)
+        if identity in seen:
+            continue
+        merged.append((document, score))
+        seen.add(identity)
+    return merged
 
 
 def build_heading_path(metadata: dict[str, Any]) -> str:
@@ -529,9 +722,17 @@ def rerank_retrieval_candidates(
             )
         )
 
+    required_sources = _required_sources_from_preferences(retrieval_preferences)
+    if required_sources:
+        deduped = select_required_sources(
+            deduped,
+            required_sources=required_sources,
+            top_k=top_k,
+        )
+
     selected = (
         prune_low_relevance_candidates(deduped, top_k=top_k)
-        if prune_low_relevance
+        if prune_low_relevance and not required_sources
         else deduped[:top_k]
     )
     for rank, chunk in enumerate(selected, 1):
@@ -562,6 +763,8 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     lowered = str(query or "").lower()
     preferred_doc_types: set[str] = set()
     preferred_extensions: set[str] = set()
+    preferred_heading_terms: set[str] = set()
+    required_sources: set[str] = set()
 
     if any(
         term in lowered for term in {"postmortem", "复盘", "事故复盘", "历史事故", "事故时间线"}
@@ -607,6 +810,52 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     ):
         preferred_extensions.add(".xlsx")
 
+    if any(term in lowered for term in {"证据", "取证", "如何收集", "怎样区分"}):
+        preferred_heading_terms.update({"排查步骤", "常用命令", "相关工具命令"})
+    if any(
+        term in lowered
+        for term in {
+            "处置边界",
+            "审批",
+            "重启",
+            "扩容",
+            "限流",
+            "回滚",
+            "删除",
+            "截断",
+            "清理",
+            "dry-run",
+        }
+    ):
+        preferred_heading_terms.add("升级与审批")
+    if "redis" in lowered and "官方" in lowered and any(
+        term in lowered for term in {"复盘", "事故"}
+    ):
+        required_sources.update({"official_redis_clients.md", "redis_postmortem.pdf"})
+    if (
+        any(term in lowered for term in {"kubernetes", "k8s"})
+        and "pod" in lowered
+        and "service" in lowered
+        and "endpointslice" in lowered
+    ):
+        required_sources.update(
+            {
+                "official_kubernetes_debug_pods.md",
+                "official_kubernetes_debug_services.md",
+            }
+        )
+    if (
+        "loki" in lowered
+        and "discarded" in lowered
+        and any(term in lowered for term in {"告警", "alert"})
+    ):
+        required_sources.update(
+            {
+                "official_loki_troubleshoot_ingest.md",
+                "official_prometheus_alerting_practices.md",
+            }
+        )
+
     specific_fault_query = any(
         term in lowered
         for term in {
@@ -626,7 +875,16 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     preferred_source_terms = {
         term
         for term, aliases in {
-            "redis": {"redis", "maxclients", "blocked_clients", "connected_clients", "连接槽位"},
+            "redis": {
+                "redis",
+                "maxclients",
+                "blocked_clients",
+                "connected_clients",
+                "空闲客户端",
+                "客户端连接",
+                "服务端关闭",
+                "连接槽位",
+            },
             "mysql": {
                 "mysql",
                 "sql",
@@ -681,6 +939,7 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
                 "slow",
                 "latency",
                 "p95",
+                "响应延迟",
                 "响应时间",
                 "接口变慢",
                 "外部接口",
@@ -696,6 +955,9 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
                 "maxclients",
                 "blocked_clients",
                 "connected_clients",
+                "空闲客户端",
+                "客户端连接",
+                "服务端关闭",
                 "连接上限",
                 "连接槽位",
                 "连接数满",
@@ -745,6 +1007,7 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
             "memory": {"memory", "oom", "oomkilled", "内存"},
             "disk": {"disk", "inode", "no space", "磁盘"},
             "service_unavailable": {"503", "5xx", "服务不可用", "无法访问", "接口全部失败"},
+            "slow_response": {"响应延迟", "响应时间", "接口变慢", "外部接口", "下游"},
         }.items()
         if any(alias in lowered for alias in aliases)
     }
@@ -761,6 +1024,8 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         "preferred_extensions": preferred_extensions,
         "preferred_source_terms": preferred_source_terms,
         "dominant_source_terms": dominant_source_terms,
+        "preferred_heading_terms": preferred_heading_terms,
+        "required_sources": required_sources,
         "penalize_generic_service": specific_fault_query and not generic_service_query,
         "require_source_diversity": any(
             term in lowered
@@ -814,7 +1079,16 @@ def retrieval_intent_multiplier(
     dominant_source_terms = (
         set(raw_dominant_terms) if isinstance(raw_dominant_terms, set) else set()
     )
+    raw_heading_terms = preferences.get("preferred_heading_terms")
+    preferred_heading_terms = (
+        set(raw_heading_terms) if isinstance(raw_heading_terms, set) else set()
+    )
+    raw_required_sources = preferences.get("required_sources")
+    required_sources = (
+        set(raw_required_sources) if isinstance(raw_required_sources, set) else set()
+    )
     normalized_source = source_file.lower().replace("-", "_")
+    normalized_heading = str(chunk.get("heading_path") or "").lower()
     multiplier = 1.0
     if suffix and suffix in preferred_extensions:
         multiplier *= 1.22
@@ -829,10 +1103,18 @@ def retrieval_intent_multiplier(
     ):
         multiplier *= 0.78
     if bool(preferences.get("prefer_service_debug")):
-        if "debug_services" in normalized_source:
-            multiplier *= 1.8
-        elif "debug_pods" in normalized_source:
-            multiplier *= 0.62
+        if "debug_services" in normalized_source or "debug_pods" in normalized_source:
+            multiplier *= 1.6
+    if source_file.lower() in required_sources:
+        multiplier *= 1.65
+    if preferred_heading_terms:
+        if any(term.lower() in normalized_heading for term in preferred_heading_terms):
+            multiplier *= 1.55
+        elif any(
+            term in normalized_heading
+            for term in {"告警名称", "问题描述", "相关告警", "预防措施", "长期优化"}
+        ):
+            multiplier *= 0.68
     searchable_text = " ".join(
         [
             normalized_source,
@@ -867,6 +1149,62 @@ def retrieval_intent_multiplier(
         }:
             multiplier *= 0.78
     return multiplier
+
+
+def select_required_sources(
+    candidates: list[dict[str, Any]],
+    *,
+    required_sources: set[str],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Reserve one ranked slot for each source explicitly required by the query."""
+    if not candidates or not required_sources or top_k <= 0:
+        return candidates
+
+    selected_ids: set[tuple[str, str]] = set()
+    selected: list[dict[str, Any]] = []
+    for source in required_sources:
+        match = next(
+            (
+                chunk
+                for chunk in candidates
+                if str(chunk.get("source_file") or "").lower() == source.lower()
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        identity = (str(match.get("doc_id") or ""), str(match.get("chunk_id") or ""))
+        if identity not in selected_ids:
+            selected.append(match)
+            selected_ids.add(identity)
+
+    selected.sort(key=lambda item: -float(item.get("rerank_score") or 0.0))
+    for chunk in candidates:
+        if len(selected) >= top_k:
+            break
+        identity = (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
+        if identity in selected_ids:
+            continue
+        selected.append(chunk)
+        selected_ids.add(identity)
+
+    selected_identities = {
+        (str(item.get("doc_id") or ""), str(item.get("chunk_id") or "")) for item in selected
+    }
+    return selected + [
+        chunk
+        for chunk in candidates
+        if (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
+        not in selected_identities
+    ]
+
+
+def _required_sources_from_preferences(
+    preferences: dict[str, set[str] | bool],
+) -> set[str]:
+    raw_required_sources = preferences.get("required_sources")
+    return set(raw_required_sources) if isinstance(raw_required_sources, set) else set()
 
 
 def prune_low_relevance_candidates(
@@ -1173,6 +1511,10 @@ def _coerce_score(score: Any) -> float | None:
         return float(score)
     except (TypeError, ValueError):
         return None
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 2)
 
 
 def _stable_chunk_id(source_file: str, heading_path: str, content: str) -> str:

@@ -8,7 +8,11 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 
 - Treat all FastAPI routes as internal tooling; do not expose the service directly to the public internet.
 - Set `DEBUG=false`.
+- Keep FastAPI OpenAPI, Swagger UI, and ReDoc disabled when `DEBUG=false`; publish a reviewed
+  API contract separately if operators need documentation in production.
 - Set `CORS_ALLOWED_ORIGINS` to explicit internal frontend origins.
+- Keep browser cookie credentials disabled; AutoOnCall authenticates API calls with explicit
+  bearer or `X-AutoOnCall-Token` headers instead of cross-origin cookies.
 - Treat startup warnings about non-local bind, disabled API auth, or wildcard CORS as release blockers.
 - Set `PRODUCTION_EXPOSURE_STRICT=true` so unsafe externally bound demo defaults fail closed during startup instead of only logging warnings.
 - Store `DASHSCOPE_API_KEY`, API tokens, Redis passwords, MySQL credentials, bearer tokens, and webhook secrets in a secret manager.
@@ -27,13 +31,15 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 ## Internal API Auth
 
 - `API_AUTH_ENABLED=false` keeps local demos open.
-- `API_READ_TOKEN`: read-only token for chat, incident, alert, trace, report, approval list, eval, and tool contract views.
-- `API_OPERATOR_TOKEN`: read + diagnosis + knowledge indexing + alert ingestion token.
+- `API_READ_TOKEN`: read-only token for incident, alert, trace, report, approval list, upload config, session history, and tool contract views.
+- `API_OPERATOR_TOKEN`: read + chat + diagnosis + knowledge indexing + alert ingestion + eval token.
 - `API_APPROVER_TOKEN`: read + approval decision + safe-change resume/manual-result token.
 - `API_ADMIN_TOKEN`: all scopes.
 - `API_AUTH_TOKENS`: optional JSON map for multiple tokens, for example `{"ops-token":["operator"],"sre-token":["approver"]}`.
 
 Clients can send either `Authorization: Bearer <token>` or `X-AutoOnCall-Token: <token>`. If auth is enabled but no token is configured, protected APIs return 503 so the service fails closed.
+Obvious placeholder tokens and tokens shorter than 16 characters are ignored, so production
+startup also fails closed when strict exposure protection is enabled with unusable credentials.
 
 ## Exposure Guard
 
@@ -105,6 +111,8 @@ an internal platform, and keep the safety defaults in this document in place.
 Because the image defaults to `PRODUCTION_EXPOSURE_STRICT=true`, an externally
 bound container must enable API auth and configure scoped tokens before it will
 serve traffic.
+The image runs as the unprivileged `autooncall` user and honors the configured
+`HOST` and `PORT` values at runtime.
 The `.dockerignore` file excludes local virtual environments, logs, uploads,
 SQLite databases, coverage reports, and `.env` files from the image context.
 

@@ -7,10 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.config import config
 from app.models.incident import new_model_id, utc_now
+from app.services.document_loaders.base import MAX_CLEANING_WARNINGS
 
 
 class IndexingQualityRecord(BaseModel):
@@ -42,6 +45,7 @@ class IndexingQualityService:
 
     def __init__(self, storage_path: str | Path | None = None) -> None:
         self.storage_path = Path(storage_path or config.knowledge_indexing_report_path)
+        self.lock_path = self.storage_path.with_name(f".{self.storage_path.name}.lock")
 
     def record_single_file_result(
         self,
@@ -98,7 +102,7 @@ class IndexingQualityService:
                 source_path=path,
                 operation=operation,
                 status="failed",
-                error_message=str(error),
+                error_message=_public_indexing_error_message(str(error)),
                 duration_ms=getattr(result, "get_duration_ms", lambda: 0)(),
             )
             self._append(record)
@@ -118,7 +122,7 @@ class IndexingQualityService:
             source_path=source_path,
             operation=operation,
             status="failed",
-            error_message=error_message,
+            error_message=_public_indexing_error_message(error_message),
         )
         self._append(record)
         return record
@@ -130,7 +134,9 @@ class IndexingQualityService:
         limit: int = 100,
     ) -> list[IndexingQualityRecord]:
         """Return recent quality records, optionally filtered by document type."""
-        records = _read_records(self.storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(self.lock_path)):
+            records = _read_records(self.storage_path)
         if doc_type:
             records = [record for record in records if record.doc_type == doc_type]
         records.sort(key=lambda record: record.created_at, reverse=True)
@@ -143,8 +149,9 @@ class IndexingQualityService:
 
     def _append(self, record: IndexingQualityRecord) -> None:
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.storage_path.open("a", encoding="utf-8") as handle:
-            handle.write(record.model_dump_json() + "\n")
+        with FileLock(str(self.lock_path)):
+            with self.storage_path.open("a", encoding="utf-8") as handle:
+                handle.write(record.model_dump_json() + "\n")
 
 
 def build_quality_record_from_result(
@@ -154,7 +161,7 @@ def build_quality_record_from_result(
     source_path: str | None = None,
 ) -> IndexingQualityRecord:
     """Create a quality record from SingleFileIndexingResult-like objects."""
-    report = dict(getattr(result, "cleaning_report", {}) or {})
+    report = _safe_report(getattr(result, "cleaning_report", {}))
     resolved_source_path = source_path or getattr(result, "file_path", "")
     return build_quality_record(
         report=report,
@@ -180,26 +187,33 @@ def build_quality_record(
     error_message: str = "",
 ) -> IndexingQualityRecord:
     """Normalize raw cleaning report dictionaries into the persistent schema."""
-    source_file = str(report.get("source_file") or Path(source_path).name or "unknown")
+    report = _safe_report(report)
+    source_file = _public_path(str(report.get("source_file") or source_path)) or "unknown"
     doc_type = _doc_type_from_report(report, source_file)
+    normalized_status = _normalize_quality_status(status)
+    safe_error_message = (
+        _public_indexing_error_message(error_message)
+        if normalized_status == "failed"
+        else error_message
+    )
     return IndexingQualityRecord(
         source_file=source_file,
         source_path=_public_path(source_path),
         operation=operation,
-        status=status,
-        chunk_count=chunk_count,
-        duration_ms=duration_ms,
+        status=normalized_status,
+        chunk_count=max(_safe_non_negative_int(chunk_count), 0),
+        duration_ms=max(_safe_non_negative_int(duration_ms), 0),
         doc_type=doc_type,
         loader_type=str(report.get("loader_type") or ""),
-        raw_units=int(report.get("raw_units") or 0),
-        indexed_units=int(report.get("indexed_units") or 0),
-        dropped_units=int(report.get("dropped_units") or 0),
-        empty_units=int(report.get("empty_units") or 0),
-        duplicate_units=int(report.get("duplicate_units") or 0),
-        low_information_units=int(report.get("low_information_units") or 0),
-        warnings=[str(item)[:300] for item in report.get("warnings", []) or []],
+        raw_units=_safe_non_negative_int(report.get("raw_units")),
+        indexed_units=_safe_non_negative_int(report.get("indexed_units")),
+        dropped_units=_safe_non_negative_int(report.get("dropped_units")),
+        empty_units=_safe_non_negative_int(report.get("empty_units")),
+        duplicate_units=_safe_non_negative_int(report.get("duplicate_units")),
+        low_information_units=_safe_non_negative_int(report.get("low_information_units")),
+        warnings=_normalize_warnings(report.get("warnings")),
         message=message,
-        error_message=error_message,
+        error_message=safe_error_message,
     )
 
 
@@ -282,20 +296,61 @@ def _doc_type_from_report(report: dict[str, Any], source_file: str) -> str:
 
 
 def _public_path(value: str) -> str:
-    return Path(str(value or "")).name
+    normalized = str(value or "").replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] if normalized else ""
+
+
+def _public_indexing_error_message(value: str) -> str:
+    return "索引失败，请检查服务端日志" if str(value or "") else ""
+
+
+def _safe_non_negative_int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_quality_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    return status if status in {"success", "empty", "failed"} else "unknown"
+
+
+def _safe_report(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _normalize_warnings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = [value]
+    return [str(item)[:300] for item in values[:MAX_CLEANING_WARNINGS]]
 
 
 def _read_records(path: Path) -> list[IndexingQualityRecord]:
     if not path.exists():
         return []
     records: list[IndexingQualityRecord] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    invalid_line_numbers: list[int] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
             records.append(IndexingQualityRecord.model_validate(json.loads(line)))
         except (json.JSONDecodeError, ValueError):
-            continue
+            invalid_line_numbers.append(line_number)
+    if invalid_line_numbers:
+        logger.warning(
+            "索引质量记录包含无效行，已跳过: file={}, invalid_count={}, lines={}",
+            path.name,
+            len(invalid_line_numbers),
+            invalid_line_numbers[:20],
+        )
     return records
 
 

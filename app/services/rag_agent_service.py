@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Sequence
 from datetime import datetime
 from typing import Annotated, Any, cast
@@ -33,7 +34,9 @@ from app.services.rag_answer_policy import (
     copy_message_with_content,
     ensure_citation_block,
     has_valid_citations,
+    is_explicit_knowledge_refusal,
     message_content_to_text,
+    select_supporting_citations,
 )
 from app.services.rag_read_models import (
     build_citations,
@@ -285,8 +288,83 @@ class RagAgentService:
             }
 
         grounded_question = build_grounded_question(question, retrieval_payload)
-        answer = await self.query_grounded(grounded_question, session_id, history_question=question)
+        generation_started = time.perf_counter()
+        answer, generation_observability = await self.query_grounded_observed(
+            grounded_question,
+            session_id,
+            history_question=question,
+        )
+        if is_explicit_knowledge_refusal(answer):
+            answer = build_no_answer_message(
+                {
+                    **retrieval_payload,
+                    "status": "no_answer",
+                    "summary": "当前知识库没有足够的相关证据回答该问题。",
+                }
+            )
+            observability = build_rag_observability(
+                retrieval_payload,
+                generation_observability,
+                total_ms=(
+                    float(
+                        retrieval_payload.get("observability", {})
+                        .get("stages", {})
+                        .get("retrieval_total_ms", 0.0)
+                        or 0.0
+                    )
+                    + round((time.perf_counter() - generation_started) * 1000, 2)
+                ),
+            )
+            self._append_grounded_history(session_id, question, answer)
+            return {
+                "success": True,
+                "answer": answer,
+                "citations": [],
+                "retrieval": retrieval_context,
+                "no_answer": True,
+                "answer_policy": "refuse_without_trusted_source",
+                "observability": observability,
+            }
+        citations = select_supporting_citations(answer, citations)
+        if not has_valid_citations(citations):
+            answer = build_missing_citation_message()
+            guarded_payload = build_citation_guard_payload(retrieval_payload)
+            self._append_grounded_history(session_id, question, answer)
+            return {
+                "success": True,
+                "answer": answer,
+                "citations": [],
+                "retrieval": compact_retrieval_payload(guarded_payload),
+                "no_answer": True,
+                "answer_policy": "refuse_without_citation",
+                "observability": build_rag_observability(
+                    retrieval_payload,
+                    generation_observability,
+                    total_ms=(
+                        float(
+                            retrieval_payload.get("observability", {})
+                            .get("stages", {})
+                            .get("retrieval_total_ms", 0.0)
+                            or 0.0
+                        )
+                        + round((time.perf_counter() - generation_started) * 1000, 2)
+                    ),
+                ),
+            }
         answer = ensure_citation_block(answer, citations)
+        observability = build_rag_observability(
+            retrieval_payload,
+            generation_observability,
+            total_ms=(
+                float(
+                    retrieval_payload.get("observability", {})
+                    .get("stages", {})
+                    .get("retrieval_total_ms", 0.0)
+                    or 0.0
+                )
+                + round((time.perf_counter() - generation_started) * 1000, 2)
+            ),
+        )
         self._append_grounded_history(session_id, question, answer)
 
         return {
@@ -296,6 +374,7 @@ class RagAgentService:
             "retrieval": retrieval_context,
             "no_answer": False,
             "answer_policy": retrieval_payload.get("answer_policy", "answer_with_citations"),
+            "observability": observability,
         }
 
     async def query_grounded(
@@ -321,6 +400,36 @@ class RagAgentService:
                 f"{summarize_text_for_log(history_question, label='question')}"
             )
         return answer
+
+    async def query_grounded_observed(
+        self,
+        grounded_question: str,
+        session_id: str,
+        *,
+        history_question: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Generate one grounded answer and retain provider-reported usage when available."""
+        model = self._ensure_model()
+        started_at = time.perf_counter()
+        messages = [
+            SystemMessage(content=build_grounded_system_prompt()),
+            HumanMessage(content=grounded_question),
+        ]
+        result = await model.ainvoke(messages)
+        content = result.content if hasattr(result, "content") else result
+        answer = message_content_to_text(content)
+        usage = extract_message_token_usage(result)
+        return answer, {
+            "llm_generation_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "llm_ttft_ms": "not_observed",
+            "token_usage": usage or {
+                "status": "not_observed",
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+            },
+            "model": self.model_name,
+        }
 
     async def query_stream(
         self,
@@ -495,6 +604,54 @@ class RagAgentService:
             else:
                 yield chunk
 
+        if is_explicit_knowledge_refusal(full_answer):
+            answer = build_no_answer_message(
+                {
+                    **retrieval_payload,
+                    "status": "no_answer",
+                    "summary": "当前知识库没有足够的相关证据回答该问题。",
+                }
+            )
+            self._append_grounded_history(session_id, question, answer)
+            yield {
+                "type": "content",
+                "data": answer,
+                "node": "retrieval_guard",
+            }
+            yield {
+                "type": "complete",
+                "data": {
+                    "answer": answer,
+                    "citations": [],
+                    "retrieval": retrieval_context,
+                    "no_answer": True,
+                    "answer_policy": "refuse_without_trusted_source",
+                },
+            }
+            return
+
+        citations = select_supporting_citations(full_answer, citations)
+        if not has_valid_citations(citations):
+            answer = build_missing_citation_message()
+            guarded_payload = build_citation_guard_payload(retrieval_payload)
+            guarded_context = compact_retrieval_payload(guarded_payload)
+            yield {
+                "type": "content",
+                "data": answer,
+                "node": "citation_guard",
+            }
+            self._append_grounded_history(session_id, question, answer)
+            yield {
+                "type": "complete",
+                "data": {
+                    "answer": answer,
+                    "citations": [],
+                    "retrieval": guarded_context,
+                    "no_answer": True,
+                    "answer_policy": "refuse_without_citation",
+                },
+            }
+            return
         final_answer = ensure_citation_block(full_answer, citations)
         appended_content = final_answer[len(full_answer) :]
         if appended_content:
@@ -705,10 +862,83 @@ class RagAgentService:
             model=self.model_name,
             api_key=cast(Any, config.dashscope_api_key),
             base_url=config.dashscope_api_base,
-            temperature=0.7,
+            temperature=0,
             streaming=self.streaming,
         )
         return self.model
 
 
 rag_agent_service = RagAgentService(streaming=True)
+
+
+def extract_message_token_usage(message: Any) -> dict[str, Any] | None:
+    """Normalize LangChain/OpenAI-compatible usage metadata without estimating tokens."""
+    candidates = [
+        getattr(message, "usage_metadata", None),
+        getattr(message, "response_metadata", None),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        usage = candidate.get("token_usage") or candidate.get("usage") or candidate
+        if not isinstance(usage, dict):
+            continue
+        input_tokens = _optional_int(
+            usage.get("input_tokens", usage.get("prompt_tokens"))
+        )
+        output_tokens = _optional_int(
+            usage.get("output_tokens", usage.get("completion_tokens"))
+        )
+        total_tokens = _optional_int(usage.get("total_tokens"))
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            continue
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
+        return {
+            "status": "observed",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    return None
+
+
+def build_rag_observability(
+    retrieval_payload: dict[str, Any],
+    generation: dict[str, Any],
+    *,
+    total_ms: float,
+) -> dict[str, Any]:
+    """Combine retrieval and generation observations for API and benchmark reuse."""
+    retrieval = dict(retrieval_payload.get("observability") or {})
+    stages = dict(retrieval.get("stages") or {})
+    stages.update(
+        {
+            "context_build_ms": "not_observed",
+            "llm_ttft_ms": generation.get("llm_ttft_ms", "not_observed"),
+            "llm_generation_ms": generation.get("llm_generation_ms", 0.0),
+            "total_ms": round(total_ms, 2),
+        }
+    )
+    runtime = dict(retrieval.get("runtime") or {})
+    runtime["llm_model"] = generation.get("model", config.effective_rag_model)
+    return {
+        "stages": stages,
+        "counts": retrieval.get("counts", {}),
+        "runtime": runtime,
+        "token_usage": generation.get("token_usage", {"status": "not_observed"}),
+        "estimated_cost": {
+            "status": "not_observed",
+            "amount": None,
+            "currency": None,
+            "price_snapshot": None,
+        },
+        "limitations": retrieval.get("limitations", []),
+    }
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

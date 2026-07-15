@@ -34,6 +34,7 @@ def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ],
         "error_message": payload.get("error_message"),
+        "observability": payload.get("observability", {}),
     }
 
 
