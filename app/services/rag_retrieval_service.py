@@ -1472,7 +1472,7 @@ def select_required_sources(
             (
                 chunk
                 for chunk in candidates
-                if str(chunk.get("source_file") or "").lower() == source.lower()
+                if citation_source_basename(chunk.get("source_file")) == source.lower()
             ),
             None,
         )
@@ -1645,13 +1645,18 @@ def enforce_source_coverage(
     if not required_sources:
         return candidates, set()
     present = {
-        str(item.get("source_file") or "").strip().lower()
+        citation_source_basename(item.get("source_file"))
         for item in candidates
         if str(item.get("source_file") or "").strip()
     }
     required = {str(source).strip().lower() for source in required_sources if str(source).strip()}
     missing = required - present
     return (candidates if not missing else [], missing)
+
+
+def citation_source_basename(value: Any) -> str:
+    """Normalize a public or disambiguated source label for coverage checks."""
+    return str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
 
 
 def normalize_chunk_content(chunk: dict[str, Any]) -> str:

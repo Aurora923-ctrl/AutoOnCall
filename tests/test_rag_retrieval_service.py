@@ -557,6 +557,27 @@ def test_required_source_coverage_fails_closed() -> None:
     assert missing == {"redis_postmortem.pdf"}
 
 
+def test_required_source_coverage_accepts_disambiguated_public_paths() -> None:
+    candidates = [
+        {
+            "source_file": "uploads/official_redis_clients.md",
+            "chunk_id": "official#1",
+        },
+        {
+            "source_file": "docs/knowledge-base/redis_postmortem.pdf",
+            "chunk_id": "postmortem#1",
+        },
+    ]
+
+    selected, missing = enforce_source_coverage(
+        candidates,
+        required_sources={"official_redis_clients.md", "redis_postmortem.pdf"},
+    )
+
+    assert selected == candidates
+    assert missing == set()
+
+
 def test_required_source_selection_is_deterministic_and_reserves_final_budget() -> None:
     candidates = [
         {
@@ -589,6 +610,31 @@ def test_required_source_selection_is_deterministic_and_reserves_final_budget() 
         "official_redis_clients.md",
         "redis_postmortem.pdf",
     ]
+
+
+def test_required_source_selection_matches_disambiguated_public_paths() -> None:
+    candidates = [
+        {
+            "doc_id": "official",
+            "source_file": "uploads/official_redis_clients.md",
+            "chunk_id": "official#1",
+            "rerank_score": 10.0,
+        },
+        {
+            "doc_id": "postmortem",
+            "source_file": "docs/knowledge-base/redis_postmortem.pdf",
+            "chunk_id": "postmortem#1",
+            "rerank_score": 1.0,
+        },
+    ]
+
+    selected = rag_retrieval_service.select_required_sources(
+        candidates,
+        required_sources={"redis_postmortem.pdf", "official_redis_clients.md"},
+        top_k=2,
+    )[:2]
+
+    assert {item["chunk_id"] for item in selected} == {"official#1", "postmortem#1"}
 
 
 def test_required_source_count_larger_than_top_k_cannot_claim_coverage() -> None:

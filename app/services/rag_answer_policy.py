@@ -165,7 +165,7 @@ def build_generation_evidence(
                 (
                     item
                     for item in ordered_evidence
-                    if str(item.get("source_file") or "").strip().lower() == source
+                    if citation_source_basename(item.get("source_file")) == source
                 ),
                 None,
             )
@@ -207,12 +207,12 @@ def build_generation_evidence(
             break
         if len(header) + len(content) <= remaining:
             selected.append(dict(item))
-            selected_sources.add(str(item.get("source_file") or "").strip().lower())
+            selected_sources.add(citation_source_basename(item.get("source_file")))
             used_chars += separator_chars + len(header) + len(content)
             continue
         if (
             required_sources
-            and str(item.get("source_file") or "").strip().lower() in required_sources
+            and citation_source_basename(item.get("source_file")) in required_sources
         ):
             return []
         if selected:
@@ -232,11 +232,16 @@ def build_generation_evidence(
         else:
             trimmed_item["content_preview"] = truncated
         selected.append(trimmed_item)
-        selected_sources.add(str(trimmed_item.get("source_file") or "").strip().lower())
+        selected_sources.add(citation_source_basename(trimmed_item.get("source_file")))
         break
     if required_sources and not required_sources.issubset(selected_sources):
         return []
     return normalize_generation_citation_labels(selected)
+
+
+def citation_source_basename(value: Any) -> str:
+    """Normalize a source label for required-source and generation checks."""
+    return str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
 
 
 def normalize_generation_citation_labels(

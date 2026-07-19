@@ -139,6 +139,34 @@ def test_generation_evidence_uses_basename_after_duplicate_content_is_collapsed(
     assert evidence[0]["source_file"] == "redis.md"
 
 
+def test_generation_evidence_matches_required_sources_by_basename() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "uploads/official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#0004",
+                "content": "Redis checks maxclients before accepting a connection.",
+            },
+            {
+                "source_file": "docs/knowledge-base/redis_postmortem.pdf",
+                "chunk_id": "redis_postmortem.pdf#0001",
+                "content": "The incident window recorded connected client saturation.",
+            },
+        ],
+        "required_sources": [
+            "official_redis_clients.md",
+            "redis_postmortem.pdf",
+        ],
+    }
+
+    evidence = build_generation_evidence(payload)
+
+    assert {item["source_file"] for item in evidence} == {
+        "official_redis_clients.md",
+        "redis_postmortem.pdf",
+    }
+
+
 def test_generation_context_deduplicates_near_duplicate_legacy_chunks() -> None:
     repeated = (
         "步骤1 获取当前时间。步骤2 查询系统监控日志。"
@@ -591,6 +619,47 @@ async def test_query_with_retrieval_only_allows_budgeted_generation_evidence(
     result = await service.query_with_retrieval("question", "budgeted-evidence")
 
     assert [item["chunk_id"] for item in result["citations"]] == ["one.md#0001"]
+
+
+@pytest.mark.asyncio
+async def test_query_with_retrieval_keeps_frozen_evidence_allowlist_aligned(
+    monkeypatch,
+) -> None:
+    class FakeGroundedModel:
+        async def ainvoke(self, messages):
+            prompt = str(messages[-1].content)
+            assert "payment_wiki.html#0001" in prompt
+            return SimpleNamespace(
+                content="检查 active_connections 和 pool_waiting。[payment_wiki.html | payment_wiki.html#0001]"
+            )
+
+    service = rag_module.RagAgentService()
+    service.model = FakeGroundedModel()
+    monkeypatch.setattr(
+        rag_module,
+        "retrieve_structured_knowledge",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "retrieval_results": [
+                {
+                    "source_file": "uploads/payment_wiki.html",
+                    "chunk_id": "payment_wiki.html#0001",
+                    "content": "Check active_connections and pool_waiting.",
+                }
+            ],
+            "generation_allowlist": [
+                {
+                    "source_file": "uploads/payment_wiki.html",
+                    "chunk_id": "payment_wiki.html#0001",
+                }
+            ],
+        },
+    )
+
+    result = await service.query_with_retrieval("How do I inspect MySQL?", "aligned-allowlist")
+
+    assert result["no_answer"] is False
+    assert result["citations"][0]["source_file"] == "payment_wiki.html"
 
 
 @pytest.mark.asyncio

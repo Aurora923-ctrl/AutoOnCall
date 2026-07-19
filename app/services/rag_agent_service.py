@@ -349,6 +349,13 @@ class RagAgentService:
         generation_payload = {
             **retrieval_payload,
             "retrieval_results": generation_evidence,
+            "generation_allowlist": [
+                {
+                    "source_file": str(item.get("source_file") or ""),
+                    "chunk_id": str(item.get("chunk_id") or ""),
+                }
+                for item in generation_evidence
+            ],
         }
         citations = build_citations(generation_payload)
         if not has_valid_citations(citations):
