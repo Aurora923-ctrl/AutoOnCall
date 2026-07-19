@@ -179,6 +179,14 @@ Object.assign(window.AutoOnCallApp.prototype, {
                                 this.highlightCodeBlocks(messageContent);
                                 this.scrollToBottom();
                             }
+                        } else if (sseMessage.type === 'replace_content') {
+                            fullResponse = sseMessage.data || '';
+                            if (assistantMessageElement) {
+                                const messageContent = assistantMessageElement.querySelector('.message-content');
+                                messageContent.innerHTML = this.renderMarkdown(fullResponse);
+                                this.highlightCodeBlocks(messageContent);
+                                this.scrollToBottom();
+                            }
                         } else if (sseMessage.type === 'search_results') {
                             streamRagMetadata = this.buildRagMetadata({ retrieval: sseMessage.data });
                             this.renderRagSources(assistantMessageElement, streamRagMetadata);

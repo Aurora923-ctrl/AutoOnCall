@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from app.agent.mcp_client import close_mcp_client
 from app.api import (
     a2a,
     aiops,
@@ -28,7 +29,9 @@ from app.api import (
 from app.config import config
 from app.core.auth import configured_token_scopes
 from app.core.milvus_client import milvus_manager
+from app.services.aiops_service import aiops_service
 from app.services.vector_store_manager import vector_store_manager
+from app.utils.log_safety import sanitize_log_value
 
 # Used only to detect risky configuration values; this constant does not bind a socket.
 EXTERNALLY_BOUND_HOSTS = {"0.0.0.0", "::", "[::]"}  # nosec B104
@@ -43,6 +46,8 @@ def production_exposure_warnings() -> list[str]:
         return []
 
     warnings: list[str] = []
+    if config.debug:
+        warnings.append("debug mode is enabled while binding to a non-local host")
     if not config.api_auth_enabled:
         warnings.append("API auth is disabled while binding to a non-local host")
     elif not configured_token_scopes():
@@ -83,14 +88,20 @@ def enforce_production_exposure_policy() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    app_name = sanitize_log_value(config.app_name)
+    app_version = sanitize_log_value(config.app_version)
+    bind_host = sanitize_log_value(config.host)
     logger.info("=" * 60)
-    logger.info(f"🚀 {config.app_name} v{config.app_version} 启动中...")
+    logger.info(f"🚀 {app_name} v{app_version} 启动中...")
     logger.info(f"📝 环境: {'开发' if config.debug else '生产'}")
-    logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
+    logger.info(f"🌐 监听地址: http://{bind_host}:{config.port}")
     if config.debug:
-        logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
+        logger.info(f"📚 API 文档: http://{bind_host}:{config.port}/docs")
 
     enforce_production_exposure_policy()
+    reconciled_runs = aiops_service.reconcile_incomplete_runs()
+    if reconciled_runs:
+        logger.warning(f"Reconciled {reconciled_runs} abandoned AIOps runs after startup")
 
     logger.info("🔌 Milvus 将在 readiness、RAG 检索或文档索引首次使用时按需连接")
 
@@ -99,10 +110,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await close_mcp_client()
         logger.info("🔌 正在关闭 Milvus 连接...")
-        await vector_store_manager.aclose()
-        milvus_manager.close()
-        logger.info(f"👋 {config.app_name} 关闭")
+        try:
+            await vector_store_manager.aclose()
+        finally:
+            milvus_manager.close()
+        logger.info(f"👋 {app_name} 关闭")
 
 
 app = FastAPI(

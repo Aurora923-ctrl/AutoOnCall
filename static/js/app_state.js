@@ -157,8 +157,15 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     loadChatHistories() {
         try {
-            const stored = localStorage.getItem('chatHistories');
-            return stored ? JSON.parse(stored) : [];
+            const stored = sessionStorage.getItem('chatHistories');
+            const legacyStored = localStorage.getItem('chatHistories');
+            if (!stored && legacyStored) {
+                sessionStorage.setItem('chatHistories', legacyStored);
+            }
+            if (legacyStored) {
+                localStorage.removeItem('chatHistories');
+            }
+            return (stored || legacyStored) ? JSON.parse(stored || legacyStored) : [];
         } catch (e) {
             console.error('加载历史对话失败:', e);
             return [];
@@ -169,7 +176,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     saveChatHistories() {
         try {
-            localStorage.setItem('chatHistories', JSON.stringify(this.chatHistories));
+            sessionStorage.setItem('chatHistories', JSON.stringify(this.chatHistories));
+            localStorage.removeItem('chatHistories');
         } catch (e) {
             console.error('保存历史对话失败:', e);
         }
@@ -177,8 +185,15 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     loadKnowledgeUploadState() {
         try {
-            const stored = localStorage.getItem('autooncallKnowledgeUpload');
-            return stored ? JSON.parse(stored) : null;
+            const stored = sessionStorage.getItem('autooncallKnowledgeUpload');
+            const legacyStored = localStorage.getItem('autooncallKnowledgeUpload');
+            if (!stored && legacyStored) {
+                sessionStorage.setItem('autooncallKnowledgeUpload', legacyStored);
+            }
+            if (legacyStored) {
+                localStorage.removeItem('autooncallKnowledgeUpload');
+            }
+            return (stored || legacyStored) ? JSON.parse(stored || legacyStored) : null;
         } catch (e) {
             console.error('加载知识库状态失败:', e);
             return null;
@@ -189,8 +204,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
         this.knowledgeUploadState = payload || null;
         try {
             if (this.knowledgeUploadState) {
-                localStorage.setItem('autooncallKnowledgeUpload', JSON.stringify(this.knowledgeUploadState));
+                sessionStorage.setItem('autooncallKnowledgeUpload', JSON.stringify(this.knowledgeUploadState));
+                localStorage.removeItem('autooncallKnowledgeUpload');
             } else {
+                sessionStorage.removeItem('autooncallKnowledgeUpload');
                 localStorage.removeItem('autooncallKnowledgeUpload');
             }
         } catch (e) {
@@ -721,7 +738,12 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     
                     // 如果后端有历史记录，使用后端的
                     if (backendHistory.length > 0) {
-                        this.currentChatHistory = [];
+                        this.currentChatHistory = backendHistory.map(msg => ({
+                            type: msg.role === 'user' ? 'user' : 'assistant',
+                            content: msg.content || '',
+                            metadata: msg.metadata || null,
+                            timestamp: msg.timestamp || new Date().toISOString()
+                        }));
                         backendHistory.forEach(msg => {
                             // 后端返回格式: {role: "user|assistant", content: "...", timestamp: "..."}
                             const messageType = msg.role === 'user' ? 'user' : 'assistant';

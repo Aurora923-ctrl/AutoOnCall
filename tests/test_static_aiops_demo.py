@@ -38,7 +38,9 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "overscroll-behavior-inline: contain" in style
     assert "document.readyState === 'loading'" in script
     assert "sanitizeRenderedHtml" in script
-    assert "value.startsWith('javascript:')" in script
+    assert "compactValue.startsWith('javascript:')" in script
+    assert "compactValue.startsWith('data:')" in script
+    assert "allowedTags = new Set" in script
     assert "reduceAIOpsEvent" in script
     assert "parsedLine.done" in script
     assert "trimmed.startsWith('event:')" in script
@@ -200,6 +202,9 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "renderAuthTokenState" in script
     assert "saveApiToken" in script
     assert "clearApiToken" in script
+    assert "sessionStorage.setItem('chatHistories'" in script
+    assert "localStorage.removeItem('chatHistories')" in script
+    assert "sessionStorage.setItem('autooncallKnowledgeUpload'" in script
     assert 'id="apiTokenInput"' in page
     assert 'id="apiTokenSaveBtn"' in page
     assert 'id="apiTokenClearBtn"' in page
@@ -259,6 +264,8 @@ def test_static_aiops_page_consumes_structured_report_and_incident_links() -> No
     assert "terminalReceived" in script
     assert "流式响应在完成事件前中断，请重试" in script
     assert "handleStreamFailure" in script
+    assert "replace_content" in script
+    assert "metadata: msg.metadata || null" in script
     assert "if (!terminalReceived)" in script
     assert "buffer += decoder.decode();" in script
     assert "line.endsWith('\\r')" in script

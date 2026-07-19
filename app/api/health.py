@@ -165,17 +165,23 @@ def _base_health_data() -> dict[str, Any]:
         "service": config.app_name,
         "version": config.app_version,
         "status": "healthy",
-        "mode": "production",
+        "mode": "development" if config.debug else "production",
     }
 
 
 def _check_milvus() -> dict[str, str]:
     try:
         milvus_healthy = milvus_manager.readiness_check()
-        return {
+        payload = {
             "status": "connected" if milvus_healthy else "disconnected",
             "message": "Milvus connected" if milvus_healthy else "Milvus disconnected",
         }
+        if milvus_healthy and not _embedding_configuration_ready():
+            return {
+                "status": "partial",
+                "message": "Milvus connected but embedding configuration is incomplete",
+            }
+        return payload
     except Exception as exc:
         logger.warning(
             "Milvus health check failed: error_type={}",
@@ -340,12 +346,24 @@ def _capability_readiness(
 ) -> dict[str, Any]:
     rag_ready = milvus.get("status") == "connected"
     external_status = str(external_systems.get("status") or "unknown")
-    if external_status == "configured":
-        aiops_status = external_status
-        aiops_ready = True
+    checks = external_systems.get("checks")
+    check_map = checks if isinstance(checks, dict) else {}
+    observability_ready = any(
+        _readiness_status(check_map, source) == "connected" for source in ("prometheus", "loki")
+    )
+    configured_failure = any(
+        isinstance(payload, dict)
+        and payload.get("configured") is True
+        and payload.get("status") == "failed"
+        for payload in check_map.values()
+    )
+    aiops_ready = external_status == "configured" and observability_ready and not configured_failure
+    if configured_failure:
+        aiops_status = "degraded"
+    elif external_status == "configured" and not observability_ready:
+        aiops_status = "partial"
     else:
         aiops_status = external_status
-        aiops_ready = False
 
     return {
         "rag": {
@@ -361,11 +379,28 @@ def _capability_readiness(
         "aiops": {
             "ready": aiops_ready,
             "status": aiops_status,
+            "required_dependency": "prometheus_or_loki",
             "mock_fallback_enabled": bool(external_systems.get("mock_fallback_enabled")),
             "message": (
-                "AIOps diagnosis can use configured adapters"
+                "AIOps diagnosis has a verified observability source"
                 if aiops_ready
-                else "AIOps diagnosis has no verified reachable adapters"
+                else "AIOps diagnosis needs reachable Prometheus or Loki without adapter failures"
             ),
         },
     }
+
+
+def _embedding_configuration_ready() -> bool:
+    """Return whether indexing and query embedding can be attempted."""
+    return bool(
+        str(config.dashscope_api_key or "").strip()
+        and str(config.dashscope_embedding_model or "").strip()
+        and int(config.dashscope_embedding_dimensions) > 0
+    )
+
+
+def _readiness_status(checks: dict[str, Any], name: str) -> str:
+    payload = checks.get(name)
+    if not isinstance(payload, dict):
+        return "unknown"
+    return str(payload.get("status") or "unknown")

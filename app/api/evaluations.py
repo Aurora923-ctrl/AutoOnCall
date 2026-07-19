@@ -221,12 +221,14 @@ async def get_eval_backlog() -> dict[str, Any]:
                 "by_eval_file": {},
             },
             "items": [],
+            "invalid_items": [],
         }
     backlog = build_eval_backlog_summary(payload)
     return {
         "available": backlog["available"],
         "summary": backlog["summary"],
         "items": backlog["items"],
+        "invalid_items": backlog["invalid_items"],
     }
 
 

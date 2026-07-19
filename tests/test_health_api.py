@@ -22,6 +22,16 @@ async def test_liveness_does_not_check_milvus(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_liveness_reports_development_mode_when_debug_is_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(health_api.config, "debug", True)
+
+    response = await health_api.liveness_check()
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["data"]["mode"] == "development"
+
+
+@pytest.mark.asyncio
 async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
     async def external_ready():
         return {"status": "configured", "mock_fallback_enabled": False}
@@ -43,7 +53,11 @@ async def test_readiness_reports_milvus_dependency_failure(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_readiness_attempts_lazy_milvus_connection(monkeypatch) -> None:
     async def external_ready():
-        return {"status": "configured", "mock_fallback_enabled": False}
+        return {
+            "status": "configured",
+            "mock_fallback_enabled": False,
+            "checks": {"prometheus": {"status": "connected", "configured": True}},
+        }
 
     class LazyMilvus:
         def readiness_check(self) -> bool:
@@ -81,7 +95,11 @@ async def test_readiness_reports_aiops_dependency_failure(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_capability_readiness_splits_aiops_from_rag(monkeypatch) -> None:
     async def external_ready():
-        return {"status": "configured", "mock_fallback_enabled": False}
+        return {
+            "status": "configured",
+            "mock_fallback_enabled": False,
+            "checks": {"prometheus": {"status": "connected", "configured": True}},
+        }
 
     monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: False)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
@@ -111,7 +129,11 @@ async def test_rag_readiness_uses_rag_dependency_status(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_health_keeps_readiness_compatible(monkeypatch) -> None:
     async def external_ready():
-        return {"status": "configured", "mock_fallback_enabled": False}
+        return {
+            "status": "configured",
+            "mock_fallback_enabled": False,
+            "checks": {"prometheus": {"status": "connected", "configured": True}},
+        }
 
     monkeypatch.setattr(health_api.milvus_manager, "readiness_check", lambda: True)
     monkeypatch.setattr(health_api, "_external_system_readiness", external_ready)
@@ -179,6 +201,43 @@ def test_unverified_external_configuration_does_not_mark_aiops_ready() -> None:
     assert capabilities["aiops"]["ready"] is False
     assert capabilities["aiops"]["status"] == "unverified"
     assert capabilities["aiops"]["mock_fallback_enabled"] is True
+
+
+def test_domain_adapter_alone_does_not_mark_aiops_ready() -> None:
+    capabilities = health_api._capability_readiness(
+        {"status": "connected"},
+        {
+            "status": "configured",
+            "mock_fallback_enabled": False,
+            "checks": {
+                "prometheus": {"status": "not_configured", "configured": False},
+                "loki": {"status": "not_configured", "configured": False},
+                "redis": {"status": "connected", "configured": True},
+            },
+        },
+    )
+
+    assert capabilities["aiops"]["ready"] is False
+    assert capabilities["aiops"]["status"] == "partial"
+    assert capabilities["aiops"]["required_dependency"] == "prometheus_or_loki"
+
+
+def test_observability_source_marks_aiops_ready_without_adapter_failures() -> None:
+    capabilities = health_api._capability_readiness(
+        {"status": "disconnected"},
+        {
+            "status": "configured",
+            "mock_fallback_enabled": False,
+            "checks": {
+                "prometheus": {"status": "connected", "configured": True},
+                "loki": {"status": "not_configured", "configured": False},
+                "redis": {"status": "not_configured", "configured": False},
+            },
+        },
+    )
+
+    assert capabilities["aiops"]["ready"] is True
+    assert capabilities["aiops"]["status"] == "configured"
 
 
 def test_failed_readiness_hides_raw_exception_detail() -> None:

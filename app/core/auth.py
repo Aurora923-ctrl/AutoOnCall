@@ -37,7 +37,8 @@ ROLE_SCOPES = {
     "viewer": {READ_SCOPE},
     "reader": {READ_SCOPE},
     "operator": {READ_SCOPE, DIAGNOSE_SCOPE, CHAT_WRITE_SCOPE, KNOWLEDGE_WRITE_SCOPE, EVAL_SCOPE},
-    "approver": {READ_SCOPE, APPROVE_SCOPE, CHANGE_SCOPE},
+    "approver": {READ_SCOPE, APPROVE_SCOPE},
+    "change_operator": {READ_SCOPE, CHANGE_SCOPE},
     "admin": {ADMIN_SCOPE, *ALL_SCOPES},
 }
 
@@ -56,6 +57,7 @@ class AuthPrincipal:
 
     enabled: bool
     token_name: str = "anonymous"
+    principal_id: str = "anonymous"
     scopes: frozenset[str] = frozenset()
 
     def has_scope(self, scope: str) -> bool:
@@ -67,6 +69,13 @@ def audit_actor(principal: AuthPrincipal, fallback: str = "operator") -> str:
     if principal.enabled and principal.token_name:
         return principal.token_name
     return fallback or principal.token_name
+
+
+def scoped_session_id(principal: AuthPrincipal, session_id: str) -> str:
+    """Namespace caller-controlled session IDs by authenticated principal."""
+    if not principal.enabled:
+        return session_id
+    return f"principal:{principal.principal_id}:{session_id}"
 
 
 def require_scope(scope: str):
@@ -88,6 +97,11 @@ def authenticate_request(
 ) -> AuthPrincipal:
     """Authenticate one request and enforce the required scope."""
     if not config.api_auth_enabled:
+        if required_scope in {APPROVE_SCOPE, CHANGE_SCOPE}:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="approval and change APIs require API authentication",
+            )
         return AuthPrincipal(enabled=False)
 
     token_registry = configured_token_scopes()
@@ -105,11 +119,12 @@ def authenticate_request(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    for token_name, token_entry in token_registry.items():
+    for token_entry in token_registry.values():
         if hmac.compare_digest(presented_token, token_entry["token"]):
             principal = AuthPrincipal(
                 enabled=True,
-                token_name=token_name,
+                token_name=token_entry["token_name"],
+                principal_id=sha256(token_entry["token"].encode("utf-8")).hexdigest()[:16],
                 scopes=frozenset(token_entry["scopes"]),
             )
             if not principal.has_scope(required_scope):
@@ -133,6 +148,7 @@ def configured_token_scopes() -> dict[str, dict[str, Any]]:
     _add_role_token(registry, "read_token", config.api_read_token, "viewer")
     _add_role_token(registry, "operator_token", config.api_operator_token, "operator")
     _add_role_token(registry, "approver_token", config.api_approver_token, "approver")
+    _add_role_token(registry, "change_token", config.api_change_token, "change_operator")
     _add_role_token(registry, "admin_token", config.api_admin_token, "admin")
     return registry
 
@@ -165,7 +181,11 @@ def _parse_json_token_registry(raw_value: str) -> dict[str, dict[str, Any]]:
         if not scopes:
             continue
         token_name = _token_name(value, token_text)
-        registry[token_name] = {"token": token_text, "scopes": scopes}
+        registry[_token_registry_key(token_text)] = {
+            "token": token_text,
+            "token_name": token_name,
+            "scopes": scopes,
+        }
     return registry
 
 
@@ -178,7 +198,11 @@ def _add_role_token(
     token_text = (token or "").strip()
     if not _is_usable_token(token_text):
         return
-    registry[token_name] = {"token": token_text, "scopes": ROLE_SCOPES[role]}
+    registry[token_name] = {
+        "token": token_text,
+        "token_name": token_name,
+        "scopes": ROLE_SCOPES[role],
+    }
 
 
 def _is_usable_token(token: str) -> bool:
@@ -196,6 +220,11 @@ def _token_name(value: Any, token: str) -> str:
         return fallback
     candidate = str(value["name"]).strip()
     return candidate if _SAFE_TOKEN_NAME_RE.fullmatch(candidate) else fallback
+
+
+def _token_registry_key(token: str) -> str:
+    """Return an internal key that cannot collide on a caller-supplied audit name."""
+    return f"json_token_{sha256(token.encode('utf-8')).hexdigest()}"
 
 
 def _expand_scopes(value: Any) -> set[str]:

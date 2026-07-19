@@ -7,9 +7,10 @@ from app.services.a2a_messages import (
     A2AEnvelope,
     diagnosis_task_id,
     incident_from_envelope,
-    new_task_id,
     parse_message_envelope,
     resolve_skill,
+    scope_message_to_principal,
+    task_id_for_envelope,
 )
 from app.services.a2a_payloads import (
     a2a_state_from_autooncall_status,
@@ -53,13 +54,14 @@ __all__ = [
     "dump_a2a",
     "incident_from_envelope",
     "mixed_artifact",
-    "new_task_id",
     "normalized_a2a_base_path",
     "parse_message_envelope",
     "resolve_skill",
+    "scope_message_to_principal",
     "status_message",
     "status_update_event",
     "task_status",
+    "task_id_for_envelope",
     "text_part",
 ]
 

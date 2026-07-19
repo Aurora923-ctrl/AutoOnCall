@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from app.services.aiops_read_models.replay_evaluation import replay_evaluation_provenance
+
 
 @pytest.mark.asyncio
 async def test_eval_summary_api_returns_resume_metrics(monkeypatch, tmp_path) -> None:
@@ -283,6 +285,40 @@ async def test_ragas_summary_api_returns_quality_dashboard(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_eval_backlog_api_recomputes_summary_and_validates_items(
+    monkeypatch, tmp_path
+) -> None:
+    evaluations_api = importlib.import_module("app.api.evaluations")
+    backlog_path = tmp_path / "backlog.json"
+    backlog_path.write_text(
+        json.dumps(
+            {
+                "summary": {"total": 999, "by_target": {"rag": 999}},
+                "items": [
+                    {
+                        "backlog_id": "ebl-1",
+                        "target": "rag",
+                        "category": "missing_citation",
+                        "priority": "P1",
+                        "review_status": "new",
+                    },
+                    {"backlog_id": "invalid", "target": "not-a-target"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(evaluations_api, "EVAL_BACKLOG_PATH", backlog_path)
+
+    payload = await evaluations_api.get_eval_backlog()
+
+    assert payload["summary"]["total"] == 1
+    assert payload["summary"]["by_target"] == {"rag": 1}
+    assert len(payload["items"]) == 1
+    assert len(payload["invalid_items"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_ragas_summary_api_returns_unavailable_when_missing(
     monkeypatch,
     tmp_path,
@@ -329,7 +365,16 @@ async def test_eval_backlog_api_returns_reviewable_drafts(monkeypatch, tmp_path)
         json.dumps(
             {
                 "summary": {"total": 1, "by_review_status": {"new": 1}},
-                "items": [{"suggested_eval_case_id": "draft_rag_redis", "target": "rag"}],
+                "items": [
+                    {
+                        "feedback_id": "fbk-001",
+                        "target": "rag",
+                        "category": "retrieval_failure",
+                        "suggested_eval_file": "eval/rag_cases.yaml",
+                        "suggested_eval_case_id": "draft_rag_redis",
+                        "suggested_eval_dimension": "rag_recall_at_k",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -436,3 +481,51 @@ async def test_scorecard_api_rejects_scorecard_from_another_run(monkeypatch, tmp
 
     assert payload["available"] is False
     assert "does not belong" in payload["message"]
+
+
+def test_replay_provenance_exposes_model_dataset_and_run_identity() -> None:
+    provenance = replay_evaluation_provenance(
+        {
+            "artifact": "eval_summary.json",
+            "run": {
+                "run_id": "run-001",
+                "judge_model": "qwen-max",
+                "embedding_model": "text-embedding-v4",
+                "dataset": {"path": "eval/cases.yaml", "sha256": "dataset-sha"},
+                "environment": {
+                    "suite": "aiops",
+                    "git_commit": "commit-sha",
+                    "evaluation_fingerprint": "eval-sha",
+                },
+            },
+            "artifact_status": {"stale": False, "reasons": []},
+        }
+    )
+
+    assert provenance["run_id"] == "run-001"
+    assert provenance["suite"] == "aiops"
+    assert provenance["model"] == "qwen-max"
+    assert provenance["embedding_model"] == "text-embedding-v4"
+    assert provenance["dataset"]["sha256"] == "dataset-sha"
+
+
+def test_replay_provenance_prefers_actual_execution_identity() -> None:
+    provenance = replay_evaluation_provenance(
+        {
+            "run": {
+                "run_id": "run-fallback",
+                "judge_model": "configured-model",
+                "embedding_model": "configured-embedding",
+                "environment": {
+                    "suite": "ragas",
+                    "execution_identity": {
+                        "actual_model": "fallback-provider/model-v2",
+                        "actual_embedding_model": "fallback-provider/embed-v2",
+                    },
+                },
+            }
+        }
+    )
+
+    assert provenance["model"] == "fallback-provider/model-v2"
+    assert provenance["embedding_model"] == "fallback-provider/embed-v2"

@@ -6,17 +6,22 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import feedback as feedback_api, incidents
+from app.core.auth import AuthPrincipal
 from app.models.feedback import BadCaseFeedbackCreate, DiagnosisFeedbackCreate
 from app.models.trace import TraceEvent
 from app.services.feedback_service import (
     FeedbackService,
+    build_bad_case_feedback,
     build_eval_backlog_item,
     classify_improvement_items,
 )
 from app.services.report_generator import ReportGenerator
 from scripts.eval.export_bad_cases import (
     backlog_from_eval_summary,
+    build_aiops_eval_case,
+    build_rag_eval_case,
     export_bad_cases,
+    merge_backlog_items,
     promote_bad_cases_to_eval,
 )
 from tests.test_report_generator import _state_with_redis_evidence
@@ -487,7 +492,7 @@ def test_backlog_from_eval_summary_routes_ragas_and_change_failures(tmp_path) ->
                 "case_scores": [
                     {
                         "id": "redis_ragas_quality",
-                        "status": "failed",
+                        "passed": False,
                         "failed_metrics": ["id_based_context_recall"],
                         "failure_reasons": {"id_based_context_recall": "missed context id"},
                         "tags": ["core_interview"],
@@ -532,6 +537,163 @@ def test_backlog_from_eval_summary_routes_ragas_and_change_failures(tmp_path) ->
     assert change_items[0].category == "tool_failure"
     assert change_items[0].suggested_eval_dimension == "safe_change_regression_gate"
     assert "safe-change" in change_items[0].expected_behavior.lower()
+
+
+def test_backlog_from_eval_summary_inherits_parent_run_provenance(tmp_path) -> None:
+    summary_path = tmp_path / "eval_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "run": {
+                    "run_id": "run-1",
+                    "dataset": {"sha256": "dataset-sha"},
+                    "environment": {
+                        "evaluation_fingerprint": "eval-fingerprint",
+                        "execution_identity": {
+                            "actual_model": "actual-model",
+                            "actual_embedding_model": "actual-embedding",
+                        },
+                    },
+                },
+                "summary": {
+                    "failed_cases": [
+                        {"suite": "aiops", "id": "case-1", "failed_metrics": ["tool_hit"]}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    item = backlog_from_eval_summary(summary_path)[0]
+    provenance = item.metadata["provenance"]
+
+    assert provenance["run_id"] == "run-1"
+    assert provenance["model"] == "actual-model"
+    assert provenance["embedding_model"] == "actual-embedding"
+    assert provenance["dataset"]["sha256"] == "dataset-sha"
+    assert provenance["evaluation_fingerprint"] == "eval-fingerprint"
+    assert provenance["artifact"] == "eval_summary.json"
+
+
+def test_direct_feedback_marks_invalid_references_as_orphaned(tmp_path) -> None:
+    class EmptyStore:
+        def get_incident_state(self, incident_id):
+            return None
+
+        def get_latest_report(self, incident_id):
+            return None
+
+        def get_aiops_session_snapshot(self, session_id):
+            return None
+
+        def list_trace_events(self, *, incident_id=None, trace_id=None, event_type=None):
+            return []
+
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    feedback = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            category="tool_failure",
+            reason="invalid runtime link",
+            expected_answer="keep the link traceable",
+            query="incident",
+            metadata={
+                "incident_id": "missing-incident",
+                "report_id": "missing-report",
+                "session_id": "missing-session",
+                "run_id": "run-1",
+            },
+        ),
+        reference_store=EmptyStore(),
+    )
+
+    assert feedback.reference_status == "orphaned"
+    assert "incident_not_found" in feedback.orphan_reasons
+    assert service.list_eval_backlog() == []
+
+
+def test_reference_refresh_rejects_existing_backlog_and_preserves_corrupt_lines(tmp_path) -> None:
+    class ToggleStore:
+        available = True
+
+        def get_incident_state(self, incident_id):
+            return object() if self.available else None
+
+        def get_report(self, report_id):
+            if not self.available:
+                return None
+            return type("Report", (), {"incident_id": "inc-1"})()
+
+        def get_aiops_session_snapshot(self, session_id):
+            if not self.available:
+                return None
+            return type("Snapshot", (), {"incident_id": "inc-1"})()
+
+        def list_trace_events(self, *, incident_id=None, trace_id=None, event_type=None):
+            return [object()] if self.available else []
+
+    path = tmp_path / "feedback.jsonl"
+    store = ToggleStore()
+    service = FeedbackService(path)
+    service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            category="tool_failure",
+            reason="runtime failure",
+            expected_answer="preserve the regression case",
+            query="incident",
+            trace_id="trace-1",
+            metadata={
+                "incident_id": "inc-1",
+                "report_id": "rpt-1",
+                "session_id": "run-1",
+                "run_id": "run-1",
+            },
+        ),
+        reference_store=store,
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("{corrupt-json\n")
+
+    store.available = False
+    refreshed = service.list_bad_cases(reference_store=store)
+
+    assert refreshed[0].reference_status == "orphaned"
+    assert service.list_eval_backlog()[0].review_status == "rejected"
+    assert "{corrupt-json" in path.read_text(encoding="utf-8")
+
+
+def test_historical_report_reference_is_verified_when_report_still_exists(tmp_path) -> None:
+    class HistoricalReportStore:
+        def get_incident_state(self, incident_id):
+            return object()
+
+        def get_report(self, report_id):
+            return type("Report", (), {"incident_id": "inc-1"})()
+
+        def get_aiops_session_snapshot(self, session_id):
+            return None
+
+        def list_trace_events(self, *, incident_id=None, trace_id=None, event_type=None):
+            return []
+
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    feedback = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            reason="historical report feedback",
+            expected_answer="historical reports remain traceable",
+            query="incident",
+            metadata={"incident_id": "inc-1", "report_id": "rpt-old"},
+        ),
+        reference_store=HistoricalReportStore(),
+    )
+
+    assert feedback.reference_status == "verified"
 
 
 def test_direct_ragas_and_change_feedback_routes_without_mixing_rag_promotion(tmp_path) -> None:
@@ -769,3 +931,258 @@ def test_feedback_jsonl_keeps_runtime_context_fields(tmp_path) -> None:
     assert evidence["rejected_results"][0]["source_file"] == "noise.md"
     assert evidence["trace_id"] == "trace-context"
     assert evidence["tool_calls"][0]["tool_name"] == "search_runbook"
+
+
+def test_direct_feedback_upsert_is_scoped_by_owner_and_rebuilds_backlog(tmp_path) -> None:
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    first = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="rag",
+            vote="thumb_down",
+            idempotency_key="message-1",
+            category="retrieval_failure",
+            reason="wrong source",
+            expected_answer="use redis.md",
+            query="redis timeout",
+        ),
+        owner_id="alice",
+    )
+    updated = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="rag",
+            vote="thumb_up",
+            idempotency_key="message-1",
+            reason="fixed",
+            query="redis timeout",
+        ),
+        owner_id="alice",
+    )
+    other_owner = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="rag",
+            vote="thumb_down",
+            idempotency_key="message-1",
+            category="retrieval_failure",
+            reason="still wrong",
+            expected_answer="use redis.md",
+            query="redis timeout",
+        ),
+        owner_id="bob",
+    )
+
+    assert updated.feedback_id == first.feedback_id
+    assert other_owner.feedback_id != first.feedback_id
+    assert service.list_bad_cases(owner_id="alice")[0].vote == "thumb_up"
+    assert service.list_eval_backlog(owner_id="alice") == []
+    assert len(service.list_eval_backlog(owner_id="bob")) == 1
+
+
+def test_merge_backlog_preserves_review_state_and_richer_snapshot() -> None:
+    base = build_eval_backlog_item(
+        build_bad_case_feedback(
+            BadCaseFeedbackCreate(
+                target="aiops",
+                vote="thumb_down",
+                category="tool_failure",
+                reason="metrics failed",
+                expected_answer="degrade to logs",
+                query="latency spike",
+                tool_calls=[{"tool_name": "query_metrics", "status": "failed"}],
+            )
+        )
+    )
+    reviewed = base.model_copy(
+        update={
+            "review_status": "reviewed",
+            "reviewed_by": "alice",
+            "failure_reasons": ["reviewed failure"],
+            "evidence_snapshot": {"query": "latency spike", "review_note": "keep this"},
+        }
+    )
+    regenerated = build_eval_backlog_item(
+        build_bad_case_feedback(
+            BadCaseFeedbackCreate(
+                target="aiops",
+                vote="thumb_down",
+                category="tool_failure",
+                reason="metrics and logs failed",
+                expected_answer="degrade with explicit failure evidence",
+                query="latency spike",
+                tool_calls=[
+                    {"tool_name": "query_metrics", "status": "failed"},
+                    {"tool_name": "query_logs", "status": "failed"},
+                ],
+            )
+        )
+    ).model_copy(
+        update={
+            "backlog_id": reviewed.backlog_id,
+            "feedback_id": reviewed.feedback_id,
+            "suggested_eval_case_id": reviewed.suggested_eval_case_id,
+        }
+    )
+
+    merged = merge_backlog_items([reviewed, regenerated])
+
+    assert len(merged) == 1
+    assert merged[0].review_status == "reviewed"
+    assert merged[0].reviewed_by == "alice"
+    assert merged[0].evidence_snapshot["review_note"] == "keep this"
+    assert "reviewed failure" in merged[0].failure_reasons
+
+
+def test_exported_cases_redact_secrets_and_neutralize_formula_cells() -> None:
+    rag_case = build_rag_eval_case(
+        build_bad_case_feedback(
+            BadCaseFeedbackCreate(
+                target="rag",
+                vote="thumb_down",
+                category="retrieval_failure",
+                reason='=HYPERLINK("https://evil.invalid")',
+                expected_answer="token=secret-value use redis.md",
+                query="+SUM(1,1)",
+            )
+        )
+    )
+    aiops_case = build_aiops_eval_case(
+        build_bad_case_feedback(
+            BadCaseFeedbackCreate(
+                target="aiops",
+                vote="thumb_down",
+                category="permission_denied",
+                reason="@cmd",
+                expected_answer="block the action",
+                query="-2+3",
+            )
+        )
+    )
+
+    serialized = json.dumps([rag_case, aiops_case], ensure_ascii=False)
+    assert "secret-value" not in serialized
+    assert rag_case is not None
+    assert rag_case["query"].startswith("'")
+    assert rag_case["feedback"]["reason"].startswith("'")
+    assert aiops_case is not None
+    assert aiops_case["input"].startswith("'")
+    assert aiops_case["feedback"]["reason"].startswith("'")
+    assert aiops_case["expected_risk_policy"] == "forbidden"
+    assert aiops_case["expected_report_status"] == "blocked"
+
+
+def test_feedback_identifiers_reject_log_control_characters() -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        BadCaseFeedbackCreate(
+            target="rag",
+            vote="thumb_down",
+            idempotency_key="message\nforged",
+        )
+    with pytest.raises(ValueError, match="control characters"):
+        BadCaseFeedbackCreate(
+            target="rag",
+            vote="thumb_down",
+            trace_id="trace\tforged",
+        )
+    with pytest.raises(ValueError, match="metadata.incident_id"):
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            metadata={"incident_id": "inc\nforged"},
+        )
+    with pytest.raises(ValueError, match="report_id"):
+        DiagnosisFeedbackCreate(
+            report_id="rpt\nforged",
+            root_cause_correct="no",
+            accepted_suggestion="no",
+        )
+
+
+def test_feedback_api_uses_principal_id_not_shared_display_name(monkeypatch, tmp_path) -> None:
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    monkeypatch.setattr(feedback_api, "get_feedback_service", lambda: service)
+    monkeypatch.setattr(feedback_api, "create_aiops_store", lambda: None)
+
+    alice = AuthPrincipal(
+        enabled=True,
+        token_name="shared-actor",
+        principal_id="principal-alice",
+        scopes=frozenset({"read", "diagnose"}),
+    )
+    bob = AuthPrincipal(
+        enabled=True,
+        token_name="shared-actor",
+        principal_id="principal-bob",
+        scopes=frozenset({"read", "diagnose"}),
+    )
+
+    async def alice_dependency():
+        return alice
+
+    async def bob_dependency():
+        return bob
+
+    app = FastAPI()
+    app.include_router(feedback_api.router, prefix="/api")
+    dependency = next(
+        route.dependant.dependencies[0].call
+        for route in app.routes
+        if getattr(route, "path", "") == "/api/feedback"
+    )
+    app.dependency_overrides[dependency] = alice_dependency
+    client = TestClient(app)
+    payload = {
+        "target": "rag",
+        "vote": "thumb_down",
+        "idempotency_key": "message-1",
+        "category": "retrieval_failure",
+        "reason": "wrong source",
+        "expected_answer": "use redis.md",
+        "query": "redis timeout",
+    }
+    assert client.post("/api/feedback", json=payload).status_code == 200
+
+    app.dependency_overrides[dependency] = bob_dependency
+    assert client.post("/api/feedback", json=payload).status_code == 200
+
+    assert len(service.list_bad_cases(owner_id="principal-alice")) == 1
+    assert len(service.list_bad_cases(owner_id="principal-bob")) == 1
+
+
+def test_backlog_listing_refreshes_orphaned_references(tmp_path) -> None:
+    class ToggleStore:
+        available = True
+
+        def get_incident_state(self, incident_id):
+            return object() if self.available else None
+
+        def get_report(self, report_id):
+            if not self.available:
+                return None
+            return type("Report", (), {"incident_id": "inc-1"})()
+
+        def get_aiops_session_snapshot(self, session_id):
+            return None
+
+        def list_trace_events(self, *, incident_id=None, trace_id=None, event_type=None):
+            return []
+
+    store = ToggleStore()
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            category="poor_report_quality",
+            reason="report is incomplete",
+            expected_answer="include evidence",
+            query="incident",
+            metadata={"incident_id": "inc-1", "report_id": "rpt-1"},
+        ),
+        owner_id="alice",
+        reference_store=store,
+    )
+
+    store.available = False
+    items = service.list_eval_backlog(owner_id="alice", reference_store=store)
+
+    assert len(items) == 1
+    assert items[0].review_status == "rejected"

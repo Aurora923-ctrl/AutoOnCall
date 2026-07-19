@@ -143,7 +143,8 @@ class EvalBacklogResponse(BaseModel):
 
     available: bool = False
     summary: dict[str, Any] = Field(default_factory=dict)
-    items: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[EvalBacklogItem] = Field(default_factory=list)
+    invalid_items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EvalRagasResponse(BaseModel):
@@ -159,6 +160,8 @@ class EvalRagasResponse(BaseModel):
     dashboard: dict[str, Any] = Field(default_factory=dict)
     case_scores: list[dict[str, Any]] = Field(default_factory=list)
     failed_cases: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_status: dict[str, Any] = Field(default_factory=dict)
+    stale: bool = True
     message: str = ""
 
 

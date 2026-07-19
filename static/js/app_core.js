@@ -9,7 +9,7 @@ class AutoOnCallApp {
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.knowledgeUploadState = this.loadKnowledgeUploadState();
         this.uploadConstraints = {
-            allowedExtensions: ['.txt', '.md', '.markdown'],
+            allowedExtensions: ['.txt', '.md', '.markdown', '.pdf', '.html', '.htm', '.csv', '.xlsx'],
             maxSizeMb: 10,
             maxSize: 10 * 1024 * 1024
         };
@@ -120,24 +120,47 @@ Object.assign(window.AutoOnCallApp.prototype, {
     sanitizeRenderedHtml(html) {
         const container = document.createElement('div');
         container.innerHTML = html || '';
+        const allowedTags = new Set([
+            'A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'EM', 'H1', 'H2', 'H3', 'H4',
+            'H5', 'H6', 'HR', 'LI', 'OL', 'P', 'PRE', 'STRONG', 'TABLE', 'TBODY',
+            'TD', 'TH', 'THEAD', 'TR', 'UL'
+        ]);
+        const allowedAttributes = {
+            A: new Set(['href', 'title']),
+            CODE: new Set(['class']),
+            TH: new Set(['align']),
+            TD: new Set(['align'])
+        };
 
-        container.querySelectorAll('script, style, iframe, object, embed, link, meta').forEach((node) => {
-            node.remove();
+        container.querySelectorAll('*').forEach((node) => {
+            if (!allowedTags.has(node.tagName)) {
+                node.replaceWith(...node.childNodes);
+            }
         });
 
         container.querySelectorAll('*').forEach((node) => {
             Array.from(node.attributes).forEach((attr) => {
                 const name = attr.name.toLowerCase();
                 const value = (attr.value || '').trim().toLowerCase();
-                if (
-                    name.startsWith('on') ||
-                    name === 'style' ||
-                    ((name === 'href' || name === 'src' || name === 'xlink:href') &&
-                        (value.startsWith('javascript:') || value.startsWith('data:text/html')))
-                ) {
+                const tagAttributes = allowedAttributes[node.tagName] || new Set();
+                if (!tagAttributes.has(name)) {
                     node.removeAttribute(attr.name);
+                    return;
+                }
+                if (name === 'href') {
+                    const compactValue = value.replace(/[\u0000-\u0020]+/g, '');
+                    if (
+                        compactValue.startsWith('javascript:') ||
+                        compactValue.startsWith('data:') ||
+                        compactValue.startsWith('vbscript:')
+                    ) {
+                        node.removeAttribute(attr.name);
+                    }
                 }
             });
+            if (node.tagName === 'A' && node.hasAttribute('href')) {
+                node.setAttribute('rel', 'noopener noreferrer');
+            }
         });
 
         return container.innerHTML;

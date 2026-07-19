@@ -46,7 +46,7 @@ class SessionInfoResponse(BaseModel):
 
     message_count: int = Field(..., description="消息数量")
 
-    history: list[dict[str, str]] = Field(..., description="历史消息列表")
+    history: list[dict[str, Any]] = Field(..., description="历史消息列表")
 
 
 class ApiResponse(BaseModel):

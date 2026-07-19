@@ -23,30 +23,61 @@ def normalized_a2a_base_path() -> str:
 
 def a2a_state_from_autooncall_status(status: str) -> A2ATaskState:
     """Map AutoOnCall lifecycle statuses onto A2A task states."""
-    normalized = (status or "").strip()
-    if normalized in {"waiting_approval", "approval_approved", "waiting_manual_execution"}:
-        return "TASK_STATE_INPUT_REQUIRED"
-    if normalized in {"manual_result_required"}:
+    normalized = (status or "").strip().lower()
+    if normalized in {
+        "waiting_approval",
+        "approval_approved",
+        "waiting_manual_execution",
+        "manual_result_required",
+        "partial_success",
+        "recovery_pending",
+        "rollback_recommended",
+        "needs_human",
+        "incomplete",
+        "degraded",
+    }:
         return "TASK_STATE_INPUT_REQUIRED"
     if normalized in {"approval_rejected", "approval_cancelled", "blocked", "escalated"}:
         return "TASK_STATE_REJECTED"
-    if normalized in {"failed", "precheck_failed", "dry_run_failed"}:
+    if normalized in {"failed", "precheck_failed", "dry_run_failed", "rollback_failed"}:
         return "TASK_STATE_FAILED"
+    if normalized in {"cancelled", "canceled"}:
+        return "TASK_STATE_CANCELED"
     if normalized in {
+        "created",
+        "queued",
+        "submitted",
         "running",
+        "resume_running",
         "planning",
         "executing",
         "diagnosing",
         "investigating",
+        "alert_firing",
+        "alert_resolved",
         "change_prechecking",
         "change_dry_run",
+        "change_validated",
         "change_executing_sandbox",
+        "precheck_running",
+        "dry_run_running",
+        "sandbox_executing",
         "observing",
     }:
         return "TASK_STATE_WORKING"
-    if normalized:
+    if normalized in {
+        "completed",
+        "approval_resumed",
+        "manual_result_recorded",
+        "manual_execution_recorded",
+        "dry_run_completed",
+        "sandbox_validated",
+        "resolved",
+        "closed",
+        "rolled_back",
+    }:
         return "TASK_STATE_COMPLETED"
-    return "TASK_STATE_UNKNOWN"
+    return "TASK_STATE_UNSPECIFIED"
 
 
 def task_status(
@@ -79,16 +110,28 @@ def status_update_event(
     state: A2ATaskState,
     message: str,
     final: bool,
+    initial: bool = False,
 ) -> dict[str, Any]:
     """Return an A2A streaming status update event."""
-    return {
+    update = {
         "taskId": task_id,
         "contextId": context_id,
         "status": dump_a2a(
             task_status(task_id=task_id, context_id=context_id, state=state, text=message)
         ),
-        "final": final,
     }
+    if initial:
+        return {
+            "task": {
+                "id": task_id,
+                "contextId": context_id,
+                "status": update["status"],
+                "artifacts": [],
+                "metadata": {},
+                "history": [],
+            },
+        }
+    return {"statusUpdate": update}
 
 
 def diagnosis_event_to_a2a_event(
@@ -102,20 +145,22 @@ def diagnosis_event_to_a2a_event(
     message = str(event.get("message") or event.get("stage") or event_type or "diagnosis update")
     if event_type == "report" and isinstance(event.get("structured_report"), dict):
         return {
-            "taskId": task_id,
-            "contextId": context_id or str(event.get("incident_id") or ""),
-            "artifact": dump_a2a(
-                mixed_artifact(
-                    str(event["structured_report"].get("report_id") or "diagnosis_report"),
-                    "Diagnosis Report",
-                    text=str(
-                        event["structured_report"].get("markdown") or event.get("report") or ""
+            "artifactUpdate": {
+                "taskId": task_id,
+                "contextId": context_id or str(event.get("incident_id") or ""),
+                "artifact": dump_a2a(
+                    mixed_artifact(
+                        str(event["structured_report"].get("report_id") or "diagnosis_report"),
+                        "Diagnosis Report",
+                        text=str(
+                            event["structured_report"].get("markdown") or event.get("report") or ""
+                        ),
+                        data=event["structured_report"],
                     ),
-                    data=event["structured_report"],
-                )
-            ),
-            "append": False,
-            "lastChunk": False,
+                ),
+                "append": False,
+                "lastChunk": False,
+            },
         }
     if event_type == "complete":
         state = a2a_state_from_autooncall_status(str(event.get("status") or "completed"))

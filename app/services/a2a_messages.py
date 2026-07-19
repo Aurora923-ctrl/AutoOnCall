@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 from app.models.incident import Incident
 from app.services.a2a_skills import (
@@ -25,14 +26,20 @@ class A2AEnvelope:
     text: str
     data: dict[str, Any]
     metadata: dict[str, Any]
+    request_fingerprint: str
 
 
 def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
     """Accept A2A HTTP+JSON and simple JSON-RPC-like payloads."""
+    if not isinstance(payload, dict):
+        raise ValueError("A2A request body must be an object")
     raw_params = payload.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else payload
     raw_message = params.get("message")
     message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else params
+    role = str(message.get("role") or params.get("role") or "").strip().upper()
+    if role and role not in {"ROLE_USER", "USER"}:
+        raise ValueError("A2A message role must identify the caller as a user")
     raw_parts = message.get("parts")
     parts: list[Any] = raw_parts if isinstance(raw_parts, list) else []
     data: dict[str, Any] = {}
@@ -48,8 +55,10 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         or message.get("message_id")
         or params.get("messageId")
         or params.get("message_id")
-        or uuid4().hex
-    )
+        or ""
+    ).strip()
+    if not message_id:
+        raise ValueError("A2A messageId is required")
     task_id = str(
         message.get("taskId")
         or message.get("task_id")
@@ -58,7 +67,7 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         or data.get("task_id")
         or data.get("session_id")
         or ""
-    )
+    ).strip()
     context_id = str(
         message.get("contextId")
         or message.get("context_id")
@@ -67,7 +76,7 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         or data.get("context_id")
         or data.get("incident_id")
         or ""
-    )
+    ).strip()
     return A2AEnvelope(
         message_id=message_id,
         task_id=task_id,
@@ -75,6 +84,13 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         text=text,
         data=data,
         metadata=metadata,
+        request_fingerprint=_request_fingerprint(
+            text=text,
+            data=data,
+            metadata=metadata,
+            task_id=task_id,
+            context_id=context_id,
+        ),
     )
 
 
@@ -101,19 +117,77 @@ def resolve_skill(envelope: A2AEnvelope) -> str:
 
 def diagnosis_task_id(envelope: A2AEnvelope) -> str:
     """Return a server-owned A2A/AutoOnCall diagnosis task id."""
-    return new_task_id("diagnosis")
+    return task_id_for_envelope("diagnosis", envelope)
 
 
-def new_task_id(kind: str) -> str:
-    """Generate a server-owned A2A task id."""
-    return f"a2a-{kind}-{uuid4().hex}"
+def task_id_for_envelope(kind: str, envelope: A2AEnvelope) -> str:
+    """Return a stable server-owned task id for one caller message."""
+    message_id = envelope.message_id.strip()
+    if not message_id:
+        raise ValueError("A2A messageId is required")
+    digest = sha256(f"{kind}\0{message_id}".encode()).hexdigest()
+    return f"a2a-{kind}-{digest}"
+
+
+def scope_message_to_principal(payload: dict[str, Any], principal_id: str) -> dict[str, Any]:
+    """Namespace caller message identity without changing the business payload."""
+    envelope = parse_message_envelope(payload)
+    scoped = dict(payload)
+    raw_params = scoped.get("params")
+    params = dict(raw_params) if isinstance(raw_params, dict) else scoped
+    raw_message = params.get("message")
+    message = dict(raw_message) if isinstance(raw_message, dict) else params
+    message["messageId"] = f"principal:{principal_id}:{envelope.message_id}"
+    message.pop("message_id", None)
+    if isinstance(raw_message, dict):
+        params["message"] = message
+    if isinstance(raw_params, dict):
+        scoped["params"] = params
+    else:
+        scoped = params
+    return scoped
+
+
+def _request_fingerprint(
+    *,
+    text: str,
+    data: dict[str, Any],
+    metadata: dict[str, Any],
+    task_id: str,
+    context_id: str,
+) -> str:
+    payload = {
+        "text": text,
+        "data": data,
+        "metadata": metadata,
+        "task_id": task_id,
+        "context_id": context_id,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def incident_from_envelope(envelope: A2AEnvelope) -> Incident:
     """Build the structured Incident for a diagnosis request."""
     raw_incident = envelope.data.get("incident")
     if isinstance(raw_incident, dict):
-        return Incident.model_validate(raw_incident)
+        incident_payload = dict(raw_incident)
+        if envelope.context_id:
+            incident_id = str(incident_payload.get("incident_id") or "").strip()
+            if incident_id and incident_id != envelope.context_id:
+                raise ValueError("A2A contextId does not match incident_id")
+            incident_payload["incident_id"] = envelope.context_id
+        raw_alert = _mapping(incident_payload.get("raw_alert"))
+        raw_alert.update(
+            {
+                "source": "a2a",
+                "message_id": envelope.message_id,
+                "context_id": envelope.context_id,
+                "request_fingerprint": envelope.request_fingerprint,
+            }
+        )
+        incident_payload["raw_alert"] = raw_alert
+        return Incident.model_validate(incident_payload)
     if envelope.text:
         return Incident(
             title=envelope.text[:120] or "A2A incident diagnosis",

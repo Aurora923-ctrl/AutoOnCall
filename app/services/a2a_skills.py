@@ -44,7 +44,7 @@ def agent_skills(*, extended: bool = False) -> list[A2AAgentSkill]:
                 "structured incident. Produces evidence, trace, approval state, and report artifacts."
             ),
             tags=["aiops", "incident", "diagnosis"],
-            inputModes=["application/json", "text/plain"],
+            inputModes=["application/json"],
             outputModes=["application/json", "text/markdown"],
             examples=examples[SKILL_DIAGNOSE_INCIDENT] if extended else [],
         ),

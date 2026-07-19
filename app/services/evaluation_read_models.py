@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.models.feedback import EvalBacklogItem
 from scripts.eval.eval_environment import assess_eval_artifact_staleness
 
 
@@ -160,9 +161,7 @@ def build_ragas_summary_payload(
     quality_contract = _dict_or_empty(raw_payload.get("quality_contract"))
     case_scores = raw_payload.get("case_scores", [])
     cases = case_scores if isinstance(case_scores, list) else []
-    failed_cases = summary.get("failed_cases", [])
-    if not isinstance(failed_cases, list):
-        failed_cases = []
+    failed_cases = _failed_ragas_cases(summary, cases)
     dashboard = build_ragas_dashboard(run, summary, thresholds)
     artifact_status = assess_eval_artifact_staleness(run)
     return {
@@ -206,6 +205,7 @@ def build_ragas_unavailable_payload(message: str, *, summary_path: Path) -> dict
         },
         "case_scores": [],
         "failed_cases": [],
+        "invalid_items": [],
         "artifact_status": {
             "stale": True,
             "reasons": ["artifact_unavailable"],
@@ -220,23 +220,45 @@ def build_ragas_unavailable_payload(message: str, *, summary_path: Path) -> dict
 def build_eval_backlog_summary(backlog_payload: dict[str, Any] | None) -> dict[str, Any]:
     """Return compact eval-backlog counters for dashboards."""
     payload = backlog_payload if isinstance(backlog_payload, dict) else {}
-    summary = _dict_or_empty(payload.get("summary"))
-    items = payload.get("items", [])
-    if not summary and isinstance(items, list):
-        summary = _summarize_backlog_items(items)
+    raw_items = payload.get("items", [])
+    items: list[dict[str, Any]] = []
+    invalid_items: list[dict[str, Any]] = []
+    if isinstance(raw_items, list):
+        for index, raw_item in enumerate(raw_items):
+            if not isinstance(raw_item, dict):
+                invalid_items.append({"index": index, "reason": "item is not an object"})
+                continue
+            try:
+                items.append(EvalBacklogItem.model_validate(raw_item).model_dump(mode="json"))
+            except Exception as exc:
+                invalid_items.append({"index": index, "reason": f"{type(exc).__name__}: {exc}"})
+    summary = _summarize_backlog_items(items)
     return {
         "available": bool(payload),
-        "summary": summary
-        or {
-            "total": 0,
-            "by_target": {},
-            "by_category": {},
-            "by_priority": {},
-            "by_review_status": {},
-            "by_eval_file": {},
-        },
-        "items": items if isinstance(items, list) else [],
+        "summary": summary,
+        "items": items,
+        "invalid_items": invalid_items,
     }
+
+
+def _failed_ragas_cases(
+    summary: dict[str, Any],
+    case_scores: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use case-level pass flags when a RAGAS summary omits failed_cases."""
+    failed = summary.get("failed_cases")
+    if isinstance(failed, list) and failed:
+        return [item for item in failed if isinstance(item, dict)]
+    return [
+        item
+        for item in case_scores
+        if isinstance(item, dict)
+        and (
+            item.get("passed") is False
+            or str(item.get("status") or "").lower() in {"failed", "error"}
+            or bool(item.get("failed_metrics"))
+        )
+    ]
 
 
 def build_ragas_dashboard(
