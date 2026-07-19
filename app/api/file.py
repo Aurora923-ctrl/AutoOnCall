@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
+import aiofiles  # type: ignore[import-untyped]
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from filelock import AsyncFileLock
@@ -402,7 +403,7 @@ async def _save_upload_file(
     uploaded_size = 0
 
     try:
-        with temp_path.open("wb") as handle:
+        async with aiofiles.open(temp_path, "wb") as handle:
             while True:
                 chunk = await file.read(UPLOAD_READ_CHUNK_SIZE)
                 if not chunk:
@@ -413,15 +414,15 @@ async def _save_upload_file(
                         status_code=400,
                         detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE_MB}MB）",
                     )
-                handle.write(chunk)
+                await handle.write(chunk)
 
         if file_extension:
-            _validate_saved_file_signature(temp_path, file_extension)
-        temp_path.replace(file_path)
+            await asyncio.to_thread(_validate_saved_file_signature, temp_path, file_extension)
+        await asyncio.to_thread(temp_path.replace, file_path)
         return uploaded_size
     except BaseException:
         try:
-            temp_path.unlink(missing_ok=True)
+            await asyncio.to_thread(temp_path.unlink, missing_ok=True)
         except OSError:
             logger.warning(f"清理临时上传文件失败: {temp_path}")
         raise

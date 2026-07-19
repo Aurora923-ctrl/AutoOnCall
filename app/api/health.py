@@ -10,6 +10,7 @@ from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.core.observability import observability_status
 from app.integrations.base import bearer_headers, classify_adapter_error
 from app.integrations.mysql import MySQLStatusAdapter
 from app.integrations.redis_info import RedisInfoAdapter
@@ -166,6 +167,7 @@ def _base_health_data() -> dict[str, Any]:
         "version": config.app_version,
         "status": "healthy",
         "mode": "development" if config.debug else "production",
+        "observability": observability_status(),
     }
 
 

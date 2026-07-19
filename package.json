@@ -1,0 +1,12 @@
+{
+  "name": "autooncall-frontend",
+  "private": true,
+  "version": "1.2.1",
+  "scripts": {
+    "lint": "eslint static/app.js static/js frontend-tests",
+    "test": "node --test frontend-tests"
+  },
+  "devDependencies": {
+    "eslint": "9.38.0"
+  }
+}

@@ -9,10 +9,13 @@ from typing import Any
 import httpx
 
 from app.config import config
+from app.core.resilience import call_with_resilience
 from app.integrations.base import (
     ExternalAdapterError,
+    ExternalAdapterResponseError,
     adapter_success,
     bearer_headers,
+    classify_adapter_error,
     escape_prometheus_label_value,
     first_float,
     parse_duration_seconds,
@@ -67,14 +70,30 @@ class PrometheusMetricsAdapter:
             values: dict[str, float] = {}
             empty_queries: list[str] = []
             for name, template in queries.items():
-                value, has_data = await self._query_range(
-                    client,
-                    base_url,
-                    template,
-                    service_name,
-                    start_seconds=start_seconds,
-                    end_seconds=end_seconds,
-                    step_seconds=step_seconds,
+
+                async def query_range(
+                    query_template: str = template,
+                ) -> tuple[float, bool]:
+                    return await self._query_range(
+                        client,
+                        base_url,
+                        query_template,
+                        service_name,
+                        start_seconds=start_seconds,
+                        end_seconds=end_seconds,
+                        step_seconds=step_seconds,
+                    )
+
+                value, has_data = await call_with_resilience(
+                    "prometheus",
+                    "query_range",
+                    query_range,
+                    timeout_seconds=self.timeout_seconds,
+                    max_attempts=2,
+                    retry_delay_seconds=0.1,
+                    is_retryable=_is_retryable_prometheus_error,
+                    failure_threshold=config.dependency_circuit_failure_threshold,
+                    recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
                 )
                 values[name] = value
                 if not has_data:
@@ -225,6 +244,14 @@ class PrometheusMetricsAdapter:
                 if math.isfinite(value):
                     return value, True
         return 0.0, False
+
+
+def _is_retryable_prometheus_error(exc: Exception) -> bool:
+    """Retry transport/server failures, but not valid business-failure payloads."""
+
+    if isinstance(exc, ExternalAdapterResponseError):
+        return False
+    return classify_adapter_error(exc) in {"timeout", "connection_error", "server_error"}
 
 
 def _metric_inference(

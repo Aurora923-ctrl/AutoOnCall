@@ -26,7 +26,7 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init bootstrap verify verify-local hygiene-check reference-check dependency-lock-check start stop restart check upload clean up down status wait \
+.PHONY: help init bootstrap verify verify-local hygiene-check reference-check dependency-lock-check async-blocking-audit frontend-install frontend-lint frontend-test frontend-schema frontend-schema-check frontend-verify live-eval start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-ragas-full-core eval-ragas-full-generated-core eval-ragas-full-runtime-core eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         api-contract-verify knowledge-quality benchmark-baseline candidate-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
@@ -691,7 +691,7 @@ test:  ## 运行测试
 
 test-quick:  ## 快速测试
 	@echo "$(YELLOW)⚡ 快速测试...$(NC)"
-	$(PYTHON) -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -q --no-cov
 
 test-integrations:  ## Run Docker/live integration tests
 	$(PYTHON) -m pytest tests/ -m integration -v
@@ -774,6 +774,29 @@ dependency-lock-check:  ## Verify supported installs consume uv.lock
 	@echo "$(YELLOW)Verifying locked dependency installation paths...$(NC)"
 	$(PYTHON) scripts/maintenance/verify_dependency_lock.py
 
+async-blocking-audit:  ## Audit async functions for direct blocking I/O
+	$(PYTHON) scripts/maintenance/audit_async_blocking.py
+
+frontend-install:  ## Install locked frontend quality tooling
+	npm ci
+
+frontend-lint:  ## Lint the static JavaScript workbench
+	npm run lint
+
+frontend-test:  ## Run minimal frontend component/loader tests
+	npm test
+
+frontend-schema:  ## Generate the frontend OpenAPI contract
+	$(PYTHON) scripts/frontend/generate_openapi_schema.py
+
+frontend-schema-check:  ## Verify the committed OpenAPI contract is current
+	$(PYTHON) scripts/maintenance/verify_openapi_schema.py
+
+frontend-verify:  ## Run static frontend quality checks
+	@$(MAKE) frontend-lint
+	@$(MAKE) frontend-test
+	@$(MAKE) frontend-schema-check
+
 verify-local:  ## 面试前本地快速质量验证
 	@echo "$(YELLOW)✅ 运行 AutoOnCall 本地快速验证...$(NC)"
 	@$(MAKE) test-quick
@@ -797,6 +820,8 @@ verify:  ## 运行只验证门禁（不修改源码）
 	@$(MAKE) eval-replanner
 	@$(MAKE) api-contract-verify
 	@$(MAKE) dependency-lock-check
+	@$(MAKE) async-blocking-audit
+	@$(MAKE) frontend-verify
 	@$(MAKE) reference-check
 	@$(MAKE) hygiene-check
 	@echo "$(GREEN)✅ 交付门禁通过！$(NC)"
@@ -825,6 +850,11 @@ full-gate:  ## Stage-8 full quality gate; expensive live experiments remain expl
 	@$(MAKE) benchmark-baseline
 	@$(MAKE) interview-summary
 	@echo "$(GREEN)Full gate complete. Scorecard is in the latest benchmark run directory.$(NC)"
+
+live-eval:  ## Explicit external-key/live-dependency evaluation suite
+	@$(MAKE) performance-real-model
+	@$(MAKE) eval-ragas-full-runtime-core
+	@$(MAKE) performance-rag-runtime
 
 pre-commit-install:  ## 安装 pre-commit hooks
 	@echo "$(YELLOW)🔗 安装 pre-commit hooks...$(NC)"

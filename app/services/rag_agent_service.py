@@ -26,6 +26,8 @@ from typing_extensions import TypedDict
 
 from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_retry
 from app.config import config
+from app.core.observability import dependency_operation
+from app.core.resilience import CircuitOpenError, call_with_resilience, get_circuit_breaker
 from app.services.rag_answer_policy import (
     build_citation_guard_payload,
     build_generation_evidence,
@@ -1097,27 +1099,32 @@ class RagAgentService:
         session_id: str,
     ) -> Any:
         """Invoke the grounded model with one explicit timeout and bounded retry policy."""
-        max_attempts = int(config.rag_model_max_retries) + 1
         safe_session_id = sanitize_log_value(session_id)
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return await asyncio.wait_for(
-                    model.ainvoke(messages),
-                    timeout=float(config.rag_model_timeout_seconds),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if attempt >= max_attempts or not _is_retryable_model_error(exc):
-                    raise
-                logger.warning(
-                    "RAG 模型调用失败，准备重试: session_id={}, attempt={}, error_type={}",
-                    safe_session_id,
-                    attempt,
-                    type(exc).__name__,
-                )
-                await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
-        raise RuntimeError("RAG 模型调用未返回结果")
+
+        async def invoke() -> Any:
+            return await model.ainvoke(messages)
+
+        try:
+            return await call_with_resilience(
+                "llm",
+                "rag_invoke",
+                invoke,
+                timeout_seconds=float(config.rag_model_timeout_seconds),
+                max_attempts=int(config.rag_model_max_retries) + 1,
+                retry_delay_seconds=float(config.rag_model_retry_delay_seconds),
+                is_retryable=_is_retryable_model_error,
+                failure_threshold=config.dependency_circuit_failure_threshold,
+                recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "RAG model call failed: session_id={}, error_type={}",
+                safe_session_id,
+                type(exc).__name__,
+            )
+            raise
 
     @asynccontextmanager
     async def _model_stream_with_retry(
@@ -1132,37 +1139,55 @@ class RagAgentService:
         safe_session_id = sanitize_log_value(session_id)
 
         async def stream_attempts() -> AsyncIterator[str]:
-            for attempt in range(1, max_attempts + 1):
-                emitted = False
-                emitted_bytes = 0
-                try:
-                    async with asyncio.timeout(float(config.rag_model_timeout_seconds)):
-                        async for chunk in model.astream(messages):
-                            content = chunk.content if hasattr(chunk, "content") else chunk
-                            text = message_content_to_text(content)
-                            if not text:
-                                continue
-                            next_emitted_bytes = emitted_bytes + len(text.encode("utf-8"))
-                            if not emitted and next_emitted_bytes > int(
-                                config.rag_stream_spool_max_memory_bytes
-                            ):
-                                raise ValueError("RAG 模型流输出超过安全上限")
-                            emitted_bytes = next_emitted_bytes
-                            emitted = True
-                            yield text
-                    return
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    if emitted or attempt >= max_attempts or not _is_retryable_model_error(exc):
+            breaker = get_circuit_breaker(
+                "llm",
+                failure_threshold=config.dependency_circuit_failure_threshold,
+                recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
+            )
+            with dependency_operation("llm", "rag_stream") as observation:
+                if not breaker.try_acquire_request():
+                    observation.status = "circuit_open"
+                    raise CircuitOpenError("llm circuit is open")
+                for attempt in range(1, max_attempts + 1):
+                    emitted = False
+                    emitted_bytes = 0
+                    try:
+                        async with asyncio.timeout(float(config.rag_model_timeout_seconds)):
+                            async for chunk in model.astream(messages):
+                                content = chunk.content if hasattr(chunk, "content") else chunk
+                                text = message_content_to_text(content)
+                                if not text:
+                                    continue
+                                next_emitted_bytes = emitted_bytes + len(text.encode("utf-8"))
+                                if not emitted and next_emitted_bytes > int(
+                                    config.rag_stream_spool_max_memory_bytes
+                                ):
+                                    raise ValueError("RAG 模型流输出超过安全上限")
+                                emitted_bytes = next_emitted_bytes
+                                emitted = True
+                                yield text
+                        breaker.record_success()
+                        return
+                    except asyncio.CancelledError:
+                        breaker.release_request()
                         raise
-                    logger.warning(
-                        "RAG 模型流调用失败，准备重试: session_id={}, attempt={}, error_type={}",
-                        safe_session_id,
-                        attempt,
-                        type(exc).__name__,
-                    )
-                    await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
+                    except Exception as exc:
+                        if emitted or attempt >= max_attempts or not _is_retryable_model_error(exc):
+                            observation.status = "error"
+                            if _is_retryable_model_error(exc):
+                                breaker.record_failure()
+                            else:
+                                breaker.record_success()
+                            raise
+                        observation.retry_count += 1
+                        logger.warning(
+                            "RAG 模型流调用失败，准备重试: session_id={}, "
+                            "attempt={}, error_type={}",
+                            safe_session_id,
+                            attempt,
+                            type(exc).__name__,
+                        )
+                        await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
             raise RuntimeError("RAG 模型流未返回结果")
 
         yield stream_attempts()

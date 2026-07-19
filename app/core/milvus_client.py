@@ -19,6 +19,18 @@ from pymilvus import (
 )
 
 from app.config import config
+from app.core.observability import dependency_operation
+from app.core.resilience import CircuitOpenError, get_circuit_breaker
+
+
+def _is_retryable_milvus_connect_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError, MilvusException)):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(
+        marker in text
+        for marker in ("timeout", "timed out", "connection", "unavailable", "resource exhausted")
+    )
 
 
 class MilvusClientManager:
@@ -134,39 +146,56 @@ class MilvusClientManager:
         """Create both ORM and client connections with bounded retries."""
         max_retries = int(config.milvus_connect_max_retries)
         last_error: Exception | None = None
-        for attempt in range(max_retries + 1):
-            try:
-                connections.connect(
-                    alias=self.CONNECTION_ALIAS,
-                    host=config.milvus_host,
-                    port=str(config.milvus_port),
-                    timeout=config.milvus_timeout / 1000,
-                )
-                uri = f"http://{config.milvus_host}:{config.milvus_port}"
-                self._client = MilvusClient(
-                    uri=uri,
-                    timeout=config.milvus_timeout / 1000,
-                    alias=self.CONNECTION_ALIAS,
-                )
-                logger.info("成功连接到 Milvus")
-                return
-            except Exception as exc:
-                last_error = exc
+        breaker = get_circuit_breaker(
+            "milvus",
+            failure_threshold=config.dependency_circuit_failure_threshold,
+            recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
+        )
+        with dependency_operation("milvus", "connect") as observation:
+            if not breaker.try_acquire_request():
+                observation.status = "circuit_open"
+                raise CircuitOpenError("milvus circuit is open")
+            for attempt in range(max_retries + 1):
                 try:
-                    if connections.has_connection(self.CONNECTION_ALIAS):
-                        connections.disconnect(self.CONNECTION_ALIAS)
-                except Exception:
-                    logger.warning("清理失败的 Milvus 连接尝试时出现异常")
-                self._client = None
-                if attempt >= max_retries:
-                    break
-                delay = float(config.milvus_connect_retry_delay_seconds) * (2**attempt)
-                logger.warning(
-                    f"连接 Milvus 失败，准备重试 ({attempt + 1}/{max_retries}): "
-                    f"error_type={type(exc).__name__}"
-                )
-                if delay > 0:
-                    time.sleep(delay)
+                    connections.connect(
+                        alias=self.CONNECTION_ALIAS,
+                        host=config.milvus_host,
+                        port=str(config.milvus_port),
+                        timeout=config.milvus_timeout / 1000,
+                    )
+                    uri = f"http://{config.milvus_host}:{config.milvus_port}"
+                    self._client = MilvusClient(
+                        uri=uri,
+                        timeout=config.milvus_timeout / 1000,
+                        alias=self.CONNECTION_ALIAS,
+                    )
+                    breaker.record_success()
+                    logger.info("成功连接到 Milvus")
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    retryable = _is_retryable_milvus_connect_error(exc)
+                    try:
+                        if connections.has_connection(self.CONNECTION_ALIAS):
+                            connections.disconnect(self.CONNECTION_ALIAS)
+                    except Exception:
+                        logger.warning("清理失败的 Milvus 连接尝试时出现异常")
+                    self._client = None
+                    if attempt >= max_retries or not retryable:
+                        if retryable:
+                            breaker.record_failure()
+                        else:
+                            breaker.record_success()
+                        observation.status = "error"
+                        break
+                    observation.retry_count += 1
+                    delay = float(config.milvus_connect_retry_delay_seconds) * (2**attempt)
+                    logger.warning(
+                        f"连接 Milvus 失败，准备重试 ({attempt + 1}/{max_retries}): "
+                        f"error_type={type(exc).__name__}"
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
         if last_error is None:
             raise RuntimeError("连接 Milvus 失败")
         raise last_error

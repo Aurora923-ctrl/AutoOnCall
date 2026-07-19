@@ -1,5 +1,16 @@
 # AutoOnCall
 
+## Engineering Gates
+
+`make verify` is the deterministic CI gate and does not require an external model key.
+It includes Python quality checks, offline AIOps/RAG evaluations, an async blocking-I/O
+audit, ESLint, minimal frontend tests, and committed OpenAPI schema verification.
+
+`make live-eval` is the explicit release/interview gate for real model requests and live
+Milvus dependencies. OpenTelemetry exports can be enabled with
+`OTEL_EXPORTER_OTLP_ENDPOINT`; without an endpoint, spans and metrics remain in-process
+and add no external infrastructure requirement.
+
 AutoOnCall 是一个面向 OnCall 故障诊断场景的 Python 3.11 FastAPI 应用。它把告警接入、RAG Runbook、Plan-Execute-Replan 诊断、工具取证、风险审批、Trace、报告和安全变更记录串成一条可解释、可审计、可评测的 AIOps 闭环。
 
 当前 `docs/knowledge-base/` 包含 20 份 Markdown、PDF、HTML、CSV 和 XLSX

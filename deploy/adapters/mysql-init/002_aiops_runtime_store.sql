@@ -112,6 +112,16 @@ CREATE TABLE IF NOT EXISTS diagnosis_reports (
     INDEX idx_diagnosis_reports_incident (incident_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version BIGINT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO schema_migrations(version, name) VALUES
+    (1, 'runtime_schema_baseline'),
+    (2, 'approval_and_change_idempotency');
+
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX
 ON autooncall.* TO 'autooncall'@'%';
 

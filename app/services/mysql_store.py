@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
@@ -28,7 +29,11 @@ from app.services.incident_lifecycle import (
     merge_incident_state,
 )
 from app.services.incident_state_builder import build_incident_state_from_alert
+from app.services.schema_migrations import SchemaMigration, apply_mysql_migrations
 from app.services.sql_safety import bind_markers, trusted_identifier, trusted_table_statement
+
+_MYSQL_POOLS: dict[tuple[tuple[str, Any], ...], Any] = {}
+_MYSQL_POOLS_LOCK = Lock()
 
 _RETENTION_SQL: dict[str, tuple[str, str]] = {
     "alert_events": (
@@ -2491,7 +2496,6 @@ class AIOpsMySQLStore:
                         INDEX idx_approval_requests_status (status, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """)
-                self._ensure_approval_idempotency_columns(cursor)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS change_executions (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2573,10 +2577,20 @@ class AIOpsMySQLStore:
                         INDEX idx_diagnosis_reports_incident (incident_id, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """)
-                self._ensure_change_execution_scope_unique_index(cursor)
                 self._ensure_retention_timestamp_columns(cursor)
                 self._ensure_runtime_column_capacities(cursor)
                 self._require_transactional_runtime_tables(cursor)
+                apply_mysql_migrations(
+                    cursor,
+                    [
+                        SchemaMigration(1, "runtime_schema_baseline", lambda _cursor: None),
+                        SchemaMigration(
+                            2,
+                            "approval_and_change_idempotency",
+                            self._apply_mysql_approval_and_change_idempotency,
+                        ),
+                    ],
+                )
 
     def _ensure_approval_idempotency_columns(self, cursor: Any) -> None:
         """Add approval idempotency columns and unique key to older MySQL tables."""
@@ -2632,6 +2646,10 @@ class AIOpsMySQLStore:
             raise RuntimeError(
                 "MySQL approval schema is incompatible with runtime idempotency requirements"
             ) from exc
+
+    def _apply_mysql_approval_and_change_idempotency(self, cursor: Any) -> None:
+        self._ensure_approval_idempotency_columns(cursor)
+        self._ensure_change_execution_scope_unique_index(cursor)
 
     def _ensure_retention_timestamp_columns(self, cursor: Any) -> None:
         """Backfill timestamps required for retention based on last mutation."""
@@ -2789,17 +2807,40 @@ class AIOpsMySQLStore:
     def _connect(self):
         try:
             import pymysql
+            from dbutils.pooled_db import PooledDB
             from pymysql.cursors import DictCursor
         except ImportError as exc:
             raise RuntimeError(
                 "AIOPS_STORAGE_BACKEND=mysql requires pymysql; install project dependencies."
             ) from exc
 
-        return pymysql.connect(
-            **self.connection_settings,
-            autocommit=True,
-            cursorclass=DictCursor,
-        )
+        pool_key = tuple(sorted(self.connection_settings.items()))
+        with _MYSQL_POOLS_LOCK:
+            pool = _MYSQL_POOLS.get(pool_key)
+            if pool is None:
+                pool = PooledDB(
+                    creator=pymysql,
+                    mincached=1,
+                    maxcached=config.mysql_pool_size,
+                    maxconnections=config.mysql_pool_size + config.mysql_pool_max_overflow,
+                    blocking=True,
+                    ping=1,
+                    **self.connection_settings,
+                    autocommit=True,
+                    cursorclass=DictCursor,
+                )
+                _MYSQL_POOLS[pool_key] = pool
+        return pool.connection()
+
+
+def close_mysql_pools() -> None:
+    """Close process-wide MySQL pools during application shutdown."""
+
+    with _MYSQL_POOLS_LOCK:
+        pools = list(_MYSQL_POOLS.values())
+        _MYSQL_POOLS.clear()
+    for pool in pools:
+        pool.close()
 
 
 def _parse_mysql_dsn(dsn: str) -> dict[str, Any]:

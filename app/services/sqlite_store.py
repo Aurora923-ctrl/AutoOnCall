@@ -30,6 +30,7 @@ from app.services.incident_lifecycle import (
     merge_incident_state,
 )
 from app.services.incident_state_builder import build_incident_state_from_alert
+from app.services.schema_migrations import SchemaMigration, apply_sqlite_migrations
 from app.services.sql_safety import bind_markers, trusted_table_statement
 
 _RETENTION_SQL: dict[str, tuple[str, str]] = {
@@ -2050,18 +2051,6 @@ class AIOpsSQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_diagnosis_reports_incident
                     ON diagnosis_reports(incident_id, created_at);
                 """)
-            approval_columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(approval_requests)").fetchall()
-            }
-            if "idempotency_key" not in approval_columns:
-                connection.execute("ALTER TABLE approval_requests ADD COLUMN idempotency_key TEXT")
-            if "updated_at" not in approval_columns:
-                connection.execute("ALTER TABLE approval_requests ADD COLUMN updated_at TEXT")
-                connection.execute(
-                    "UPDATE approval_requests SET updated_at = "
-                    "COALESCE(decided_at, created_at) WHERE updated_at IS NULL"
-                )
             report_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(diagnosis_reports)").fetchall()
@@ -2071,26 +2060,54 @@ class AIOpsSQLiteStore:
                 connection.execute(
                     "UPDATE diagnosis_reports SET updated_at = created_at WHERE updated_at IS NULL"
                 )
+            apply_sqlite_migrations(
+                connection,
+                [
+                    SchemaMigration(1, "runtime_schema_baseline", lambda _connection: None),
+                    SchemaMigration(
+                        2,
+                        "approval_and_change_idempotency",
+                        self._apply_sqlite_approval_and_change_idempotency,
+                    ),
+                ],
+            )
+
+    def _apply_sqlite_approval_and_change_idempotency(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        approval_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(approval_requests)").fetchall()
+        }
+        if "idempotency_key" not in approval_columns:
+            connection.execute("ALTER TABLE approval_requests ADD COLUMN idempotency_key TEXT")
+        if "updated_at" not in approval_columns:
+            connection.execute("ALTER TABLE approval_requests ADD COLUMN updated_at TEXT")
+            connection.execute(
+                "UPDATE approval_requests SET updated_at = "
+                "COALESCE(decided_at, created_at) WHERE updated_at IS NULL"
+            )
+        connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_approval_idempotency
+            ON approval_requests(idempotency_key)
+            WHERE status = 'pending' AND idempotency_key IS NOT NULL
+            """)
+        try:
             connection.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_approval_idempotency
-                ON approval_requests(idempotency_key)
-                WHERE status = 'pending' AND idempotency_key IS NOT NULL
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_executions_scope
+                ON change_executions(incident_id, change_plan_id, approval_id)
                 """)
-            try:
-                connection.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_executions_scope
-                    ON change_executions(incident_id, change_plan_id, approval_id)
-                    """)
-            except sqlite3.IntegrityError as exc:
-                duplicate_groups = self._count_change_execution_scope_duplicates(connection)
-                raise RuntimeError(
-                    "SQLite change_executions contains "
-                    f"{duplicate_groups} duplicate business-scope groups"
-                ) from exc
-            except sqlite3.OperationalError as exc:
-                raise RuntimeError(
-                    "SQLite change_executions schema cannot enforce business-scope idempotency"
-                ) from exc
+        except sqlite3.IntegrityError as exc:
+            duplicate_groups = self._count_change_execution_scope_duplicates(connection)
+            raise RuntimeError(
+                "SQLite change_executions contains "
+                f"{duplicate_groups} duplicate business-scope groups"
+            ) from exc
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "SQLite change_executions schema cannot enforce business-scope idempotency"
+            ) from exc
 
     def _count_change_execution_scope_duplicates(self, connection: sqlite3.Connection) -> int:
         row = connection.execute("""

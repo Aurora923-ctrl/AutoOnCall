@@ -150,6 +150,17 @@ class Settings(BaseSettings):
     production_exposure_strict: bool = False
     log_retention_days: int = 14
 
+    # ---- OpenTelemetry / dependency resilience ---------------------------------
+    otel_service_name: str = "autooncall"
+    otel_environment: str = "local"
+    otel_exporter_otlp_endpoint: str = ""
+    otel_export_timeout_seconds: float = Field(default=5.0, gt=0)
+    otel_metric_export_interval_seconds: int = Field(default=30, ge=1)
+    otel_instrument_fastapi: bool = True
+    otel_excluded_urls: str = "health/live"
+    dependency_circuit_failure_threshold: int = Field(default=5, ge=1)
+    dependency_circuit_recovery_seconds: float = Field(default=30.0, gt=0)
+
     # ---- 内部 API Token / RBAC 配置 ------------------------------------------
     # Optional internal API-token RBAC. Disabled by default for local demos/tests.
     # When enabled, missing token configuration fails closed.
@@ -224,6 +235,8 @@ class Settings(BaseSettings):
     mysql_database: str = ""
     mysql_instances: str = ""
     mysql_timeout_seconds: float = Field(default=5.0, gt=0)
+    mysql_pool_size: int = Field(default=10, ge=1)
+    mysql_pool_max_overflow: int = Field(default=5, ge=0)
     mysql_include_processlist: bool = False
     aiops_store_raw_external_payload: bool = False
 

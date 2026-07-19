@@ -26,3 +26,8 @@ data/rag_lexical_index.json
 volumes
 dist
 build
+node_modules
+frontend-tests
+package-lock.json
+package.json
+eslint.config.js

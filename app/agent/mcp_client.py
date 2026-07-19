@@ -87,7 +87,14 @@ async def retry_interceptor(
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise TimeoutError("MCP tool total timeout exhausted")
-            task = asyncio.create_task(handler(request))
+            started = asyncio.get_running_loop().create_future()
+
+            async def invoke_handler(started_signal=started):
+                started_signal.set_result(None)
+                return await handler(request)
+
+            task = asyncio.create_task(invoke_handler())
+            await started
             done, _ = await asyncio.wait({task}, timeout=remaining)
             if not done:
                 task.cancel()

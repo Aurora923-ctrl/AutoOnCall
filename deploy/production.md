@@ -27,6 +27,20 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 - Keep `INDEX_ALLOWED_ROOTS` limited to trusted knowledge-base directories such as
   `uploads,docs/knowledge-base`.
 - Use `/health/live` for process liveness and `/health/ready` for dependency and adapter readiness.
+- Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an OTLP/HTTP collector to export FastAPI,
+  HTTP client, LLM, Milvus, Prometheus, retry, timeout, and circuit-breaker telemetry.
+- Apply database changes through the versioned `schema_migrations` table. Runtime
+  startup applies only ordered idempotent migrations and records each applied version.
+
+## Quality Gate Layers
+
+`make verify` and the default GitHub Actions job are deterministic and do not require
+external model keys. They include Python checks, offline evaluations, the async blocking-call
+audit, ESLint, minimal frontend tests, and OpenAPI schema drift verification.
+
+Use `make live-eval` explicitly for real-model RAGAS, live Milvus generation benchmarks,
+and the 30 RAG + 20 AIOps acceptance workload. This separation keeps ordinary CI bounded
+while preserving a release-time live evidence path.
 
 ## Internal API Auth
 

@@ -12,6 +12,7 @@ from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.core.resilience import call_sync_with_resilience
 from app.services.document_splitter_service import canonical_source_id
 from app.services.vector_embedding_service import vector_embedding_service
 from app.utils.log_safety import summarize_text_for_log
@@ -108,13 +109,27 @@ class VectorStoreManager:
                     f"Milvus collection '{self.collection_name}' 未就绪，拒绝降级为 insert"
                 )
             try:
-                cast(Any, vector_store).upsert(
-                    ids=ids,
-                    documents=documents,
-                    batch_size=len(documents),
-                    timeout=config.milvus_timeout / 1000,
+
+                def upsert() -> None:
+                    cast(Any, vector_store).upsert(
+                        ids=ids,
+                        documents=documents,
+                        batch_size=len(documents),
+                        timeout=config.milvus_timeout / 1000,
+                    )
+                    self._flush(vector_store)
+
+                call_sync_with_resilience(
+                    "milvus",
+                    "upsert",
+                    upsert,
+                    timeout_seconds=config.milvus_timeout / 1000,
+                    max_attempts=1,
+                    retry_delay_seconds=0,
+                    is_retryable=_is_retryable_milvus_error,
+                    failure_threshold=config.dependency_circuit_failure_threshold,
+                    recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
                 )
-                self._flush(vector_store)
             except Exception:
                 self._delete_vector_ids_with_store(
                     vector_store,
@@ -331,10 +346,24 @@ class VectorStoreManager:
         safe_query, safe_expr = _validate_search_inputs(query, k=k, expr=expr)
         try:
             vector_store = cast(Any, self._ensure_vector_store())
-            docs = (
-                vector_store.similarity_search(safe_query, k=k, expr=safe_expr)
-                if safe_expr
-                else vector_store.similarity_search(safe_query, k=k)
+
+            def search() -> Any:
+                return (
+                    vector_store.similarity_search(safe_query, k=k, expr=safe_expr)
+                    if safe_expr
+                    else vector_store.similarity_search(safe_query, k=k)
+                )
+
+            docs = call_sync_with_resilience(
+                "milvus",
+                "similarity_search",
+                search,
+                timeout_seconds=config.milvus_timeout / 1000,
+                max_attempts=int(config.milvus_connect_max_retries) + 1,
+                retry_delay_seconds=float(config.milvus_connect_retry_delay_seconds),
+                is_retryable=_is_retryable_milvus_error,
+                failure_threshold=config.dependency_circuit_failure_threshold,
+                recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
             )
             logger.debug(
                 "相似度搜索完成: {}, 结果数={}",
@@ -363,10 +392,24 @@ class VectorStoreManager:
             vector_store = cast(Any, self._ensure_vector_store())
             if not hasattr(vector_store, "similarity_search_with_score"):
                 raise RuntimeError("VectorStore 不支持带分数的相似度检索")
-            results = (
-                vector_store.similarity_search_with_score(safe_query, k=k, expr=safe_expr)
-                if safe_expr
-                else vector_store.similarity_search_with_score(safe_query, k=k)
+
+            def scored_search() -> Any:
+                return (
+                    vector_store.similarity_search_with_score(safe_query, k=k, expr=safe_expr)
+                    if safe_expr
+                    else vector_store.similarity_search_with_score(safe_query, k=k)
+                )
+
+            results = call_sync_with_resilience(
+                "milvus",
+                "similarity_search_with_score",
+                scored_search,
+                timeout_seconds=config.milvus_timeout / 1000,
+                max_attempts=int(config.milvus_connect_max_retries) + 1,
+                retry_delay_seconds=float(config.milvus_connect_retry_delay_seconds),
+                is_retryable=_is_retryable_milvus_error,
+                failure_threshold=config.dependency_circuit_failure_threshold,
+                recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
             )
             logger.debug(
                 "带分数相似度搜索完成: {}, 结果数: {}",
@@ -428,6 +471,26 @@ class VectorStoreManager:
 
 
 vector_store_manager = VectorStoreManager()
+
+
+def _is_retryable_milvus_error(exc: Exception) -> bool:
+    """Retry transient Milvus transport and timeout failures only."""
+
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    error_name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return any(
+        marker in error_name or marker in message
+        for marker in (
+            "timeout",
+            "timed out",
+            "connection",
+            "unavailable",
+            "resource exhausted",
+            "rate limit",
+        )
+    )
 
 
 def _quote_expr_value(value: Any) -> str:

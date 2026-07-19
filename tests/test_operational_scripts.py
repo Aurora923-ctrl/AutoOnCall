@@ -79,11 +79,13 @@ def test_mysql_init_provisions_writable_aiops_runtime_schema() -> None:
         "aiops_sessions",
         "incident_states",
         "diagnosis_reports",
+        "schema_migrations",
     ]:
         assert f"CREATE TABLE IF NOT EXISTS {table}" in runtime_schema
 
     assert "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX" in runtime_schema
     assert "ON autooncall.* TO 'autooncall'@'%'" in runtime_schema
+    assert "INSERT IGNORE INTO schema_migrations" in runtime_schema
 
 
 def test_destructive_maintenance_scripts_require_explicit_confirmation(
@@ -320,9 +322,14 @@ def test_readme_points_to_five_minute_interview_demo_and_core_stack() -> None:
 def test_makefile_verify_runs_quality_gate_targets() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
+    test_quick = makefile.split("test-quick:  ##", maxsplit=1)[1].split(
+        "test-integrations:",
+        maxsplit=1,
+    )[0]
     verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]
     verify = verify.split("check-all:", maxsplit=1)[0]
 
+    assert "--no-cov" in test_quick
     assert "@$(MAKE) format-check" in verify
     assert "@$(MAKE) lint" in verify
     assert "@$(MAKE) type-check" in verify

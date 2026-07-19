@@ -1,5 +1,6 @@
 """Read-only evaluation summary APIs."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,7 @@ async def get_eval_summary() -> dict[str, Any]:
         )
 
     try:
-        raw_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        raw_payload = await _read_json_file(summary_path)
     except (OSError, json.JSONDecodeError):
         return build_eval_unavailable_payload(
             "evaluation summary is unreadable",
@@ -77,7 +78,7 @@ async def get_eval_summary() -> dict[str, Any]:
     return build_eval_summary_payload(
         raw_payload,
         summary_path=summary_path,
-        backlog_payload=load_eval_backlog_payload(backlog_path),
+        backlog_payload=await asyncio.to_thread(load_eval_backlog_payload, backlog_path),
     )
 
 
@@ -91,7 +92,7 @@ async def get_interview_scorecard() -> dict[str, Any]:
             scorecard_path=pointer_path,
         )
     try:
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer = await _read_json_file(pointer_path)
     except (OSError, json.JSONDecodeError):
         return build_interview_scorecard_unavailable_payload(
             "benchmark latest pointer is unreadable",
@@ -108,7 +109,7 @@ async def get_interview_scorecard() -> dict[str, Any]:
             scorecard_path=scorecard_path,
         )
     try:
-        raw_payload = json.loads(scorecard_path.read_text(encoding="utf-8"))
+        raw_payload = await _read_json_file(scorecard_path)
     except (OSError, json.JSONDecodeError):
         return build_interview_scorecard_unavailable_payload(
             "interview scorecard is unreadable",
@@ -144,7 +145,7 @@ async def get_ragas_summary() -> dict[str, Any]:
         )
 
     try:
-        raw_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        raw_payload = await _read_json_file(summary_path)
     except (OSError, json.JSONDecodeError):
         return build_ragas_unavailable_payload(
             "RAGAS quality summary is unreadable",
@@ -181,7 +182,7 @@ async def get_adapter_verification() -> dict[str, Any]:
         )
 
     try:
-        raw_payload = json.loads(adapter_path.read_text(encoding="utf-8"))
+        raw_payload = await _read_json_file(adapter_path)
     except (OSError, json.JSONDecodeError):
         return build_adapter_unavailable_payload(
             "adapter verification is unreadable",
@@ -208,7 +209,7 @@ async def get_adapter_verification() -> dict[str, Any]:
 )
 async def get_eval_backlog() -> dict[str, Any]:
     """Return reviewable eval-backlog drafts generated from feedback and failed evals."""
-    payload = load_eval_backlog_payload(_eval_backlog_path())
+    payload = await asyncio.to_thread(load_eval_backlog_payload, _eval_backlog_path())
     if payload is None:
         return {
             "available": False,
@@ -241,6 +242,11 @@ def load_eval_backlog_payload(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+async def _read_json_file(path: Path) -> Any:
+    text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    return json.loads(text)
 
 
 def _dict_value(payload: dict[str, Any], *keys: str) -> Any:

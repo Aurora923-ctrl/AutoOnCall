@@ -29,7 +29,9 @@ from app.api import (
 from app.config import config
 from app.core.auth import configured_token_scopes
 from app.core.milvus_client import milvus_manager
+from app.core.observability import configure_observability, shutdown_observability
 from app.services.aiops_service import aiops_service
+from app.services.mysql_store import close_mysql_pools
 from app.services.vector_store_manager import vector_store_manager
 from app.utils.log_safety import sanitize_log_value
 
@@ -116,6 +118,8 @@ async def lifespan(app: FastAPI):
             await vector_store_manager.aclose()
         finally:
             milvus_manager.close()
+            close_mysql_pools()
+            shutdown_observability()
         logger.info(f"👋 {app_name} 关闭")
 
 
@@ -128,6 +132,7 @@ app = FastAPI(
     redoc_url="/redoc" if config.debug else None,
     openapi_url="/openapi.json" if config.debug else None,
 )
+configure_observability(app)
 
 app.add_middleware(
     CORSMiddleware,

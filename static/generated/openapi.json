@@ -1,0 +1,6914 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AutoOnCall",
+    "description": "基于 LangChain 的智能oncall运维系统",
+    "version": "1.2.1"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "健康检查"
+        ],
+        "summary": "Health Check",
+        "description": "Compatibility endpoint with readiness semantics.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "健康检查"
+        ],
+        "summary": "Liveness Check",
+        "description": "Return process liveness without checking external dependencies.",
+        "operationId": "liveness_check_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "健康检查"
+        ],
+        "summary": "Readiness Check",
+        "description": "Return dependency readiness for all production traffic capabilities.",
+        "operationId": "readiness_check_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready/rag": {
+      "get": {
+        "tags": [
+          "健康检查"
+        ],
+        "summary": "Rag Readiness Check",
+        "description": "Return readiness for RAG search and upload indexing.",
+        "operationId": "rag_readiness_check_health_ready_rag_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready/aiops": {
+      "get": {
+        "tags": [
+          "健康检查"
+        ],
+        "summary": "Aiops Readiness Check",
+        "description": "Return readiness for AIOps diagnosis.",
+        "operationId": "aiops_readiness_check_health_ready_aiops_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthApiResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "tags": [
+          "对话"
+        ],
+        "summary": "Chat",
+        "description": "快速对话接口\n{\n    \"code\": 200,\n    \"message\": \"success\",\n    \"data\": {\n        \"success\": true,\n        \"answer\": \"回答内容\",\n        \"errorMessage\": null\n    }\n}\n\nArgs:\n    request: 对话请求\n\nReturns:\n    统一格式的对话响应",
+        "operationId": "chat_api_chat_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatApiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat_stream": {
+      "post": {
+        "tags": [
+          "对话"
+        ],
+        "summary": "Chat Stream",
+        "description": "流式对话接口（基于 RAG Agent，SSE）\n\n返回 SSE 格式，data 字段为 JSON：\n\n工具调用事件:\nevent: message\ndata: {\"type\":\"tool_call\",\"data\":{\"tool\":\"工具名\",\"status\":\"start|end\",\"input\":{...}}}\n\n内容流式事件:\nevent: message\ndata: {\"type\":\"content\",\"data\":\"内容块\"}\n\n完成事件:\nevent: message\ndata: {\"type\":\"done\",\"data\":{\"answer\":\"完整答案\",\"tool_calls\":[...]}}\n\nArgs:\n    request: 对话请求\n\nReturns:\n    SSE 事件流",
+        "operationId": "chat_stream_api_chat_stream_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat/clear": {
+      "post": {
+        "tags": [
+          "对话"
+        ],
+        "summary": "Clear Session",
+        "description": "清空会话历史\n\nArgs:\n    request: 清空请求\n\nReturns:\n    操作结果",
+        "operationId": "clear_session_api_chat_clear_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClearRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat/session/{session_id}": {
+      "get": {
+        "tags": [
+          "对话"
+        ],
+        "summary": "Get Session Info",
+        "description": "查询会话历史\n\nArgs:\n    session_id: 会话 ID\n\nReturns:\n    会话信息",
+        "operationId": "get_session_info_api_chat_session__session_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfoResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/upload/config": {
+      "get": {
+        "tags": [
+          "文件管理"
+        ],
+        "summary": "Upload Config",
+        "description": "Return upload constraints used by the frontend before selecting a file.",
+        "operationId": "upload_config_api_upload_config_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadConfigResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/upload": {
+      "post": {
+        "tags": [
+          "文件管理"
+        ],
+        "summary": "Upload File",
+        "description": "上传文件并自动创建向量索引\n\nArgs:\n    file: 上传的文件\n\nReturns:\n    JSONResponse: 上传结果",
+        "operationId": "upload_file_api_upload_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_file_api_upload_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadFileResponse"
+                }
+              }
+            }
+          },
+          "207": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadFileResponse"
+                }
+              }
+            },
+            "description": "Multi-Status"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/index_directory": {
+      "post": {
+        "tags": [
+          "文件管理"
+        ],
+        "summary": "批量索引目录（运维入口）",
+        "description": "面向 make upload 等批处理/运维流程；前端工作台主入口仍使用 /upload。",
+        "operationId": "index_directory_api_index_directory_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "directory_path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Directory Path"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/indexing/reports": {
+      "get": {
+        "tags": [
+          "文件管理"
+        ],
+        "summary": "Knowledge Indexing Reports",
+        "description": "Return persisted loader cleaning quality reports and doc_type aggregates.",
+        "operationId": "knowledge_indexing_reports_api_knowledge_indexing_reports_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "doc_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Doc Type"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeIndexingReportsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/tools/contracts": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "List Aiops Tool Contracts",
+        "description": "Return read-only AIOps tool contracts without invoking external systems.",
+        "operationId": "list_aiops_tool_contracts_api_aiops_tools_contracts_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Aiops Tool Contracts Api Aiops Tools Contracts Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/demo/incidents": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "List Demo Incidents",
+        "description": "Return the central demo incident catalog used by the frontend workbench.",
+        "operationId": "list_demo_incidents_api_aiops_demo_incidents_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Demo Incidents Api Aiops Demo Incidents Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/status-catalog": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Get Aiops Status Catalog",
+        "description": "Return lifecycle statuses used by AIOps history filters and badges.",
+        "operationId": "get_aiops_status_catalog_api_aiops_status_catalog_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Aiops Status Catalog Api Aiops Status Catalog Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/runs": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "List Aiops Runs",
+        "description": "Return recent durable diagnosis runs for history views.",
+        "operationId": "list_aiops_runs_api_aiops_runs_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "service_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Aiops Runs Api Aiops Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/runs/{session_id}": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Get Aiops Run Status",
+        "description": "Return the latest durable state for one diagnosis run.",
+        "operationId": "get_aiops_run_status_api_aiops_runs__session_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Aiops Run Status Api Aiops Runs  Session Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops": {
+      "post": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Diagnose Stream",
+        "description": "Run the Plan-Execute-Replan AIOps diagnosis workflow as an SSE stream.",
+        "operationId": "diagnose_stream_api_aiops_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AIOpsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/demo/incidents/{case_id}": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Get Demo Incident",
+        "description": "Return a ready-to-run demo incident payload for interviews and local demos.",
+        "operationId": "get_demo_incident_api_aiops_demo_incidents__case_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/aiops/demo/incidents/{case_id}/run": {
+      "post": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Run Demo Incident",
+        "description": "Run a fixed demo incident through the normal AIOps SSE workflow.",
+        "operationId": "run_demo_incident_api_aiops_demo_incidents__case_id__run_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AIOpsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/diagnosis/resume": {
+      "post": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Resume Diagnosis Stream",
+        "description": "Record an approved human decision and close the paused diagnosis loop.",
+        "operationId": "resume_diagnosis_stream_api_incidents__incident_id__diagnosis_resume_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AIOpsResumeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/changes/{change_plan_id}/resume": {
+      "post": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Resume Safe Change Stream",
+        "description": "Start the safe change workflow after an approval decision.",
+        "operationId": "resume_safe_change_stream_api_incidents__incident_id__changes__change_plan_id__resume_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "change_plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Change Plan Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeResumeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/changes": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "List Incident Changes",
+        "description": "List safe change executions for one incident.",
+        "operationId": "list_incident_changes_api_incidents__incident_id__changes_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Incident Changes Api Incidents  Incident Id  Changes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/changes/{change_execution_id}": {
+      "get": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Get Change Execution",
+        "description": "Return one safe change execution.",
+        "operationId": "get_change_execution_api_changes__change_execution_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "change_execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Change Execution Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Change Execution Api Changes  Change Execution Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/changes/{change_execution_id}/manual-result": {
+      "post": {
+        "tags": [
+          "AIOps智能运维"
+        ],
+        "summary": "Submit Manual Change Result",
+        "description": "Record a manual execution result for a waiting safe change workflow.",
+        "operationId": "submit_manual_change_result_api_changes__change_execution_id__manual_result_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "change_execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Change Execution Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualExecutionResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Submit Manual Change Result Api Changes  Change Execution Id  Manual Result Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/alertmanager": {
+      "post": {
+        "tags": [
+          "AIOps告警接入"
+        ],
+        "summary": "Ingest Alertmanager Webhook",
+        "description": "Ingest Alertmanager webhook payloads and create/update Incident state.",
+        "operationId": "ingest_alertmanager_webhook_api_alerts_alertmanager_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "auto_diagnose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Auto Diagnose"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertIngestionResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts": {
+      "get": {
+        "tags": [
+          "AIOps告警接入"
+        ],
+        "summary": "List Alerts",
+        "description": "Return recently ingested normalized alerts.",
+        "operationId": "list_alerts_api_alerts_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "firing",
+                    "resolved",
+                    "active",
+                    "triggered",
+                    "inactive",
+                    "ok",
+                    "closed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "service_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/{fingerprint}": {
+      "get": {
+        "tags": [
+          "AIOps告警接入"
+        ],
+        "summary": "Get Alert",
+        "description": "Return one normalized alert by fingerprint.",
+        "operationId": "get_alert_api_alerts__fingerprint__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Fingerprint"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/pending": {
+      "get": {
+        "tags": [
+          "AIOps人工审批"
+        ],
+        "summary": "List Pending Approvals",
+        "description": "List the operator approval queue.",
+        "operationId": "list_pending_approvals_api_approvals_pending_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "include_approved_actions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Approved Actions"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/approval": {
+      "get": {
+        "tags": [
+          "AIOps人工审批"
+        ],
+        "summary": "List Incident Approvals",
+        "description": "List approval requests for one incident.",
+        "operationId": "list_incident_approvals_api_incidents__incident_id__approval_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "approved",
+                    "rejected",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentApprovalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AIOps人工审批"
+        ],
+        "summary": "Submit Incident Approval",
+        "description": "Approve or reject the explicitly identified request for an incident.",
+        "operationId": "submit_incident_approval_api_incidents__incident_id__approval_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents": {
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "List Incidents",
+        "description": "List incident summaries known by report, trace, or approval storage.",
+        "operationId": "list_incidents_api_incidents_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}": {
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "Get Incident Overview",
+        "description": "Return one incident overview assembled from report, trace, and approval state.",
+        "operationId": "get_incident_overview_api_incidents__incident_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOverviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/replay": {
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "Get Incident Replay",
+        "description": "Return a replay-ready incident view assembled from all diagnosis artifacts.",
+        "operationId": "get_incident_replay_api_incidents__incident_id__replay_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentReplayResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/trace": {
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "Get Incident Trace",
+        "description": "Return trace events for one incident.",
+        "operationId": "get_incident_trace_api_incidents__incident_id__trace_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event Type"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentTraceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/report": {
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "Get Incident Report",
+        "description": "Return the latest structured diagnosis report for one incident.",
+        "operationId": "get_incident_report_api_incidents__incident_id__report_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Format"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentReportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents/{incident_id}/feedback": {
+      "post": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "Submit Incident Feedback",
+        "description": "Submit minimal operator feedback for report-quality improvement.",
+        "operationId": "submit_incident_feedback_api_incidents__incident_id__feedback_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiagnosisFeedbackCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentFeedbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "AIOps故障事件"
+        ],
+        "summary": "List Incident Feedback",
+        "description": "List operator feedback for one incident.",
+        "operationId": "list_incident_feedback_api_incidents__incident_id__feedback_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentFeedbackListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/summary": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Eval Summary",
+        "description": "Return the latest offline evaluation summary for the frontend dashboard.",
+        "operationId": "get_eval_summary_api_eval_summary_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Eval Summary Api Eval Summary Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/scorecard": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Interview Scorecard",
+        "description": "Return the scorecard generated inside the latest benchmark run directory.",
+        "operationId": "get_interview_scorecard_api_eval_scorecard_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Interview Scorecard Api Eval Scorecard Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/ragas": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Ragas Summary",
+        "description": "Return the latest optional RAGAS quality report for RAG answers.",
+        "operationId": "get_ragas_summary_api_eval_ragas_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRagasResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/ragas-summary": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Ragas Summary Alias",
+        "description": "Return the latest RAGAS quality report using the explicit summary alias.",
+        "operationId": "get_ragas_summary_alias_api_eval_ragas_summary_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRagasResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/adapter-verification": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Adapter Verification",
+        "description": "Return the latest full-stack adapter verification payload for the frontend.",
+        "operationId": "get_adapter_verification_api_eval_adapter_verification_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Adapter Verification Api Eval Adapter Verification Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/backlog": {
+      "get": {
+        "tags": [
+          "离线评测"
+        ],
+        "summary": "Get Eval Backlog",
+        "description": "Return reviewable eval-backlog drafts generated from feedback and failed evals.",
+        "operationId": "get_eval_backlog_api_eval_backlog_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalBacklogResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/feedback": {
+      "post": {
+        "tags": [
+          "反馈闭环"
+        ],
+        "summary": "Submit Bad Case Feedback",
+        "description": "Submit thumb feedback with runtime context for eval-case drafting.",
+        "operationId": "submit_bad_case_feedback_api_feedback_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BadCaseFeedbackCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadCaseFeedbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/feedback/bad-cases": {
+      "get": {
+        "tags": [
+          "反馈闭环"
+        ],
+        "summary": "List Bad Case Feedback",
+        "description": "List captured bad cases that can be promoted into regression cases.",
+        "operationId": "list_bad_case_feedback_api_feedback_bad_cases_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target"
+            }
+          },
+          {
+            "name": "high_value_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "High Value Only"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadCaseFeedbackListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/feedback/eval-backlog": {
+      "get": {
+        "tags": [
+          "反馈闭环"
+        ],
+        "summary": "List Eval Backlog",
+        "description": "List reviewable eval backlog drafts without promoting them into eval YAML.",
+        "operationId": "list_eval_backlog_api_feedback_eval_backlog_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target"
+            }
+          },
+          {
+            "name": "review_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Review Status"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalBacklogListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/agent-card.json": {
+      "get": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "Get Agent Card",
+        "description": "Return the public A2A Agent Card for capability discovery.",
+        "operationId": "get_agent_card__well_known_agent_card_json_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/v1/extendedAgentCard": {
+      "get": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "Get Extended Agent Card",
+        "description": "Return the extended Agent Card with examples for authenticated callers.",
+        "operationId": "get_extended_agent_card_a2a_v1_extendedAgentCard_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          },
+          {
+            "name": "A2A-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "A2A-Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/v1/message:send": {
+      "post": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "Message Send",
+        "description": "Handle A2A message:send.",
+        "operationId": "message_send_a2a_v1_message_send_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          },
+          {
+            "name": "A2A-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "A2A-Version"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/v1/message:stream": {
+      "post": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "Message Stream",
+        "description": "Handle A2A message:stream using SSE.",
+        "operationId": "message_stream_a2a_v1_message_stream_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          },
+          {
+            "name": "A2A-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "A2A-Version"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/v1/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "Get Task",
+        "description": "Return a current A2A task view backed by an AutoOnCall diagnosis run.",
+        "operationId": "get_task_a2a_v1_tasks__task_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          },
+          {
+            "name": "A2A-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "A2A-Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/v1/tasks": {
+      "get": {
+        "tags": [
+          "A2A Agent"
+        ],
+        "summary": "List Tasks",
+        "description": "Return recent A2A task views.",
+        "operationId": "list_tasks_a2a_v1_tasks_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Incident Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-AutoOnCall-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Autooncall-Token"
+            }
+          },
+          {
+            "name": "A2A-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "A2A-Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "返回首页",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AIOpsRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "description": "会话ID，用于追踪诊断历史"
+          },
+          "incident": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Incident"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "结构化故障事件；不传时后端会根据当前任务自动构造默认 Incident"
+          }
+        },
+        "type": "object",
+        "title": "AIOpsRequest",
+        "description": "Request body for the streaming `/api/aiops` diagnosis endpoint.",
+        "example": {
+          "incident": {
+            "environment": "prod",
+            "service_name": "order-service",
+            "severity": "P1",
+            "symptom": "5xx 错误率升高，P95 延迟超过 3 秒，并出现 Redis connection timeout",
+            "title": "order-service Redis timeout"
+          },
+          "session_id": "session-123"
+        }
+      },
+      "AIOpsResumeRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "description": "原诊断会话 ID；新审批会从 metadata 自动推断，旧审批可显式传入。"
+          },
+          "approval_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Approval Id",
+            "description": "要恢复的审批 ID。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_id"
+        ],
+        "title": "AIOpsResumeRequest",
+        "description": "Request body for resuming a paused AIOps diagnosis after approval.",
+        "example": {
+          "approval_id": "apr_xxx",
+          "session_id": "session-123"
+        }
+      },
+      "AlertDetailResponse": {
+        "properties": {
+          "alert": {
+            "$ref": "#/components/schemas/AlertEvent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "alert"
+        ],
+        "title": "AlertDetailResponse",
+        "description": "Detail response for one normalized alert event."
+      },
+      "AlertEvent": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Source",
+            "default": "alertmanager"
+          },
+          "fingerprint": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Fingerprint"
+          },
+          "incident_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Incident Id"
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Status",
+            "default": "firing"
+          },
+          "alertname": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Alertname",
+            "default": "UnknownAlert"
+          },
+          "service_name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Service Name",
+            "default": "unknown-service"
+          },
+          "severity": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Severity",
+            "default": "P2"
+          },
+          "environment": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Environment",
+            "default": "unknown"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 4096,
+            "title": "Summary",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4096,
+            "title": "Description",
+            "default": ""
+          },
+          "labels": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Labels"
+          },
+          "annotations": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Annotations"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "generator_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "title": "Generator Url",
+            "default": ""
+          },
+          "raw_payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Raw Payload"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fingerprint",
+          "incident_id"
+        ],
+        "title": "AlertEvent",
+        "description": "Normalized alert event persisted before it becomes an Incident."
+      },
+      "AlertIngestionItem": {
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created",
+            "default": false
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "title": "Deduplicated",
+            "default": false
+          },
+          "previous_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Status"
+          },
+          "status_changed": {
+            "type": "boolean",
+            "title": "Status Changed",
+            "default": false
+          },
+          "reopened": {
+            "type": "boolean",
+            "title": "Reopened",
+            "default": false
+          },
+          "stale_ignored": {
+            "type": "boolean",
+            "title": "Stale Ignored",
+            "default": false
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "incident_status": {
+            "type": "string",
+            "title": "Incident Status"
+          },
+          "status_reason": {
+            "type": "string",
+            "title": "Status Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "event",
+          "incident_id",
+          "incident_status"
+        ],
+        "title": "AlertIngestionItem",
+        "description": "One normalized alert and the Incident lifecycle result it produced."
+      },
+      "AlertIngestionResult": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "alertmanager"
+          },
+          "received": {
+            "type": "integer",
+            "title": "Received",
+            "default": 0
+          },
+          "created": {
+            "type": "integer",
+            "title": "Created",
+            "default": 0
+          },
+          "deduplicated": {
+            "type": "integer",
+            "title": "Deduplicated",
+            "default": 0
+          },
+          "resolved": {
+            "type": "integer",
+            "title": "Resolved",
+            "default": 0
+          },
+          "stale_ignored": {
+            "type": "integer",
+            "title": "Stale Ignored",
+            "default": 0
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AlertIngestionItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AlertIngestionResult",
+        "description": "Response returned after processing an alert webhook."
+      },
+      "AlertListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AlertListResponse",
+        "description": "List response for normalized alert events."
+      },
+      "ApiResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "状态"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "消息"
+          },
+          "data": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data",
+            "description": "数据"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "ApiResponse",
+        "description": "通用 API 响应"
+      },
+      "ApprovalDecisionRequest": {
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Approval Id"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "reject",
+              "cancel"
+            ],
+            "title": "Decision"
+          },
+          "decided_by": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Decided By",
+            "default": "operator"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_id",
+          "decision"
+        ],
+        "title": "ApprovalDecisionRequest",
+        "description": "API payload for approving or rejecting a pending action."
+      },
+      "ApprovalDecisionResponse": {
+        "properties": {
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval"
+        ],
+        "title": "ApprovalDecisionResponse",
+        "description": "Response after approving or rejecting one approval request."
+      },
+      "ApprovalListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequest"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "ApprovalListResponse",
+        "description": "List response for pending approval requests."
+      },
+      "ApprovalRequest": {
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Approval Id"
+          },
+          "incident_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Incident Id"
+          },
+          "action": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Action"
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Risk Level"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Reason",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "cancelled"
+            ],
+            "title": "Status",
+            "default": "pending"
+          },
+          "step_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Id"
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Name"
+          },
+          "change_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangePlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requested_by": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Requested By",
+            "default": "aiops-agent"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "decision_reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Decision Reason",
+            "default": ""
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "projection_pending": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Projection Pending"
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Expires In Seconds",
+            "default": 3600
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id",
+          "action",
+          "risk_level"
+        ],
+        "title": "ApprovalRequest",
+        "description": "Human approval request for non-read-only or risky actions."
+      },
+      "BadCaseFeedback": {
+        "properties": {
+          "feedback_id": {
+            "type": "string",
+            "title": "Feedback Id"
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id",
+            "default": "anonymous"
+          },
+          "dedupe_fingerprint": {
+            "type": "string",
+            "title": "Dedupe Fingerprint",
+            "default": ""
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id",
+            "default": ""
+          },
+          "report_id": {
+            "type": "string",
+            "title": "Report Id",
+            "default": ""
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id",
+            "default": ""
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "default": ""
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "rag",
+              "aiops",
+              "change",
+              "ragas"
+            ],
+            "title": "Target"
+          },
+          "vote": {
+            "type": "string",
+            "enum": [
+              "thumb_up",
+              "thumb_down"
+            ],
+            "title": "Vote"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "retrieval_failure",
+              "missing_citation",
+              "tool_failure",
+              "hallucination_risk",
+              "permission_denied",
+              "poor_report_quality"
+            ],
+            "title": "Category"
+          },
+          "category_label": {
+            "type": "string",
+            "title": "Category Label",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          },
+          "expected_answer": {
+            "type": "string",
+            "title": "Expected Answer",
+            "default": ""
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/FeedbackEvidence"
+          },
+          "high_value": {
+            "type": "boolean",
+            "title": "High Value",
+            "default": false
+          },
+          "reference_status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "unverified",
+              "orphaned"
+            ],
+            "title": "Reference Status",
+            "default": "unverified"
+          },
+          "orphan_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Orphan Reasons"
+          },
+          "improvement_items": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Improvement Items"
+          },
+          "exported_eval_case_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exported Eval Case Ids"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target",
+          "vote",
+          "category"
+        ],
+        "title": "BadCaseFeedback",
+        "description": "Persisted feedback item used to turn bad cases into offline eval cases."
+      },
+      "BadCaseFeedbackCreate": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "rag",
+              "aiops",
+              "change",
+              "ragas"
+            ],
+            "title": "Target"
+          },
+          "vote": {
+            "type": "string",
+            "enum": [
+              "thumb_up",
+              "thumb_down"
+            ],
+            "title": "Vote"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Idempotency Key",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "default": ""
+          },
+          "expected_answer": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Expected Answer",
+            "default": ""
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "retrieval_failure",
+                  "missing_citation",
+                  "tool_failure",
+                  "hallucination_risk",
+                  "permission_denied",
+                  "poor_report_quality"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 8000,
+            "title": "Query",
+            "default": ""
+          },
+          "answer": {
+            "type": "string",
+            "maxLength": 12000,
+            "title": "Answer",
+            "default": ""
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "retrieval_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Retrieval Results"
+          },
+          "rejected_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Rejected Results"
+          },
+          "trace_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Trace Id",
+            "default": ""
+          },
+          "tool_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tool Calls"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target",
+          "vote"
+        ],
+        "title": "BadCaseFeedbackCreate",
+        "description": "Input payload for RAG/AIOps thumb feedback.",
+        "example": {
+          "answer": "当前回答内容",
+          "category": "retrieval_failure",
+          "citations": [],
+          "expected_answer": "应引用 redis_maxclients.md 并说明 connected_clients 接近上限。",
+          "metadata": {
+            "session_id": "session-1"
+          },
+          "query": "order-service Redis timeout 怎么排查？",
+          "reason": "召回到了 CPU 文档，但问题实际是 Redis maxclients。",
+          "rejected_results": [],
+          "retrieval_results": [],
+          "target": "rag",
+          "tool_calls": [],
+          "trace_id": "trace-1",
+          "vote": "thumb_down"
+        }
+      },
+      "BadCaseFeedbackListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BadCaseFeedback"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "BadCaseFeedbackListResponse",
+        "description": "List response for captured bad cases."
+      },
+      "BadCaseFeedbackResponse": {
+        "properties": {
+          "feedback": {
+            "$ref": "#/components/schemas/BadCaseFeedback"
+          }
+        },
+        "type": "object",
+        "required": [
+          "feedback"
+        ],
+        "title": "BadCaseFeedbackResponse",
+        "description": "Response after thumb feedback is captured."
+      },
+      "Body_upload_file_api_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_file_api_upload_post"
+      },
+      "ChangePlan": {
+        "properties": {
+          "change_plan_id": {
+            "type": "string",
+            "title": "Change Plan Id"
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Risk Level",
+            "default": "medium"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "approved",
+              "rejected",
+              "cancelled"
+            ],
+            "title": "Status",
+            "default": "draft"
+          },
+          "pre_checklist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pre Checklist"
+          },
+          "execution_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Execution Steps"
+          },
+          "rollback_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Rollback Steps"
+          },
+          "verification_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Verification Steps"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeStep"
+            },
+            "type": "array",
+            "title": "Steps"
+          },
+          "rollback_plan": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeStep"
+            },
+            "type": "array",
+            "title": "Rollback Plan"
+          },
+          "remediation_playbook": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemediationPlaybook"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observe_metrics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Observe Metrics"
+          },
+          "blast_radius": {
+            "type": "string",
+            "title": "Blast Radius",
+            "default": ""
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "title": "Expires In Seconds",
+            "default": 3600
+          },
+          "manual_execution_required": {
+            "type": "boolean",
+            "title": "Manual Execution Required",
+            "default": true
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": "Agent 只生成变更计划草案，不自动执行生产动作。"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id",
+          "action"
+        ],
+        "title": "ChangePlan",
+        "description": "A non-executing production change plan attached to approvals and reports."
+      },
+      "ChangeResumeRequest": {
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Approval Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "dry_run_only",
+              "manual_record",
+              "sandbox"
+            ],
+            "title": "Mode",
+            "default": "dry_run_only"
+          },
+          "operator": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Operator",
+            "default": "operator"
+          },
+          "observe_window_seconds": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Observe Window Seconds",
+            "default": 300
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_id"
+        ],
+        "title": "ChangeResumeRequest",
+        "description": "Request body for starting a safe change workflow after approval."
+      },
+      "ChangeStep": {
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "title": "Step Id"
+          },
+          "action_type": {
+            "type": "string",
+            "title": "Action Type",
+            "default": "manual"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target",
+            "default": ""
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name",
+            "default": ""
+          },
+          "input_args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Input Args"
+          },
+          "expected_result": {
+            "type": "string",
+            "title": "Expected Result",
+            "default": ""
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Risk Level",
+            "default": "medium"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "default": true
+          },
+          "can_dry_run": {
+            "type": "boolean",
+            "title": "Can Dry Run",
+            "default": true
+          },
+          "rollback_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Step Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "skipped"
+            ],
+            "title": "Status",
+            "default": "pending"
+          }
+        },
+        "type": "object",
+        "title": "ChangeStep",
+        "description": "Structured execution or rollback step inside a human-approved change plan."
+      },
+      "ChatApiResponse": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ChatDataResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "title": "ChatApiResponse",
+        "description": "Envelope returned by the non-streaming chat endpoint."
+      },
+      "ChatDataResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "retrieval": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Retrieval"
+          },
+          "observability": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Observability"
+          },
+          "noAnswer": {
+            "type": "boolean",
+            "title": "Noanswer",
+            "default": false
+          },
+          "answerPolicy": {
+            "type": "string",
+            "title": "Answerpolicy",
+            "default": ""
+          },
+          "errorMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errormessage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success"
+        ],
+        "title": "ChatDataResponse",
+        "description": "Data payload returned by the non-streaming chat endpoint."
+      },
+      "ChatRequest": {
+        "properties": {
+          "Id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Id",
+            "description": "会话 ID"
+          },
+          "Question": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Question",
+            "description": "用户问题"
+          },
+          "metadataFilter": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadatafilter",
+            "description": "RAG 检索 metadata 精确过滤条件"
+          },
+          "evidenceLevel": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "offline_fixture",
+                  "local_live",
+                  "controlled_fault",
+                  "production"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencelevel",
+            "description": "Optional provenance level for persisted request performance evidence."
+          },
+          "acceptanceRunId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acceptancerunid",
+            "description": "Optional bounded run identity for local-live acceptance evidence."
+          }
+        },
+        "type": "object",
+        "required": [
+          "Id",
+          "Question"
+        ],
+        "title": "ChatRequest",
+        "description": "对话请求",
+        "example": {
+          "Id": "session-123",
+          "Question": "什么是向量数据库？"
+        }
+      },
+      "ClearRequest": {
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Sessionid",
+            "description": "会话 ID"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sessionId"
+        ],
+        "title": "ClearRequest",
+        "description": "清空会话请求"
+      },
+      "DiagnosisFeedback": {
+        "properties": {
+          "feedback_id": {
+            "type": "string",
+            "title": "Feedback Id"
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id",
+            "default": "anonymous"
+          },
+          "dedupe_fingerprint": {
+            "type": "string",
+            "title": "Dedupe Fingerprint",
+            "default": ""
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "report_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Report Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id",
+            "default": ""
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "default": ""
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "vote": {
+            "type": "string",
+            "enum": [
+              "thumb_up",
+              "thumb_down"
+            ],
+            "title": "Vote",
+            "default": "thumb_down"
+          },
+          "root_cause_correct": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "partial",
+              "no"
+            ],
+            "title": "Root Cause Correct"
+          },
+          "accepted_suggestion": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no"
+            ],
+            "title": "Accepted Suggestion"
+          },
+          "operator_note": {
+            "type": "string",
+            "title": "Operator Note",
+            "default": ""
+          },
+          "improvement_items": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Improvement Items"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id",
+          "report_id",
+          "root_cause_correct",
+          "accepted_suggestion"
+        ],
+        "title": "DiagnosisFeedback",
+        "description": "Operator feedback used to turn weak reports into improvement backlog."
+      },
+      "DiagnosisFeedbackCreate": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "run_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Run Id",
+            "default": ""
+          },
+          "session_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Session Id",
+            "default": ""
+          },
+          "trace_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Trace Id",
+            "default": ""
+          },
+          "root_cause_correct": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "partial",
+              "no"
+            ],
+            "title": "Root Cause Correct"
+          },
+          "accepted_suggestion": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no"
+            ],
+            "title": "Accepted Suggestion"
+          },
+          "operator_note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Operator Note",
+            "default": ""
+          },
+          "expected_answer": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Expected Answer",
+            "default": ""
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "retrieval_failure",
+                  "missing_citation",
+                  "tool_failure",
+                  "hallucination_risk",
+                  "permission_denied",
+                  "poor_report_quality"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "vote": {
+            "type": "string",
+            "enum": [
+              "thumb_up",
+              "thumb_down"
+            ],
+            "title": "Vote",
+            "default": "thumb_down"
+          }
+        },
+        "type": "object",
+        "required": [
+          "report_id",
+          "root_cause_correct",
+          "accepted_suggestion"
+        ],
+        "title": "DiagnosisFeedbackCreate",
+        "description": "Input payload for the incident report feedback loop."
+      },
+      "DiagnosisReport": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": "AIOps diagnosis report"
+          },
+          "service_name": {
+            "type": "string",
+            "title": "Service Name",
+            "default": "unknown-service"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity",
+            "default": "P2"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment",
+            "default": "unknown"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "completed"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "root_cause": {
+            "type": "string",
+            "title": "Root Cause",
+            "default": ""
+          },
+          "hypotheses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Hypotheses"
+          },
+          "hypothesis_ranking": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Hypothesis Ranking"
+          },
+          "selected_root_cause_id": {
+            "type": "string",
+            "title": "Selected Root Cause Id",
+            "default": ""
+          },
+          "selected_root_cause_category": {
+            "type": "string",
+            "title": "Selected Root Cause Category",
+            "default": "unknown"
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "key_findings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Key Findings"
+          },
+          "confirmed_facts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Confirmed Facts"
+          },
+          "inferred_conclusions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Inferred Conclusions"
+          },
+          "next_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Next Steps"
+          },
+          "tool_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tool Calls"
+          },
+          "dependency_signals": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Dependency Signals"
+          },
+          "timeline": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Timeline"
+          },
+          "impact": {
+            "type": "string",
+            "title": "Impact",
+            "default": ""
+          },
+          "risk_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Risk Summary"
+          },
+          "manual_action_required": {
+            "type": "boolean",
+            "title": "Manual Action Required",
+            "default": false
+          },
+          "approval_status": {
+            "type": "string",
+            "title": "Approval Status",
+            "default": "not_required"
+          },
+          "approval_decision": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Approval Decision"
+          },
+          "change_plan": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Change Plan"
+          },
+          "change_executions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Change Executions"
+          },
+          "remediation_suggestion": {
+            "type": "string",
+            "title": "Remediation Suggestion",
+            "default": ""
+          },
+          "prevention": {
+            "type": "string",
+            "title": "Prevention",
+            "default": ""
+          },
+          "trace_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Trace Summary"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "evidence_profile": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence Profile"
+          },
+          "evidence_sufficiency": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence Sufficiency"
+          },
+          "degradation_analysis": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Degradation Analysis"
+          },
+          "evidence_graph": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence Graph"
+          },
+          "conclusion_alignment": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Conclusion Alignment"
+          },
+          "confidence_reason": {
+            "type": "string",
+            "title": "Confidence Reason",
+            "default": ""
+          },
+          "uncertainties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Uncertainties"
+          },
+          "markdown": {
+            "type": "string",
+            "title": "Markdown",
+            "default": ""
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "default": 0.0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id"
+        ],
+        "title": "DiagnosisReport",
+        "description": "Structured diagnosis and post-incident report."
+      },
+      "EvalBacklogItem": {
+        "properties": {
+          "backlog_id": {
+            "type": "string",
+            "title": "Backlog Id"
+          },
+          "feedback_id": {
+            "type": "string",
+            "title": "Feedback Id",
+            "default": ""
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "feedback"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "rag",
+              "aiops",
+              "change",
+              "ragas"
+            ],
+            "title": "Target"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "retrieval_failure",
+              "missing_citation",
+              "tool_failure",
+              "hallucination_risk",
+              "permission_denied",
+              "poor_report_quality"
+            ],
+            "title": "Category"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ],
+            "title": "Priority",
+            "default": "P1"
+          },
+          "review_status": {
+            "type": "string",
+            "enum": [
+              "new",
+              "reviewed",
+              "promoted",
+              "rejected"
+            ],
+            "title": "Review Status",
+            "default": "new"
+          },
+          "suggested_eval_file": {
+            "type": "string",
+            "title": "Suggested Eval File",
+            "default": ""
+          },
+          "suggested_eval_suite": {
+            "type": "string",
+            "title": "Suggested Eval Suite",
+            "default": "aiops"
+          },
+          "suggested_eval_case_id": {
+            "type": "string",
+            "title": "Suggested Eval Case Id",
+            "default": ""
+          },
+          "suggested_eval_dimension": {
+            "type": "string",
+            "title": "Suggested Eval Dimension",
+            "default": ""
+          },
+          "expected_behavior": {
+            "type": "string",
+            "title": "Expected Behavior",
+            "default": ""
+          },
+          "failure_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failure Reasons"
+          },
+          "evidence_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence Snapshot"
+          },
+          "links": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Links"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "reviewed_by": {
+            "type": "string",
+            "title": "Reviewed By",
+            "default": ""
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target",
+          "category"
+        ],
+        "title": "EvalBacklogItem",
+        "description": "Reviewable draft that connects one bad case to a future eval regression case."
+      },
+      "EvalBacklogListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvalBacklogItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "title": "EvalBacklogListResponse",
+        "description": "List response for reviewable eval-backlog drafts."
+      },
+      "EvalBacklogResponse": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": false
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvalBacklogItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "invalid_items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Invalid Items"
+          }
+        },
+        "type": "object",
+        "title": "EvalBacklogResponse",
+        "description": "Read response for reviewable eval-backlog drafts."
+      },
+      "EvalRagasResponse": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": false
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "default": ""
+          },
+          "artifact": {
+            "type": "string",
+            "title": "Artifact",
+            "default": ""
+          },
+          "run": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "thresholds": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Thresholds"
+          },
+          "quality_contract": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Quality Contract"
+          },
+          "dashboard": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Dashboard"
+          },
+          "case_scores": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Case Scores"
+          },
+          "failed_cases": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Failed Cases"
+          },
+          "artifact_status": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Artifact Status"
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "default": true
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "EvalRagasResponse",
+        "description": "Read response for the latest optional RAGAS quality report."
+      },
+      "FeedbackEvidence": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "default": ""
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer",
+            "default": ""
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "retrieval_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Retrieval Results"
+          },
+          "rejected_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Rejected Results"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "tool_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tool Calls"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "title": "FeedbackEvidence",
+        "description": "Runtime context captured with a feedback item for later eval-case drafting."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthApiResponse": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "data": {
+            "$ref": "#/components/schemas/HealthDataResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "title": "HealthApiResponse",
+        "description": "Envelope returned by liveness and readiness endpoints."
+      },
+      "HealthDataResponse": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "checks": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Checks"
+          },
+          "capabilities": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Capabilities"
+          },
+          "milvus": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milvus"
+          },
+          "selected_capability": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Capability"
+          },
+          "unready_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unready Capabilities"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "status",
+          "mode"
+        ],
+        "title": "HealthDataResponse",
+        "description": "Shared liveness/readiness payload."
+      },
+      "Incident": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Incident Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "default": "AIOps diagnosis request"
+          },
+          "service_name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Service Name",
+            "default": "unknown-service"
+          },
+          "severity": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Severity",
+            "default": "P2"
+          },
+          "symptom": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Symptom",
+            "default": ""
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Start Time"
+          },
+          "environment": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Environment",
+            "default": "unknown"
+          },
+          "raw_alert": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Raw Alert"
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Status",
+            "default": "investigating"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "title": "Incident",
+        "description": "A structured incident event that drives an AIOps diagnosis."
+      },
+      "IncidentApprovalListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequest"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id"
+        ],
+        "title": "IncidentApprovalListResponse",
+        "description": "List response for approval requests scoped to one incident."
+      },
+      "IncidentFeedbackListResponse": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosisFeedback"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id"
+        ],
+        "title": "IncidentFeedbackListResponse",
+        "description": "Feedback items scoped to one incident."
+      },
+      "IncidentFeedbackResponse": {
+        "properties": {
+          "feedback": {
+            "$ref": "#/components/schemas/DiagnosisFeedback"
+          }
+        },
+        "type": "object",
+        "required": [
+          "feedback"
+        ],
+        "title": "IncidentFeedbackResponse",
+        "description": "Response after an operator submits report feedback."
+      },
+      "IncidentListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "IncidentListResponse",
+        "description": "List response for incident overview summaries."
+      },
+      "IncidentOverviewResponse": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "status_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Status Metadata"
+          },
+          "status_reason": {
+            "type": "string",
+            "title": "Status Reason",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "service_name": {
+            "type": "string",
+            "title": "Service Name"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "root_cause": {
+            "type": "string",
+            "title": "Root Cause",
+            "default": ""
+          },
+          "manual_action_required": {
+            "type": "boolean",
+            "title": "Manual Action Required",
+            "default": false
+          },
+          "approval_status": {
+            "type": "string",
+            "title": "Approval Status",
+            "default": "not_required"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "default": ""
+          },
+          "lifecycle": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle"
+          },
+          "trace_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Trace Summary"
+          },
+          "approval_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Approval Summary"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosisReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diagnosis_chain": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnosis Chain"
+          },
+          "links": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Links"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id",
+          "status",
+          "title",
+          "service_name",
+          "severity",
+          "environment"
+        ],
+        "title": "IncidentOverviewResponse",
+        "description": "Aggregated incident, trace, approval, report, and diagnosis-chain view."
+      },
+      "IncidentReplayResponse": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "status_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Status Metadata"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "service_name": {
+            "type": "string",
+            "title": "Service Name"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "root_cause": {
+            "type": "string",
+            "title": "Root Cause",
+            "default": ""
+          },
+          "overview": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Overview"
+          },
+          "stages": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Stages"
+          },
+          "timeline": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Timeline"
+          },
+          "replanner_decisions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Replanner Decisions"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics"
+          },
+          "evidence_quality": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence Quality"
+          },
+          "tooling": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Tooling"
+          },
+          "approval_flow": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Approval Flow"
+          },
+          "change_flow": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Change Flow"
+          },
+          "report_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Report Summary"
+          },
+          "evaluation": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evaluation"
+          },
+          "links": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Links"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id",
+          "status",
+          "title",
+          "service_name",
+          "severity",
+          "environment"
+        ],
+        "title": "IncidentReplayResponse",
+        "description": "Replay-ready view of one diagnosis from alert to report."
+      },
+      "IncidentReportResponse": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "report_id": {
+            "type": "string",
+            "title": "Report Id",
+            "default": ""
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosisReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "markdown": {
+            "type": "string",
+            "title": "Markdown",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id"
+        ],
+        "title": "IncidentReportResponse",
+        "description": "Latest diagnosis report response for one incident."
+      },
+      "IncidentTraceResponse": {
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id",
+            "default": ""
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TraceEvent"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident_id"
+        ],
+        "title": "IncidentTraceResponse",
+        "description": "Trace response for one incident."
+      },
+      "KnowledgeIndexingReportsResponse": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "default": 200
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "success"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "title": "KnowledgeIndexingReportsResponse",
+        "description": "Knowledge indexing quality report response."
+      },
+      "ManualExecutionResultRequest": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed",
+              "partial",
+              "recovery_pending",
+              "rolled_back",
+              "rollback_failed"
+            ],
+            "title": "Status"
+          },
+          "operator": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Operator",
+            "default": "operator"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Notes",
+            "default": ""
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence"
+          },
+          "observed_metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Observed Metrics"
+          },
+          "step_results": {
+            "items": {
+              "$ref": "#/components/schemas/ManualStepResult"
+            },
+            "type": "array",
+            "title": "Step Results"
+          },
+          "observe_window_seconds": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Observe Window Seconds",
+            "default": 300
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "ManualExecutionResultRequest",
+        "description": "Request body for recording a human-executed change result."
+      },
+      "ManualStepResult": {
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Step Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed",
+              "skipped",
+              "rolled_back"
+            ],
+            "title": "Status"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "step_id",
+          "status"
+        ],
+        "title": "ManualStepResult",
+        "description": "Human-recorded outcome for one approved change step."
+      },
+      "RemediationPlaybook": {
+        "properties": {
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "risk_policy": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "approval_required",
+              "forbidden"
+            ],
+            "title": "Risk Policy",
+            "default": "approval_required"
+          },
+          "approval_required": {
+            "type": "boolean",
+            "title": "Approval Required",
+            "default": true
+          },
+          "pre_check": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pre Check"
+          },
+          "dry_run": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dry Run"
+          },
+          "sandbox_or_manual_record": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sandbox Or Manual Record"
+          },
+          "rollback": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Rollback"
+          },
+          "observe_metrics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Observe Metrics"
+          },
+          "stop_conditions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stop Conditions"
+          },
+          "safety_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Safety Notes"
+          }
+        },
+        "type": "object",
+        "title": "RemediationPlaybook",
+        "description": "Auditable remediation playbook that never executes production changes itself."
+      },
+      "SessionInfoResponse": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID"
+          },
+          "message_count": {
+            "type": "integer",
+            "title": "Message Count",
+            "description": "消息数量"
+          },
+          "history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "History",
+            "description": "历史消息列表"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "message_count",
+          "history"
+        ],
+        "title": "SessionInfoResponse",
+        "description": "会话信息响应"
+      },
+      "TraceEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "incident_id": {
+            "type": "string",
+            "title": "Incident Id"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type",
+            "default": "node"
+          },
+          "node_name": {
+            "type": "string",
+            "title": "Node Name"
+          },
+          "step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Id"
+          },
+          "input_summary": {
+            "type": "string",
+            "title": "Input Summary",
+            "default": ""
+          },
+          "output_summary": {
+            "type": "string",
+            "title": "Output Summary",
+            "default": ""
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Name"
+          },
+          "tool_args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Tool Args"
+          },
+          "tool_result": {
+            "title": "Tool Result"
+          },
+          "latency_ms": {
+            "type": "number",
+            "title": "Latency Ms",
+            "default": 0.0
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "success"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "trace_id",
+          "incident_id",
+          "node_name"
+        ],
+        "title": "TraceEvent",
+        "description": "Trace event for graph nodes, tool calls, and future LLM calls."
+      },
+      "UploadConfigData": {
+        "properties": {
+          "allowed_extensions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Extensions"
+          },
+          "max_file_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max File Size"
+          },
+          "max_file_size_mb": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max File Size Mb"
+          }
+        },
+        "type": "object",
+        "required": [
+          "max_file_size",
+          "max_file_size_mb"
+        ],
+        "title": "UploadConfigData",
+        "description": "Frontend-visible file upload constraints."
+      },
+      "UploadConfigResponse": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "default": 200
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "success"
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadConfigData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "UploadConfigResponse",
+        "description": "File upload configuration response."
+      },
+      "UploadFileData": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Size"
+          },
+          "overwritten": {
+            "type": "boolean",
+            "title": "Overwritten",
+            "default": false
+          },
+          "indexing_ready": {
+            "type": "boolean",
+            "title": "Indexing Ready",
+            "default": false
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/UploadIndexingStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "filename",
+          "file_path",
+          "size",
+          "indexing"
+        ],
+        "title": "UploadFileData",
+        "description": "Saved file metadata plus indexing readiness."
+      },
+      "UploadFileResponse": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadFileData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "title": "UploadFileResponse",
+        "description": "File upload and indexing response."
+      },
+      "UploadIndexingStatus": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "empty",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "chunk_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Chunk Count"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Duration Ms"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "cleaning": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Cleaning"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "chunk_count",
+          "duration_ms"
+        ],
+        "title": "UploadIndexingStatus",
+        "description": "Public indexing outcome returned by the upload API."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
