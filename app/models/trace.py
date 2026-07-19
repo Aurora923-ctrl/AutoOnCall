@@ -1,7 +1,7 @@
 """Trace and tool call audit models for AIOps workflows."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +27,8 @@ class ToolCallRecord(BaseModel):
     risk_level: str = "low"
     read_only: bool = True
     error_message: str | None = None
+    invocation_kind: Literal["tool", "analysis_fallback", "policy"] = "tool"
+    actual_tool_invoked: bool = True
     execution_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 

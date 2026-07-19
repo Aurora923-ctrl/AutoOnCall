@@ -3,6 +3,7 @@
 from app.models.change_execution import ChangeExecution, DryRunResult, PreCheckResult
 from app.services.change_execution_read_models import build_change_execution_read_model
 from app.services.change_plan_builder import build_change_plan
+from app.services.incident_lifecycle import status_metadata
 
 
 def test_change_plan_builder_creates_structured_redis_plan() -> None:
@@ -190,3 +191,17 @@ def test_change_execution_read_model_exposes_lifecycle_and_stages() -> None:
     ]
     assert payload["stages"][2]["status"] == "skipped"
     assert "dry-run 已完成" in payload["next_steps"][0]
+
+
+def test_extended_change_statuses_have_explicit_lifecycle_metadata() -> None:
+    expected = {
+        "partial_success": ("部分完成", False),
+        "recovery_pending": ("恢复待确认", False),
+        "rolled_back": ("回滚已完成", True),
+        "rollback_failed": ("回滚失败", True),
+    }
+
+    for status, (label, terminal) in expected.items():
+        metadata = status_metadata(status)
+        assert metadata["label"] == label
+        assert metadata["terminal"] is terminal

@@ -8,8 +8,9 @@ from fastapi import HTTPException
 from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.evidence_analyzer import EvidenceAnalysis
 from app.models.evidence import Evidence
-from app.models.trace import ToolCallRecord
+from app.models.trace import ToolCallRecord, TraceEvent
 from app.services.change_plan_builder import build_change_plan
+from app.services.evidence_graph import build_incident_evidence_graph
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
 
@@ -95,6 +96,27 @@ def _state_with_redis_evidence() -> dict:
             confidence=0.7,
         ).model_dump(mode="json"),
     ]
+    redis_evidence_id = state["gathered_evidence"][0]["evidence_id"]
+    reference_evidence_ids = [
+        item["evidence_id"]
+        for item in state["gathered_evidence"]
+        if item["evidence_type"] in {"ticket", "runbook"}
+    ]
+    state["evidence_analysis"] = {
+        "hypothesis_ranking": [
+            {
+                "hypothesis_id": "hyp-redis-maxclients",
+                "title": state["hypotheses"][0],
+                "description": state["hypotheses"][0],
+                "category": "redis_maxclients",
+                "supporting_evidence_ids": [redis_evidence_id, *reference_evidence_ids],
+                "refuting_evidence_ids": [],
+                "missing_evidence": [],
+                "confidence": 0.82,
+                "confidence_reason": "Redis live status directly supports maxclients saturation.",
+            }
+        ]
+    }
     state["tool_call_records"] = [
         ToolCallRecord(
             trace_id=state["trace_id"],
@@ -329,6 +351,66 @@ def test_report_body_shows_failed_tool_without_dumping_raw_json(tmp_path) -> Non
     assert '"very_large"' not in body
 
 
+def test_report_classifies_timeout_degradation_as_unsafe_and_needing_human(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["tool_call_records"].append(
+        ToolCallRecord(
+            trace_id=state["trace_id"],
+            incident_id=state["incident"]["incident_id"],
+            step_id="s5",
+            tool_name="query_logs",
+            input_args={"service_name": "order-service"},
+            output={"status": "failed"},
+            output_summary="",
+            data_source="failed",
+            latency_ms=120000.0,
+            status="failed",
+            error_message="Loki request timeout",
+        ).model_dump(mode="json")
+    )
+    state["errors"] = ["工具 query_logs 调用失败: Loki request timeout"]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status == "degraded"
+    assert report.manual_action_required is True
+    assert report.degradation_analysis["category"] == "dependency_timeout"
+    assert report.degradation_analysis["safe_terminal"] is False
+    assert report.degradation_analysis["needs_human"] is True
+    assert report.degradation_analysis["failed_tools"] == ["query_logs"]
+    assert "降级根因：dependency_timeout" in report.markdown
+
+
+def test_report_classifies_evidence_only_degradation_as_safe_boundary(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"] = [
+        item
+        for item in state["gathered_evidence"]
+        if item["source_tool"] not in {"search_runbook", "search_history_ticket"}
+    ]
+    state["tool_call_records"] = [
+        item
+        for item in state["tool_call_records"]
+        if item["tool_name"] not in {"search_runbook", "search_history_ticket"}
+    ]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status == "needs_human"
+    assert report.manual_action_required is True
+    assert report.degradation_analysis["category"] == "evidence_insufficient"
+    assert report.degradation_analysis["safe_terminal"] is True
+    assert report.degradation_analysis["missing_evidence"]
+
+
 def test_report_recommendation_contains_complete_change_loop(tmp_path) -> None:
     state = _state_with_redis_evidence()
     plan = build_change_plan(
@@ -392,14 +474,14 @@ def test_report_generator_downgrades_unaligned_conclusions(tmp_path) -> None:
     assert report.status == "needs_human"
     assert report.conclusion_alignment["status"] == "needs_human_confirmation"
     assert set(report.conclusion_alignment["missing_fields"]) == {
-        "root_cause",
         "key_findings",
         "remediation_suggestion",
     }
-    assert report.root_cause.startswith("待人工确认：")
+    assert report.conclusion_alignment["fields"]["root_cause"]["claim_type"] == "insufficiency"
+    assert report.root_cause == "证据不足，暂未形成明确根因"
     assert all(item.startswith("待人工确认：") for item in report.key_findings)
     assert report.remediation_suggestion.startswith("待人工确认：")
-    assert "root_cause: aligned=false" in report.markdown
+    assert "root_cause: aligned=true" in report.markdown
     assert "报告由 completed 降级为 needs_human" in report.markdown
 
 
@@ -780,8 +862,9 @@ def test_report_generator_renders_conflicts_and_confidence_reasons(tmp_path) -> 
 
     assert report.uncertainties
     assert report.confidence_reason.startswith("query_redis_status")
-    assert report.selected_root_cause_id == "hyp-redis"
-    assert report.hypothesis_ranking[0]["refuting_evidence_ids"] == ["evd-redis"]
+    assert report.selected_root_cause_id == ""
+    assert "证据不足" in report.root_cause
+    assert report.hypothesis_ranking[0]["refuting_evidence_ids"] == []
     assert "## 不确定性" in report.markdown
     assert "根因假设矩阵" in report.markdown
     assert "query_network_status" in report.markdown
@@ -791,6 +874,7 @@ def test_report_generator_renders_conflicts_and_confidence_reasons(tmp_path) -> 
 def test_report_generator_uses_ranked_root_cause_confidence_signal(tmp_path) -> None:
     state = _state_with_redis_evidence()
     state["gathered_evidence"][0]["confidence"] = 0.4
+    supporting_ids = [item["evidence_id"] for item in state["gathered_evidence"][:3]]
     state["evidence_analysis"] = {
         "confidence": 0.72,
         "confidence_reasons": ["已收集至少三类成功证据，并形成可解释根因假设"],
@@ -800,7 +884,7 @@ def test_report_generator_uses_ranked_root_cause_confidence_signal(tmp_path) -> 
                 "title": "Redis maxclients 或连接池耗尽导致 timeout 和 5xx。",
                 "description": "Redis maxclients 或连接池耗尽导致 timeout 和 5xx。",
                 "category": "redis_maxclients",
-                "supporting_evidence_ids": ["evd-redis", "evd-metrics", "evd-logs"],
+                "supporting_evidence_ids": supporting_ids,
                 "refuting_evidence_ids": [],
                 "missing_evidence": [],
                 "confidence": 0.76,
@@ -816,6 +900,137 @@ def test_report_generator_uses_ranked_root_cause_confidence_signal(tmp_path) -> 
     )
 
     assert report.confidence == 0.76
+
+
+def test_report_generator_ignores_unsupported_hypothesis_confidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["evidence_analysis"] = {
+        "confidence": 0.45,
+        "hypothesis_ranking": [
+            {
+                "hypothesis_id": "hyp-unsupported",
+                "title": "Unsupported root cause",
+                "supporting_evidence_ids": [],
+                "confidence": 0.99,
+            }
+        ],
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.confidence < 0.99
+    assert report.selected_root_cause_id == ""
+
+
+def test_report_generator_does_not_use_unlinked_analysis_confidence(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    for item in state["gathered_evidence"]:
+        if item.get("evidence_type") not in {"runbook", "risk"}:
+            item["confidence"] = 0.2
+    state["evidence_analysis"] = {
+        "confidence": 0.99,
+        "hypothesis_ranking": [],
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.confidence < 0.99
+
+
+def test_report_generator_filters_supplied_trace_events_to_current_run(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    incident_id = state["incident"]["incident_id"]
+    trace_id = state["trace_id"]
+    events = [
+        TraceEvent(
+            trace_id="trace-other",
+            incident_id=incident_id,
+            node_name="executor",
+            event_type="tool_call",
+            output_summary="other run",
+        ),
+        TraceEvent(
+            trace_id=trace_id,
+            incident_id=incident_id,
+            node_name="executor",
+            event_type="tool_call",
+            output_summary="current run",
+        ),
+    ]
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=events,
+        status="completed",
+    )
+
+    assert report.trace_summary["event_count"] == 1
+    assert len(report.timeline) == 1
+    assert report.timeline[0]["summary"] == "current run"
+
+
+def test_report_generator_does_not_present_unsupported_hypothesis_as_summary_or_finding(
+    tmp_path,
+) -> None:
+    state = _state_with_redis_evidence()
+    state["hypotheses"] = ["Database corruption caused the incident"]
+    state["evidence_analysis"] = {}
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert "Database corruption" not in report.summary
+    assert all("Database corruption" not in item for item in report.key_findings)
+    assert all("Database corruption" not in item for item in report.inferred_conclusions)
+
+
+def test_report_generator_redacts_secrets_before_persistence_and_markdown(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["incident"]["symptom"] = "authorization=Bearer incident-secret"
+    state["gathered_evidence"][0]["fact"] = "token=evidence-secret"
+    state["gathered_evidence"][0]["raw_data"]["output"]["password"] = "redis-secret"
+    state["tool_call_records"][0]["input_args"] = {"api_key": "tool-secret"}
+    state["tool_call_records"][0]["output_summary"] = "cookie=session-secret"
+
+    generator = ReportGenerator(tmp_path / "reports.db")
+    report = generator.generate_from_state(state, trace_events=[], status="completed")
+    payload = report.model_dump_json()
+
+    assert "incident-secret" not in payload
+    assert "evidence-secret" not in payload
+    assert "redis-secret" not in payload
+    assert "tool-secret" not in payload
+    assert "session-secret" not in payload
+    assert "[REDACTED]" in report.markdown
+    assert generator.get_report(report.incident_id).markdown == report.markdown
+
+
+def test_report_generator_neutralizes_active_markdown_content(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["incident"]["title"] = "<script>alert(1)</script>"
+    state["gathered_evidence"][0]["fact"] = "[click](javascript:alert(1))"
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert "<script>" not in report.markdown
+    assert "&lt;script&gt;" in report.markdown
+    assert "javascript:" not in report.markdown.lower()
+    assert "javascript&#58;" in report.markdown.lower()
 
 
 def test_report_generator_keeps_graceful_degradation_confidence_floor(tmp_path) -> None:
@@ -948,6 +1163,164 @@ def test_report_generator_caps_unknown_successful_evidence_confidence(tmp_path) 
     assert report.confidence == 0.5
 
 
+def test_report_generator_does_not_select_unsupported_top_hypothesis(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"][0]["evidence_id"] = "evd-redis"
+    state["evidence_analysis"] = {
+        "hypothesis_ranking": [
+            {
+                "hypothesis_id": "hyp-unsupported",
+                "title": "Unsupported root cause",
+                "category": "dependency_timeout",
+                "supporting_evidence_ids": [],
+                "refuting_evidence_ids": [],
+                "confidence": 0.9,
+            },
+            {
+                "hypothesis_id": "hyp-supported",
+                "title": "Redis maxclients saturation",
+                "category": "redis_maxclients",
+                "supporting_evidence_ids": ["evd-redis"],
+                "refuting_evidence_ids": [],
+                "confidence": 0.7,
+            },
+        ]
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.selected_root_cause_id == "hyp-supported"
+    assert report.root_cause == "Redis maxclients saturation"
+
+
+def test_report_generator_legacy_hypothesis_does_not_inherit_unrelated_evidence(
+    tmp_path,
+) -> None:
+    state = _state_with_redis_evidence()
+    state["hypotheses"] = ["Legacy unsupported root cause"]
+    state["evidence_analysis"] = {}
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.selected_root_cause_id == ""
+    assert report.hypothesis_ranking[0]["supporting_evidence_ids"] == []
+
+
+def test_report_generator_without_ranking_does_not_promote_supporting_fact_to_root_cause(
+    tmp_path,
+) -> None:
+    state = _state_with_redis_evidence()
+    state["hypotheses"] = []
+    state["evidence_analysis"] = {}
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.selected_root_cause_id == ""
+    assert "证据不足" in report.root_cause
+    assert report.conclusion_alignment["fields"]["root_cause"]["aligned"] is True
+    assert report.conclusion_alignment["fields"]["root_cause"]["claim_type"] == "insufficiency"
+
+
+def test_evidence_graph_does_not_mark_unselected_hypothesis_or_link_stale_evidence(
+    tmp_path,
+) -> None:
+    state = _state_with_redis_evidence()
+    state["gathered_evidence"][0]["evidence_id"] = "evd-stale"
+    state["gathered_evidence"][0]["raw_data"]["metadata"] = {
+        "evidence_quality": {
+            "status": "stale",
+            "usable": False,
+            "reasons": ["result_marked_stale_or_expired"],
+        }
+    }
+    state["evidence_analysis"] = {
+        "hypothesis_ranking": [
+            {
+                "hypothesis_id": "hyp-stale-only",
+                "title": "Stale-only hypothesis",
+                "category": "redis_maxclients",
+                "supporting_evidence_ids": ["evd-stale"],
+                "refuting_evidence_ids": [],
+                "confidence": 0.8,
+            }
+        ]
+    }
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    hypothesis_node = next(
+        node for node in report.evidence_graph["nodes"] if node["node_type"] == "hypothesis"
+    )
+    assert report.selected_root_cause_id == ""
+    assert hypothesis_node["selected"] is False
+    assert not any(
+        edge["source"] == "hypothesis:hyp-stale-only" and edge["relation"] == "supported_by"
+        for edge in report.evidence_graph["edges"]
+    )
+
+
+def test_evidence_graph_does_not_guess_tool_call_when_same_tool_is_ambiguous() -> None:
+    graph = build_incident_evidence_graph(
+        incident_id="inc-ambiguous-tool",
+        trace_id="trace-ambiguous-tool",
+        root_cause="",
+        selected_root_cause_id="",
+        hypothesis_ranking=[],
+        evidence=[
+            {
+                "evidence_id": "evd-ambiguous",
+                "source_tool": "query_metrics",
+                "step_id": "",
+                "summary": "legacy metric evidence",
+                "stance": "neutral",
+                "raw_data": {
+                    "status": "success",
+                    "input_args": {"service_name": "order-service"},
+                    "output": {"summary": "legacy metric evidence"},
+                },
+            }
+        ],
+        tool_calls=[
+            {
+                "call_id": "call-1",
+                "step_id": "s1",
+                "tool_name": "query_metrics",
+                "input_args": {"service_name": "payment-service"},
+                "status": "success",
+            },
+            {
+                "call_id": "call-2",
+                "step_id": "s2",
+                "tool_name": "query_metrics",
+                "input_args": {"service_name": "inventory-service"},
+                "status": "success",
+            },
+        ],
+        conclusion_alignment={},
+    )
+
+    assert not any(
+        edge["source"] == "evidence:evd-ambiguous" and edge["relation"] == "produced_by"
+        for edge in graph["edges"]
+    )
+
+
 @pytest.mark.asyncio
 async def test_replanner_response_generation_attaches_structured_report(
     monkeypatch, tmp_path
@@ -967,6 +1340,7 @@ async def test_replanner_response_generation_attaches_structured_report(
         reason="证据覆盖 Redis 状态和错误症状",
         evidence_sufficient=True,
         hypotheses=state["hypotheses"],
+        hypothesis_ranking=state["evidence_analysis"]["hypothesis_ranking"],
         confidence=0.82,
     )
 

@@ -8,7 +8,7 @@ from hashlib import sha256
 from typing import Any, Literal, cast
 
 from app.models.approval import ApprovalRequest
-from app.models.change_plan import ChangePlan
+from app.models.change_plan import ChangePlan, change_plan_fingerprint
 from app.services.aiops_state_utils import extract_incident_id, incident_field
 from app.services.approval_service import approval_service
 from app.services.change_plan_builder import build_change_plan
@@ -47,11 +47,11 @@ def create_approval_request_from_risk_decision(
     plan = change_plan or build_change_plan_from_risk_decision(state, decision)
     repository = approval_repository or approval_service
     incident_id = extract_incident_id(state)
-    idempotency_key = build_approval_idempotency_key(state, decision)
-    existing = find_pending_approval_by_idempotency_key(repository, incident_id, idempotency_key)
-    if existing is not None:
-        return existing
-
+    idempotency_key = build_approval_idempotency_key(
+        state,
+        decision,
+        change_plan=plan,
+    )
     request = ApprovalRequest(
         incident_id=incident_id,
         action=str(_decision_value(decision, "action", "需要人工确认的后续处置动作")),
@@ -68,8 +68,15 @@ def create_approval_request_from_risk_decision(
             "read_only": _decision_value(decision, "read_only", False),
             "idempotency_key": idempotency_key,
             "change_plan": plan.model_dump(mode="json"),
+            "change_plan_fingerprint": change_plan_fingerprint(plan),
         },
     )
+    if hasattr(repository, "create_request_once"):
+        return repository.create_request_once(request, idempotency_key=idempotency_key)
+
+    existing = find_pending_approval_by_idempotency_key(repository, incident_id, idempotency_key)
+    if existing is not None:
+        return existing
     return repository.create_request(request)
 
 
@@ -143,18 +150,54 @@ def generate_risk_stop_response(decision: Any) -> str:
 """
 
 
-def build_approval_idempotency_key(state: Mapping[str, Any], decision: Any) -> str:
+def build_approval_idempotency_key(
+    state: Mapping[str, Any],
+    decision: Any,
+    *,
+    change_plan: ChangePlan | None = None,
+) -> str:
     """Build a stable key for one pending risky action within an incident."""
+    plan = change_plan or build_change_plan_from_risk_decision(state, decision)
     payload = {
         "incident_id": extract_incident_id(state),
+        "session_id": state.get("session_id") or state.get("trace_id") or "",
+        "trace_id": state.get("trace_id") or "",
         "step_id": _decision_value(decision, "step_id", None),
         "tool_name": _decision_value(decision, "tool_name", None),
         "action": _decision_value(decision, "action", ""),
         "risk_level": _decision_value(decision, "risk_level", "medium"),
         "policy": _decision_value(decision, "policy", "approval_required"),
+        "service_name": incident_field(state, "service_name", "unknown-service"),
+        "environment": incident_field(state, "environment", "unknown"),
+        "change_plan_scope": _change_plan_idempotency_scope(plan),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _change_plan_idempotency_scope(plan: ChangePlan) -> dict[str, Any]:
+    """Return plan content without generated identities or lifecycle timestamps."""
+    volatile_fields = {
+        "change_plan_id",
+        "step_id",
+        "rollback_step_id",
+        "created_at",
+        "status",
+    }
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): normalize(item)
+                for key, item in value.items()
+                if key not in volatile_fields
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    normalized = normalize(plan.model_dump(mode="json"))
+    return dict(normalized) if isinstance(normalized, dict) else {}
 
 
 def find_pending_approval_by_idempotency_key(

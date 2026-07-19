@@ -10,7 +10,7 @@ from app.models.api_contracts import (
     ApprovalListResponse,
     IncidentApprovalListResponse,
 )
-from app.models.approval import ApprovalDecisionRequest
+from app.models.approval import ApprovalDecisionRequest, ApprovalRequest
 from app.services.approval_service import (
     ApprovalNotFoundError,
     ApprovalService,
@@ -47,7 +47,11 @@ async def list_pending_approvals(
         approved_requests = service.list_requests(incident_id=incident_id, status="approved")
         requests = [
             *requests,
-            *[request for request in approved_requests if _approval_has_next_action(request)],
+            *[
+                request
+                for request in approved_requests
+                if _approval_has_next_action(service, request)
+            ],
         ]
     return {"items": [request.model_dump(mode="json") for request in requests]}
 
@@ -78,29 +82,21 @@ async def submit_incident_approval(
     request: ApprovalDecisionRequest,
     principal: AuthPrincipal = Depends(require_scope(APPROVE_SCOPE)),
 ) -> dict:
-    """Approve or reject the latest pending request for an incident."""
+    """Approve or reject the explicitly identified request for an incident."""
     decided_by = audit_actor(principal, request.decided_by)
     try:
-        if request.approval_id:
-            existing = get_approval_service().get_request(request.approval_id)
-            if existing.incident_id != incident_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="approval_id does not belong to the requested incident",
-                )
-            approval = get_approval_service().decide_request(
-                approval_id=request.approval_id,
-                decision=request.decision,
-                decided_by=decided_by,
-                reason=request.reason,
+        existing = get_approval_service().get_request(request.approval_id)
+        if existing.incident_id != incident_id:
+            raise HTTPException(
+                status_code=400,
+                detail="approval_id does not belong to the requested incident",
             )
-        else:
-            approval = get_approval_service().decide_latest_pending(
-                incident_id=incident_id,
-                decision=request.decision,
-                decided_by=decided_by,
-                reason=request.reason,
-            )
+        approval = get_approval_service().decide_request(
+            approval_id=request.approval_id,
+            decision=request.decision,
+            decided_by=decided_by,
+            reason=request.reason,
+        )
     except ApprovalNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ApprovalStateError as exc:
@@ -109,9 +105,9 @@ async def submit_incident_approval(
     return {"approval": approval.model_dump(mode="json")}
 
 
-def _approval_has_next_action(request: object) -> bool:
-    status = getattr(request, "status", "")
-    if status != "approved":
+def _approval_has_next_action(service: ApprovalService, request: ApprovalRequest) -> bool:
+    if request.status != "approved":
         return False
-    change_plan = getattr(request, "change_plan", None)
-    return bool(getattr(change_plan, "change_plan_id", ""))
+    if request.change_plan is None or not request.change_plan.change_plan_id:
+        return False
+    return service.has_unstarted_change_action(request)

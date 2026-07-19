@@ -11,6 +11,7 @@ from app.models.incident import Incident
 from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.services.incident_lifecycle import (
+    alert_event_can_reopen_incident,
     incident_status_from_alert_status,
     is_alert_mutable_incident_status,
     manual_action_required_from_change_execution,
@@ -205,6 +206,7 @@ def build_incident_state_from_alert(
         existing is not None
         and not is_alert_mutable_incident_status(existing.status)
         and not _alert_can_override_auto_diagnosis_failure(existing)
+        and not alert_event_can_reopen_incident(existing, event)
     ):
         status = existing.status
         reason = existing.status_reason
@@ -213,6 +215,7 @@ def build_incident_state_from_alert(
         status = desired_status
         reason = status_reason
         preserved_existing = False
+    preserved_state = existing if preserved_existing else None
     metadata = dict(existing.metadata if existing else {})
     metadata.update(
         {
@@ -230,14 +233,17 @@ def build_incident_state_from_alert(
         metadata["preserved_incident_status"] = existing.status
 
     return IncidentState(
-        incident_id=incident.incident_id,
+        incident_id=event.incident_id,
         status=status,
         status_reason=reason,
-        title=incident.title,
-        service_name=incident.service_name,
-        severity=incident.severity,
-        environment=incident.environment,
-        summary=incident.symptom,
+        title=preserved_state.title
+        if preserved_state
+        else f"{event.service_name} {event.alertname}",
+        service_name=preserved_state.service_name if preserved_state else event.service_name,
+        severity=preserved_state.severity if preserved_state else event.severity,
+        environment=preserved_state.environment if preserved_state else event.environment,
+        summary=preserved_state.summary if preserved_state else _alert_summary(event),
+        root_cause=preserved_state.root_cause if preserved_state else "",
         trace_id=existing.trace_id if existing else "",
         session_id=existing.session_id if existing else "",
         report_id=existing.report_id if existing else None,
@@ -252,3 +258,10 @@ def _alert_can_override_auto_diagnosis_failure(existing: IncidentState) -> bool:
     """Allow alert lifecycle updates to recover a state failed only by auto diagnosis."""
     metadata = dict(existing.metadata or {})
     return existing.status == "failed" and metadata.get("alert_auto_diagnosis_status") == "failed"
+
+
+def _alert_summary(event: AlertEvent) -> str:
+    parts = [event.summary]
+    if event.description and event.description != event.summary:
+        parts.append(event.description)
+    return "；".join(item for item in parts if item)

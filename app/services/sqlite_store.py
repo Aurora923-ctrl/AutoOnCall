@@ -9,47 +9,405 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
 from app.config import config
+from app.models.a2a import A2ATaskRecord
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
 from app.models.approval import ApprovalRequest
 from app.models.change_execution import ChangeExecution
+from app.models.incident import Incident
 from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
-from app.services.incident_lifecycle import merge_incident_state
+from app.services.incident_lifecycle import (
+    alert_auto_diagnosis_claim_is_active,
+    is_new_alert_generation,
+    is_stale_alert_event,
+    merge_incident_state,
+)
+from app.services.incident_state_builder import build_incident_state_from_alert
+from app.services.sql_safety import bind_markers, trusted_table_statement
 
 _RETENTION_SQL: dict[str, tuple[str, str]] = {
     "alert_events": (
-        "SELECT COUNT(*) FROM alert_events WHERE updated_at < ?",
-        "DELETE FROM alert_events WHERE updated_at < ?",
+        """
+        SELECT COUNT(*) FROM alert_events AS target
+        WHERE target.updated_at < ? AND target.status = 'resolved'
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved', 'change_validated',
+                    'waiting_manual_execution', 'observing', 'partial_success',
+                    'recovery_pending', 'rollback_recommended'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM alert_events AS target
+        WHERE target.updated_at < ? AND target.status = 'resolved'
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved', 'change_validated',
+                    'waiting_manual_execution', 'observing', 'partial_success',
+                    'recovery_pending', 'rollback_recommended'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
+                )
+          )
+        """,
     ),
     "trace_events": (
-        "SELECT COUNT(*) FROM trace_events WHERE created_at < ?",
-        "DELETE FROM trace_events WHERE created_at < ?",
+        """
+        SELECT COUNT(*) FROM trace_events AS target
+        WHERE target.created_at < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM alert_events AS alert
+              WHERE alert.incident_id = target.incident_id
+                AND alert.status != 'resolved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM trace_events AS target
+        WHERE target.created_at < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM alert_events AS alert
+              WHERE alert.incident_id = target.incident_id
+                AND alert.status != 'resolved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
     ),
     "approval_requests": (
-        "SELECT COUNT(*) FROM approval_requests WHERE created_at < ?",
-        "DELETE FROM approval_requests WHERE created_at < ?",
+        """
+        SELECT COUNT(*) FROM approval_requests AS target
+        WHERE target.updated_at < ? AND target.status != 'pending'
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.approval_id = target.approval_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM approval_requests AS target
+        WHERE target.updated_at < ? AND target.status != 'pending'
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.approval_id = target.approval_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
     ),
     "diagnosis_reports": (
-        "SELECT COUNT(*) FROM diagnosis_reports WHERE created_at < ?",
-        "DELETE FROM diagnosis_reports WHERE created_at < ?",
+        """
+        SELECT COUNT(*) FROM diagnosis_reports AS target
+        WHERE target.updated_at < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM alert_events AS alert
+              WHERE alert.incident_id = target.incident_id
+                AND alert.status != 'resolved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM diagnosis_reports AS target
+        WHERE target.updated_at < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM incident_states AS state
+              WHERE state.incident_id = target.incident_id
+                AND state.status NOT IN (
+                    'completed', 'incomplete', 'degraded', 'needs_human',
+                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aiops_sessions AS session
+              WHERE session.incident_id = target.incident_id
+                AND session.status IN (
+                    'running', 'planning', 'executing', 'resume_running',
+                    'waiting_approval', 'approval_approved'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_requests AS approval
+              WHERE approval.incident_id = target.incident_id
+                AND approval.status = 'pending'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM alert_events AS alert
+              WHERE alert.incident_id = target.incident_id
+                AND alert.status != 'resolved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = target.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
     ),
     "change_executions": (
-        "SELECT COUNT(*) FROM change_executions WHERE created_at < ?",
-        "DELETE FROM change_executions WHERE created_at < ?",
+        """
+        SELECT COUNT(*) FROM change_executions
+        WHERE updated_at < ?
+          AND status IN (
+              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+              'rolled_back', 'rollback_failed',
+              'closed', 'escalated'
+          )
+        """,
+        """
+        DELETE FROM change_executions
+        WHERE updated_at < ?
+          AND status IN (
+              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+              'rolled_back', 'rollback_failed',
+              'closed', 'escalated'
+          )
+        """,
     ),
     "aiops_sessions": (
-        "SELECT COUNT(*) FROM aiops_sessions WHERE updated_at < ?",
-        "DELETE FROM aiops_sessions WHERE updated_at < ?",
+        """
+        SELECT COUNT(*) FROM aiops_sessions
+        WHERE updated_at < ?
+          AND status NOT IN (
+              'running', 'planning', 'executing', 'resume_running',
+              'waiting_approval', 'approval_approved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = aiops_sessions.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM aiops_sessions
+        WHERE updated_at < ?
+          AND status NOT IN (
+              'running', 'planning', 'executing', 'resume_running',
+              'waiting_approval', 'approval_approved'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = aiops_sessions.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
     ),
     "incident_states": (
-        "SELECT COUNT(*) FROM incident_states WHERE updated_at < ?",
-        "DELETE FROM incident_states WHERE updated_at < ?",
+        """
+        SELECT COUNT(*) FROM incident_states
+        WHERE updated_at < ?
+          AND status IN (
+              'completed', 'incomplete', 'degraded', 'needs_human',
+              'approval_rejected', 'approval_cancelled', 'approval_resumed',
+              'blocked', 'failed', 'escalated', 'resolved', 'closed',
+              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+              'rolled_back', 'rollback_failed'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = incident_states.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
+        """
+        DELETE FROM incident_states
+        WHERE updated_at < ?
+          AND status IN (
+              'completed', 'incomplete', 'degraded', 'needs_human',
+              'approval_rejected', 'approval_cancelled', 'approval_resumed',
+              'blocked', 'failed', 'escalated', 'resolved', 'closed',
+              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+              'rolled_back', 'rollback_failed'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM change_executions AS execution
+              WHERE execution.incident_id = incident_states.incident_id
+                AND execution.status NOT IN (
+                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                    'rolled_back', 'rollback_failed',
+                    'closed', 'escalated'
+                )
+          )
+        """,
     ),
 }
 _RUNTIME_RESET_SQL = (
@@ -70,6 +428,7 @@ _RUNTIME_RESET_SQL = (
     ),
     ("trace_events", "SELECT COUNT(*) FROM trace_events", "DELETE FROM trace_events"),
     ("aiops_sessions", "SELECT COUNT(*) FROM aiops_sessions", "DELETE FROM aiops_sessions"),
+    ("a2a_tasks", "SELECT COUNT(*) FROM a2a_tasks", "DELETE FROM a2a_tasks"),
     ("incident_states", "SELECT COUNT(*) FROM incident_states", "DELETE FROM incident_states"),
     ("alert_events", "SELECT COUNT(*) FROM alert_events", "DELETE FROM alert_events"),
 )
@@ -86,6 +445,17 @@ def resolve_sqlite_path(storage_path: str | Path | None = None) -> Path:
     return path
 
 
+_CHANGE_EXECUTION_TERMINAL_STATUSES = (
+    "precheck_failed",
+    "dry_run_failed",
+    "sandbox_validated",
+    "rolled_back",
+    "rollback_failed",
+    "closed",
+    "escalated",
+)
+
+
 class AIOpsSQLiteStore:
     """Small SQLite repository for trace, approval, and report state."""
 
@@ -96,38 +466,139 @@ class AIOpsSQLiteStore:
 
     def save_alert_event(self, event: AlertEvent) -> None:
         """Persist the latest state of one normalized alert event."""
-        payload = _dump_model(event)
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO alert_events (
-                    fingerprint, incident_id, source, status, service_name,
-                    severity, environment, starts_at, updated_at, payload
+            self._save_alert_event(connection, event)
+
+    def persist_alert_ingestion(
+        self,
+        event: AlertEvent,
+        incident: Incident,
+    ) -> tuple[AlertEvent, IncidentState, bool, str | None, bool, bool]:
+        """Atomically upsert one alert and its IncidentState projection."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            alert_row = connection.execute(
+                "SELECT payload FROM alert_events WHERE fingerprint = ?",
+                (event.fingerprint,),
+            ).fetchone()
+            existing_alert = (
+                AlertEvent.model_validate(_load_payload(alert_row))
+                if alert_row is not None
+                else None
+            )
+            created = existing_alert is None
+            previous_status = existing_alert.status if existing_alert is not None else None
+            stale_ignored = bool(
+                existing_alert is not None and is_stale_alert_event(existing_alert, event)
+            )
+            reopened = bool(
+                existing_alert is not None
+                and not stale_ignored
+                and is_new_alert_generation(existing_alert, event)
+            )
+
+            state_row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident.incident_id,),
+            ).fetchone()
+            existing_state = (
+                IncidentState.model_validate(_load_payload(state_row))
+                if state_row is not None
+                else None
+            )
+
+            stored_event = existing_alert if stale_ignored and existing_alert is not None else event
+            if existing_alert is not None:
+                stored_event.created_at = existing_alert.created_at
+            if not stale_ignored:
+                stored_event.updated_at = datetime.now(UTC)
+
+            incident_state = build_incident_state_from_alert(
+                event=stored_event,
+                incident=incident,
+                existing=existing_state,
+            )
+            if existing_state is not None:
+                incident_state = merge_incident_state(existing_state, incident_state)
+
+            if stale_ignored and existing_state is not None:
+                return (
+                    stored_event,
+                    existing_state,
+                    created,
+                    previous_status,
+                    stale_ignored,
+                    reopened,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(fingerprint) DO UPDATE SET
-                    incident_id = excluded.incident_id,
-                    source = excluded.source,
-                    status = excluded.status,
-                    service_name = excluded.service_name,
-                    severity = excluded.severity,
-                    environment = excluded.environment,
-                    starts_at = excluded.starts_at,
-                    updated_at = excluded.updated_at,
-                    payload = excluded.payload
-                """,
-                (
-                    event.fingerprint,
-                    event.incident_id,
-                    event.source,
-                    event.status,
-                    event.service_name,
-                    event.severity,
-                    event.environment,
-                    event.starts_at.isoformat() if event.starts_at else None,
-                    event.updated_at.isoformat(),
-                    payload,
-                ),
+            if not stale_ignored:
+                self._save_alert_event(connection, stored_event)
+            self._save_incident_state(connection, incident_state)
+            return (
+                stored_event,
+                incident_state,
+                created,
+                previous_status,
+                stale_ignored,
+                reopened,
+            )
+
+    def claim_alert_auto_diagnosis(self, incident_id: str) -> str | None:
+        """Claim one alert diagnosis across all SQLite workers."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state = IncidentState.model_validate(_load_payload(row))
+            metadata = dict(state.metadata or {})
+            now = datetime.now(UTC)
+            if alert_auto_diagnosis_claim_is_active(
+                metadata,
+                now=now,
+                lease_seconds=config.alert_auto_diagnosis_timeout_seconds,
+            ):
+                return None
+            claim_token = uuid4().hex
+            metadata.update(
+                {
+                    "alert_auto_diagnosis_status": "running",
+                    "alert_auto_diagnosis_error": "",
+                    "alert_auto_diagnosis_claimed_at": now.isoformat(),
+                    "alert_auto_diagnosis_claim_token": claim_token,
+                }
+            )
+            self._save_incident_state(
+                connection,
+                state.model_copy(update={"metadata": metadata}),
+            )
+            return claim_token
+
+    def release_alert_auto_diagnosis(self, incident_id: str, claim_token: str) -> None:
+        """Release a process-wide alert diagnosis claim after the task exits."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return
+            state = IncidentState.model_validate(_load_payload(row))
+            metadata = dict(state.metadata or {})
+            if (
+                metadata.get("alert_auto_diagnosis_status") != "running"
+                or metadata.get("alert_auto_diagnosis_claim_token") != claim_token
+            ):
+                return
+            metadata["alert_auto_diagnosis_status"] = "idle"
+            metadata["alert_auto_diagnosis_claimed_at"] = ""
+            metadata["alert_auto_diagnosis_claim_token"] = ""
+            self._save_incident_state(
+                connection,
+                state.model_copy(update={"metadata": metadata}),
             )
 
     def get_alert_event(self, fingerprint: str) -> AlertEvent | None:
@@ -170,26 +641,17 @@ class AIOpsSQLiteStore:
         return [AlertEvent.model_validate(_load_payload(row)) for row in rows]
 
     def save_trace_event(self, event: TraceEvent) -> None:
-        """Persist a trace event."""
+        """Persist an immutable trace event idempotently."""
         payload = _dump_model(event)
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO trace_events (
                     event_id, trace_id, incident_id, event_type, node_name,
                     step_id, tool_name, status, created_at, payload
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(event_id) DO UPDATE SET
-                    trace_id = excluded.trace_id,
-                    incident_id = excluded.incident_id,
-                    event_type = excluded.event_type,
-                    node_name = excluded.node_name,
-                    step_id = excluded.step_id,
-                    tool_name = excluded.tool_name,
-                    status = excluded.status,
-                    created_at = excluded.created_at,
-                    payload = excluded.payload
+                ON CONFLICT(event_id) DO NOTHING
                 """,
                 (
                     event.event_id,
@@ -204,6 +666,15 @@ class AIOpsSQLiteStore:
                     payload,
                 ),
             )
+            if cursor.rowcount == 0:
+                row = connection.execute(
+                    "SELECT payload FROM trace_events WHERE event_id = ?",
+                    (event.event_id,),
+                ).fetchone()
+                if row is None or _load_payload(row) != event.model_dump(mode="json"):
+                    raise ValueError(
+                        f"Trace event {event.event_id} already exists with different payload"
+                    )
 
     def list_trace_events(
         self,
@@ -237,22 +708,24 @@ class AIOpsSQLiteStore:
     def save_approval_request(self, request: ApprovalRequest) -> None:
         """Persist the latest state of one approval request."""
         payload = _dump_model(request)
+        updated_at = (request.decided_at or request.created_at).isoformat()
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO approval_requests (
                     approval_id, incident_id, status, risk_level, action,
-                    created_at, decided_at, payload
+                    created_at, updated_at, decided_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(approval_id) DO UPDATE SET
                     incident_id = excluded.incident_id,
-                    status = excluded.status,
                     risk_level = excluded.risk_level,
                     action = excluded.action,
                     created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
                     decided_at = excluded.decided_at,
                     payload = excluded.payload
+                WHERE approval_requests.status = excluded.status
                 """,
                 (
                     request.approval_id,
@@ -261,10 +734,74 @@ class AIOpsSQLiteStore:
                     request.risk_level,
                     request.action,
                     request.created_at.isoformat(),
+                    updated_at,
                     request.decided_at.isoformat() if request.decided_at else None,
                     payload,
                 ),
             )
+
+    def create_approval_request_once(
+        self,
+        request: ApprovalRequest,
+        *,
+        idempotency_key: str,
+    ) -> tuple[ApprovalRequest, bool]:
+        """Create one pending approval for an idempotency key."""
+        payload = _dump_model(request)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                """
+                SELECT payload FROM approval_requests
+                WHERE idempotency_key = ? AND status = 'pending'
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if existing_row is not None:
+                return ApprovalRequest.model_validate(_load_payload(existing_row)), False
+
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO approval_requests (
+                    approval_id, incident_id, status, risk_level, action,
+                    idempotency_key, created_at, updated_at, decided_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.approval_id,
+                    request.incident_id,
+                    request.status,
+                    request.risk_level,
+                    request.action,
+                    idempotency_key,
+                    request.created_at.isoformat(),
+                    request.created_at.isoformat(),
+                    request.decided_at.isoformat() if request.decided_at else None,
+                    payload,
+                ),
+            )
+            if cursor.rowcount == 1:
+                return request, True
+
+            conflict_row = connection.execute(
+                """
+                SELECT payload FROM approval_requests
+                WHERE approval_id = ?
+                   OR (idempotency_key = ? AND status = 'pending')
+                ORDER BY CASE WHEN approval_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (request.approval_id, idempotency_key, request.approval_id),
+            ).fetchone()
+            if conflict_row is None:
+                raise RuntimeError("approval creation conflicted but existing record was not found")
+            existing = ApprovalRequest.model_validate(_load_payload(conflict_row))
+            if existing.approval_id == request.approval_id and existing != request:
+                raise ValueError(
+                    f"Approval {request.approval_id} already exists and cannot be replaced"
+                )
+            return existing, False
 
     def save_approval_decision_if_pending(self, request: ApprovalRequest) -> bool:
         """Persist an approval decision only while the request is still pending."""
@@ -279,6 +816,7 @@ class AIOpsSQLiteStore:
                     risk_level = ?,
                     action = ?,
                     created_at = ?,
+                    updated_at = ?,
                     decided_at = ?,
                     payload = ?
                 WHERE approval_id = ? AND status = 'pending'
@@ -289,6 +827,7 @@ class AIOpsSQLiteStore:
                     request.risk_level,
                     request.action,
                     request.created_at.isoformat(),
+                    (request.decided_at or datetime.now(UTC)).isoformat(),
                     request.decided_at.isoformat() if request.decided_at else None,
                     payload,
                     request.approval_id,
@@ -365,6 +904,52 @@ class AIOpsSQLiteStore:
                     payload,
                 ),
             )
+
+    def save_change_execution_if_status(
+        self,
+        execution: ChangeExecution,
+        *,
+        expected_statuses: set[str],
+    ) -> bool:
+        """Update one safe change workflow only from an expected current status."""
+        normalized_statuses = sorted(
+            {str(status).strip() for status in expected_statuses if str(status).strip()}
+        )
+        if not normalized_statuses:
+            return False
+        payload = _dump_model(execution)
+        placeholders = bind_markers(len(normalized_statuses), "?")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"""
+                UPDATE change_executions
+                SET
+                    change_plan_id = ?,
+                    approval_id = ?,
+                    incident_id = ?,
+                    status = ?,
+                    mode = ?,
+                    created_at = ?,
+                    updated_at = ?,
+                    payload = ?
+                WHERE change_execution_id = ?
+                  AND status IN ({placeholders})
+                """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
+                (
+                    execution.change_plan_id,
+                    execution.approval_id,
+                    execution.incident_id,
+                    execution.status,
+                    execution.mode,
+                    execution.created_at.isoformat(),
+                    execution.updated_at.isoformat(),
+                    payload,
+                    execution.change_execution_id,
+                    *normalized_statuses,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def create_change_execution_once(
         self,
@@ -468,12 +1053,17 @@ class AIOpsSQLiteStore:
     def save_aiops_session_snapshot(self, snapshot: AIOpsSessionSnapshot) -> None:
         """Persist the latest durable snapshot for one diagnosis session."""
         now = datetime.now(UTC)
-        existing = self.get_aiops_session_snapshot(snapshot.session_id)
-        if existing is not None:
-            snapshot.created_at = existing.created_at
         snapshot.updated_at = now
-        payload = _dump_model(snapshot)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM aiops_sessions WHERE session_id = ?",
+                (snapshot.session_id,),
+            ).fetchone()
+            if row is not None:
+                existing = AIOpsSessionSnapshot.model_validate(_load_payload(row))
+                snapshot.created_at = existing.created_at
+            payload = _dump_model(snapshot)
             connection.execute(
                 """
                 INSERT INTO aiops_sessions (
@@ -500,6 +1090,240 @@ class AIOpsSQLiteStore:
                     payload,
                 ),
             )
+
+    def save_aiops_session_snapshot_with_incident(
+        self,
+        snapshot: AIOpsSessionSnapshot,
+        incident_state: IncidentState,
+    ) -> None:
+        """Persist a session snapshot and incident projection in one transaction."""
+        now = datetime.now(UTC)
+        snapshot.updated_at = now
+        incident_state.updated_at = now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM aiops_sessions WHERE session_id = ?",
+                (snapshot.session_id,),
+            ).fetchone()
+            if row is not None:
+                existing = AIOpsSessionSnapshot.model_validate(_load_payload(row))
+                snapshot.created_at = existing.created_at
+            payload = _dump_model(snapshot)
+            connection.execute(
+                """
+                INSERT INTO aiops_sessions (
+                    session_id, incident_id, trace_id, status, node_name,
+                    created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    incident_id = excluded.incident_id,
+                    trace_id = excluded.trace_id,
+                    status = excluded.status,
+                    node_name = excluded.node_name,
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (
+                    snapshot.session_id,
+                    snapshot.incident_id,
+                    snapshot.trace_id,
+                    snapshot.status,
+                    snapshot.node_name,
+                    snapshot.created_at.isoformat(),
+                    snapshot.updated_at.isoformat(),
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident_state.incident_id,),
+            ).fetchone()
+            if row is not None:
+                incident_state = merge_incident_state(
+                    IncidentState.model_validate(_load_payload(row)),
+                    incident_state,
+                )
+            self._save_incident_state(connection, incident_state)
+
+    def create_aiops_session_snapshot_with_incident(
+        self,
+        snapshot: AIOpsSessionSnapshot,
+        incident_state: IncidentState,
+    ) -> bool:
+        """Create a session snapshot and incident projection atomically."""
+        now = datetime.now(UTC)
+        snapshot.updated_at = now
+        incident_state.updated_at = now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            payload = _dump_model(snapshot)
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO aiops_sessions (
+                    session_id, incident_id, trace_id, status, node_name,
+                    created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot.session_id,
+                    snapshot.incident_id,
+                    snapshot.trace_id,
+                    snapshot.status,
+                    snapshot.node_name,
+                    snapshot.created_at.isoformat(),
+                    snapshot.updated_at.isoformat(),
+                    payload,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                return False
+            self._save_incident_state(connection, incident_state)
+            return True
+
+    def update_aiops_session_snapshot_with_incident_if_status(
+        self,
+        snapshot: AIOpsSessionSnapshot,
+        incident_state: IncidentState,
+        *,
+        expected_statuses: set[str],
+    ) -> bool:
+        """Transition a session and incident projection in one transaction."""
+        normalized = sorted({str(item).strip() for item in expected_statuses if str(item).strip()})
+        if not normalized:
+            return False
+        now = datetime.now(UTC)
+        snapshot.updated_at = now
+        incident_state.updated_at = now
+        placeholders = bind_markers(len(normalized), "?")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM aiops_sessions WHERE session_id = ?",
+                (snapshot.session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            existing = AIOpsSessionSnapshot.model_validate(_load_payload(row))
+            if existing.status not in normalized:
+                return False
+            snapshot.created_at = existing.created_at
+            cursor = connection.execute(
+                f"""
+                UPDATE aiops_sessions
+                SET incident_id = ?, trace_id = ?, status = ?, node_name = ?,
+                    updated_at = ?, payload = ?
+                WHERE session_id = ? AND status IN ({placeholders})
+                """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
+                (
+                    snapshot.incident_id,
+                    snapshot.trace_id,
+                    snapshot.status,
+                    snapshot.node_name,
+                    snapshot.updated_at.isoformat(),
+                    _dump_model(snapshot),
+                    snapshot.session_id,
+                    *normalized,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident_state.incident_id,),
+            ).fetchone()
+            if row is not None:
+                incident_state = merge_incident_state(
+                    IncidentState.model_validate(_load_payload(row)),
+                    incident_state,
+                )
+            self._save_incident_state(connection, incident_state)
+            return True
+
+    def create_aiops_session_snapshot(self, snapshot: AIOpsSessionSnapshot) -> bool:
+        """Insert the first snapshot for a diagnosis session without overwriting."""
+        now = datetime.now(UTC)
+        snapshot.updated_at = now
+        payload = _dump_model(snapshot)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO aiops_sessions (
+                    session_id, incident_id, trace_id, status, node_name,
+                    created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot.session_id,
+                    snapshot.incident_id,
+                    snapshot.trace_id,
+                    snapshot.status,
+                    snapshot.node_name,
+                    snapshot.created_at.isoformat(),
+                    snapshot.updated_at.isoformat(),
+                    payload,
+                ),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def update_aiops_session_snapshot_if_status(
+        self,
+        snapshot: AIOpsSessionSnapshot,
+        *,
+        expected_statuses: set[str],
+    ) -> bool:
+        """Update one snapshot only when its current status matches."""
+        normalized_statuses = sorted(
+            {str(status).strip() for status in expected_statuses if str(status).strip()}
+        )
+        if not normalized_statuses:
+            return False
+
+        now = datetime.now(UTC)
+        snapshot.updated_at = now
+        placeholders = bind_markers(len(normalized_statuses), "?")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM aiops_sessions WHERE session_id = ?",
+                (snapshot.session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            existing = AIOpsSessionSnapshot.model_validate(_load_payload(row))
+            if existing.status not in normalized_statuses:
+                return False
+
+            snapshot.created_at = existing.created_at
+            payload = _dump_model(snapshot)
+            cursor = connection.execute(
+                f"""
+                UPDATE aiops_sessions
+                SET
+                    incident_id = ?,
+                    trace_id = ?,
+                    status = ?,
+                    node_name = ?,
+                    updated_at = ?,
+                    payload = ?
+                WHERE session_id = ?
+                  AND status IN ({placeholders})
+                """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
+                (
+                    snapshot.incident_id,
+                    snapshot.trace_id,
+                    snapshot.status,
+                    snapshot.node_name,
+                    snapshot.updated_at.isoformat(),
+                    payload,
+                    snapshot.session_id,
+                    *normalized_statuses,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def get_aiops_session_snapshot(self, session_id: str) -> AIOpsSessionSnapshot | None:
         """Return the latest durable snapshot for one diagnosis session."""
@@ -558,47 +1382,129 @@ class AIOpsSQLiteStore:
             rows = connection.execute(query, params).fetchall()
         return [AIOpsSessionSnapshot.model_validate(_load_payload(row)) for row in rows]
 
-    def save_incident_state(self, state: IncidentState) -> None:
-        """Persist the latest lifecycle state for one incident."""
-        existing = self.get_incident_state(state.incident_id)
-        if existing is not None:
-            state = merge_incident_state(existing, state)
+    def create_a2a_task_record(self, record: A2ATaskRecord) -> bool:
+        """Insert an A2A task ownership record without overwriting."""
         now = datetime.now(UTC)
-        state.updated_at = now
-        payload = _dump_model(state)
+        record.updated_at = now
+        payload = _dump_model(record)
         with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO a2a_tasks (
+                    task_id, message_id, request_fingerprint, skill, incident_id,
+                    state, created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.task_id,
+                    record.message_id,
+                    record.request_fingerprint,
+                    record.skill,
+                    record.incident_id,
+                    record.state,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                    payload,
+                ),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def save_a2a_task_record(self, record: A2ATaskRecord) -> None:
+        """Update one durable A2A task record."""
+        now = datetime.now(UTC)
+        record.updated_at = now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM a2a_tasks WHERE task_id = ?",
+                (record.task_id,),
+            ).fetchone()
+            if row is not None:
+                existing = A2ATaskRecord.model_validate(_load_payload(row))
+                if (
+                    existing.message_id != record.message_id
+                    or existing.request_fingerprint != record.request_fingerprint
+                ):
+                    raise ValueError("A2A task ownership mismatch")
+                record.created_at = existing.created_at
             connection.execute(
                 """
-                INSERT INTO incident_states (
-                    incident_id, status, service_name, severity, environment,
-                    trace_id, session_id, approval_status, created_at, updated_at, payload
+                INSERT INTO a2a_tasks (
+                    task_id, message_id, request_fingerprint, skill, incident_id,
+                    state, created_at, updated_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(incident_id) DO UPDATE SET
-                    status = excluded.status,
-                    service_name = excluded.service_name,
-                    severity = excluded.severity,
-                    environment = excluded.environment,
-                    trace_id = excluded.trace_id,
-                    session_id = excluded.session_id,
-                    approval_status = excluded.approval_status,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    request_fingerprint = excluded.request_fingerprint,
+                    skill = excluded.skill,
+                    incident_id = excluded.incident_id,
+                    state = excluded.state,
                     updated_at = excluded.updated_at,
                     payload = excluded.payload
                 """,
                 (
-                    state.incident_id,
-                    state.status,
-                    state.service_name,
-                    state.severity,
-                    state.environment,
-                    state.trace_id,
-                    state.session_id,
-                    state.approval_status,
-                    state.created_at.isoformat(),
-                    state.updated_at.isoformat(),
-                    payload,
+                    record.task_id,
+                    record.message_id,
+                    record.request_fingerprint,
+                    record.skill,
+                    record.incident_id,
+                    record.state,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                    _dump_model(record),
                 ),
             )
+
+    def get_a2a_task_record(self, task_id: str) -> A2ATaskRecord | None:
+        """Return one durable A2A task record."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM a2a_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return A2ATaskRecord.model_validate(_load_payload(row)) if row is not None else None
+
+    def list_a2a_task_records(
+        self,
+        *,
+        incident_id: str | None = None,
+        limit: int = 20,
+        owner_id: str = "",
+    ) -> list[A2ATaskRecord]:
+        """Return recent durable A2A task records."""
+        query = "SELECT payload FROM a2a_tasks"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if incident_id is not None:
+            clauses.append("incident_id = ?")
+            params.append(incident_id)
+        if owner_id:
+            clauses.append("owner_id = ?")
+            params.append(owner_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [A2ATaskRecord.model_validate(_load_payload(row)) for row in rows]
+
+    def save_incident_state(self, state: IncidentState) -> None:
+        """Persist the latest lifecycle state for one incident."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (state.incident_id,),
+            ).fetchone()
+            if row is not None:
+                state = merge_incident_state(
+                    IncidentState.model_validate(_load_payload(row)),
+                    state,
+                )
+            self._save_incident_state(connection, state)
 
     def get_incident_state(self, incident_id: str) -> IncidentState | None:
         """Return the latest lifecycle state for one incident."""
@@ -621,6 +1527,81 @@ class AIOpsSQLiteStore:
                 """).fetchall()
         return [IncidentState.model_validate(_load_payload(row)) for row in rows]
 
+    @staticmethod
+    def _save_alert_event(connection: sqlite3.Connection, event: AlertEvent) -> None:
+        payload = _dump_model(event)
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                fingerprint, incident_id, source, status, service_name,
+                severity, environment, starts_at, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET
+                incident_id = excluded.incident_id,
+                source = excluded.source,
+                status = excluded.status,
+                service_name = excluded.service_name,
+                severity = excluded.severity,
+                environment = excluded.environment,
+                starts_at = excluded.starts_at,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                event.fingerprint,
+                event.incident_id,
+                event.source,
+                event.status,
+                event.service_name,
+                event.severity,
+                event.environment,
+                event.starts_at.isoformat() if event.starts_at else None,
+                event.updated_at.isoformat(),
+                payload,
+            ),
+        )
+
+    @staticmethod
+    def _save_incident_state(
+        connection: sqlite3.Connection,
+        state: IncidentState,
+    ) -> None:
+        state.updated_at = datetime.now(UTC)
+        payload = _dump_model(state)
+        connection.execute(
+            """
+            INSERT INTO incident_states (
+                incident_id, status, service_name, severity, environment,
+                trace_id, session_id, approval_status, created_at, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(incident_id) DO UPDATE SET
+                status = excluded.status,
+                service_name = excluded.service_name,
+                severity = excluded.severity,
+                environment = excluded.environment,
+                trace_id = excluded.trace_id,
+                session_id = excluded.session_id,
+                approval_status = excluded.approval_status,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                state.incident_id,
+                state.status,
+                state.service_name,
+                state.severity,
+                state.environment,
+                state.trace_id,
+                state.session_id,
+                state.approval_status,
+                state.created_at.isoformat(),
+                state.updated_at.isoformat(),
+                payload,
+            ),
+        )
+
     def save_report(self, report: DiagnosisReport) -> None:
         """Persist a diagnosis report."""
         payload = _dump_model(report)
@@ -628,13 +1609,14 @@ class AIOpsSQLiteStore:
             connection.execute(
                 """
                 INSERT INTO diagnosis_reports (
-                    report_id, incident_id, trace_id, created_at, payload
+                    report_id, incident_id, trace_id, created_at, updated_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(report_id) DO UPDATE SET
                     incident_id = excluded.incident_id,
                     trace_id = excluded.trace_id,
                     created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
                     payload = excluded.payload
                 """,
                 (
@@ -642,9 +1624,64 @@ class AIOpsSQLiteStore:
                     report.incident_id,
                     report.trace_id,
                     report.created_at.isoformat(),
+                    datetime.now(UTC).isoformat(),
                     payload,
                 ),
             )
+
+    def save_report_with_incident(
+        self,
+        report: DiagnosisReport,
+        incident_state: IncidentState,
+    ) -> None:
+        """Persist a report and its IncidentState projection atomically."""
+        now = datetime.now(UTC)
+        incident_state.updated_at = now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO diagnosis_reports (
+                    report_id, incident_id, trace_id, created_at, updated_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(report_id) DO UPDATE SET
+                    incident_id = excluded.incident_id,
+                    trace_id = excluded.trace_id,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    payload = excluded.payload
+                """,
+                (
+                    report.report_id,
+                    report.incident_id,
+                    report.trace_id,
+                    report.created_at.isoformat(),
+                    now.isoformat(),
+                    _dump_model(report),
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload FROM incident_states WHERE incident_id = ?",
+                (incident_state.incident_id,),
+            ).fetchone()
+            if row is not None:
+                incident_state = merge_incident_state(
+                    IncidentState.model_validate(_load_payload(row)),
+                    incident_state,
+                )
+            self._save_incident_state(connection, incident_state)
+
+    def get_report(self, report_id: str) -> DiagnosisReport | None:
+        """Return one report by its stable identifier."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM diagnosis_reports WHERE report_id = ?",
+                (report_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return DiagnosisReport.model_validate(_load_payload(row))
 
     def get_latest_report(self, incident_id: str) -> DiagnosisReport | None:
         """Return the latest report for one incident."""
@@ -667,14 +1704,21 @@ class AIOpsSQLiteStore:
         """Return the latest report per incident."""
         with self._connect() as connection:
             rows = connection.execute("""
-                SELECT payload
-                FROM diagnosis_reports
-                WHERE rowid IN (
-                    SELECT MAX(rowid)
-                    FROM diagnosis_reports
-                    GROUP BY incident_id
+                SELECT current.payload
+                FROM diagnosis_reports AS current
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM diagnosis_reports AS newer
+                    WHERE newer.incident_id = current.incident_id
+                      AND (
+                          newer.created_at > current.created_at
+                          OR (
+                              newer.created_at = current.created_at
+                              AND newer.rowid > current.rowid
+                          )
+                      )
                 )
-                ORDER BY created_at DESC, rowid DESC
+                ORDER BY current.created_at DESC, current.rowid DESC
                 """).fetchall()
         return [DiagnosisReport.model_validate(_load_payload(row)) for row in rows]
 
@@ -682,6 +1726,7 @@ class AIOpsSQLiteStore:
         """Delete all AIOps runtime records while preserving the database schema."""
         deleted: dict[str, int] = {}
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             for table, count_sql, delete_sql in _RUNTIME_RESET_SQL:
                 count = connection.execute(count_sql).fetchone()[0]
                 deleted[table] = int(count)
@@ -698,12 +1743,16 @@ class AIOpsSQLiteStore:
         deleted: dict[str, int] = {}
 
         with self._connect() as connection:
-            for table, (count_sql, delete_sql) in _RETENTION_SQL.items():
-                count = connection.execute(count_sql, (cutoff_text,)).fetchone()[0]
-                deleted[table] = int(count)
-                if not dry_run:
-                    connection.execute(delete_sql, (cutoff_text,))
             if not dry_run:
+                connection.execute("BEGIN IMMEDIATE")
+            eligible_incidents = self._select_retention_eligible_incidents(
+                connection,
+                cutoff_text=cutoff_text,
+            )
+            if dry_run:
+                deleted = self._count_retention_incidents(connection, eligible_incidents)
+            else:
+                deleted = self._delete_retention_incidents(connection, eligible_incidents)
                 try:
                     connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except sqlite3.OperationalError:
@@ -716,6 +1765,151 @@ class AIOpsSQLiteStore:
             "dry_run": dry_run,
             "deleted": deleted,
         }
+
+    @staticmethod
+    def _select_retention_eligible_incidents(
+        connection: sqlite3.Connection,
+        *,
+        cutoff_text: str,
+    ) -> list[str]:
+        terminal_placeholders = bind_markers(
+            len(_CHANGE_EXECUTION_TERMINAL_STATUSES),
+            "?",
+        )
+        rows = connection.execute(
+            f"""
+            SELECT incident_id
+            FROM (
+                SELECT incident_id FROM alert_events
+                UNION SELECT incident_id FROM trace_events
+                UNION SELECT incident_id FROM approval_requests
+                UNION SELECT incident_id FROM change_executions
+                UNION SELECT incident_id FROM aiops_sessions
+                UNION SELECT incident_id FROM incident_states
+                UNION SELECT incident_id FROM diagnosis_reports
+            ) AS incidents
+            WHERE NOT EXISTS (
+                SELECT 1 FROM alert_events AS alert
+                WHERE alert.incident_id = incidents.incident_id
+                  AND (alert.status != 'resolved' OR alert.updated_at >= ?)
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM trace_events AS trace
+                WHERE trace.incident_id = incidents.incident_id
+                  AND trace.created_at >= ?
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM approval_requests AS approval
+                WHERE approval.incident_id = incidents.incident_id
+                  AND (approval.status = 'pending' OR approval.updated_at >= ?)
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM change_executions AS execution
+                WHERE execution.incident_id = incidents.incident_id
+                  AND (
+                      execution.status NOT IN ({terminal_placeholders})
+                      OR execution.updated_at >= ?
+                  )
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM aiops_sessions AS session
+                WHERE session.incident_id = incidents.incident_id
+                  AND (
+                      session.status IN (
+                          'running', 'planning', 'executing', 'resume_running',
+                          'waiting_approval', 'approval_approved', 'change_validated',
+                          'waiting_manual_execution', 'observing', 'partial_success',
+                          'recovery_pending', 'rollback_recommended'
+                      )
+                      OR session.updated_at >= ?
+                  )
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM incident_states AS state
+                WHERE state.incident_id = incidents.incident_id
+                  AND (
+                      state.status NOT IN (
+                          'completed', 'incomplete', 'degraded', 'needs_human',
+                          'approval_rejected', 'approval_cancelled', 'approval_resumed',
+                          'blocked', 'failed', 'escalated', 'resolved', 'closed',
+                          'precheck_failed', 'dry_run_failed', 'sandbox_validated',
+                          'rolled_back', 'rollback_failed'
+                      )
+                      OR state.updated_at >= ?
+                  )
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM diagnosis_reports AS report
+                WHERE report.incident_id = incidents.incident_id
+                  AND report.updated_at >= ?
+            )
+            ORDER BY incident_id
+            """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
+            (
+                cutoff_text,
+                cutoff_text,
+                cutoff_text,
+                *_CHANGE_EXECUTION_TERMINAL_STATUSES,
+                cutoff_text,
+                cutoff_text,
+                cutoff_text,
+                cutoff_text,
+            ),
+        ).fetchall()
+        return [str(row["incident_id"]) for row in rows]
+
+    @staticmethod
+    def _count_retention_incidents(
+        connection: sqlite3.Connection,
+        incident_ids: list[str],
+    ) -> dict[str, int]:
+        counts = dict.fromkeys(_RETENTION_SQL, 0)
+        if not incident_ids:
+            return counts
+        for table in _RETENTION_SQL:
+            row = connection.execute(
+                trusted_table_statement(
+                    "SELECT_COUNT",
+                    table=table,
+                    allowed_tables=_RETENTION_SQL,
+                    value_count=len(incident_ids),
+                    marker="?",
+                ),
+                incident_ids,
+            ).fetchone()
+            counts[table] = int(row[0])
+        return counts
+
+    @staticmethod
+    def _delete_retention_incidents(
+        connection: sqlite3.Connection,
+        incident_ids: list[str],
+    ) -> dict[str, int]:
+        deleted = dict.fromkeys(_RETENTION_SQL, 0)
+        if not incident_ids:
+            return deleted
+        deletion_order = (
+            "change_executions",
+            "approval_requests",
+            "diagnosis_reports",
+            "trace_events",
+            "aiops_sessions",
+            "incident_states",
+            "alert_events",
+        )
+        for table in deletion_order:
+            cursor = connection.execute(
+                trusted_table_statement(
+                    "DELETE",
+                    table=table,
+                    allowed_tables=deletion_order,
+                    value_count=len(incident_ids),
+                    marker="?",
+                ),
+                incident_ids,
+            )
+            deleted[table] = int(cursor.rowcount or 0)
+        return deleted
 
     def _initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -766,7 +1960,9 @@ class AIOpsSQLiteStore:
                     status TEXT NOT NULL,
                     risk_level TEXT NOT NULL,
                     action TEXT NOT NULL,
+                    idempotency_key TEXT,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     decided_at TEXT,
                     payload TEXT NOT NULL
                 );
@@ -809,6 +2005,22 @@ class AIOpsSQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_aiops_sessions_status
                     ON aiops_sessions(status, updated_at);
 
+                CREATE TABLE IF NOT EXISTS a2a_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
+                    skill TEXT NOT NULL,
+                    incident_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_a2a_tasks_message
+                    ON a2a_tasks(message_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_a2a_tasks_incident
+                    ON a2a_tasks(incident_id, updated_at);
+
                 CREATE TABLE IF NOT EXISTS incident_states (
                     incident_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
@@ -832,10 +2044,37 @@ class AIOpsSQLiteStore:
                     incident_id TEXT NOT NULL,
                     trace_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_diagnosis_reports_incident
                     ON diagnosis_reports(incident_id, created_at);
+                """)
+            approval_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(approval_requests)").fetchall()
+            }
+            if "idempotency_key" not in approval_columns:
+                connection.execute("ALTER TABLE approval_requests ADD COLUMN idempotency_key TEXT")
+            if "updated_at" not in approval_columns:
+                connection.execute("ALTER TABLE approval_requests ADD COLUMN updated_at TEXT")
+                connection.execute(
+                    "UPDATE approval_requests SET updated_at = "
+                    "COALESCE(decided_at, created_at) WHERE updated_at IS NULL"
+                )
+            report_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(diagnosis_reports)").fetchall()
+            }
+            if "updated_at" not in report_columns:
+                connection.execute("ALTER TABLE diagnosis_reports ADD COLUMN updated_at TEXT")
+                connection.execute(
+                    "UPDATE diagnosis_reports SET updated_at = created_at WHERE updated_at IS NULL"
+                )
+            connection.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_approval_idempotency
+                ON approval_requests(idempotency_key)
+                WHERE status = 'pending' AND idempotency_key IS NOT NULL
                 """)
             try:
                 connection.execute("""
@@ -844,18 +2083,14 @@ class AIOpsSQLiteStore:
                     """)
             except sqlite3.IntegrityError as exc:
                 duplicate_groups = self._count_change_execution_scope_duplicates(connection)
-                self._record_migration_warning(
-                    "无法为 change_executions 创建业务幂等唯一索引，"
-                    f"发现 {duplicate_groups} 组历史重复安全变更记录；"
-                    "运行时将继续通过应用层预查避免新增重复。"
-                    f" error={exc}"
-                )
+                raise RuntimeError(
+                    "SQLite change_executions contains "
+                    f"{duplicate_groups} duplicate business-scope groups"
+                ) from exc
             except sqlite3.OperationalError as exc:
-                self._record_migration_warning(
-                    "无法检查或创建 change_executions 业务幂等唯一索引；"
-                    "运行时将继续通过应用层预查避免新增重复。"
-                    f" error={exc}"
-                )
+                raise RuntimeError(
+                    "SQLite change_executions schema cannot enforce business-scope idempotency"
+                ) from exc
 
     def _count_change_execution_scope_duplicates(self, connection: sqlite3.Connection) -> int:
         row = connection.execute("""

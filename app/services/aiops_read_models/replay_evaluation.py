@@ -26,14 +26,21 @@ def build_replay_evaluation(
     evaluation_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Build the single-incident evaluation view for diagnosis replay."""
-    matched_case = match_replay_eval_case(
+    matched_case, match_method, match_score = match_replay_eval_case_details(
         incident_id=incident_id,
         overview=overview,
         report_payload=report_payload,
         evaluation_summary=evaluation_summary,
     )
     if matched_case:
-        return build_linked_replay_evaluation(matched_case, metrics=metrics, tooling=tooling)
+        return build_linked_replay_evaluation(
+            matched_case,
+            metrics=metrics,
+            tooling=tooling,
+            evaluation_summary=evaluation_summary,
+            match_method=match_method,
+            match_score=match_score,
+        )
     return build_heuristic_replay_evaluation(
         evaluation_summary=evaluation_summary,
         metrics=metrics,
@@ -52,15 +59,36 @@ def match_replay_eval_case(
     evaluation_summary: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Find the offline evaluation case that best matches one replay incident."""
-    cases = _as_list((evaluation_summary or {}).get("cases"))
+    matched_case, _, _ = match_replay_eval_case_details(
+        incident_id=incident_id,
+        overview=overview,
+        report_payload=report_payload,
+        evaluation_summary=evaluation_summary,
+    )
+    return matched_case
+
+
+def match_replay_eval_case_details(
+    *,
+    incident_id: str,
+    overview: dict[str, Any],
+    report_payload: dict[str, Any],
+    evaluation_summary: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str, int]:
+    """Return a current eval case plus the explicit matching provenance."""
+    summary = evaluation_summary or {}
+    if not summary.get("available") or summary.get("stale"):
+        return None, "none", 0
+
+    cases = _as_list(summary.get("cases"))
     if not cases:
-        return None
+        return None, "none", 0
 
     candidate_ids = replay_eval_case_candidate_ids(incident_id, overview, report_payload)
     for item in cases:
         case = _as_mapping(item)
         if candidate_ids.intersection(replay_eval_case_identifiers(case)):
-            return case
+            return case, "identifier", 1
 
     best_case: dict[str, Any] | None = None
     best_score = 0
@@ -90,7 +118,9 @@ def match_replay_eval_case(
         if score > best_score:
             best_case = case
             best_score = score
-    return best_case if best_score >= 3 else None
+    if best_case is not None and best_score >= 3:
+        return best_case, "token_overlap", best_score
+    return None, "none", best_score
 
 
 def replay_eval_case_candidate_ids(
@@ -139,6 +169,9 @@ def build_linked_replay_evaluation(
     *,
     metrics: dict[str, Any],
     tooling: dict[str, Any],
+    evaluation_summary: dict[str, Any] | None = None,
+    match_method: str = "unknown",
+    match_score: int = 0,
 ) -> dict[str, Any]:
     """Build a replay evaluation view from a matched offline eval case."""
     case_metrics = _as_mapping(case.get("metrics"))
@@ -190,7 +223,7 @@ def build_linked_replay_evaluation(
             "percent",
             "非期望诊断工具占比；越低越好。",
             "cases[].unnecessary_tool_rate",
-            status=boolean_metric_status(case_metrics.get("unnecessary_tool_rate")),
+            status=lower_is_better_metric_status(unnecessary_tool_rate_value),
         ),
         replay_evaluation_metric(
             "trace_completeness",
@@ -216,6 +249,11 @@ def build_linked_replay_evaluation(
         "source": "offline_eval_summary",
         "case_id": case_id,
         "passed": passed,
+        "match": {
+            "method": match_method,
+            "score": match_score,
+        },
+        "provenance": replay_evaluation_provenance(evaluation_summary),
         "summary": f"已匹配离线评测用例 {case_id or 'unknown'}，结果：{'通过' if passed else '未通过'}。",
         "message": "该结果来自最近一次离线评测摘要，可用于面试展示单条故障的诊断质量。",
         "metrics": metric_items,
@@ -312,6 +350,11 @@ def build_heuristic_replay_evaluation(
         "source": "replay_quality",
         "case_id": "",
         "passed": None,
+        "match": {
+            "method": "none",
+            "score": 0,
+        },
+        "provenance": replay_evaluation_provenance(evaluation_summary),
         "summary": (
             "未匹配到当前 Incident 的离线评测 case，展示 Replay 自动质量检查。"
             if has_eval_summary
@@ -375,14 +418,16 @@ def replay_evidence_is_sufficient(
     replanner_decisions: list[dict[str, Any]],
 ) -> bool:
     """Heuristically judge whether replay evidence is enough to explain the diagnosis."""
-    evidence_count = int(metrics.get("evidence_count") or 0)
+    usable_evidence_count = int(evidence_quality.get("usable_count") or 0)
+    trusted_usable_count = int(evidence_quality.get("trusted_usable_count") or 0)
     report_confidence = _safe_float(metrics.get("confidence")) or 0.0
     average_evidence_confidence = _safe_float(evidence_quality.get("average_confidence")) or 0.0
     has_replanner_sufficient = any(
         bool(item.get("evidence_sufficient")) for item in replanner_decisions
     )
     return bool(
-        evidence_count >= 2
+        usable_evidence_count >= 2
+        and trusted_usable_count >= 1
         and not evidence_quality.get("has_not_configured")
         and (
             average_evidence_confidence >= 0.6
@@ -400,6 +445,56 @@ def boolean_metric_status(value: Any) -> str:
     if parsed is False:
         return "failed"
     return "unknown"
+
+
+def lower_is_better_metric_status(value: Any) -> str:
+    """Grade a non-negative rate where zero is the only passing value."""
+    parsed = _safe_float(value)
+    if parsed is None:
+        return "unknown"
+    if parsed <= 0:
+        return "passed"
+    return "warning"
+
+
+def replay_evaluation_provenance(
+    evaluation_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Expose enough artifact identity to audit a linked replay score."""
+    summary = evaluation_summary or {}
+    run = _as_mapping(summary.get("run"))
+    environment = _as_mapping(run.get("environment"))
+    execution_identity = _as_mapping(environment.get("execution_identity"))
+    dataset = _as_mapping(run.get("dataset"))
+    artifact_status = _as_mapping(summary.get("artifact_status"))
+    model = str(
+        execution_identity.get("actual_model")
+        or run.get("model")
+        or run.get("judge_model")
+        or environment.get("rag_model")
+        or ""
+    )
+    embedding_model = str(
+        execution_identity.get("actual_embedding_model")
+        or run.get("embedding_model")
+        or environment.get("embedding_model")
+        or ""
+    )
+    return {
+        "artifact": str(summary.get("artifact") or summary.get("path") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "suite": str(environment.get("suite") or run.get("suite") or ""),
+        "model": model,
+        "embedding_model": embedding_model,
+        "git_commit": str(environment.get("git_commit") or ""),
+        "git_dirty": environment.get("git_dirty"),
+        "evaluation_fingerprint": str(environment.get("evaluation_fingerprint") or ""),
+        "dataset": dataset,
+        "stale": bool(summary.get("stale") or artifact_status.get("stale")),
+        "stale_reasons": _as_list(artifact_status.get("reasons")),
+        "generated_fingerprint": str(artifact_status.get("generated_fingerprint") or ""),
+        "current_fingerprint": str(artifact_status.get("current_fingerprint") or ""),
+    }
 
 
 def normalize_eval_identifier(value: str) -> str:

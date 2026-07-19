@@ -6,9 +6,10 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from app.config import config
+from app.integrations.base import public_adapter_failure_message
 from app.models.evidence import (
     Evidence,
     build_confidence_reason,
@@ -19,19 +20,41 @@ from app.models.evidence import (
 from app.models.plan import PlanStep
 from app.models.trace import ToolCallRecord
 from app.services.aiops_state_utils import extract_incident_id
-from app.tools.base import ToolExecutionResult
+from app.tools.base import (
+    ToolExecutionResult,
+    extract_tool_error_message,
+    is_failed_tool_output,
+)
 from app.utils.redaction import redact_sensitive_data
+
+UNUSABLE_EVIDENCE_CONFIDENCE_CAP = 0.1
+STALE_EVIDENCE_CONFIDENCE_CAP = 0.15
 
 
 def result_for_persistence(result: ToolExecutionResult) -> ToolExecutionResult:
     """Return a copy with bulky external raw payloads removed for Trace/Report storage."""
+    result = _normalize_result_status(result)
+    metadata = dict(result.metadata or {})
+    metadata["evidence_quality"] = classify_tool_result_quality(result)
+    result = result.model_copy(update={"metadata": metadata})
+
     redacted_args = redact_sensitive_data(result.input_args)
     redacted_output = redact_sensitive_data(result.output)
+    redacted_error = (
+        str(redact_sensitive_data(result.error_message))
+        if result.error_message is not None
+        else None
+    )
+    redacted_metadata = redact_sensitive_data(result.metadata)
     updates: dict[str, Any] = {}
     if redacted_args != result.input_args:
         updates["input_args"] = redacted_args
     if redacted_output != result.output:
         updates["output"] = redacted_output
+    if redacted_error != result.error_message:
+        updates["error_message"] = redacted_error
+    if redacted_metadata != result.metadata:
+        updates["metadata"] = redacted_metadata
     persisted_result = result.model_copy(update=updates) if updates else result
     if not config.aiops_store_raw_external_payload and isinstance(persisted_result.output, dict):
         compact_output = redact_sensitive_data(_compact_external_payload(persisted_result.output))
@@ -42,15 +65,25 @@ def result_for_persistence(result: ToolExecutionResult) -> ToolExecutionResult:
 
 def tool_result_to_evidence(result: ToolExecutionResult, step: PlanStep) -> Evidence:
     """Convert a tool result into audit-ready diagnostic evidence."""
+    result = result_for_persistence(result)
     raw_data = result.model_dump(mode="json")
     summary = summarize_tool_result(result)
-    stance = infer_evidence_stance(
-        source_tool=result.tool_name,
-        raw_data=raw_data,
-        summary=summary,
+    quality = classify_tool_result_quality(result)
+    stance = (
+        infer_evidence_stance(
+            source_tool=result.tool_name,
+            raw_data=raw_data,
+            summary=summary,
+        )
+        if quality["usable"]
+        else "unknown"
     )
     data_source = normalize_data_source(result.tool_name, raw_data)
     confidence = _evidence_confidence(result, data_source)
+    if quality["status"] == "stale":
+        confidence = min(confidence, STALE_EVIDENCE_CONFIDENCE_CAP)
+    elif not quality["usable"]:
+        confidence = min(confidence, UNUSABLE_EVIDENCE_CONFIDENCE_CAP)
     execution_path = result.metadata.get("execution_path")
     if execution_path == "manual_analysis":
         confidence = min(confidence, 0.35)
@@ -86,6 +119,14 @@ def tool_result_to_call_record(
     state: Mapping[str, Any],
 ) -> ToolCallRecord:
     """Convert a tool result into a replayable tool call audit record."""
+    result = result_for_persistence(result)
+    raw_invocation_kind = str(result.metadata.get("invocation_kind") or "tool")
+    invocation_kind = cast(
+        Literal["tool", "analysis_fallback", "policy"],
+        raw_invocation_kind
+        if raw_invocation_kind in {"tool", "analysis_fallback", "policy"}
+        else "tool",
+    )
     return ToolCallRecord(
         trace_id=state.get("trace_id") or "trace-unknown",
         incident_id=extract_incident_id(state),
@@ -102,6 +143,8 @@ def tool_result_to_call_record(
         risk_level=result.risk_level,
         read_only=result.read_only,
         error_message=result.error_message,
+        invocation_kind=invocation_kind,
+        actual_tool_invoked=bool(result.metadata.get("actual_tool_invoked", True)),
         execution_metadata=result.metadata,
     )
 
@@ -110,6 +153,8 @@ def summarize_tool_result(result: ToolExecutionResult) -> str:
     """Create a compact human-readable evidence summary."""
     if result.status == "failed":
         return f"工具 {result.tool_name} 调用失败: {result.error_message or '未知错误'}"
+    if classify_tool_result_quality(result)["status"] == "stale":
+        return f"工具 {result.tool_name} 返回了过期数据，不可作为当前诊断证据"
 
     output = result.output
     if isinstance(output, dict):
@@ -159,6 +204,15 @@ def _compact_external_payload(output: dict[str, Any]) -> dict[str, Any]:
     }:
         return output
     compact = dict(output)
+    compact.pop("endpoint", None)
+    if "processlist_sample" in compact:
+        compact["processlist_sample"] = _compact_processlist_sample(
+            compact.get("processlist_sample")
+        )
+    if "partial_errors" in compact:
+        compact["partial_errors"] = _compact_external_errors(compact.get("partial_errors"))
+    if "fallback_errors" in compact:
+        compact["fallback_errors"] = _compact_external_errors(compact.get("fallback_errors"))
     raw = compact.get("raw")
     if isinstance(raw, dict):
         compact["raw"] = _compact_raw_payload(raw)
@@ -166,10 +220,55 @@ def _compact_external_payload(output: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _compact_external_errors(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    errors: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        error_type = str(item.get("error_type") or "adapter_error")
+        errors.append(
+            {
+                key: item.get(key)
+                for key in ("query", "command", "tool_name", "source")
+                if item.get(key) is not None
+            }
+            | {
+                "error_type": error_type,
+                "error_message": public_adapter_failure_message(error_type),
+            }
+        )
+    return errors
+
+
+def _compact_processlist_sample(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "Command": item.get("Command"),
+                "Time": item.get("Time"),
+                "State": item.get("State"),
+                "has_statement": bool(item.get("Info") or item.get("has_statement")),
+            }
+        )
+    return rows
+
+
 def _materialize_large_output_artifact(result: ToolExecutionResult) -> ToolExecutionResult:
     """Store oversized tool output as a redacted artifact and keep only a compact pointer."""
     output = result.output
     if output is None:
+        return result
+    existing_artifact = (
+        result.metadata.get("output_artifact") if isinstance(result.metadata, dict) else None
+    )
+    if isinstance(existing_artifact, dict):
         return result
 
     inline_limit = max(int(config.aiops_tool_output_inline_bytes or 0), 0)
@@ -332,10 +431,77 @@ def _evidence_confidence(result: ToolExecutionResult, data_source: str) -> float
     return 0.65
 
 
+def classify_tool_result_quality(result: ToolExecutionResult) -> dict[str, Any]:
+    """Classify whether a result can participate in diagnostic inference."""
+    if result.status == "failed":
+        reason = result.error_message or extract_tool_error_message(result.output) or "tool_failed"
+        return {"status": "failed", "usable": False, "reasons": [str(reason)]}
+    if _is_explicitly_stale(result.output) or _is_explicitly_stale(result.metadata):
+        return {
+            "status": "stale",
+            "usable": False,
+            "reasons": ["result_marked_stale_or_expired"],
+        }
+    if _is_empty_result_output(result.output):
+        return {"status": "empty", "usable": False, "reasons": ["empty_output"]}
+    return {"status": "valid", "usable": True, "reasons": []}
+
+
+def _normalize_result_status(result: ToolExecutionResult) -> ToolExecutionResult:
+    """Keep the outer status consistent with structured failure and empty payloads."""
+    if result.status != "success":
+        return result
+    if is_failed_tool_output(result.output):
+        return result.model_copy(
+            update={
+                "status": "failed",
+                "error_message": result.error_message
+                or extract_tool_error_message(result.output)
+                or "Tool returned a structured failure result",
+            }
+        )
+    if _is_empty_result_output(result.output):
+        metadata = dict(result.metadata or {})
+        metadata["failure_kind"] = "no_data"
+        return result.model_copy(
+            update={
+                "status": "failed",
+                "error_message": result.error_message or "Tool returned no usable data",
+                "metadata": metadata,
+            }
+        )
+    return result
+
+
+def _is_empty_result_output(output: Any) -> bool:
+    if output is None:
+        return True
+    if isinstance(output, str):
+        return not output.strip()
+    if isinstance(output, (list, tuple, set, dict)):
+        return len(output) == 0
+    return False
+
+
+def _is_explicitly_stale(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for key in ("stale", "is_stale", "expired", "is_expired", "stale_ignored"):
+        if value.get(key) is True:
+            return True
+    for key in ("freshness", "data_status", "evidence_status", "data_quality"):
+        if str(value.get(key) or "").strip().lower() in {"stale", "expired", "outdated"}:
+            return True
+    return False
+
+
 def _build_evidence_fact(result: ToolExecutionResult, data_source: str) -> str:
     """Separate directly observed data from later diagnostic inference."""
-    if result.status == "failed":
+    quality = classify_tool_result_quality(result)
+    if result.status == "failed" or quality["status"] == "empty":
         return f"{result.tool_name} 未返回可用数据，来源={data_source}"
+    if quality["status"] == "stale":
+        return f"{result.tool_name} 返回数据已被标记为过期，来源={data_source}"
     if isinstance(result.output, dict) and result.output.get("fact"):
         return str(result.output["fact"])
     summary = summarize_tool_result(result)
@@ -344,7 +510,7 @@ def _build_evidence_fact(result: ToolExecutionResult, data_source: str) -> str:
 
 def _build_evidence_inference(result: ToolExecutionResult, stance: str) -> str:
     """Summarize what this evidence does to the active hypothesis."""
-    if result.status == "failed":
+    if result.status == "failed" or not classify_tool_result_quality(result)["usable"]:
         return "该步骤不能支持根因判断，只能作为证据缺口记录。"
     if isinstance(result.output, dict) and result.output.get("inference"):
         return str(result.output["inference"])
@@ -359,6 +525,11 @@ def _build_evidence_inference(result: ToolExecutionResult, stance: str) -> str:
 
 def _build_evidence_uncertainty(result: ToolExecutionResult, data_source: str) -> str:
     """Make mock, fallback, and failure boundaries explicit."""
+    quality = classify_tool_result_quality(result)
+    if quality["status"] == "stale":
+        return "工具返回的数据已明确标记为过期或失效，不能代表当前事故窗口。"
+    if quality["status"] == "empty":
+        return "工具未返回可用数据，不能据此支持或反驳根因假设。"
     if (
         result.status != "failed"
         and isinstance(result.output, dict)
@@ -384,6 +555,8 @@ def _build_evidence_next_step(
     step: PlanStep,
 ) -> str:
     """Recommend the next verification action based on provenance and status."""
+    if classify_tool_result_quality(result)["status"] == "stale":
+        return f"重新调用 {result.tool_name} 获取当前事故窗口内的新鲜数据。"
     if data_source == "not_configured":
         return f"配置 {result.tool_name} 对应真实适配器，或开启 Mock 模式后仅作演示。"
     if result.status == "failed":

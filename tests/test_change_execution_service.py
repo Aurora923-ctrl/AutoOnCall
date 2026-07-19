@@ -1,6 +1,9 @@
 """Service tests for approved safe change workflows."""
 
+import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
 
@@ -34,6 +37,25 @@ def _build_runtime(tmp_path):
 
 def _state_store(service: ChangeExecutionService) -> AIOpsSQLiteStore:
     return AIOpsSQLiteStore(service.database_path)
+
+
+def _tamper_approval_plan(
+    approval_store: ApprovalService,
+    approval_id: str,
+    *,
+    update_plan,
+) -> None:
+    with sqlite3.connect(approval_store.database_path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["change_plan"] = update_plan(payload["change_plan"])
+        connection.execute(
+            "UPDATE approval_requests SET payload = ? WHERE approval_id = ?",
+            (json.dumps(payload), approval_id),
+        )
 
 
 def test_sqlite_store_creates_change_execution_once_without_overwrite(tmp_path) -> None:
@@ -84,7 +106,7 @@ def test_sqlite_store_treats_approval_plan_scope_as_idempotency_key(tmp_path) ->
     assert second.status == "created"
 
 
-def test_sqlite_store_preserves_idempotency_for_legacy_tables_without_scope_index(
+def test_sqlite_store_rejects_legacy_duplicate_change_execution_scopes(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "legacy-safe-change-store.db"
@@ -103,14 +125,6 @@ def test_sqlite_store_preserves_idempotency_for_legacy_tables_without_scope_inde
             "created_at": utc_now() - timedelta(minutes=1),
         }
     )
-    retry = first.model_copy(
-        update={
-            "change_execution_id": "chgexec-third-retry",
-            "status": "dry_run_running",
-            "created_at": utc_now(),
-        }
-    )
-
     with sqlite3.connect(database_path) as connection:
         connection.execute("""
             CREATE TABLE change_executions (
@@ -148,13 +162,9 @@ def test_sqlite_store_preserves_idempotency_for_legacy_tables_without_scope_inde
                 ),
             )
 
-    store = AIOpsSQLiteStore(database_path)
-    existing, created = store.create_change_execution_once(retry)
+    with pytest.raises(RuntimeError, match="duplicate business-scope groups"):
+        AIOpsSQLiteStore(database_path)
 
-    assert store.migration_warnings
-    assert "历史重复安全变更记录" in store.migration_warnings[0]
-    assert created is False
-    assert existing.change_execution_id == "chgexec-first"
     with sqlite3.connect(database_path) as connection:
         count = connection.execute("SELECT COUNT(*) FROM change_executions").fetchone()[0]
     assert count == 2
@@ -407,7 +417,15 @@ async def test_stale_plan_blocks_resume_from_completed_dry_run(
             "expires_in_seconds": 60,
         }
     )
-    approval_store.create_request(approval.model_copy(update={"change_plan": stale_plan}))
+    _tamper_approval_plan(
+        approval_store,
+        approval.approval_id,
+        update_plan=lambda payload: {
+            **payload,
+            "created_at": stale_plan.created_at.isoformat(),
+            "expires_in_seconds": stale_plan.expires_in_seconds,
+        },
+    )
 
     second = await _collect_events(
         service,
@@ -509,9 +527,15 @@ async def test_sandbox_validation_does_not_resolve_incident(tmp_path) -> None:
 async def test_high_risk_plan_without_rollback_stops_at_precheck(tmp_path) -> None:
     service, approval_store, _, _ = _build_runtime(tmp_path)
     approval, plan = _approved_request(approval_store)
-    plan = plan.model_copy(update={"rollback_steps": [], "rollback_plan": []})
-    approval = approval.model_copy(update={"change_plan": plan})
-    approval_store.create_request(approval)
+    _tamper_approval_plan(
+        approval_store,
+        approval.approval_id,
+        update_plan=lambda payload: {
+            **payload,
+            "rollback_steps": [],
+            "rollback_plan": [],
+        },
+    )
 
     events = await _collect_events(
         service,
@@ -532,19 +556,21 @@ async def test_high_risk_plan_without_rollback_stops_at_precheck(tmp_path) -> No
 async def test_stale_plan_stops_at_precheck(tmp_path) -> None:
     service, approval_store, _, _ = _build_runtime(tmp_path)
     approval, plan = _approved_request(approval_store)
-    stale_plan = plan.model_copy(
-        update={
-            "created_at": utc_now() - timedelta(hours=2),
+    stale_created_at = utc_now() - timedelta(hours=2)
+    _tamper_approval_plan(
+        approval_store,
+        approval.approval_id,
+        update_plan=lambda payload: {
+            **payload,
+            "created_at": stale_created_at.isoformat(),
             "expires_in_seconds": 60,
-        }
+        },
     )
-    approval = approval.model_copy(update={"change_plan": stale_plan})
-    approval_store.create_request(approval)
 
     events = await _collect_events(
         service,
         incident_id=approval.incident_id,
-        change_plan_id=stale_plan.change_plan_id,
+        change_plan_id=plan.change_plan_id,
         approval_id=approval.approval_id,
     )
 
@@ -557,16 +583,38 @@ async def test_stale_plan_stops_at_precheck(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_dry_run_failure_never_enters_manual_execution(tmp_path) -> None:
     service, approval_store, _, _ = _build_runtime(tmp_path)
-    approval, plan = _approved_request(approval_store)
+    plan = build_change_plan(
+        incident_id="inc-dry-run-failure",
+        action="人工调整 Redis maxclients",
+        risk_level="high",
+        tool_name="suggest_remediation",
+        service_name="order-service",
+        environment="prod",
+        metadata={"trace_id": "trace-dry-run-failure"},
+    )
     blocked_step = plan.steps[0].model_copy(update={"can_dry_run": False})
     blocked_plan = plan.model_copy(update={"steps": [blocked_step]})
-    approval = approval.model_copy(update={"change_plan": blocked_plan})
-    approval_store.create_request(approval)
+    request = approval_store.create_request(
+        ApprovalRequest(
+            incident_id=blocked_plan.incident_id,
+            action=blocked_plan.action,
+            risk_level=blocked_plan.risk_level,
+            reason="production change requires approval",
+            change_plan=blocked_plan,
+            metadata={"trace_id": "trace-dry-run-failure"},
+        )
+    )
+    approval = approval_store.decide_request(
+        request.approval_id,
+        decision="approve",
+        decided_by="approver",
+    )
+    assert approval.change_plan is not None
 
     events = await _collect_events(
         service,
         incident_id=approval.incident_id,
-        change_plan_id=blocked_plan.change_plan_id,
+        change_plan_id=approval.change_plan.change_plan_id,
         approval_id=approval.approval_id,
         mode="manual_record",
     )
@@ -613,8 +661,9 @@ async def test_manual_record_waits_then_closes_after_operator_result(tmp_path) -
         execution.change_execution_id,
         ManualExecutionResultRequest(
             status="succeeded",
-            operator="pytest",
+            operator="change-operator",
             notes="人工已在变更平台执行并确认指标恢复",
+            evidence={"change_ticket": "CHG-001"},
             observed_metrics={"service_5xx_rate": 0.0},
         ),
     )
@@ -634,6 +683,518 @@ async def test_manual_record_waits_then_closes_after_operator_result(tmp_path) -
     assert closed_state.status == "resolved"
     assert closed_state.latest_approval_id == approval.approval_id
     assert closed_state.manual_action_required is False
+
+
+@pytest.mark.asyncio
+async def test_approver_cannot_record_manual_execution_result(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    with pytest.raises(ChangeExecutionStateError, match="other than the approver"):
+        service.record_manual_result(
+            execution_id,
+            ManualExecutionResultRequest(
+                status="succeeded",
+                operator=str(approval.decided_by),
+                notes="self-approved execution",
+                evidence={"change_ticket": "CHG-SELF"},
+                observed_metrics={"service_5xx_rate": 0.0},
+            ),
+        )
+
+    persisted = service.get_execution(execution_id)
+    assert persisted.status == "waiting_manual_execution"
+    assert not persisted.manual_result
+
+
+@pytest.mark.asyncio
+async def test_manual_result_revalidates_exact_approved_plan(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+    with sqlite3.connect(approval_store.database_path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id = ?",
+            (approval.approval_id,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["change_plan"]["action"] = "expanded unapproved action"
+        connection.execute(
+            "UPDATE approval_requests SET payload = ? WHERE approval_id = ?",
+            (json.dumps(payload), approval.approval_id),
+        )
+
+    with pytest.raises(ChangeExecutionStateError, match="no longer valid"):
+        service.record_manual_result(
+            execution_id,
+            ManualExecutionResultRequest(
+                status="succeeded",
+                operator="separate-operator",
+                notes="execution completed",
+                evidence={"change_ticket": "CHG-DRIFT"},
+                observed_metrics={"service_5xx_rate": 0.0},
+            ),
+        )
+
+    assert service.get_execution(execution_id).status == "waiting_manual_execution"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_manual_results_have_single_winner(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+    barrier = threading.Barrier(2)
+
+    def submit(operator: str):
+        barrier.wait()
+        try:
+            return service.record_manual_result(
+                execution_id,
+                ManualExecutionResultRequest(
+                    status="succeeded",
+                    operator=operator,
+                    notes=f"result from {operator}",
+                    evidence={"change_ticket": f"CHG-{operator}"},
+                    observed_metrics={"service_5xx_rate": 0.0},
+                ),
+            )
+        except ChangeExecutionStateError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, ["operator-a", "operator-b"]))
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, ChangeExecutionStateError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert service.get_execution(execution_id).status == "closed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("manual_status", "execution_status"),
+    [
+        ("partial", "partial_success"),
+        ("recovery_pending", "recovery_pending"),
+        ("rolled_back", "rolled_back"),
+        ("rollback_failed", "rollback_failed"),
+    ],
+)
+async def test_manual_result_preserves_extended_recovery_states(
+    tmp_path,
+    manual_status,
+    execution_status,
+) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    request_kwargs = {
+        "status": manual_status,
+        "operator": "separate-operator",
+        "notes": f"manual result {manual_status}",
+        "evidence": {"change_ticket": "CHG-STATE"},
+        "observed_metrics": {"service_5xx_rate": 0.1},
+    }
+    if manual_status == "rollback_failed":
+        request_kwargs["evidence"] = {}
+        request_kwargs["observed_metrics"] = {}
+
+    updated = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(**request_kwargs),
+    )
+
+    assert updated.status == execution_status
+
+
+@pytest.mark.asyncio
+async def test_partial_execution_can_transition_to_rolled_back(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    partial = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="partial",
+            operator="separate-operator",
+            notes="one approved step completed",
+            evidence={"change_ticket": "CHG-PARTIAL"},
+            observed_metrics={"service_5xx_rate": 0.2},
+        ),
+    )
+    rolled_back = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="rolled_back",
+            operator="separate-operator",
+            notes="completed rollback for the changed scope",
+            evidence={"change_ticket": "CHG-PARTIAL"},
+            observed_metrics={"service_5xx_rate": 0.0},
+        ),
+    )
+
+    assert partial.status == "partial_success"
+    assert rolled_back.status == "rolled_back"
+    assert rolled_back.manual_result["history"][0]["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_recovery_pending_can_close_after_observation(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="recovery_pending",
+            operator="separate-operator",
+            notes="waiting for the full observation window",
+            evidence={"change_ticket": "CHG-RECOVERY"},
+            observed_metrics={"service_5xx_rate": 0.05},
+        ),
+    )
+    closed = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="succeeded",
+            operator="separate-operator",
+            notes="observation window passed",
+            evidence={"change_ticket": "CHG-RECOVERY"},
+            observed_metrics={"service_5xx_rate": 0.0},
+        ),
+    )
+
+    assert closed.status == "closed"
+    assert closed.manual_result["history"][0]["status"] == "recovery_pending"
+
+
+@pytest.mark.asyncio
+async def test_multi_step_success_requires_every_approved_step_result(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    plan = build_change_plan(
+        incident_id="inc-multi-step",
+        action="multi-step manual change",
+        risk_level="high",
+        tool_name="suggest_remediation",
+        service_name="order-service",
+        environment="prod",
+    )
+    second_step = plan.steps[0].model_copy(update={"step_id": "second-approved-step"})
+    expanded_plan = plan.model_copy(update={"steps": [*plan.steps, second_step]})
+    pending = approval_store.create_request(
+        ApprovalRequest(
+            incident_id=expanded_plan.incident_id,
+            action=expanded_plan.action,
+            risk_level=expanded_plan.risk_level,
+            change_plan=expanded_plan,
+        )
+    )
+    approval = approval_store.decide_request(
+        pending.approval_id,
+        decision="approve",
+        decided_by="approver",
+    )
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=expanded_plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    with pytest.raises(ChangeExecutionStateError, match="every approved step"):
+        service.record_manual_result(
+            execution_id,
+            ManualExecutionResultRequest(
+                status="succeeded",
+                operator="separate-operator",
+                notes="only one step recorded",
+                evidence={"change_ticket": "CHG-MULTI"},
+                observed_metrics={"service_5xx_rate": 0.0},
+                step_results=[
+                    {
+                        "step_id": expanded_plan.steps[0].step_id,
+                        "status": "succeeded",
+                    }
+                ],
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_multi_step_partial_requires_complete_mixed_step_results(tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    plan = build_change_plan(
+        incident_id="inc-multi-step-partial",
+        action="multi-step manual change",
+        risk_level="high",
+        tool_name="suggest_remediation",
+        service_name="order-service",
+        environment="prod",
+    )
+    first_step = plan.steps[0]
+    first_rollback = plan.rollback_plan[0]
+    second_rollback = first_rollback.model_copy(update={"step_id": "rollback-second"})
+    second_step = first_step.model_copy(
+        update={
+            "step_id": "execute-second",
+            "rollback_step_id": second_rollback.step_id,
+        }
+    )
+    expanded_plan = plan.model_copy(
+        update={
+            "steps": [first_step, second_step],
+            "rollback_plan": [first_rollback, second_rollback],
+        }
+    )
+    pending = approval_store.create_request(
+        ApprovalRequest(
+            incident_id=expanded_plan.incident_id,
+            action=expanded_plan.action,
+            risk_level=expanded_plan.risk_level,
+            change_plan=expanded_plan,
+        )
+    )
+    approval = approval_store.decide_request(
+        pending.approval_id,
+        decision="approve",
+        decided_by="approver",
+    )
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=expanded_plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    with pytest.raises(ChangeExecutionStateError, match="multi-step partial"):
+        service.record_manual_result(
+            execution_id,
+            ManualExecutionResultRequest(
+                status="partial",
+                operator="separate-operator",
+                notes="only one step was described",
+                evidence={"change_ticket": "CHG-MULTI-PARTIAL"},
+                observed_metrics={"service_5xx_rate": 0.2},
+                step_results=[{"step_id": first_step.step_id, "status": "succeeded"}],
+            ),
+        )
+
+    updated = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="partial",
+            operator="separate-operator",
+            notes="first step succeeded and second step was stopped",
+            evidence={"change_ticket": "CHG-MULTI-PARTIAL"},
+            observed_metrics={"service_5xx_rate": 0.2},
+            step_results=[
+                {"step_id": first_step.step_id, "status": "succeeded"},
+                {"step_id": second_step.step_id, "status": "skipped"},
+            ],
+        ),
+    )
+
+    assert updated.status == "partial_success"
+
+
+@pytest.mark.asyncio
+async def test_manual_result_survives_projection_failures(monkeypatch, tmp_path) -> None:
+    service, approval_store, trace_store, report_store = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+
+    monkeypatch.setattr(
+        service._store,
+        "save_incident_state",
+        lambda state: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setattr(
+        report_store,
+        "mark_change_execution_updated",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("report unavailable")),
+    )
+    monkeypatch.setattr(
+        trace_store,
+        "record_change_event",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+
+    updated = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="succeeded",
+            operator="separate-operator",
+            notes="external change completed",
+            evidence={"change_ticket": "CHG-PROJECTION"},
+            observed_metrics={"service_5xx_rate": 0.0},
+        ),
+    )
+
+    assert updated.status == "closed"
+    assert service.get_execution(execution_id).status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_manual_result_projection_failures_are_marked_and_repaired(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service, approval_store, trace_store, report_store = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+    original_save_state = service._store.save_incident_state
+    original_report_update = report_store.mark_change_execution_updated
+    original_trace_update = trace_store.record_change_event
+    monkeypatch.setattr(
+        service._store,
+        "save_incident_state",
+        lambda state: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setattr(
+        report_store,
+        "mark_change_execution_updated",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("report unavailable")),
+    )
+    monkeypatch.setattr(
+        trace_store,
+        "record_change_event",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+
+    updated = service.record_manual_result(
+        execution_id,
+        ManualExecutionResultRequest(
+            status="succeeded",
+            operator="separate-operator",
+            notes="external change completed",
+            evidence={"change_ticket": "CHG-REPAIR"},
+            observed_metrics={"service_5xx_rate": 0.0},
+        ),
+    )
+
+    assert updated.projection_pending == ["incident_state", "report", "trace"]
+    monkeypatch.setattr(service._store, "save_incident_state", original_save_state)
+    monkeypatch.setattr(report_store, "mark_change_execution_updated", original_report_update)
+    monkeypatch.setattr(trace_store, "record_change_event", original_trace_update)
+
+    repaired = service.get_execution(execution_id)
+    assert repaired.projection_pending == []
+    state = service._store.get_incident_state(approval.incident_id)
+    assert state is not None
+    assert state.status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_manual_result_persists_projection_outbox_before_sync(monkeypatch, tmp_path) -> None:
+    service, approval_store, _, _ = _build_runtime(tmp_path)
+    approval, plan = _approved_request(approval_store)
+    events = await _collect_events(
+        service,
+        incident_id=approval.incident_id,
+        change_plan_id=plan.change_plan_id,
+        approval_id=approval.approval_id,
+        mode="manual_record",
+        operator="change-operator",
+    )
+    execution_id = events[-1]["change_execution"]["change_execution_id"]
+    monkeypatch.setattr(
+        service,
+        "_sync_committed_execution",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("process stopped")),
+    )
+
+    with pytest.raises(RuntimeError, match="process stopped"):
+        service.record_manual_result(
+            execution_id,
+            ManualExecutionResultRequest(
+                status="succeeded",
+                operator="separate-operator",
+                notes="external change completed",
+                evidence={"change_ticket": "CHG-OUTBOX"},
+                observed_metrics={"service_5xx_rate": 0.0},
+            ),
+        )
+
+    stored = service._store.get_change_execution(execution_id)
+    assert stored is not None
+    assert stored.status == "closed"
+    assert stored.projection_pending == ["incident_state", "report", "trace"]
 
 
 @pytest.mark.asyncio

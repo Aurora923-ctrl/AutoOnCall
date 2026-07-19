@@ -1,6 +1,8 @@
 """Human-executed change plan model for risky AIOps actions."""
 
+import json
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -64,3 +66,15 @@ class ChangePlan(BaseModel):
     notes: str = "Agent 只生成变更计划草案，不自动执行生产动作。"
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+def change_plan_fingerprint(plan: ChangePlan) -> str:
+    """Return a stable digest for the exact plan content presented for approval."""
+    canonical = json.dumps(
+        plan.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()

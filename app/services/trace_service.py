@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from app.models.trace import ToolCallRecord, TraceEvent
 from app.services.aiops_store import create_aiops_store
@@ -35,6 +38,8 @@ class TraceService:
     def create_event(
         self,
         *,
+        event_id: str | None = None,
+        created_at: datetime | None = None,
         trace_id: str,
         incident_id: str,
         node_name: str,
@@ -51,22 +56,27 @@ class TraceService:
         metadata: dict[str, Any] | None = None,
     ) -> TraceEvent:
         """Create, store, and persist a trace event."""
-        event = TraceEvent(
-            trace_id=trace_id,
-            incident_id=incident_id,
-            node_name=node_name,
-            event_type=event_type,
-            step_id=step_id,
-            input_summary=_truncate(redact_sensitive_text(input_summary)),
-            output_summary=_truncate(redact_sensitive_text(output_summary)),
-            tool_name=tool_name,
-            tool_args=redact_sensitive_data(dict(tool_args or {})),
-            tool_result=_compact_value(redact_sensitive_data(tool_result)),
-            latency_ms=latency_ms,
-            status=status,
-            error_message=redact_sensitive_text(error_message) if error_message else None,
-            metadata=redact_sensitive_data(dict(metadata or {})),
-        )
+        payload: dict[str, Any] = {
+            "trace_id": trace_id,
+            "incident_id": incident_id,
+            "node_name": node_name,
+            "event_type": event_type,
+            "step_id": step_id,
+            "input_summary": _truncate(redact_sensitive_text(input_summary)),
+            "output_summary": _truncate(redact_sensitive_text(output_summary)),
+            "tool_name": tool_name,
+            "tool_args": redact_sensitive_data(dict(tool_args or {})),
+            "tool_result": _compact_value(redact_sensitive_data(tool_result)),
+            "latency_ms": latency_ms,
+            "status": status,
+            "error_message": redact_sensitive_text(error_message) if error_message else None,
+            "metadata": redact_sensitive_data(dict(metadata or {})),
+        }
+        if event_id:
+            payload["event_id"] = event_id
+        if created_at:
+            payload["created_at"] = created_at
+        event = TraceEvent.model_validate(payload)
         self._store.save_trace_event(event)
         return event
 
@@ -125,6 +135,8 @@ class TraceService:
                 "data_source": call.data_source,
                 "risk_level": call.risk_level,
                 "read_only": call.read_only,
+                "invocation_kind": call.invocation_kind,
+                "actual_tool_invoked": call.actual_tool_invoked,
                 "output_artifact": call.output_artifact,
                 "execution_metadata": call.execution_metadata,
             },
@@ -164,6 +176,8 @@ class TraceService:
     def record_approval_event(
         self,
         *,
+        event_id: str | None = None,
+        created_at: datetime | None = None,
         trace_id: str,
         incident_id: str,
         approval_id: str,
@@ -176,6 +190,8 @@ class TraceService:
     ) -> TraceEvent:
         """Record approval request creation or decision."""
         return self.create_event(
+            event_id=event_id,
+            created_at=created_at,
             trace_id=trace_id,
             incident_id=incident_id,
             node_name="approval_service",
@@ -193,6 +209,8 @@ class TraceService:
     def record_change_event(
         self,
         *,
+        event_id: str | None = None,
+        created_at: datetime | None = None,
         trace_id: str,
         incident_id: str,
         change_execution_id: str,
@@ -205,6 +223,8 @@ class TraceService:
     ) -> TraceEvent:
         """Record a safe change workflow stage transition."""
         return self.create_event(
+            event_id=event_id,
+            created_at=created_at,
             trace_id=trace_id,
             incident_id=incident_id,
             node_name="safe_change_workflow",
@@ -240,16 +260,25 @@ class TraceService:
         path = Path(legacy_storage_path)
         if not path.exists():
             return
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
             if not line.strip():
                 continue
             try:
                 record = json.loads(line)
                 payload = record.get("trace_event") or record
                 event = TraceEvent.model_validate(payload)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid legacy trace record: path={}, line={}, error={}",
+                    path,
+                    line_number,
+                    exc,
+                )
                 continue
-            self._store.save_trace_event(event)
+            self._store.save_trace_event(_sanitize_trace_event(event))
 
 
 def _summarize_node_output(output: dict[str, Any]) -> str:
@@ -309,6 +338,22 @@ def _compact_value(value: Any) -> Any:
 
 def _truncate(text: str, limit: int = 1000) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _sanitize_trace_event(event: TraceEvent) -> TraceEvent:
+    """Redact legacy trace payloads before importing them into durable storage."""
+    return event.model_copy(
+        update={
+            "input_summary": _truncate(redact_sensitive_text(event.input_summary)),
+            "output_summary": _truncate(redact_sensitive_text(event.output_summary)),
+            "tool_args": redact_sensitive_data(event.tool_args),
+            "tool_result": _compact_value(redact_sensitive_data(event.tool_result)),
+            "error_message": (
+                redact_sensitive_text(event.error_message) if event.error_message else None
+            ),
+            "metadata": redact_sensitive_data(event.metadata),
+        }
+    )
 
 
 trace_service = TraceService()

@@ -7,6 +7,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from app.models.incident import utc_now
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
@@ -34,6 +36,7 @@ from app.services.report_quality import (
 )
 from app.services.sqlite_store import resolve_sqlite_path
 from app.services.trace_service import trace_service
+from app.utils.redaction import redact_sensitive_data
 from app.utils.structured_data import (
     as_dict as _as_dict,
     dedupe_strings as _dedupe_strings,
@@ -88,20 +91,35 @@ class ReportGenerator:
             tool_calls=tool_calls,
             errors=errors,
         )
+        degradation_analysis = _build_degradation_analysis(
+            status=status,
+            evidence_profile=evidence_profile,
+            tool_calls=tool_calls,
+            errors=errors,
+        )
         evidence_analysis = {
             **evidence_analysis,
             "evidence_profile": evidence_profile,
             "report_status": status,
+            "degradation_analysis": degradation_analysis,
         }
         warnings = _dedupe_strings([*warnings, *sufficiency_warnings])
         hypothesis_ranking = _build_hypothesis_ranking(hypotheses, evidence_analysis, evidence)
         selected_root_cause_id = _selected_root_cause_id(hypothesis_ranking)
         selected_root_cause = _selected_root_cause_text(hypothesis_ranking)
+        has_supported_root_cause = bool(selected_root_cause_id and selected_root_cause)
 
         events = (
-            list(trace_events)
+            [
+                event
+                for event in trace_events
+                if (not trace_id or event.trace_id == trace_id) and event.incident_id == incident_id
+            ]
             if trace_events is not None
-            else trace_service.list_events(incident_id=incident_id)
+            else trace_service.list_events(
+                incident_id=incident_id,
+                trace_id=trace_id or None,
+            )
         )
         approval_status = _approval_status(pending_approval, risk_summary)
         manual_action_required = _manual_action_required(
@@ -109,7 +127,7 @@ class ReportGenerator:
             risk_summary=risk_summary,
             status=status,
         )
-        root_cause = selected_root_cause or _select_root_cause(hypotheses, evidence, errors)
+        root_cause = selected_root_cause or _select_root_cause(errors)
         key_findings = _build_key_findings(hypotheses, evidence, tool_calls, errors)
         remediation_suggestion = _build_remediation(
             state=state,
@@ -124,6 +142,7 @@ class ReportGenerator:
             hypothesis_ranking=hypothesis_ranking,
             selected_root_cause_id=selected_root_cause_id,
             evidence=evidence,
+            require_root_cause_alignment=has_supported_root_cause,
         )
         status, alignment_warnings = _apply_conclusion_alignment_gate(
             requested_status=status,
@@ -163,7 +182,13 @@ class ReportGenerator:
             severity=str(incident.get("severity") or "P2"),
             environment=str(incident.get("environment") or "unknown"),
             status=status,
-            summary=_build_summary(incident, evidence, hypotheses, errors, status),
+            summary=_build_summary(
+                incident,
+                evidence,
+                errors,
+                status,
+                root_cause=root_cause,
+            ),
             root_cause=root_cause,
             hypotheses=hypotheses,
             hypothesis_ranking=hypothesis_ranking,
@@ -190,6 +215,7 @@ class ReportGenerator:
             warnings=warnings,
             evidence_profile=evidence_profile,
             evidence_sufficiency=_as_dict(evidence_profile.get("sufficiency")),
+            degradation_analysis=degradation_analysis,
             evidence_graph=evidence_graph,
             conclusion_alignment=conclusion_alignment,
             confidence_reason=_build_confidence_reason(evidence, evidence_analysis, errors),
@@ -207,22 +233,20 @@ class ReportGenerator:
                 evidence_analysis,
             ),
         )
-        report = report.model_copy(update={"markdown": _render_markdown(report)})
-        self.save_report(report)
+        report = self.save_report(report)
         if trace_events is None:
             _record_report_generated(report, existing_events=events)
         return report
 
     def save_report(self, report: DiagnosisReport) -> DiagnosisReport:
         """Persist a report and keep the latest copy in memory."""
-        self._store.save_report(report)
-        self._store.save_incident_state(
-            build_incident_state_from_report(
-                report=report,
-                status=_incident_status_from_report_status(report.status),
-                status_reason=f"Diagnosis report saved: {report.status}",
-            )
+        report = _sanitize_report(report)
+        incident_state = build_incident_state_from_report(
+            report=report,
+            status=_incident_status_from_report_status(report.status),
+            status_reason=f"Diagnosis report saved: {report.status}",
         )
+        self._store.save_report_with_incident(report, incident_state)
         return report
 
     def get_report(self, incident_id: str) -> DiagnosisReport | None:
@@ -243,11 +267,15 @@ class ReportGenerator:
         if report is None:
             return None
 
-        if approval_status not in {"approved", "rejected"}:
+        if approval_status not in {"approved", "rejected", "cancelled"}:
             return report
 
         status = f"approval_{approval_status}"
-        decision_text = "审批已通过" if approval_status == "approved" else "审批已拒绝"
+        decision_text = {
+            "approved": "审批已通过",
+            "rejected": "审批已拒绝",
+            "cancelled": "审批已取消",
+        }[approval_status]
         actor_text = f"，处理人：{decided_by}" if decided_by else ""
         reason_text = f"，原因：{reason}" if reason else ""
         risk_summary = dict(report.risk_summary or {})
@@ -279,10 +307,12 @@ class ReportGenerator:
         )
         summary = report.summary
         if "审批已" not in summary:
-            summary = (
-                f"{summary} {decision_text}，审批通过后进入 pre-check、dry-run、"
-                "sandbox 或人工执行记录。"
+            follow_up = (
+                "审批通过后进入 pre-check、dry-run、sandbox 或人工执行记录。"
+                if approval_status == "approved"
+                else "该审批不再授权后续诊断恢复或安全变更执行。"
             )
+            summary = f"{summary} {decision_text}，{follow_up}"
 
         updated = report.model_copy(
             update={
@@ -296,9 +326,7 @@ class ReportGenerator:
                 "uncertainties": _dedupe_strings(uncertainties)[:8],
             }
         )
-        updated = updated.model_copy(update={"markdown": _render_markdown(updated)})
-        self.save_report(updated)
-        return updated
+        return self.save_report(updated)
 
     def mark_change_execution_updated(
         self,
@@ -342,9 +370,7 @@ class ReportGenerator:
                 ),
             }
         )
-        updated = updated.model_copy(update={"markdown": _render_markdown(updated)})
-        self.save_report(updated)
-        return updated
+        return self.save_report(updated)
 
     def list_reports(self) -> list[DiagnosisReport]:
         """Return all known latest reports sorted by creation time."""
@@ -356,16 +382,25 @@ class ReportGenerator:
         path = Path(legacy_storage_path)
         if not path.exists():
             return
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
             if not line.strip():
                 continue
             try:
                 record = json.loads(line)
                 payload = record.get("report") or record
                 report = DiagnosisReport.model_validate(payload)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid legacy report record: path={}, line={}, error={}",
+                    path,
+                    line_number,
+                    exc,
+                )
                 continue
-            self._store.save_report(report)
+            self._store.save_report(_sanitize_report(report))
 
 
 def _incident_status_from_report_status(status: str) -> str:
@@ -393,11 +428,11 @@ def _apply_evidence_sufficiency_gate(
     sufficiency = _as_dict(evidence_profile.get("sufficiency"))
     if not sufficiency:
         return requested_status, []
-    if sufficiency.get("complete"):
-        return requested_status, []
-
     missing = [str(item) for item in sufficiency.get("missing_evidence", []) if str(item).strip()]
     failed_tools = [str(item) for item in sufficiency.get("failed_tools", []) if str(item).strip()]
+    if sufficiency.get("complete") and not errors and not failed_tools:
+        return requested_status, []
+
     if errors or failed_tools:
         status = "degraded"
     elif not sufficiency.get("has_primary_domain_evidence") or not sufficiency.get(
@@ -416,6 +451,120 @@ def _apply_evidence_sufficiency_gate(
     return status, [f"报告由 completed 降级为 {status}：{detail_text}。"]
 
 
+def _build_degradation_analysis(
+    *,
+    status: str,
+    evidence_profile: dict[str, Any],
+    tool_calls: list[dict[str, Any]],
+    errors: list[str],
+) -> dict[str, Any]:
+    """Explain whether a non-completed terminal report is a safe evidence boundary."""
+    sufficiency = _as_dict(evidence_profile.get("sufficiency"))
+    missing_evidence = [
+        str(item) for item in sufficiency.get("missing_evidence", []) if str(item).strip()
+    ]
+    failed_tools = _dedupe_strings(
+        [
+            *[str(item) for item in sufficiency.get("failed_tools", []) if str(item).strip()],
+            *[
+                str(call.get("tool_name") or "")
+                for call in tool_calls
+                if str(call.get("status") or "") == "failed"
+            ],
+        ]
+    )
+    failed_tool_details = [
+        {
+            "tool_name": str(call.get("tool_name") or ""),
+            "error_type": str(
+                call.get("error_type")
+                or _as_dict(call.get("execution_metadata")).get("failure_kind")
+                or ""
+            ),
+            "error_message": str(call.get("error_message") or ""),
+            "retry": _as_dict(_as_dict(call.get("execution_metadata")).get("retry")),
+        }
+        for call in tool_calls
+        if str(call.get("status") or "") in {"failed", "error", "blocked"}
+    ]
+    failure_text = " ".join(
+        [
+            *errors,
+            *[
+                str(
+                    call.get("error_type")
+                    or _as_dict(call.get("execution_metadata")).get("failure_kind")
+                    or ""
+                )
+                + " "
+                + str(call.get("error_message") or call.get("output_summary") or "")
+                for call in tool_calls
+                if str(call.get("status") or "") in {"failed", "error", "blocked"}
+            ],
+        ]
+    ).lower()
+    timeout_markers = {
+        "timeout",
+        "timed out",
+        "超时",
+        "deadline",
+        "total_timeout_exhausted",
+        "attempts_exhausted",
+    }
+    dependency_markers = {
+        "connection",
+        "unavailable",
+        "not configured",
+        "not_configured",
+        "refused",
+        "依赖",
+        "连接",
+        "不可用",
+        "未配置",
+    }
+
+    if status == "completed":
+        category = "none"
+        safe_terminal = True
+    elif errors or failed_tools:
+        category = (
+            "dependency_timeout"
+            if any(marker in failure_text for marker in timeout_markers)
+            else "dependency_failure"
+            if any(marker in failure_text for marker in dependency_markers)
+            else "runtime_orchestration_failure"
+        )
+        safe_terminal = False
+    elif missing_evidence:
+        category = "evidence_insufficient"
+        safe_terminal = status in {"degraded", "needs_human", "incomplete"}
+    else:
+        category = "policy_or_approval_boundary"
+        safe_terminal = status in {"waiting_approval", "blocked", "needs_human"}
+
+    reasons: list[str] = []
+    if missing_evidence:
+        reasons.append("缺失证据：" + "、".join(missing_evidence))
+    if failed_tools:
+        reasons.append("失败工具：" + "、".join(failed_tools))
+    if errors:
+        reasons.append("运行错误：" + "；".join(errors[:3]))
+    if not reasons and status != "completed":
+        reasons.append(f"终态由策略或状态机边界确定：{status}")
+
+    return {
+        "category": category,
+        "safe_terminal": safe_terminal,
+        "needs_human": status in {"degraded", "needs_human", "incomplete", "blocked"}
+        or not safe_terminal,
+        "missing_evidence": missing_evidence,
+        "failed_tools": failed_tools,
+        "failed_tool_details": failed_tool_details,
+        "errors": list(errors),
+        "reasons": reasons,
+    }
+
+
 def _build_hypothesis_ranking(
     hypotheses: list[str],
     evidence_analysis: dict[str, Any],
@@ -427,7 +576,6 @@ def _build_hypothesis_ranking(
         return _ensure_hypothesis_evidence_links(ranking, evidence or [])
 
     fallback_ranking: list[dict[str, Any]] = []
-    fallback_ids = _supporting_evidence_ids(evidence or [])
     for index, item in enumerate(hypotheses, 1):
         fallback_ranking.append(
             {
@@ -435,15 +583,11 @@ def _build_hypothesis_ranking(
                 "title": item,
                 "description": item,
                 "category": "unknown",
-                "supporting_evidence_ids": fallback_ids,
+                "supporting_evidence_ids": [],
                 "refuting_evidence_ids": [],
                 "missing_evidence": [],
-                "confidence": 0.45,
-                "confidence_reason": (
-                    "兼容旧版 hypotheses 字段生成，已回链当前支持性 evidence_id。"
-                    if fallback_ids
-                    else "兼容旧版 hypotheses 字段生成，缺少证据矩阵明细。"
-                ),
+                "confidence": 0.22,
+                "confidence_reason": "兼容旧版 hypotheses 字段生成，缺少按假设关联的证据矩阵明细。",
             }
         )
     return fallback_ranking
@@ -453,20 +597,26 @@ def _ensure_hypothesis_evidence_links(
     ranking: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Ensure root-cause hypotheses can be traced back to stable Evidence IDs."""
-    fallback_ids = _supporting_evidence_ids(evidence)
-    if not fallback_ids:
-        return ranking
+    """Drop invalid evidence links without attaching unrelated supporting evidence."""
+    valid_supporting_ids = set(_supporting_evidence_ids(evidence))
+    valid_refuting_ids = {
+        str(item.get("evidence_id"))
+        for item in evidence
+        if item.get("evidence_id")
+        and str(item.get("stance") or "") == "refuting"
+        and _evidence_is_usable_for_conclusion(item)
+    }
     updated: list[dict[str, Any]] = []
     for item in ranking:
         copy = dict(item)
         raw_ids = copy.get("supporting_evidence_ids")
-        if not isinstance(raw_ids, list) or not [value for value in raw_ids if value]:
-            copy["supporting_evidence_ids"] = fallback_ids
-            reason = str(copy.get("confidence_reason") or "").strip()
-            copy["confidence_reason"] = (
-                f"{reason}；已补充 evidence_id 回链。" if reason else "已补充 evidence_id 回链。"
-            )
+        copy["supporting_evidence_ids"] = [
+            str(value) for value in raw_ids or [] if str(value) in valid_supporting_ids
+        ]
+        raw_refuting = copy.get("refuting_evidence_ids")
+        copy["refuting_evidence_ids"] = [
+            str(value) for value in raw_refuting or [] if str(value) in valid_refuting_ids
+        ]
         updated.append(copy)
     return updated
 
@@ -478,44 +628,75 @@ def _supporting_evidence_ids(evidence: list[dict[str, Any]]) -> list[str]:
         if item.get("evidence_id")
         and str(item.get("stance") or "") == "supporting"
         and str(item.get("evidence_type") or "") != "risk"
+        and _evidence_is_usable_for_conclusion(item)
     ][:5]
 
 
 def _selected_root_cause_id(hypothesis_ranking: list[dict[str, Any]]) -> str:
-    if not hypothesis_ranking:
-        return ""
-    return str(hypothesis_ranking[0].get("hypothesis_id") or "")
+    selected = _selected_root_cause_item(hypothesis_ranking)
+    return str(selected.get("hypothesis_id") or "") if selected else ""
 
 
 def _selected_root_cause_category(hypothesis_ranking: list[dict[str, Any]]) -> str:
-    if not hypothesis_ranking:
-        return "unknown"
-    return str(hypothesis_ranking[0].get("category") or "unknown")
+    selected = _selected_root_cause_item(hypothesis_ranking)
+    return str(selected.get("category") or "unknown") if selected else "unknown"
 
 
 def _selected_root_cause_text(hypothesis_ranking: list[dict[str, Any]]) -> str:
-    if not hypothesis_ranking:
+    selected = _selected_root_cause_item(hypothesis_ranking)
+    if not selected:
         return ""
-    top = hypothesis_ranking[0]
-    return str(top.get("title") or top.get("description") or "")
+    return str(selected.get("title") or selected.get("description") or "")
+
+
+def _selected_root_cause_item(
+    hypothesis_ranking: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Select only a hypothesis with direct usable support."""
+    for item in hypothesis_ranking:
+        supporting = item.get("supporting_evidence_ids")
+        if isinstance(supporting, list) and any(str(value).strip() for value in supporting):
+            return item
+    return None
+
+
+def _evidence_is_usable_for_conclusion(evidence: dict[str, Any]) -> bool:
+    raw_data = _as_dict(evidence.get("raw_data"))
+    if raw_data.get("status") != "success":
+        return False
+    metadata = _as_dict(raw_data.get("metadata"))
+    quality = _as_dict(metadata.get("evidence_quality"))
+    if quality.get("usable", True) is False:
+        return False
+    return str(evidence.get("data_source") or "") not in {
+        "failed",
+        "not_configured",
+        "manual_analysis",
+        "llm_toolnode_fallback",
+    }
 
 
 def _compact_tool_call(record: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "call_id": record.get("call_id", ""),
-        "step_id": record.get("step_id", ""),
-        "tool_name": record.get("tool_name", "unknown"),
-        "status": record.get("status", "unknown"),
-        "latency_ms": record.get("latency_ms", 0.0),
-        "data_source": record.get("data_source", "unknown"),
-        "input_summary": record.get("input_summary", ""),
-        "output_summary": record.get("output_summary", ""),
-        "output_artifact": record.get("output_artifact"),
-        "risk_level": record.get("risk_level", "low"),
-        "read_only": record.get("read_only", True),
-        "input_args": record.get("input_args", {}),
-        "error_message": record.get("error_message"),
-    }
+    payload = redact_sensitive_data(
+        {
+            "call_id": record.get("call_id", ""),
+            "step_id": record.get("step_id", ""),
+            "tool_name": record.get("tool_name", "unknown"),
+            "status": record.get("status", "unknown"),
+            "latency_ms": record.get("latency_ms", 0.0),
+            "data_source": record.get("data_source", "unknown"),
+            "input_summary": record.get("input_summary", ""),
+            "output_summary": record.get("output_summary", ""),
+            "output_artifact": record.get("output_artifact"),
+            "risk_level": record.get("risk_level", "low"),
+            "read_only": record.get("read_only", True),
+            "invocation_kind": record.get("invocation_kind", "tool"),
+            "actual_tool_invoked": record.get("actual_tool_invoked", True),
+            "input_args": record.get("input_args", {}),
+            "error_message": record.get("error_message"),
+        }
+    )
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def _report_title(incident: dict[str, Any]) -> str:
@@ -529,34 +710,25 @@ def _report_title(incident: dict[str, Any]) -> str:
 def _build_summary(
     incident: dict[str, Any],
     evidence: list[dict[str, Any]],
-    hypotheses: list[str],
     errors: list[str],
     status: str,
+    *,
+    root_cause: str,
 ) -> str:
     service_name = str(incident.get("service_name") or "unknown-service")
     symptom = str(incident.get("symptom") or incident.get("title") or "未提供明确症状")
-    if hypotheses:
-        conclusion = hypotheses[0]
-    elif evidence:
-        conclusion = _evidence_summary(evidence[0])
+    if root_cause:
+        conclusion = root_cause
     elif errors:
         conclusion = "诊断过程中存在失败步骤，当前信息不足以确认根因"
+    elif any(_evidence_is_usable_for_conclusion(item) for item in evidence):
+        conclusion = "已收集到有效证据，但尚未形成有直接支持的根因结论"
     else:
         conclusion = "尚未收集到足够证据"
     return f"{service_name} 诊断状态为 {status}；症状：{symptom}；当前判断：{conclusion}。"
 
 
-def _select_root_cause(
-    hypotheses: list[str],
-    evidence: list[dict[str, Any]],
-    errors: list[str],
-) -> str:
-    if hypotheses:
-        return hypotheses[0]
-    for item in evidence:
-        summary = _evidence_summary(item)
-        if summary:
-            return summary
+def _select_root_cause(errors: list[str]) -> str:
     if errors:
         return "诊断链路存在失败步骤，暂未形成明确根因"
     return "证据不足，暂未形成明确根因"
@@ -569,8 +741,6 @@ def _build_key_findings(
     errors: list[str],
 ) -> list[str]:
     findings: list[str] = []
-    if hypotheses:
-        findings.append(hypotheses[0])
     seen_tools: set[str] = set()
     for item in sorted(
         evidence,
@@ -579,6 +749,8 @@ def _build_key_findings(
             -float(value.get("confidence") or 0.0),
         ),
     ):
+        if not _evidence_is_usable_for_conclusion(item):
+            continue
         tool_name = str(item.get("source_tool") or "")
         if tool_name in seen_tools:
             continue
@@ -606,18 +778,14 @@ def _build_conclusion_alignment(
     hypothesis_ranking: list[dict[str, Any]],
     selected_root_cause_id: str,
     evidence: list[dict[str, Any]],
+    require_root_cause_alignment: bool,
 ) -> dict[str, Any]:
     """Link conclusion-level fields to evidence IDs or RAG citations."""
     root_evidence_ids = _selected_hypothesis_evidence_ids(
         hypothesis_ranking,
         selected_root_cause_id,
     )
-    if not root_evidence_ids:
-        root_evidence_ids = _supporting_evidence_ids(evidence)
-
     root_refs = _alignment_refs_from_evidence_ids(evidence, root_evidence_ids)
-    if not root_refs["evidence_ids"] and not root_refs["citations"]:
-        root_refs = _alignment_refs_from_evidence_ids(evidence, _supporting_evidence_ids(evidence))
     finding_items = [
         _align_text_to_evidence(finding, evidence, prefer_supporting=False)
         for finding in key_findings
@@ -629,7 +797,12 @@ def _build_conclusion_alignment(
             "text": root_cause,
             "evidence_ids": root_refs["evidence_ids"],
             "citations": root_refs["citations"],
-            "aligned": bool(root_refs["evidence_ids"] or root_refs["citations"]),
+            "aligned": (
+                bool(root_refs["evidence_ids"] or root_refs["citations"])
+                if require_root_cause_alignment
+                else True
+            ),
+            "claim_type": "root_cause" if require_root_cause_alignment else "insufficiency",
         },
         "key_findings": finding_items,
         "remediation_suggestion": {
@@ -746,6 +919,8 @@ def _align_text_to_evidence(
     terms = _alignment_terms(text)
     candidates = []
     for item in evidence:
+        if not _evidence_is_usable_for_conclusion(item):
+            continue
         if prefer_supporting and str(item.get("stance") or "") != "supporting":
             continue
         haystack = _evidence_alignment_text(item)
@@ -756,12 +931,23 @@ def _align_text_to_evidence(
         candidates = [
             item
             for item in evidence
+            if _evidence_is_usable_for_conclusion(item)
             if any(term in _evidence_alignment_text(item) for term in terms)
         ]
     if not candidates and not terms:
-        candidates = [item for item in evidence if str(item.get("stance") or "") == "supporting"]
+        candidates = [
+            item
+            for item in evidence
+            if str(item.get("stance") or "") == "supporting"
+            and _evidence_is_usable_for_conclusion(item)
+        ]
     if not candidates:
-        candidates = [item for item in evidence if str(item.get("evidence_id") or "").strip()]
+        candidates = [
+            item
+            for item in evidence
+            if str(item.get("evidence_id") or "").strip()
+            and _evidence_is_usable_for_conclusion(item)
+        ]
     candidates = candidates[:3]
     citations = _rag_citations_from_evidence(candidates)
     evidence_ids = [
@@ -784,9 +970,17 @@ def _alignment_refs_for_remediation(
     reference_evidence = [
         item
         for item in evidence
-        if str(item.get("evidence_type") or "") in {"runbook", "ticket", "deploy_history", "risk"}
-        or str(item.get("source_tool") or "")
-        in {"search_runbook", "retrieve_knowledge", "search_history_ticket", "query_deploy_history"}
+        if _evidence_is_usable_for_conclusion(item)
+        and (
+            str(item.get("evidence_type") or "") in {"runbook", "ticket", "deploy_history", "risk"}
+            or str(item.get("source_tool") or "")
+            in {
+                "search_runbook",
+                "retrieve_knowledge",
+                "search_history_ticket",
+                "query_deploy_history",
+            }
+        )
     ]
     if not reference_evidence:
         aligned = _align_text_to_evidence(remediation_suggestion, evidence, prefer_supporting=True)
@@ -874,6 +1068,8 @@ def _build_confirmed_facts(
 ) -> list[str]:
     facts: list[str] = []
     for item in evidence:
+        if not _evidence_is_usable_for_conclusion(item):
+            continue
         fact = str(item.get("fact") or "").strip()
         if fact:
             facts.append(fact)
@@ -897,8 +1093,9 @@ def _build_inferred_conclusions(
     evidence: list[dict[str, Any]],
 ) -> list[str]:
     conclusions: list[str] = []
-    conclusions.extend(hypotheses[:3])
     for item in evidence:
+        if not _evidence_is_usable_for_conclusion(item):
+            continue
         inference = str(item.get("inference") or "").strip()
         if inference:
             conclusions.append(inference)
@@ -1057,7 +1254,8 @@ def _manual_action_required(
         pending_approval
         or risk_summary.get("need_approval")
         or risk_summary.get("policy") == "forbidden"
-        or status in {"waiting_approval", "blocked", "escalated"}
+        or status
+        in {"waiting_approval", "blocked", "escalated", "degraded", "needs_human", "incomplete"}
     )
 
 
@@ -1199,6 +1397,16 @@ def _record_report_generated(
             "manual_action_required": report.manual_action_required,
         },
     )
+
+
+def _sanitize_report(report: DiagnosisReport) -> DiagnosisReport:
+    """Redact secrets before report persistence or public rendering."""
+    payload = {
+        key: redact_sensitive_data(value)
+        for key, value in report.model_dump(mode="python", exclude={"markdown"}).items()
+    }
+    sanitized = DiagnosisReport.model_validate(payload)
+    return sanitized.model_copy(update={"markdown": _render_markdown(sanitized)})
 
 
 report_generator = ReportGenerator()

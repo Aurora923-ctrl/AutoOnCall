@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
 from typing import Any
 
+from app.models.alert import AlertEvent
 from app.models.incident_state import IncidentState
 
 CHANGE_LIFECYCLE_STATUSES = {
@@ -14,8 +17,12 @@ CHANGE_LIFECYCLE_STATUSES = {
     "waiting_manual_execution",
     "change_executing_sandbox",
     "observing",
+    "partial_success",
+    "recovery_pending",
     "resolved",
     "rollback_recommended",
+    "rolled_back",
+    "rollback_failed",
     "precheck_failed",
     "dry_run_failed",
     "escalated",
@@ -38,6 +45,10 @@ AI_OBJECT_STATUSES = {
     *REPORT_ONLY_STATUSES,
     "approval_cancelled",
     "rollback_recommended",
+    "partial_success",
+    "recovery_pending",
+    "rolled_back",
+    "rollback_failed",
     "precheck_failed",
     "dry_run_failed",
     "manual_result_required",
@@ -48,6 +59,7 @@ AI_OBJECT_STATUSES = {
 
 AIOPS_RUN_FILTER_STATUSES = [
     "running",
+    "resume_running",
     "completed",
     "waiting_approval",
     "approval_approved",
@@ -58,6 +70,10 @@ AIOPS_RUN_FILTER_STATUSES = [
     "waiting_manual_execution",
     "resolved",
     "rollback_recommended",
+    "partial_success",
+    "recovery_pending",
+    "rolled_back",
+    "rollback_failed",
     "precheck_failed",
     "dry_run_failed",
     "failed",
@@ -82,6 +98,10 @@ POST_APPROVAL_RUN_STATUSES = {
     "sandbox_executing",
     "sandbox_validated",
     "observing",
+    "partial_success",
+    "recovery_pending",
+    "rolled_back",
+    "rollback_failed",
     "escalated",
     "closed",
     "failed",
@@ -90,12 +110,51 @@ POST_APPROVAL_RUN_STATUSES = {
 ALERT_FIRING_STATUSES = {"firing", "active", "triggered"}
 ALERT_RESOLVED_STATUSES = {"resolved", "inactive", "ok", "closed"}
 PRODUCTION_ENVIRONMENT_NAMES = {"prod", "production", "prd", "线上", "生产"}
+PRODUCTION_ENVIRONMENT_PATTERN = re.compile(
+    r"^(?:prod|production|prd)(?:$|[-_.:/\s].+)",
+    re.IGNORECASE,
+)
+CHINESE_PRODUCTION_ENVIRONMENT_PATTERN = re.compile(r"^(?:线上|生产)(?:$|[-_.:/\s].+)")
 ALERT_MUTABLE_INCIDENT_STATUSES = {
     "created",
     "investigating",
     "alert_firing",
     "alert_resolved",
     "resolved",
+}
+ACTIVE_DIAGNOSIS_STATUSES = {
+    "created",
+    "investigating",
+    "diagnosing",
+    "running",
+    "planning",
+    "executing",
+    "alert_firing",
+    "alert_resolved",
+}
+ALERT_AUTO_DIAGNOSIS_ACTIVE_STATUSES = {"running", "queued"}
+ALERT_AUTO_DIAGNOSIS_FAILURE_SOURCE = "alert_auto_diagnosis"
+APPROVAL_LIFECYCLE_STATUSES = {
+    "waiting_approval",
+    "approval_approved",
+    "approval_rejected",
+    "approval_cancelled",
+    "approval_resumed",
+}
+HARD_TERMINAL_INCIDENT_STATUSES = {
+    "completed",
+    "incomplete",
+    "degraded",
+    "needs_human",
+    "approval_rejected",
+    "approval_cancelled",
+    "blocked",
+    "failed",
+    "escalated",
+    "resolved",
+    "closed",
+    "precheck_failed",
+    "dry_run_failed",
 }
 
 STATUS_METADATA: dict[str, dict[str, Any]] = {
@@ -115,6 +174,12 @@ STATUS_METADATA: dict[str, dict[str, Any]] = {
         "label": "运行中",
         "tone": "warning",
         "phase": "diagnosis",
+        "terminal": False,
+    },
+    "resume_running": {
+        "label": "审批恢复中",
+        "tone": "warning",
+        "phase": "approval",
         "terminal": False,
     },
     "planning": {
@@ -237,6 +302,30 @@ STATUS_METADATA: dict[str, dict[str, Any]] = {
         "phase": "change",
         "terminal": False,
     },
+    "partial_success": {
+        "label": "部分完成",
+        "tone": "warning",
+        "phase": "change",
+        "terminal": False,
+    },
+    "recovery_pending": {
+        "label": "恢复待确认",
+        "tone": "warning",
+        "phase": "change",
+        "terminal": False,
+    },
+    "rolled_back": {
+        "label": "回滚已完成",
+        "tone": "warning",
+        "phase": "change",
+        "terminal": True,
+    },
+    "rollback_failed": {
+        "label": "回滚失败",
+        "tone": "error",
+        "phase": "change",
+        "terminal": True,
+    },
     "precheck_failed": {
         "label": "预检查失败",
         "tone": "error",
@@ -329,6 +418,7 @@ def incident_status_from_runtime_status(status: str) -> str:
     if status in {"running", "planning", "executing"}:
         return "diagnosing"
     if status in {
+        "resume_running",
         "waiting_approval",
         "approval_approved",
         "approval_rejected",
@@ -385,8 +475,16 @@ def status_from_change_execution(status: str) -> str:
         return "observing"
     if status == "closed":
         return "resolved"
+    if status == "partial_success":
+        return "partial_success"
+    if status == "recovery_pending":
+        return "recovery_pending"
     if status == "rollback_recommended":
         return "rollback_recommended"
+    if status == "rolled_back":
+        return "rolled_back"
+    if status == "rollback_failed":
+        return "rollback_failed"
     if status in {"precheck_failed", "dry_run_failed", "escalated"}:
         return status
     return status or "change_pending"
@@ -405,23 +503,32 @@ def manual_action_required_from_change_execution(status: str, *, fallback: bool)
         "closed",
         "dry_run_completed",
         "sandbox_validated",
+        "rolled_back",
         "dry_run_failed",
         "precheck_failed",
     }
 
 
 def is_production_environment(value: Any) -> bool:
-    """Return True for canonical production environment names used across AIOps."""
-    return str(value or "").strip().lower() in PRODUCTION_ENVIRONMENT_NAMES
+    """Return True for canonical production names and qualified production variants."""
+    environment = str(value or "").strip().lower()
+    if environment in PRODUCTION_ENVIRONMENT_NAMES:
+        return True
+    return bool(
+        PRODUCTION_ENVIRONMENT_PATTERN.fullmatch(environment)
+        or CHINESE_PRODUCTION_ENVIRONMENT_PATTERN.fullmatch(environment)
+    )
 
 
-def normalize_alert_status(value: Any) -> str:
+def normalize_alert_status(value: Any, *, strict: bool = False) -> str:
     """Normalize external alert statuses into the canonical alert lifecycle."""
     status = str(value or "firing").strip().lower()
     if status in ALERT_RESOLVED_STATUSES:
         return "resolved"
     if status in ALERT_FIRING_STATUSES:
         return "firing"
+    if strict:
+        raise ValueError(f"unsupported alert status: {status or '<empty>'}")
     return "firing"
 
 
@@ -433,6 +540,79 @@ def incident_status_from_alert_status(status: str) -> str:
 def is_alert_mutable_incident_status(status: str) -> bool:
     """Return whether alert webhooks may still own this IncidentState status."""
     return status in ALERT_MUTABLE_INCIDENT_STATUSES
+
+
+def is_stale_alert_event(existing: AlertEvent, incoming: AlertEvent) -> bool:
+    """Return whether an incoming alert belongs to an older lifecycle generation."""
+    existing_start = _as_utc(existing.starts_at)
+    incoming_start = _as_utc(incoming.starts_at)
+    if existing_start is not None and incoming_start is not None:
+        if incoming_start != existing_start:
+            return incoming_start < existing_start
+
+        if existing.status == "resolved" and incoming.status == "firing":
+            return True
+        if existing.status == incoming.status == "resolved":
+            existing_end = _as_utc(existing.ends_at)
+            incoming_end = _as_utc(incoming.ends_at)
+            return bool(existing_end and incoming_end and incoming_end < existing_end)
+        return False
+
+    existing_time = _alert_lifecycle_time(existing)
+    incoming_time = _alert_lifecycle_time(incoming)
+    return bool(existing_time and incoming_time and incoming_time < existing_time)
+
+
+def is_new_alert_generation(existing: AlertEvent, incoming: AlertEvent) -> bool:
+    """Return whether the incoming firing event starts a newer alert occurrence."""
+    existing_start = _as_utc(existing.starts_at)
+    incoming_start = _as_utc(incoming.starts_at)
+    return bool(
+        incoming.status == "firing"
+        and existing_start is not None
+        and incoming_start is not None
+        and incoming_start > existing_start
+    )
+
+
+def alert_event_can_reopen_incident(existing: IncidentState, event: AlertEvent) -> bool:
+    """Return whether a newer firing occurrence may reopen a terminal Incident."""
+    existing_start = _parse_metadata_datetime((existing.metadata or {}).get("starts_at"))
+    incoming_start = _as_utc(event.starts_at)
+    return bool(
+        event.status == "firing"
+        and existing_start is not None
+        and incoming_start is not None
+        and incoming_start > existing_start
+    )
+
+
+def alert_auto_diagnosis_claim_is_active(
+    metadata: dict[str, Any],
+    *,
+    now: datetime,
+    lease_seconds: float,
+) -> bool:
+    """Return whether a durable diagnosis claim is still within its lease."""
+    if metadata.get("alert_auto_diagnosis_status") not in ALERT_AUTO_DIAGNOSIS_ACTIVE_STATUSES:
+        return False
+    claimed_at = _parse_metadata_datetime(metadata.get("alert_auto_diagnosis_claimed_at"))
+    if claimed_at is None:
+        return False
+    return (now - claimed_at).total_seconds() < lease_seconds
+
+
+def _alert_lifecycle_time(event: AlertEvent) -> datetime | None:
+    value = event.ends_at if event.status == "resolved" and event.ends_at else event.starts_at
+    return _as_utc(value)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def is_change_lifecycle_state(state: IncidentState) -> bool:
@@ -449,7 +629,21 @@ def merge_incident_state(existing: IncidentState, update: IncidentState) -> Inci
     """Merge an IncidentState update without regressing a live change lifecycle."""
     metadata = dict(existing.metadata or {})
     metadata.update(update.metadata or {})
-    preserve_existing_status = should_preserve_existing_lifecycle_status(existing, update)
+    rejected_transition = not is_incident_status_transition_allowed(existing, update)
+    preserve_existing_status = rejected_transition or should_preserve_existing_lifecycle_status(
+        existing,
+        update,
+    )
+    if rejected_transition:
+        incoming_source = str((update.metadata or {}).get("source") or "unknown")
+        metadata = dict(existing.metadata or {})
+        metadata.update(
+            {
+                "source": (existing.metadata or {}).get("source") or incoming_source,
+                "ignored_status_update": update.status,
+                "ignored_status_update_source": incoming_source,
+            }
+        )
     replace_manual_action = is_change_lifecycle_state(update)
     return update.model_copy(
         update={
@@ -458,21 +652,59 @@ def merge_incident_state(existing: IncidentState, update: IncidentState) -> Inci
             "status_reason": (
                 existing.status_reason if preserve_existing_status else update.status_reason
             ),
-            "title": update.title if update.title != "AIOps incident" else existing.title,
+            "title": (
+                existing.title
+                if preserve_existing_status
+                else update.title
+                if update.title != "AIOps incident"
+                else existing.title
+            ),
             "service_name": (
-                update.service_name
-                if update.service_name != "unknown-service"
-                else existing.service_name
+                existing.service_name
+                if preserve_existing_status
+                else (
+                    update.service_name
+                    if update.service_name != "unknown-service"
+                    else existing.service_name
+                )
             ),
-            "severity": update.severity if update.severity != "unknown" else existing.severity,
+            "severity": (
+                existing.severity
+                if preserve_existing_status
+                else update.severity
+                if update.severity != "unknown"
+                else existing.severity
+            ),
             "environment": (
-                update.environment if update.environment != "unknown" else existing.environment
+                existing.environment
+                if preserve_existing_status
+                else update.environment
+                if update.environment != "unknown"
+                else existing.environment
             ),
-            "summary": update.summary or existing.summary,
-            "root_cause": update.root_cause or existing.root_cause,
-            "trace_id": update.trace_id or existing.trace_id,
-            "session_id": update.session_id or existing.session_id,
-            "report_id": update.report_id or existing.report_id,
+            "summary": existing.summary
+            if preserve_existing_status
+            else update.summary or existing.summary,
+            "root_cause": (
+                existing.root_cause
+                if preserve_existing_status
+                else update.root_cause or existing.root_cause
+            ),
+            "trace_id": (
+                existing.trace_id
+                if preserve_existing_status
+                else update.trace_id or existing.trace_id
+            ),
+            "session_id": (
+                existing.session_id
+                if preserve_existing_status
+                else update.session_id or existing.session_id
+            ),
+            "report_id": (
+                existing.report_id
+                if preserve_existing_status
+                else update.report_id or existing.report_id
+            ),
             "approval_status": (
                 existing.approval_status if preserve_existing_status else update.approval_status
             ),
@@ -490,6 +722,71 @@ def merge_incident_state(existing: IncidentState, update: IncidentState) -> Inci
             "metadata": metadata,
         }
     )
+
+
+def is_incident_status_transition_allowed(
+    existing: IncidentState,
+    update: IncidentState,
+) -> bool:
+    """Reject implicit reopen attempts from hard terminal Incident states."""
+    if existing.status == update.status:
+        return True
+    if existing.status in APPROVAL_LIFECYCLE_STATUSES and (
+        update.status in ACTIVE_DIAGNOSIS_STATUSES
+        or (
+            update.status == "failed"
+            and (update.metadata or {}).get("source") == ALERT_AUTO_DIAGNOSIS_FAILURE_SOURCE
+        )
+    ):
+        return False
+    if is_change_lifecycle_state(existing) and not is_change_lifecycle_state(update):
+        if existing.status in HARD_TERMINAL_INCIDENT_STATUSES and _is_explicit_alert_reopen(
+            existing,
+            update,
+        ):
+            return True
+        return False
+    if existing.status not in HARD_TERMINAL_INCIDENT_STATUSES:
+        return True
+    return _is_explicit_alert_reopen(existing, update) or _is_alert_failure_recovery(
+        existing,
+        update,
+    )
+
+
+def _is_explicit_alert_reopen(existing: IncidentState, update: IncidentState) -> bool:
+    existing_metadata = existing.metadata or {}
+    update_metadata = update.metadata or {}
+    existing_start = _parse_metadata_datetime(existing_metadata.get("starts_at"))
+    update_start = _parse_metadata_datetime(update_metadata.get("starts_at"))
+    return (
+        update_metadata.get("source") == "alertmanager"
+        and update_metadata.get("alert_status") == "firing"
+        and existing_start is not None
+        and update_start is not None
+        and update_start > existing_start
+    )
+
+
+def _is_alert_failure_recovery(existing: IncidentState, update: IncidentState) -> bool:
+    existing_metadata = existing.metadata or {}
+    update_metadata = update.metadata or {}
+    return (
+        existing.status == "failed"
+        and existing_metadata.get("alert_auto_diagnosis_status") == "failed"
+        and update_metadata.get("source") == "alertmanager"
+        and update.status in {"alert_firing", "resolved"}
+    )
+
+
+def _parse_metadata_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def should_preserve_existing_lifecycle_status(

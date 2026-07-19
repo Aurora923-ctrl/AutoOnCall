@@ -74,7 +74,11 @@ def execution_stage_status(execution: Mapping[str, Any]) -> str:
         "dry_run_completed",
         "sandbox_validated",
         "closed",
+        "partial_success",
+        "recovery_pending",
         "rollback_recommended",
+        "rolled_back",
+        "rollback_failed",
         "escalated",
     }:
         if manual_result:
@@ -110,8 +114,16 @@ def execution_stage_reason(execution: Mapping[str, Any]) -> str:
         return "dry-run 已完成，未执行生产变更。"
     if status == "closed":
         return "流程已关闭，未自动执行生产变更。"
+    if status == "partial_success":
+        return str(rollback_result.get("reason") or "变更部分完成，等待回滚或恢复决策。")
+    if status == "recovery_pending":
+        return "人工变更已记录，恢复效果仍待观察确认。"
     if status == "rollback_recommended":
         return str(rollback_result.get("reason") or "观察未通过，建议回滚或升级。")
+    if status == "rolled_back":
+        return str(rollback_result.get("reason") or "回滚已完成，继续观察恢复状态。")
+    if status == "rollback_failed":
+        return str(rollback_result.get("reason") or "回滚失败，需立即升级人工恢复。")
     if status == "escalated":
         return str(rollback_result.get("reason") or "安全边界阻断，已升级处理。")
     return "未执行"
@@ -126,6 +138,14 @@ def change_execution_next_steps(existing: list[str], status: str) -> list[str]:
         steps.append("由人工在变更窗口执行已审批计划，并提交执行结果与观察指标。")
     elif status == "rollback_recommended":
         steps.append("按 ChangePlan 回滚步骤处理，并升级给值班负责人复核。")
+    elif status == "partial_success":
+        steps.append("停止未完成步骤，核对已执行范围，并决定回滚还是进入恢复流程。")
+    elif status == "recovery_pending":
+        steps.append("继续观察审批指标和日志，确认恢复后再关闭 Incident。")
+    elif status == "rolled_back":
+        steps.append("回滚已完成，重新采集只读证据并确认故障影响是否收敛。")
+    elif status == "rollback_failed":
+        steps.append("回滚失败，立即升级值班负责人并启动人工恢复预案。")
     elif status == "escalated":
         steps.append("安全变更流程已升级，需人工复核沙箱或生产变更边界。")
     elif status in {"precheck_failed", "dry_run_failed"}:
@@ -150,6 +170,14 @@ def change_execution_uncertainties(existing: list[str], status: str) -> list[str
         uncertainties.append("审批已通过但生产变更仍等待人工执行记录。")
     elif status == "rollback_recommended":
         uncertainties.append("人工执行或观察结果未达标，回滚前需确认影响面。")
+    elif status == "partial_success":
+        uncertainties.append("仅部分步骤完成，当前系统状态与审批前基线可能同时存在差异。")
+    elif status == "recovery_pending":
+        uncertainties.append("变更已经记录，但观察窗口尚未证明服务稳定恢复。")
+    elif status == "rolled_back":
+        uncertainties.append("回滚完成不等于故障已恢复，仍需重新取证确认。")
+    elif status == "rollback_failed":
+        uncertainties.append("回滚失败，生产状态可能继续恶化，需人工接管。")
     elif status == "escalated":
         uncertainties.append("当前环境不满足安全沙箱执行边界，已转人工复核。")
     elif status in {"precheck_failed", "dry_run_failed"}:

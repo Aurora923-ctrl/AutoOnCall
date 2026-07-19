@@ -45,6 +45,8 @@ class ApprovalRequest(BaseModel):
     decided_by: str | None = Field(default=None, max_length=120)
     decision_reason: str = Field(default="", max_length=2000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    projection_pending: list[str] = Field(default_factory=list)
+    expires_in_seconds: int = Field(default=3600, ge=1, le=86400)
     created_at: datetime = Field(default_factory=utc_now)
     decided_at: datetime | None = None
 
@@ -60,7 +62,7 @@ class ApprovalRequest(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     """API payload for approving or rejecting a pending action."""
 
-    approval_id: str | None = Field(default=None, max_length=128)
-    decision: Literal["approve", "reject"]
+    approval_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["approve", "reject", "cancel"]
     decided_by: str = Field(default="operator", max_length=120)
     reason: str = Field(default="", max_length=2000)

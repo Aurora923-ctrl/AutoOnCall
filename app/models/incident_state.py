@@ -42,3 +42,10 @@ class IncidentState(BaseModel):
         if len(serialized) > MAX_INCIDENT_STATE_METADATA_CHARS:
             raise ValueError("incident state metadata is too large")
         return value
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def datetimes_must_include_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("incident state datetimes must include a timezone")
+        return value

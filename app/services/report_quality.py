@@ -96,17 +96,12 @@ def calculate_confidence(
         base = sum(values) / len(values) if values else 0.5
 
     analysis = _as_dict(evidence_analysis)
-    analysis_confidence = analysis.get("confidence")
-    analysis_confidence_value: float | None = None
-    if isinstance(analysis_confidence, int | float):
-        analysis_confidence_value = float(analysis_confidence)
-
-    top_hypothesis_confidence = _top_hypothesis_confidence(analysis)
-    analysis_confidence_candidates = [
-        value
-        for value in (analysis_confidence_value, top_hypothesis_confidence)
-        if value is not None and value > 0
-    ]
+    top_hypothesis_confidence = _top_supported_hypothesis_confidence(analysis, evidence)
+    analysis_confidence_candidates = (
+        [top_hypothesis_confidence]
+        if top_hypothesis_confidence is not None and top_hypothesis_confidence > 0
+        else []
+    )
     if analysis_confidence_candidates:
         base = max(base, *analysis_confidence_candidates)
     if errors and not analysis_confidence_candidates:
@@ -130,13 +125,30 @@ def calculate_confidence(
     return round(max(0.0, min(1.0, base)), 2)
 
 
-def _top_hypothesis_confidence(evidence_analysis: dict[str, Any]) -> float | None:
+def _top_supported_hypothesis_confidence(
+    evidence_analysis: dict[str, Any],
+    evidence: list[dict[str, Any]],
+) -> float | None:
     ranking = evidence_analysis.get("hypothesis_ranking")
     if not isinstance(ranking, list) or not ranking:
         return None
-    top = ranking[0] if isinstance(ranking[0], dict) else {}
-    confidence = top.get("confidence")
-    return float(confidence) if isinstance(confidence, int | float) else None
+    usable_supporting_ids = {
+        str(item.get("evidence_id"))
+        for item in evidence
+        if item.get("evidence_id")
+        and str(item.get("stance") or "") == "supporting"
+        and _evidence_is_usable(item)
+    }
+    for item in ranking:
+        hypothesis = item if isinstance(item, dict) else {}
+        supporting = hypothesis.get("supporting_evidence_ids")
+        if not isinstance(supporting, list) or not any(
+            str(value) in usable_supporting_ids for value in supporting
+        ):
+            continue
+        confidence = hypothesis.get("confidence")
+        return float(confidence) if isinstance(confidence, int | float) else None
+    return None
 
 
 def _has_failed_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:
@@ -146,6 +158,22 @@ def _has_failed_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:
         if raw_data.get("status") == "failed":
             return True
     return False
+
+
+def _evidence_is_usable(evidence: dict[str, Any]) -> bool:
+    raw_data = _as_dict(evidence.get("raw_data"))
+    if raw_data.get("status") != "success":
+        return False
+    metadata = _as_dict(raw_data.get("metadata"))
+    quality = _as_dict(metadata.get("evidence_quality"))
+    if quality.get("usable", True) is False:
+        return False
+    return str(evidence.get("data_source") or "") not in {
+        "failed",
+        "not_configured",
+        "manual_analysis",
+        "llm_toolnode_fallback",
+    }
 
 
 def _has_enough_successful_diagnostic_evidence(evidence: list[dict[str, Any]]) -> bool:

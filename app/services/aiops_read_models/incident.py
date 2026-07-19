@@ -15,8 +15,13 @@ from app.services.aiops_read_models.common import (
     build_approval_summary,
     effective_incident_status,
     latest_timestamp,
+    public_approval_request,
+    report_for_trace,
+    select_incident_artifacts,
+    state_for_trace,
 )
 from app.services.incident_lifecycle import status_metadata
+from app.utils.redaction import redact_sensitive_data
 
 
 def build_incident_overview(
@@ -27,33 +32,78 @@ def build_incident_overview(
     state: IncidentState | None = None,
 ) -> dict[str, Any]:
     """Build an API-friendly incident overview."""
-    sorted_events = sorted(events, key=lambda item: item.created_at)
-    sorted_approvals = sorted(approvals, key=lambda item: item.created_at)
+    selected_trace_id, selected_events, selected_approvals = select_incident_artifacts(
+        report,
+        state,
+        events,
+        approvals,
+    )
+    selected_report = report_for_trace(report, selected_trace_id)
+    selected_state = state_for_trace(state, selected_trace_id)
+    sorted_events = sorted(selected_events, key=lambda item: (item.created_at, item.event_id))
+    sorted_approvals = sorted(
+        selected_approvals,
+        key=lambda item: (item.created_at, item.approval_id),
+    )
     latest_event = sorted_events[-1] if sorted_events else None
     latest_approval = sorted_approvals[-1] if sorted_approvals else None
-    trace_counts = Counter(event.event_type for event in events)
-    trace_id = (
-        report.trace_id
-        if report and report.trace_id
-        else latest_event.trace_id if latest_event else state.trace_id if state else ""
+    trace_counts = Counter(event.event_type for event in sorted_events)
+    trace_id = selected_trace_id
+    updated_at = latest_timestamp(selected_report, latest_event, latest_approval, selected_state)
+    effective_approval_status = approval_status_from_approvals(sorted_approvals)
+    effective_status = effective_incident_status(
+        selected_state,
+        selected_report,
+        sorted_approvals,
     )
-    updated_at = latest_timestamp(report, latest_event, latest_approval, state)
-    effective_approval_status = approval_status_from_approvals(approvals)
-    effective_status = effective_incident_status(state, report, approvals)
     manual_action_required = (
-        state.manual_action_required
-        if state
-        else report.manual_action_required if report else bool(approvals)
+        selected_state.manual_action_required
+        if selected_state
+        else selected_report.manual_action_required
+        if selected_report
+        else bool(sorted_approvals)
     ) or effective_status in {"waiting_approval", "approval_approved", "approval_rejected"}
-    title = state.title if state else report.title if report else "AIOps incident"
-    service_name = (
-        state.service_name if state else report.service_name if report else "unknown-service"
+    title = (
+        selected_state.title
+        if selected_state
+        else selected_report.title
+        if selected_report
+        else "AIOps incident"
     )
-    severity = state.severity if state else report.severity if report else "unknown"
-    environment = state.environment if state else report.environment if report else "unknown"
-    summary = state.summary if state and state.summary else report.summary if report else ""
+    service_name = (
+        selected_state.service_name
+        if selected_state
+        else selected_report.service_name
+        if selected_report
+        else "unknown-service"
+    )
+    severity = (
+        selected_state.severity
+        if selected_state
+        else selected_report.severity
+        if selected_report
+        else "unknown"
+    )
+    environment = (
+        selected_state.environment
+        if selected_state
+        else selected_report.environment
+        if selected_report
+        else "unknown"
+    )
+    summary = (
+        selected_report.summary
+        if selected_report
+        else selected_state.summary
+        if selected_state
+        else ""
+    )
     root_cause = (
-        state.root_cause if state and state.root_cause else report.root_cause if report else ""
+        selected_report.root_cause
+        if selected_report
+        else selected_state.root_cause
+        if selected_state
+        else ""
     )
 
     return {
@@ -61,7 +111,7 @@ def build_incident_overview(
         "trace_id": trace_id,
         "status": effective_status,
         "status_metadata": status_metadata(effective_status),
-        "status_reason": state.status_reason if state else "",
+        "status_reason": selected_state.status_reason if selected_state else "",
         "title": title,
         "service_name": service_name,
         "severity": severity,
@@ -71,24 +121,38 @@ def build_incident_overview(
         "manual_action_required": manual_action_required,
         "approval_status": (
             effective_approval_status
-            if approvals
+            if sorted_approvals
             else (
-                state.approval_status
-                if state
-                else report.approval_status if report else "not_required"
+                selected_state.approval_status
+                if selected_state
+                else selected_report.approval_status
+                if selected_report
+                else "not_required"
             )
         ),
-        "session_id": state.session_id if state else "",
-        "lifecycle": state.model_dump(mode="json") if state else None,
+        "session_id": selected_state.session_id if selected_state else "",
+        "lifecycle": (
+            redact_sensitive_data(selected_state.model_dump(mode="json"))
+            if selected_state
+            else None
+        ),
         "trace_summary": {
-            "event_count": len(events),
+            "event_count": len(sorted_events),
             "by_type": dict(trace_counts),
             "latest_event_type": latest_event.event_type if latest_event else "",
             "latest_event_status": latest_event.status if latest_event else "",
         },
-        "approval_summary": build_approval_summary(approvals, latest_approval),
-        "report": report.model_dump(mode="json") if report else None,
-        "diagnosis_chain": build_diagnosis_chain(report, sorted_events, sorted_approvals),
+        "approval_summary": build_approval_summary(sorted_approvals, latest_approval),
+        "report": (
+            redact_sensitive_data(selected_report.model_dump(mode="json"))
+            if selected_report
+            else None
+        ),
+        "diagnosis_chain": build_diagnosis_chain(
+            selected_report,
+            sorted_events,
+            sorted_approvals,
+        ),
         "links": {
             "trace": f"/api/incidents/{incident_id}/trace",
             "report": f"/api/incidents/{incident_id}/report",
@@ -127,7 +191,7 @@ def build_diagnosis_chain(
         "confidence": report_payload.get("confidence", 0.0),
         "confidence_reason": report_payload.get("confidence_reason", ""),
         "data_sources": summarize_data_sources(evidence, tool_calls),
-        "approvals": [approval.model_dump(mode="json") for approval in approvals],
+        "approvals": [public_approval_request(approval) for approval in approvals],
     }
 
 

@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.api import aiops
+from app.config import config
 from app.models.approval import ApprovalRequest
 from app.services.approval_service import ApprovalService
 from app.services.change_execution_service import ChangeExecutionService
@@ -37,6 +38,13 @@ def _parse_sse_events(text: str) -> list[dict[str, Any]]:
 
 
 def _build_test_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(config, "api_auth_enabled", True)
+    monkeypatch.setattr(config, "api_auth_tokens", "")
+    monkeypatch.setattr(config, "api_read_token", "")
+    monkeypatch.setattr(config, "api_operator_token", "")
+    monkeypatch.setattr(config, "api_approver_token", "")
+    monkeypatch.setattr(config, "api_change_token", "change-secret-token")
+    monkeypatch.setattr(config, "api_admin_token", "admin-secret-token")
     test_app = FastAPI()
     test_app.include_router(aiops.router, prefix="/api")
 
@@ -98,6 +106,7 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             f"/api/incidents/{approval.incident_id}/changes/{plan.change_plan_id}/resume",
+            headers={"Authorization": "Bearer change-secret-token"},
             json={
                 "approval_id": approval.approval_id,
                 "mode": "dry_run_only",
@@ -111,7 +120,10 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
         assert "change_precheck" in [event["type"] for event in events]
         assert "change_dry_run" in [event["type"] for event in events]
 
-        list_response = await client.get(f"/api/incidents/{approval.incident_id}/changes")
+        list_response = await client.get(
+            f"/api/incidents/{approval.incident_id}/changes",
+            headers={"Authorization": "Bearer change-secret-token"},
+        )
         assert list_response.status_code == 200
         items = list_response.json()["items"]
         assert len(items) == 1
@@ -124,7 +136,10 @@ async def test_safe_change_resume_api_streams_precheck_dry_run_and_complete(
         ]
         assert items[0]["stages"][2]["status"] == "skipped"
 
-        detail_response = await client.get(f"/api/changes/{items[0]['change_execution_id']}")
+        detail_response = await client.get(
+            f"/api/changes/{items[0]['change_execution_id']}",
+            headers={"Authorization": "Bearer change-secret-token"},
+        )
         assert detail_response.status_code == 200
         detail = detail_response.json()["change_execution"]
         assert detail["status"] == "dry_run_completed"
@@ -141,6 +156,7 @@ async def test_manual_change_result_api_records_observation(monkeypatch, tmp_pat
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             f"/api/incidents/{approval.incident_id}/changes/{plan.change_plan_id}/resume",
+            headers={"Authorization": "Bearer change-secret-token"},
             json={
                 "approval_id": approval.approval_id,
                 "mode": "manual_record",
@@ -153,10 +169,12 @@ async def test_manual_change_result_api_records_observation(monkeypatch, tmp_pat
 
         result_response = await client.post(
             f"/api/changes/{execution_id}/manual-result",
+            headers={"Authorization": "Bearer change-secret-token"},
             json={
                 "status": "succeeded",
-                "operator": "pytest",
+                "operator": "change-operator",
                 "notes": "人工执行完成，观察正常",
+                "evidence": {"change_ticket": "CHG-API-1"},
                 "observed_metrics": {"service_5xx_rate": 0},
             },
         )

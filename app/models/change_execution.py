@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.change_plan import ChangeStep
 from app.models.incident import new_model_id, utc_now
@@ -22,12 +22,23 @@ ChangeExecutionStatus = Literal[
     "sandbox_executing",
     "sandbox_validated",
     "observing",
+    "partial_success",
+    "recovery_pending",
     "rollback_recommended",
+    "rolled_back",
+    "rollback_failed",
     "closed",
     "escalated",
 ]
 CheckStatus = Literal["pending", "passed", "failed", "skipped"]
-ManualExecutionStatus = Literal["succeeded", "failed"]
+ManualExecutionStatus = Literal[
+    "succeeded",
+    "failed",
+    "partial",
+    "recovery_pending",
+    "rolled_back",
+    "rollback_failed",
+]
 MAX_CHANGE_PAYLOAD_CHARS = 20_000
 
 
@@ -88,6 +99,7 @@ class ChangeExecution(BaseModel):
     observation: ObservationResult | None = None
     rollback_result: dict[str, Any] = Field(default_factory=dict)
     manual_result: dict[str, Any] = Field(default_factory=dict)
+    projection_pending: list[str] = Field(default_factory=list)
     created_by: str = Field(default="operator", max_length=120)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -102,6 +114,14 @@ class ChangeResumeRequest(BaseModel):
     observe_window_seconds: int = Field(default=300, ge=1, le=3600)
 
 
+class ManualStepResult(BaseModel):
+    """Human-recorded outcome for one approved change step."""
+
+    step_id: str = Field(min_length=1, max_length=128)
+    status: Literal["succeeded", "failed", "skipped", "rolled_back"]
+    notes: str = Field(default="", max_length=2000)
+
+
 class ManualExecutionResultRequest(BaseModel):
     """Request body for recording a human-executed change result."""
 
@@ -110,6 +130,7 @@ class ManualExecutionResultRequest(BaseModel):
     notes: str = Field(default="", max_length=4000)
     evidence: dict[str, Any] = Field(default_factory=dict)
     observed_metrics: dict[str, Any] = Field(default_factory=dict)
+    step_results: list[ManualStepResult] = Field(default_factory=list)
     observe_window_seconds: int = Field(default=300, ge=1, le=3600)
 
     @field_validator("evidence", "observed_metrics")
@@ -119,3 +140,15 @@ class ManualExecutionResultRequest(BaseModel):
         if len(serialized) > MAX_CHANGE_PAYLOAD_CHARS:
             raise ValueError("manual execution payload is too large")
         return value
+
+    @model_validator(mode="after")
+    def successful_result_requires_evidence(self) -> "ManualExecutionResultRequest":
+        if self.status in {"failed", "rollback_failed"}:
+            return self
+        if not self.notes.strip():
+            raise ValueError("manual execution result requires operator notes")
+        if not self.evidence:
+            raise ValueError("manual execution result requires execution evidence")
+        if not self.observed_metrics:
+            raise ValueError("manual execution result requires observed metrics")
+        return self

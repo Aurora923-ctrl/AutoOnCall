@@ -212,7 +212,11 @@ class ChangeExecutionService:
             )
             return
 
-        execution = self._transition(execution, "precheck_running")
+        execution = self._transition(
+            execution,
+            "precheck_running",
+            expected_statuses={"created"},
+        )
         trace_event = self._record_change_event(
             execution=execution,
             event_type="change_precheck",
@@ -237,7 +241,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        execution = self._save_execution(execution)
+        execution = self._save_execution(
+            execution,
+            expected_statuses={"precheck_running"},
+        )
         trace_event = self._record_change_event(
             execution=execution,
             event_type="change_precheck",
@@ -283,7 +290,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        execution = self._save_execution(execution)
+        execution = self._save_execution(
+            execution,
+            expected_statuses={"dry_run_running"},
+        )
         trace_event = self._record_change_event(
             execution=execution,
             event_type="change_dry_run",
@@ -376,59 +386,113 @@ class ChangeExecutionService:
     ) -> ChangeExecution:
         """Record a human execution result and produce observation/rollback state."""
         execution = self.get_execution(change_execution_id)
-        if execution.status != "waiting_manual_execution":
+        allowed_statuses = _manual_result_source_statuses(request.status)
+        if execution.status not in allowed_statuses:
             raise ChangeExecutionStateError(
-                f"change execution is {execution.status}, expected waiting_manual_execution"
+                f"change execution is {execution.status}, expected one of "
+                f"{sorted(allowed_statuses)}"
+            )
+        approval = self._load_approved_request(
+            incident_id=execution.incident_id,
+            approval_id=execution.approval_id,
+            change_plan_id=execution.change_plan_id,
+        )
+        if approval.decided_by and approval.decided_by == request.operator:
+            raise ChangeExecutionStateError(
+                "manual execution result must be recorded by an actor other than the approver"
+            )
+        plan = approval.change_plan
+        if plan is None:
+            raise ChangeExecutionStateError("approval does not include a change plan")
+        pre_check = self.run_pre_checks(approval=approval, plan=plan)
+        if pre_check.status == "failed":
+            raise ChangeExecutionStateError(
+                f"approved change plan is no longer valid: {pre_check.reason}"
             )
 
+        recorded_at = utc_now()
+        previous_manual_result = dict(execution.manual_result or {})
         manual_result = request.model_dump(mode="json")
-        manual_result["recorded_at"] = utc_now().isoformat()
-        execution = execution.model_copy(
+        manual_result["recorded_at"] = recorded_at.isoformat()
+        history = list(previous_manual_result.get("history") or [])
+        if previous_manual_result:
+            history.append(
+                {key: value for key, value in previous_manual_result.items() if key != "history"}
+            )
+        if history:
+            manual_result["history"] = history[-20:]
+        _validate_manual_step_results(execution, request)
+        observation = _manual_observation(execution, request)
+        final_status = _status_from_manual_result(request.status)
+        rollback_result: dict[str, Any] = {}
+        if final_status in {"rollback_recommended", "partial_success", "rollback_failed"}:
+            rollback_result = {
+                "status": ("failed" if final_status == "rollback_failed" else "recommended"),
+                "reason": _rollback_reason(final_status),
+                "created_at": utc_now().isoformat(),
+            }
+        elif final_status == "rolled_back":
+            rollback_result = {
+                "status": "completed",
+                "reason": "人工确认已按审批计划完成回滚，仍需持续观察恢复状态",
+                "created_at": utc_now().isoformat(),
+            }
+        completed = execution.model_copy(
             update={
-                "status": "manual_execution_recorded",
+                "status": final_status,
                 "manual_result": manual_result,
-                "updated_at": utc_now(),
+                "observation": observation,
+                "rollback_result": rollback_result,
+                "projection_pending": ["incident_state", "report", "trace"],
+                "updated_at": recorded_at,
             }
         )
-        execution = self._save_execution(execution)
-        self._record_change_event(
+        if not self._store.save_change_execution_if_status(
+            completed,
+            expected_statuses=allowed_statuses,
+        ):
+            latest = self.get_execution(change_execution_id)
+            raise ChangeExecutionStateError(
+                f"change execution is {latest.status}, expected one of {sorted(allowed_statuses)}"
+            )
+        execution = self._sync_committed_execution(completed)
+        self._record_change_event_best_effort(
             execution=execution,
             event_type="change_execution",
-            status="success" if request.status == "succeeded" else "failed",
+            status=_trace_status_from_manual_result(request.status),
             summary=f"Manual execution result recorded: {request.status}",
             metadata={"manual_result": manual_result},
         )
-
-        observation = _manual_observation(execution, request)
-        final_status = "closed" if observation.status == "passed" else "rollback_recommended"
-        rollback_result: dict[str, Any] = {}
-        if final_status == "rollback_recommended":
-            rollback_result = {
-                "status": "recommended",
-                "reason": "人工执行失败或观察指标未达标，建议按 ChangePlan 回滚步骤处理",
-                "created_at": utc_now().isoformat(),
-            }
-        execution = execution.model_copy(
-            update={
-                "status": final_status,
-                "observation": observation,
-                "rollback_result": rollback_result,
-                "updated_at": utc_now(),
-            }
-        )
-        execution = self._save_execution(execution)
-        self._record_change_event(
+        self._record_change_event_best_effort(
             execution=execution,
             event_type="change_observation",
-            status="success" if observation.status == "passed" else "failed",
+            status=(
+                "success"
+                if observation.status == "passed"
+                else "waiting"
+                if observation.status == "pending"
+                else "failed"
+            ),
             summary=observation.recommendation,
             metadata={"observation": observation.model_dump(mode="json")},
         )
-        if final_status == "rollback_recommended":
-            self._record_change_event(
+        if rollback_result:
+            self._record_change_event_best_effort(
                 execution=execution,
-                event_type="change_rollback_recommended",
-                status="blocked",
+                event_type=(
+                    "change_rollback_completed"
+                    if final_status == "rolled_back"
+                    else "change_rollback_failed"
+                    if final_status == "rollback_failed"
+                    else "change_rollback_recommended"
+                ),
+                status=(
+                    "success"
+                    if final_status == "rolled_back"
+                    else "failed"
+                    if final_status == "rollback_failed"
+                    else "blocked"
+                ),
                 summary=rollback_result["reason"],
                 metadata={"rollback_result": rollback_result},
             )
@@ -439,7 +503,7 @@ class ChangeExecutionService:
         execution = self._store.get_change_execution(change_execution_id)
         if execution is None:
             raise ChangeExecutionNotFoundError(change_execution_id)
-        return execution
+        return self._repair_execution_if_needed(execution)
 
     def list_executions(
         self,
@@ -448,10 +512,11 @@ class ChangeExecutionService:
         change_plan_id: str | None = None,
     ) -> list[ChangeExecution]:
         """List safe change executions."""
-        return self._store.list_change_executions(
+        executions = self._store.list_change_executions(
             incident_id=incident_id,
             change_plan_id=change_plan_id,
         )
+        return [self._repair_execution_if_needed(execution) for execution in executions]
 
     def _load_approved_request(
         self,
@@ -469,6 +534,8 @@ class ChangeExecutionService:
             raise ChangeExecutionStateError("approval_id does not belong to the requested incident")
         if approval.status != "approved":
             raise ChangeExecutionStateError(f"approval is {approval.status}, expected approved")
+        if self._approval_service.is_expired(approval):
+            raise ChangeExecutionStateError("approval authorization has expired")
         if approval.change_plan is None:
             raise ChangeExecutionStateError("approval does not include a change plan")
         if approval.change_plan.change_plan_id != change_plan_id:
@@ -527,7 +594,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        updated = self._save_execution(updated)
+        updated = self._save_execution(
+            updated,
+            expected_statuses={"dry_run_completed"},
+        )
         trace_event = self._record_change_event(
             execution=updated,
             event_type="change_precheck",
@@ -554,7 +624,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        updated = self._save_execution(updated)
+        updated = self._save_execution(
+            updated,
+            expected_statuses={"dry_run_completed"},
+        )
         trace_event = self._record_change_event(
             execution=updated,
             event_type="change_execution",
@@ -580,7 +653,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        updated = self._save_execution(updated)
+        updated = self._save_execution(
+            updated,
+            expected_statuses={"dry_run_completed"},
+        )
         self._record_change_event(
             execution=updated,
             event_type="change_execution",
@@ -616,7 +692,10 @@ class ChangeExecutionService:
                     "updated_at": utc_now(),
                 }
             )
-            execution = self._save_execution(execution)
+            execution = self._save_execution(
+                execution,
+                expected_statuses={"escalated"},
+            )
             self._record_change_event(
                 execution=execution,
                 event_type="change_execution",
@@ -649,7 +728,10 @@ class ChangeExecutionService:
                 "updated_at": utc_now(),
             }
         )
-        execution = self._save_execution(execution)
+        execution = self._save_execution(
+            execution,
+            expected_statuses={"sandbox_executing"},
+        )
         self._record_change_event(
             execution=execution,
             event_type="change_observation",
@@ -659,23 +741,44 @@ class ChangeExecutionService:
         )
         return execution
 
-    def _transition(self, execution: ChangeExecution, status: str) -> ChangeExecution:
+    def _transition(
+        self,
+        execution: ChangeExecution,
+        status: str,
+        *,
+        expected_statuses: set[str],
+    ) -> ChangeExecution:
         return self._save_execution(
-            execution.model_copy(update={"status": status, "updated_at": utc_now()})
+            execution.model_copy(update={"status": status, "updated_at": utc_now()}),
+            expected_statuses=expected_statuses,
         )
 
-    def _save_execution(self, execution: ChangeExecution) -> ChangeExecution:
-        self._store.save_change_execution(execution)
-        self._store.save_incident_state(build_incident_state_from_change_execution(execution))
-        self._sync_report(execution)
-        return execution
+    def _save_execution(
+        self,
+        execution: ChangeExecution,
+        *,
+        expected_statuses: set[str],
+    ) -> ChangeExecution:
+        execution = execution.model_copy(
+            update={"projection_pending": ["incident_state", "report", "trace"]}
+        )
+        if not self._store.save_change_execution_if_status(
+            execution,
+            expected_statuses=expected_statuses,
+        ):
+            latest = self.get_execution(execution.change_execution_id)
+            raise ChangeExecutionStateError(
+                f"change execution is {latest.status}, expected one of {sorted(expected_statuses)}"
+            )
+        return self._sync_committed_execution(execution)
 
-    def _sync_report(self, execution: ChangeExecution) -> None:
+    def _sync_report(self, execution: ChangeExecution) -> bool:
         try:
             self._report_generator.mark_change_execution_updated(
                 incident_id=execution.incident_id,
                 execution=build_change_execution_read_model(execution),
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "Change execution report synchronization failed: incident_id={}, "
@@ -684,7 +787,95 @@ class ChangeExecutionService:
                 execution.change_execution_id,
                 exc,
             )
-            return
+            return False
+
+    def _sync_committed_execution(self, execution: ChangeExecution) -> ChangeExecution:
+        pending = self._sync_execution_projections(execution)
+        updated = execution.model_copy(update={"projection_pending": sorted(set(pending))})
+        if updated.projection_pending != execution.projection_pending:
+            if not self._store.save_change_execution_if_status(
+                updated,
+                expected_statuses={execution.status},
+            ):
+                latest = self._store.get_change_execution(execution.change_execution_id)
+                return latest or execution
+        return updated
+
+    def _sync_execution_projections(self, execution: ChangeExecution) -> list[str]:
+        """Update rebuildable projections and return failed projection names."""
+        pending: list[str] = []
+        try:
+            self._store.save_incident_state(build_incident_state_from_change_execution(execution))
+        except Exception as exc:
+            pending.append("incident_state")
+            logger.warning(
+                "Change execution incident-state projection failed: "
+                "change_execution_id={}, error={}",
+                execution.change_execution_id,
+                exc,
+            )
+        if not self._sync_report(execution):
+            pending.append("report")
+        if not self._sync_execution_audit_projection(execution):
+            pending.append("trace")
+        return pending
+
+    def _sync_execution_audit_projection(self, execution: ChangeExecution) -> bool:
+        event_id = (
+            f"change:projection:{execution.change_execution_id}:"
+            f"{execution.updated_at.isoformat().replace('+00:00', 'Z')}"
+        )[:128]
+        try:
+            self._trace_service.record_change_event(
+                event_id=event_id,
+                created_at=execution.updated_at,
+                trace_id=execution.trace_id or "trace-unknown",
+                incident_id=execution.incident_id,
+                change_execution_id=execution.change_execution_id,
+                change_plan_id=execution.change_plan_id,
+                approval_id=execution.approval_id,
+                event_type="change_execution_projection",
+                status=execution.status,
+                summary=f"Safe change durable status={execution.status}",
+                metadata={"projection": True, "mode": execution.mode},
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Change execution audit projection failed: change_execution_id={}, error={}",
+                execution.change_execution_id,
+                exc,
+            )
+            return False
+
+    def repair_pending_projections(self, change_execution_id: str) -> ChangeExecution:
+        """Retry projections previously marked as incomplete."""
+        execution = self._store.get_change_execution(change_execution_id)
+        if execution is None:
+            raise ChangeExecutionNotFoundError(change_execution_id)
+        if not execution.projection_pending:
+            return execution
+        return self._sync_committed_execution(
+            execution.model_copy(update={"projection_pending": []})
+        )
+
+    def _repair_execution_if_needed(self, execution: ChangeExecution) -> ChangeExecution:
+        if not execution.projection_pending:
+            return execution
+        return self.repair_pending_projections(execution.change_execution_id)
+
+    def _record_change_event_best_effort(self, **kwargs: Any):
+        """Record an audit projection without invalidating a committed execution result."""
+        try:
+            return self._record_change_event(**kwargs)
+        except Exception as exc:
+            execution = kwargs["execution"]
+            logger.warning(
+                "Change execution trace projection failed: change_execution_id={}, error={}",
+                execution.change_execution_id,
+                exc,
+            )
+            return None
 
     def _record_change_event(
         self,
@@ -695,17 +886,25 @@ class ChangeExecutionService:
         summary: str,
         metadata: dict[str, Any] | None = None,
     ):
-        return self._trace_service.record_change_event(
-            trace_id=execution.trace_id or "trace-unknown",
-            incident_id=execution.incident_id,
-            change_execution_id=execution.change_execution_id,
-            change_plan_id=execution.change_plan_id,
-            approval_id=execution.approval_id,
-            event_type=event_type,
-            status=status,
-            summary=summary,
-            metadata=metadata,
-        )
+        try:
+            return self._trace_service.record_change_event(
+                trace_id=execution.trace_id or "trace-unknown",
+                incident_id=execution.incident_id,
+                change_execution_id=execution.change_execution_id,
+                change_plan_id=execution.change_plan_id,
+                approval_id=execution.approval_id,
+                event_type=event_type,
+                status=status,
+                summary=summary,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Change execution trace projection failed: change_execution_id={}, error={}",
+                execution.change_execution_id,
+                exc,
+            )
+            return None
 
     def _event_payload(
         self,
@@ -760,14 +959,30 @@ def _manual_observation(
     execution: ChangeExecution,
     request: ManualExecutionResultRequest,
 ) -> ObservationResult:
-    if request.status == "succeeded":
+    if request.status in {"succeeded", "rolled_back"}:
         failed_criteria: list[str] = []
         status: CheckStatus = "passed"
-        recommendation = "人工执行结果已记录，观察通过，安全变更流程关闭。"
+        recommendation = (
+            "人工确认回滚完成，恢复状态仍需持续观察。"
+            if request.status == "rolled_back"
+            else "人工执行结果已记录，观察通过，安全变更流程关闭。"
+        )
+    elif request.status == "recovery_pending":
+        failed_criteria = []
+        status = "pending"
+        recommendation = "人工执行已记录，恢复效果尚待观察窗口确认。"
+    elif request.status == "partial":
+        failed_criteria = ["manual_execution_partial"]
+        status = "failed"
+        recommendation = "变更仅部分完成，需停止后续步骤并评估回滚或恢复方案。"
     else:
         failed_criteria = ["manual_execution_status"]
         status = "failed"
-        recommendation = "人工执行结果为失败，建议按回滚步骤处理并升级给值班负责人。"
+        recommendation = (
+            "回滚执行失败，需立即升级并进入人工恢复。"
+            if request.status == "rollback_failed"
+            else "人工执行结果为失败，建议按回滚步骤处理并升级给值班负责人。"
+        )
 
     return ObservationResult(
         change_execution_id=execution.change_execution_id,
@@ -779,6 +994,86 @@ def _manual_observation(
         failed_criteria=failed_criteria,
         recommendation=recommendation,
     )
+
+
+def _validate_manual_step_results(
+    execution: ChangeExecution,
+    request: ManualExecutionResultRequest,
+) -> None:
+    expected_ids = {step.step_id for step in execution.execution_steps}
+    actual_ids = {result.step_id for result in request.step_results}
+    if len(actual_ids) != len(request.step_results):
+        raise ChangeExecutionStateError("manual step results contain duplicate step_id values")
+    if actual_ids - expected_ids:
+        raise ChangeExecutionStateError("manual step results contain unapproved step_id values")
+    if request.status == "partial" and len(expected_ids) > 1:
+        statuses = {result.status for result in request.step_results}
+        if actual_ids != expected_ids or "succeeded" not in statuses or statuses == {"succeeded"}:
+            raise ChangeExecutionStateError(
+                "multi-step partial result requires an outcome for every approved step "
+                "and a mix of succeeded and incomplete outcomes"
+            )
+    if request.status == "succeeded" and len(expected_ids) > 1:
+        if actual_ids != expected_ids or any(
+            result.status != "succeeded" for result in request.step_results
+        ):
+            raise ChangeExecutionStateError(
+                "multi-step success requires a succeeded result for every approved step"
+            )
+
+
+def _status_from_manual_result(status: str) -> str:
+    return {
+        "succeeded": "closed",
+        "failed": "rollback_recommended",
+        "partial": "partial_success",
+        "recovery_pending": "recovery_pending",
+        "rolled_back": "rolled_back",
+        "rollback_failed": "rollback_failed",
+    }[status]
+
+
+def _manual_result_source_statuses(status: str) -> set[str]:
+    transitions = {
+        "succeeded": {"waiting_manual_execution", "recovery_pending"},
+        "failed": {"waiting_manual_execution", "partial_success", "recovery_pending"},
+        "partial": {"waiting_manual_execution"},
+        "recovery_pending": {
+            "waiting_manual_execution",
+            "partial_success",
+            "rollback_recommended",
+            "rolled_back",
+            "rollback_failed",
+        },
+        "rolled_back": {
+            "waiting_manual_execution",
+            "partial_success",
+            "rollback_recommended",
+            "rollback_failed",
+        },
+        "rollback_failed": {
+            "waiting_manual_execution",
+            "partial_success",
+            "rollback_recommended",
+        },
+    }
+    return transitions[status]
+
+
+def _trace_status_from_manual_result(status: str) -> str:
+    if status in {"succeeded", "rolled_back"}:
+        return "success"
+    if status == "recovery_pending":
+        return "waiting"
+    return "failed"
+
+
+def _rollback_reason(status: str) -> str:
+    if status == "rollback_failed":
+        return "人工回滚失败，需立即升级并进入恢复待确认状态"
+    if status == "partial_success":
+        return "人工变更仅部分完成，建议停止后续步骤并评估回滚"
+    return "人工执行失败或观察指标未达标，建议按 ChangePlan 回滚步骤处理"
 
 
 def _stable_change_execution_id(*, approval_id: str, change_plan_id: str) -> str:

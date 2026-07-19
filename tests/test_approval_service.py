@@ -3,12 +3,15 @@
 import importlib
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import pytest
-from fastapi import HTTPException
 
 from app.models.approval import ApprovalRequest
 from app.models.change_plan import ChangePlan
+from app.models.incident import utc_now
 from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService, ApprovalStateError
 from app.services.approval_workflow import create_approval_request_from_risk_decision
@@ -115,6 +118,27 @@ async def test_pending_approval_api_can_include_approved_followups(monkeypatch, 
         approved_with_change.approval_id,
     ]
 
+    change_service = importlib.import_module(
+        "app.services.change_execution_service"
+    ).ChangeExecutionService(
+        service.database_path,
+        approval_repository=service,
+    )
+    await _collect_change_events(
+        change_service,
+        incident_id=approved_with_change.incident_id,
+        change_plan_id=approved_with_change.change_plan.change_plan_id,
+        approval_id=approved_with_change.approval_id,
+    )
+    filtered_payload = await approvals_api.list_pending_approvals(
+        include_approved_actions=True,
+    )
+    assert [item["approval_id"] for item in filtered_payload["items"]] == [pending.approval_id]
+
+
+async def _collect_change_events(service, **kwargs):
+    return [event async for event in service.start_after_approval(**kwargs)]
+
 
 def test_approval_workflow_reuses_same_pending_request_by_idempotency_key(tmp_path) -> None:
     service = ApprovalService(tmp_path / "approvals.db")
@@ -162,6 +186,92 @@ def test_approval_workflow_reuses_same_pending_request_by_idempotency_key(tmp_pa
     assert len(service.list_requests(incident_id="inc-dup")) == 2
 
 
+def test_approval_workflow_concurrent_creation_has_single_pending_request(tmp_path) -> None:
+    database_path = tmp_path / "approval-concurrency.db"
+    state = {
+        "session_id": "session-concurrent",
+        "trace_id": "trace-concurrent",
+        "incident": {
+            "incident_id": "inc-concurrent",
+            "service_name": "checkout-service",
+            "environment": "prod",
+        },
+    }
+    decision = {
+        "action": "restart checkout-service",
+        "risk_level": "high",
+        "policy": "approval_required",
+        "step_id": "s-risk",
+        "tool_name": "restart_service",
+        "reason": "production write requires approval",
+    }
+    barrier = threading.Barrier(6)
+
+    def create_request(_: int) -> ApprovalRequest:
+        service = ApprovalService(database_path)
+        barrier.wait()
+        return create_approval_request_from_risk_decision(
+            state,
+            decision,
+            approval_repository=service,
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        requests = list(executor.map(create_request, range(6)))
+
+    assert len({request.approval_id for request in requests}) == 1
+    assert len(ApprovalService(database_path).list_pending("inc-concurrent")) == 1
+
+
+def test_approval_idempotency_is_scoped_to_run_environment_and_plan(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approval-scope.db")
+    decision = {
+        "action": "restart checkout-service",
+        "risk_level": "high",
+        "policy": "approval_required",
+        "step_id": "s-risk",
+        "tool_name": "restart_service",
+        "reason": "production write requires approval",
+    }
+    staging_state = {
+        "session_id": "session-staging",
+        "trace_id": "trace-staging",
+        "incident": {
+            "incident_id": "inc-scope",
+            "service_name": "checkout-service",
+            "environment": "staging",
+        },
+    }
+    production_state = {
+        "session_id": "session-production",
+        "trace_id": "trace-production",
+        "incident": {
+            "incident_id": "inc-scope",
+            "service_name": "checkout-service",
+            "environment": "prod",
+        },
+    }
+
+    staging = create_approval_request_from_risk_decision(
+        staging_state,
+        decision,
+        approval_repository=service,
+    )
+    production = create_approval_request_from_risk_decision(
+        production_state,
+        decision,
+        approval_repository=service,
+    )
+
+    assert staging.approval_id != production.approval_id
+    assert staging.metadata["session_id"] == "session-staging"
+    assert production.metadata["session_id"] == "session-production"
+    assert staging.change_plan is not None
+    assert production.change_plan is not None
+    assert staging.change_plan.metadata["environment"] == "staging"
+    assert production.change_plan.metadata["environment"] == "prod"
+
+
 def test_approval_service_rejects_and_blocks_second_decision(tmp_path) -> None:
     service = ApprovalService(tmp_path / "approvals.db")
     request = service.create_request(
@@ -180,6 +290,269 @@ def test_approval_service_rejects_and_blocks_second_decision(tmp_path) -> None:
 
     with pytest.raises(ApprovalStateError):
         service.decide_request(request.approval_id, decision="approve")
+
+
+def test_expired_pending_approval_is_cancelled_instead_of_approved(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-expired",
+            action="expired change",
+            risk_level="high",
+            expires_in_seconds=60,
+            created_at=utc_now() - timedelta(minutes=5),
+        )
+    )
+
+    with pytest.raises(ApprovalStateError, match="expired and was cancelled"):
+        service.decide_request(request.approval_id, decision="approve", decided_by="sre")
+
+    cancelled = service.get_request(request.approval_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.decided_by == "system"
+
+
+def test_pending_queue_cancels_and_filters_expired_requests(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    expired = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-expired-queue",
+            action="expired queued change",
+            risk_level="high",
+            expires_in_seconds=60,
+            created_at=utc_now() - timedelta(minutes=5),
+        )
+    )
+
+    assert service.list_pending("inc-expired-queue") == []
+    assert service.get_request(expired.approval_id).status == "cancelled"
+
+
+def test_pending_approval_can_be_explicitly_cancelled(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-cancel",
+            action="cancel this change",
+            risk_level="medium",
+        )
+    )
+
+    cancelled = service.cancel_request(
+        request.approval_id,
+        decided_by="incident-commander",
+        reason="context changed",
+    )
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.decision_reason == "context changed"
+    with pytest.raises(ApprovalStateError):
+        service.decide_request(request.approval_id, decision="approve")
+
+
+def test_approval_decision_survives_projection_failures(monkeypatch, tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db", sync_report_status=False)
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-projection-failure",
+            action="approve despite projection failure",
+            risk_level="high",
+        )
+    )
+
+    monkeypatch.setattr(
+        service._store,
+        "save_incident_state",
+        lambda state: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_record_trace_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+
+    approved = service.decide_request(
+        request.approval_id,
+        decision="approve",
+        decided_by="sre",
+    )
+
+    assert approved.status == "approved"
+    assert service.get_request(request.approval_id).status == "approved"
+
+
+def test_approval_projection_failures_are_marked_and_repaired(monkeypatch, tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db", sync_report_status=False)
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-projection-repair",
+            action="repair projections",
+            risk_level="high",
+            metadata={"trace_id": "trace-projection-repair"},
+        )
+    )
+    original_save_state = service._store.save_incident_state
+    original_record_trace = service._record_trace_event
+    monkeypatch.setattr(
+        service._store,
+        "save_incident_state",
+        lambda state: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_record_trace_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+
+    approved = service.decide_request(
+        request.approval_id,
+        decision="approve",
+        decided_by="sre",
+    )
+
+    assert approved.projection_pending == ["incident_state", "trace"]
+    monkeypatch.setattr(service._store, "save_incident_state", original_save_state)
+    monkeypatch.setattr(service, "_record_trace_event", original_record_trace)
+
+    repaired = service.get_request(request.approval_id)
+    assert repaired.projection_pending == []
+    state = service._store.get_incident_state(request.incident_id)
+    assert state is not None
+    assert state.status == "approval_approved"
+    assert (
+        len(
+            service._store.list_trace_events(
+                incident_id=request.incident_id,
+                event_type="approval_decision",
+            )
+        )
+        == 1
+    )
+
+
+def test_approval_trace_projection_repairs_after_service_restart(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "approval-trace-restart.db"
+    service = ApprovalService(database_path, sync_report_status=False)
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-trace-restart",
+            action="repair trace after restart",
+            risk_level="high",
+            metadata={"trace_id": "trace-approval-restart"},
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_record_trace_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+
+    approved = service.decide_request(
+        request.approval_id,
+        decision="approve",
+        decided_by="sre",
+    )
+
+    assert approved.projection_pending == ["trace"]
+
+    reloaded = ApprovalService(database_path, sync_report_status=False)
+    repaired = reloaded.get_request(request.approval_id)
+
+    assert repaired.projection_pending == []
+    events = reloaded._store.list_trace_events(
+        incident_id=request.incident_id,
+        event_type="approval_decision",
+    )
+    assert len(events) == 1
+    assert events[0].trace_id == "trace-approval-restart"
+
+
+def test_approval_decision_persists_projection_outbox_before_sync(monkeypatch, tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db", sync_report_status=False)
+    request = service.create_request(
+        ApprovalRequest(
+            incident_id="inc-approval-outbox",
+            action="persist projection repair intent",
+            risk_level="high",
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_sync_committed_decision",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("process stopped")),
+    )
+
+    with pytest.raises(RuntimeError, match="process stopped"):
+        service.decide_request(
+            request.approval_id,
+            decision="approve",
+            decided_by="sre",
+        )
+
+    stored = service._store.get_approval_request(request.approval_id)
+    assert stored is not None
+    assert stored.status == "approved"
+    assert stored.projection_pending == ["incident_state", "trace"]
+
+
+def test_duplicate_approval_create_cannot_reopen_or_replace_decided_request(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    request = service.create_request(
+        ApprovalRequest(
+            approval_id="apr-stable-decision",
+            incident_id="inc-stable-decision",
+            action="manual mitigation",
+            risk_level="high",
+        )
+    )
+    approved = service.decide_request(
+        request.approval_id,
+        decision="approve",
+        decided_by="sre",
+    )
+
+    with pytest.raises(ApprovalStateError, match="cannot be replaced"):
+        service.create_request(
+            request.model_copy(
+                update={
+                    "status": "pending",
+                    "action": "conflicting action",
+                }
+            )
+        )
+
+    saved = service.get_request(request.approval_id)
+    assert saved.status == "approved"
+    assert saved.action == approved.action
+    assert saved.decided_by == "sre"
+
+
+def test_pending_approval_plan_cannot_be_replaced_before_decision(tmp_path) -> None:
+    service = ApprovalService(tmp_path / "approvals.db")
+    plan = ChangePlan(
+        change_plan_id="chg-immutable",
+        incident_id="inc-immutable",
+        action="restart one service",
+        execution_steps=["restart one service"],
+    )
+    request = service.create_request(
+        ApprovalRequest(
+            approval_id="apr-immutable",
+            incident_id=plan.incident_id,
+            action=plan.action,
+            risk_level=plan.risk_level,
+            change_plan=plan,
+        )
+    )
+    replacement = plan.model_copy(update={"action": "restart all services"})
+
+    with pytest.raises(ApprovalStateError, match="fingerprint|cannot be replaced"):
+        service.create_request(request.model_copy(update={"change_plan": replacement}))
+
+    saved = service.get_request(request.approval_id)
+    assert saved.change_plan is not None
+    assert saved.change_plan.action == "restart one service"
+    assert saved.metadata["change_plan_fingerprint"]
 
 
 def test_approval_service_syncs_report_lifecycle_on_decision(monkeypatch, tmp_path) -> None:
@@ -231,10 +604,7 @@ def test_approval_service_syncs_report_lifecycle_on_decision(monkeypatch, tmp_pa
     assert "审批原因：缺少回滚方案" in updated.markdown
 
 
-def test_resume_approval_without_id_blocks_when_newer_pending_exists(
-    monkeypatch,
-    tmp_path,
-) -> None:
+def test_resume_approval_requires_explicit_id(monkeypatch, tmp_path) -> None:
     aiops_api = importlib.import_module("app.api.aiops")
     service = ApprovalService(tmp_path / "approvals.db")
     old_request = service.create_request(
@@ -245,16 +615,7 @@ def test_resume_approval_without_id_blocks_when_newer_pending_exists(
         decision="approve",
         decided_by="sre",
     )
-    pending = service.create_request(
-        ApprovalRequest(incident_id="inc-resume", action="新变更", risk_level="high")
-    )
     monkeypatch.setattr(aiops_api, "get_approval_service", lambda: service)
 
-    with pytest.raises(HTTPException) as exc_info:
-        aiops_api._resolve_resume_approval("inc-resume", None)
-
-    assert exc_info.value.status_code == 409
-    assert "still pending" in exc_info.value.detail
     explicit_resume = aiops_api._resolve_resume_approval("inc-resume", approved.approval_id)
     assert explicit_resume.approval_id == approved.approval_id
-    assert service.get_request(pending.approval_id).status == "pending"

@@ -135,7 +135,17 @@ def render_markdown(report: DiagnosisReport) -> str:
             _render_dependency_signals(report.dependency_signals),
             "",
         ]
-    return "\n".join(sections)
+    return _neutralize_active_markdown("\n".join(sections))
+
+
+def _neutralize_active_markdown(markdown: str) -> str:
+    """Prevent report data from becoming active HTML or script-scheme links."""
+    escaped = markdown.replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(
+        r"(?i)\b(javascript|vbscript|data)\s*:",
+        lambda match: f"{match.group(1)}&#58;",
+        escaped,
+    )
 
 
 def _render_incident_summary(report: DiagnosisReport) -> str:
@@ -694,6 +704,7 @@ def _render_evidence_sufficiency(report: DiagnosisReport) -> str:
     missing = sufficiency.get("missing_evidence")
     failed = sufficiency.get("failed_tools")
     confidence_cap = sufficiency.get("confidence_cap")
+    degradation = report.degradation_analysis or {}
     lines = [
         f"- 门槛状态：{status}；是否允许 completed：{'是' if complete else '否'}。",
         "- 主故障域工具证据："
@@ -708,6 +719,15 @@ def _render_evidence_sufficiency(report: DiagnosisReport) -> str:
         f"- 缺失证据：{_render_inline_list(missing)}",
         f"- 失败工具：{_render_inline_list(failed)}",
     ]
+    if degradation:
+        lines.extend(
+            [
+                f"- 降级根因：{degradation.get('category') or 'unknown'}",
+                "- 安全终态："
+                f"{'是' if degradation.get('safe_terminal') else '否'}；"
+                f"需人工接管：{'是' if degradation.get('needs_human') else '否'}",
+            ]
+        )
     if confidence_cap is not None:
         lines.append(f"- 当前置信度上限：{float(confidence_cap):.2f}")
     if complete:

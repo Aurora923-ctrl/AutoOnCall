@@ -43,6 +43,10 @@ class AIOpsSessionSnapshot(BaseModel):
     remediation_suggestion: str = ""
     report: dict[str, Any] | None = None
     final_report_id: str | None = None
+    response: str = ""
+    resume_approval_id: str | None = None
+    resume_status: str = ""
+    resume_attempt: int = Field(default=0, ge=0)
     progress: dict[str, Any] = Field(default_factory=dict)
     progress_cursor: str = ""
     progress_events: list[dict[str, Any]] = Field(default_factory=list)
@@ -97,6 +101,10 @@ class AIOpsSessionSnapshot(BaseModel):
             remediation_suggestion=str(state.get("remediation_suggestion") or ""),
             report=report,
             final_report_id=final_report_id,
+            response=str(state.get("response") or (report or {}).get("markdown") or ""),
+            resume_approval_id=str(state.get("resume_approval_id") or "") or None,
+            resume_status=str(state.get("resume_status") or ""),
+            resume_attempt=_non_negative_int(state.get("resume_attempt")),
             progress=_to_dict(state.get("progress")),
             progress_cursor=str(state.get("progress_cursor") or ""),
             progress_events=_to_dict_list(state.get("progress_events")),
@@ -125,7 +133,10 @@ class AIOpsSessionSnapshot(BaseModel):
             "final_diagnosis": self.final_diagnosis,
             "remediation_suggestion": self.remediation_suggestion,
             "report": dict(self.report) if self.report else None,
-            "response": str((self.report or {}).get("markdown") or ""),
+            "response": self.response or str((self.report or {}).get("markdown") or ""),
+            "resume_approval_id": self.resume_approval_id,
+            "resume_status": self.resume_status,
+            "resume_attempt": self.resume_attempt,
             "progress": dict(self.progress),
             "progress_cursor": self.progress_cursor,
             "progress_events": list(self.progress_events),
@@ -156,3 +167,10 @@ def _to_string_list(value: Any) -> list[str]:
 
 def _normalize_past_steps(value: Any) -> list[dict[str, Any]]:
     return normalize_past_steps(value)
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0

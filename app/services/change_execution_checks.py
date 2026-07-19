@@ -11,9 +11,38 @@ from app.models.change_execution import (
     DryRunResult,
     PreCheckResult,
 )
-from app.models.change_plan import ChangePlan, ChangeStep
+from app.models.change_plan import ChangePlan, ChangeStep, change_plan_fingerprint
 from app.models.incident import utc_now
-from app.services.incident_lifecycle import is_production_environment
+
+DRY_RUN_TOOL_ALLOWLIST = {"manual_change_record", "suggest_remediation"}
+DRY_RUN_ACTION_ALLOWLIST = {
+    "manual",
+    "manual_change",
+    "manual_rollback",
+    "redis_config_change",
+    "database_change",
+    "service_restart",
+    "capacity_change",
+    "release_rollback",
+}
+DRY_RUN_INPUT_ALLOWLIST = {
+    "action",
+    "description",
+    "environment",
+    "service_name",
+    "source_action",
+}
+NON_PRODUCTION_ENVIRONMENTS = {
+    "dev",
+    "development",
+    "test",
+    "testing",
+    "qa",
+    "staging",
+    "stage",
+    "sandbox",
+    "local",
+}
 
 
 def build_pre_check_result(
@@ -37,6 +66,18 @@ def build_pre_check_result(
         "approval_id 与 ChangePlan incident_id 一致",
         "approval_id 与 ChangePlan incident_id 不一致",
     )
+    expected_plan_fingerprint = str(approval.metadata.get("change_plan_fingerprint") or "")
+    actual_plan_fingerprint = change_plan_fingerprint(plan)
+    check(
+        bool(expected_plan_fingerprint) and expected_plan_fingerprint == actual_plan_fingerprint,
+        "审批绑定的 ChangePlan 指纹一致",
+        "审批绑定的 ChangePlan 内容已变更或缺少指纹",
+    )
+    check(
+        approval.action == plan.action,
+        "审批动作与 ChangePlan 动作一致",
+        "审批动作与 ChangePlan 动作不一致",
+    )
     check(
         approval.status == "approved",
         "审批状态为 approved",
@@ -52,6 +93,39 @@ def build_pre_check_result(
         "审批风险等级与 ChangePlan 一致",
         "审批风险等级与 ChangePlan 不一致",
     )
+    steps = plan_steps(plan)
+    check(
+        bool(steps),
+        "ChangePlan 包含可审计的变更步骤",
+        "ChangePlan 不包含变更步骤",
+    )
+    check(
+        all(step.risk_level == plan.risk_level for step in steps),
+        "所有变更步骤风险等级与 ChangePlan 一致",
+        "变更步骤风险等级与 ChangePlan 不一致",
+    )
+    check(
+        all(step.requires_approval for step in steps),
+        "所有变更步骤均绑定人工审批",
+        "存在未绑定人工审批的变更步骤",
+    )
+    plan_service_name = str(plan.metadata.get("service_name") or "")
+    check(
+        not plan_service_name
+        or all(not step.target or step.target == plan_service_name for step in steps),
+        "所有变更步骤目标与 ChangePlan 服务范围一致",
+        "变更步骤目标超出 ChangePlan 服务范围",
+    )
+    plan_environment = str(plan.metadata.get("environment") or "")
+    check(
+        all(
+            not step.input_args.get("environment")
+            or str(step.input_args.get("environment")) == plan_environment
+            for step in steps
+        ),
+        "所有变更步骤环境与 ChangePlan 一致",
+        "变更步骤环境超出 ChangePlan 审批范围",
+    )
     check(
         not is_expired(plan),
         "ChangePlan 未超过过期窗口",
@@ -63,6 +137,27 @@ def build_pre_check_result(
         "高风险变更包含回滚方案",
         "高风险变更缺少 rollback plan，禁止进入 dry-run",
     )
+    if plan.risk_level == "high" and plan.steps:
+        rollback_steps = {step.step_id: step for step in plan.rollback_plan}
+        linked_rollbacks = [
+            rollback_steps.get(str(step.rollback_step_id or "")) for step in plan.steps
+        ]
+        check(
+            all(rollback is not None for rollback in linked_rollbacks),
+            "所有高风险结构化步骤均关联可定位的回滚步骤",
+            "高风险结构化步骤缺少有效 rollback_step_id 映射",
+        )
+        check(
+            all(
+                rollback is not None
+                and rollback.target == step.target
+                and rollback.risk_level == step.risk_level
+                and rollback.requires_approval
+                for step, rollback in zip(steps, linked_rollbacks, strict=True)
+            ),
+            "执行步骤与回滚步骤的目标、风险和审批边界一致",
+            "执行步骤与回滚步骤的目标、风险或审批边界不一致",
+        )
     checked_items.extend(
         [
             "目标服务、环境、动作、审批记录已从持久化快照校验",
@@ -76,6 +171,7 @@ def build_pre_check_result(
         "approval_decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
         "change_plan_id": plan.change_plan_id,
         "change_plan_status": plan.status,
+        "change_plan_fingerprint": actual_plan_fingerprint,
         "risk_level": plan.risk_level,
         "blast_radius": plan.blast_radius,
         "observe_metrics": list(plan.observe_metrics),
@@ -96,7 +192,9 @@ def build_pre_check_result(
 def build_dry_run_result(plan: ChangePlan) -> DryRunResult:
     """Validate steps without executing production mutations."""
     steps = plan_steps(plan)
-    blocked_steps = [step.step_id for step in steps if not step.can_dry_run]
+    blocked_steps = [
+        step.step_id for step in steps if _dry_run_step_block_reasons(step=step, plan=plan)
+    ]
     validated_steps = [step.step_id for step in steps if step.step_id not in blocked_steps]
     if plan.metadata.get("dry_run_should_fail") or plan.metadata.get("force_dry_run_failure"):
         blocked_steps.append("metadata:dry_run_should_fail")
@@ -128,8 +226,8 @@ def status_after_dry_run(mode: ChangeExecutionMode, plan: ChangePlan) -> str:
     if mode == "manual_record":
         return "waiting_manual_execution"
     if mode == "sandbox":
-        environment = str(plan.metadata.get("environment") or "").lower()
-        if is_production_environment(environment) and not plan.metadata.get("sandbox_enabled"):
+        environment = normalize_environment(plan.metadata.get("environment"))
+        if not is_known_non_production_environment(environment):
             return "escalated"
         return "sandbox_executing"
     return "dry_run_completed"
@@ -157,6 +255,41 @@ def plan_steps(plan: ChangePlan) -> list[ChangeStep]:
         )
         for text in plan.execution_steps
     ]
+
+
+def normalize_environment(value: object) -> str:
+    """Return a normalized environment name for strict boundary checks."""
+    return str(value or "").strip().lower()
+
+
+def is_known_non_production_environment(value: object) -> bool:
+    """Allow sandbox execution only for an explicit non-production environment."""
+    environment = normalize_environment(value)
+    return environment in NON_PRODUCTION_ENVIRONMENTS
+
+
+def _dry_run_step_block_reasons(*, step: ChangeStep, plan: ChangePlan) -> list[str]:
+    """Return fail-closed policy violations for one dry-run step."""
+    reasons: list[str] = []
+    plan_target = str(plan.metadata.get("service_name") or "").strip()
+    plan_environment = normalize_environment(plan.metadata.get("environment"))
+    step_environment = normalize_environment(step.input_args.get("environment"))
+
+    if not step.can_dry_run:
+        reasons.append("step_declares_no_dry_run")
+    if step.tool_name not in DRY_RUN_TOOL_ALLOWLIST:
+        reasons.append("tool_not_allowlisted")
+    if step.action_type not in DRY_RUN_ACTION_ALLOWLIST:
+        reasons.append("action_not_allowlisted")
+    if not plan_target or not step.target or step.target != plan_target:
+        reasons.append("target_not_allowlisted")
+    if not plan_environment or plan_environment == "unknown":
+        reasons.append("environment_unknown")
+    if step_environment and step_environment != plan_environment:
+        reasons.append("environment_scope_mismatch")
+    if set(step.input_args) - DRY_RUN_INPUT_ALLOWLIST:
+        reasons.append("input_args_not_allowlisted")
+    return reasons
 
 
 def dry_run_diff_preview(plan: ChangePlan) -> list[str]:

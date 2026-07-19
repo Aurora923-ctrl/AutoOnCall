@@ -1,8 +1,40 @@
 """Tests for durable AIOps session snapshots."""
 
+import pytest
+
+from app.models.a2a import A2ATaskRecord
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.incident_state import IncidentState
 from app.services.sqlite_store import AIOpsSQLiteStore
+
+
+def test_sqlite_a2a_task_record_rejects_ownership_overwrite(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "a2a-ownership.db")
+    original = A2ATaskRecord(
+        task_id="a2a-diagnosis-owned",
+        message_id="msg-owner",
+        request_fingerprint="a" * 64,
+        skill="diagnose_incident",
+        incident_id="inc-owned",
+        state="TASK_STATE_SUBMITTED",
+    )
+    conflicting = A2ATaskRecord(
+        task_id=original.task_id,
+        message_id="msg-other",
+        request_fingerprint="b" * 64,
+        skill="diagnose_incident",
+        incident_id="inc-other",
+        state="TASK_STATE_COMPLETED",
+    )
+
+    assert store.create_a2a_task_record(original) is True
+    with pytest.raises(ValueError, match="ownership mismatch"):
+        store.save_a2a_task_record(conflicting)
+
+    stored = store.get_a2a_task_record(original.task_id)
+    assert stored is not None
+    assert stored.message_id == "msg-owner"
+    assert stored.incident_id == "inc-owned"
 
 
 def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
@@ -167,6 +199,32 @@ def test_aiops_session_snapshot_preserves_string_hypotheses(tmp_path) -> None:
         "应用连接池重试放大依赖压力",
     ]
     assert saved.to_state()["hypotheses"] == saved.hypotheses
+
+
+def test_aiops_session_snapshot_preserves_resume_retry_state_and_response() -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="session-resume-state",
+        status="failed",
+        state={
+            "trace_id": "trace-resume-state",
+            "incident": {"incident_id": "inc-resume-state"},
+            "response": "fallback response without a report",
+            "resume_approval_id": "apr-resume-state",
+            "resume_status": "failed",
+            "resume_attempt": 2,
+        },
+    )
+
+    recovered = snapshot.to_state()
+
+    assert snapshot.response == "fallback response without a report"
+    assert snapshot.resume_approval_id == "apr-resume-state"
+    assert snapshot.resume_status == "failed"
+    assert snapshot.resume_attempt == 2
+    assert recovered["response"] == "fallback response without a report"
+    assert recovered["resume_approval_id"] == "apr-resume-state"
+    assert recovered["resume_status"] == "failed"
+    assert recovered["resume_attempt"] == 2
 
 
 def test_sqlite_store_upserts_incident_state_without_losing_identity_fields(tmp_path) -> None:

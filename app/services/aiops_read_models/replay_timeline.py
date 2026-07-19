@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.trace import TraceEvent
-from app.services.aiops_read_models.common import _as_list, _as_mapping, _safe_float
+from app.services.aiops_read_models.common import (
+    _as_list,
+    _as_mapping,
+    _safe_float,
+    public_trace_event,
+)
 from app.services.aiops_read_models.incident import compact_plan_step
 
 
@@ -13,6 +18,7 @@ def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
     """Normalize trace events into a frontend-friendly replay timeline."""
     timeline = []
     for event in events:
+        public_event = public_trace_event(event)
         stage = replay_stage_for_event(event)
         timeline.append(
             {
@@ -25,17 +31,19 @@ def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
                 "step_id": event.step_id or "",
                 "tool_name": event.tool_name or "",
                 "status": event.status,
-                "summary": event.output_summary or event.error_message or event.input_summary,
-                "input_summary": event.input_summary,
-                "output_summary": event.output_summary,
-                "error_message": event.error_message or "",
-                "data_source": str(event.metadata.get("data_source") or ""),
-                "decision_source": str(event.metadata.get("decision_source") or ""),
+                "summary": public_event["output_summary"]
+                or public_event.get("error_message")
+                or public_event["input_summary"],
+                "input_summary": public_event["input_summary"],
+                "output_summary": public_event["output_summary"],
+                "error_message": public_event.get("error_message") or "",
+                "data_source": str(public_event["metadata"].get("data_source") or ""),
+                "decision_source": str(public_event["metadata"].get("decision_source") or ""),
                 "latency_ms": event.latency_ms,
                 "created_at": event.created_at.isoformat(),
-                "metadata": event.metadata,
-                "tool_args": event.tool_args,
-                "tool_result": event.tool_result,
+                "metadata": public_event["metadata"],
+                "tool_args": public_event["tool_args"],
+                "tool_result": public_event.get("tool_result"),
             }
         )
     return timeline

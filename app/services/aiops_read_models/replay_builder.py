@@ -8,12 +8,18 @@ from app.models.approval import ApprovalRequest
 from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
-from app.services.aiops_read_models.common import _as_list, _as_mapping
+from app.services.aiops_read_models.common import (
+    _as_list,
+    _as_mapping,
+    report_for_trace,
+    select_incident_artifacts,
+)
 from app.services.aiops_read_models.incident import build_incident_overview
 from app.services.aiops_read_models.replay_evaluation import build_replay_evaluation
 from app.services.aiops_read_models.replay_flow import (
     build_replay_approval_flow,
     build_replay_change_flow,
+    sort_replay_change_executions,
 )
 from app.services.aiops_read_models.replay_metrics import (
     build_replay_evidence_quality,
@@ -26,6 +32,7 @@ from app.services.aiops_read_models.replay_timeline import (
     build_replay_replanner_decisions,
     build_replay_timeline,
 )
+from app.utils.redaction import redact_sensitive_data
 
 
 def build_incident_replay(
@@ -39,22 +46,41 @@ def build_incident_replay(
     evaluation_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a replay-ready incident view across trace, evidence, approval, and report."""
-    sorted_events = sorted(events, key=lambda item: item.created_at)
-    sorted_approvals = sorted(approvals, key=lambda item: item.created_at)
-    changes = list(change_executions or [])
+    selected_trace_id, selected_events, selected_approvals = select_incident_artifacts(
+        report,
+        state,
+        events,
+        approvals,
+    )
+    selected_report = report_for_trace(report, selected_trace_id)
+    sorted_events = sorted(selected_events, key=lambda item: (item.created_at, item.event_id))
+    sorted_approvals = sorted(
+        selected_approvals,
+        key=lambda item: (item.created_at, item.approval_id),
+    )
+    changes = sort_replay_change_executions(
+        [
+            item
+            for item in change_executions or []
+            if str(item.get("trace_id") or "") == selected_trace_id
+        ]
+    )
     overview = build_incident_overview(
         incident_id,
-        report,
+        selected_report,
         sorted_events,
         sorted_approvals,
         state,
     )
-    report_payload = report.model_dump(mode="json") if report else {}
+    report_payload = (
+        redact_sensitive_data(selected_report.model_dump(mode="json")) if selected_report else {}
+    )
     timeline = build_replay_timeline(sorted_events)
     replanner_decisions = build_replay_replanner_decisions(timeline)
     diagnosis_chain = _as_mapping(overview.get("diagnosis_chain"))
     evidence = _as_list(report_payload.get("evidence"))
     tool_calls = _as_list(report_payload.get("tool_calls"))
+    tooling = build_replay_tooling(tool_calls, timeline)
     metrics = build_replay_metrics(
         timeline=timeline,
         replanner_decisions=replanner_decisions,
@@ -62,9 +88,9 @@ def build_incident_replay(
         diagnosis_chain=diagnosis_chain,
         approvals=sorted_approvals,
         change_executions=changes,
+        tooling=tooling,
     )
     evidence_quality = build_replay_evidence_quality(evidence)
-    tooling = build_replay_tooling(tool_calls, timeline)
     approval_flow = build_replay_approval_flow(sorted_approvals)
     change_flow = build_replay_change_flow(changes)
     report_summary = build_replay_report_summary(report_payload)

@@ -8,23 +8,27 @@ from app.models.approval import ApprovalRequest
 from app.services.aiops_read_models.common import (
     build_approval_summary,
     latest_approval_request,
+    public_approval_request,
 )
+from app.utils.redaction import redact_sensitive_data
 
 
 def build_replay_approval_flow(approvals: list[ApprovalRequest]) -> dict[str, Any]:
     """Build the approval section used by the replay workbench."""
     latest = latest_approval_request(approvals)
     summary = build_approval_summary(approvals, latest)
-    latest_payload = latest.model_dump(mode="json") if latest else {}
+    latest_payload = public_approval_request(latest) if latest else {}
     before = (
         f"等待人工审批：{latest.action}"
         if latest and latest.status == "pending"
-        else f"触发审批：{latest.action}" if latest else "未触发审批"
+        else f"触发审批：{latest.action}"
+        if latest
+        else "未触发审批"
     )
     after = replay_approval_after_text(latest)
     return {
         "summary": summary,
-        "items": [approval.model_dump(mode="json") for approval in approvals],
+        "items": [public_approval_request(approval) for approval in approvals],
         "before_after": {
             "before": before,
             "after": after,
@@ -38,13 +42,28 @@ def build_replay_approval_flow(approvals: list[ApprovalRequest]) -> dict[str, An
 
 def build_replay_change_flow(change_executions: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the safe-change section used by the replay workbench."""
-    latest = change_executions[-1] if change_executions else {}
+    items = sort_replay_change_executions(redact_sensitive_data(change_executions))
+    latest = items[-1] if items else {}
     return {
-        "total": len(change_executions),
+        "total": len(items),
         "status": str(latest.get("lifecycle_status") or latest.get("status") or "not_started"),
         "latest": latest or None,
-        "items": change_executions,
+        "items": items,
     }
+
+
+def sort_replay_change_executions(
+    change_executions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return change snapshots in deterministic lifecycle-update order."""
+    return sorted(
+        change_executions,
+        key=lambda item: (
+            str(item.get("updated_at") or item.get("created_at") or ""),
+            str(item.get("created_at") or ""),
+            str(item.get("change_execution_id") or ""),
+        ),
+    )
 
 
 def replay_approval_stage_status(approvals: list[ApprovalRequest]) -> str:

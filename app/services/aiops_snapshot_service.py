@@ -33,8 +33,6 @@ def save_session_snapshot(
         status=status,
         node_name=node_name,
     )
-    store.save_aiops_session_snapshot(snapshot)
-
     incident_state = build_incident_state_from_state(
         state={
             **snapshot_state,
@@ -45,7 +43,91 @@ def save_session_snapshot(
         session_id=session_id,
     )
     if incident_state.incident_id and incident_state.incident_id != "incident-unknown":
-        store.save_incident_state(incident_state)
+        store.save_aiops_session_snapshot_with_incident(snapshot, incident_state)
+    else:
+        store.save_aiops_session_snapshot(snapshot)
+
+
+def create_session_snapshot(
+    store: AIOpsStateStore,
+    *,
+    session_id: str,
+    state: dict[str, Any],
+    status: str,
+    node_name: str,
+) -> bool:
+    """Atomically create the first durable snapshot for a diagnosis run."""
+    if not state:
+        return False
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id=session_id,
+        state=state,
+        status=status,
+        node_name=node_name,
+    )
+    incident_state = build_incident_state_from_state(
+        state={
+            **state,
+            "node_name": node_name,
+        },
+        status=incident_status_from_runtime_status(status),
+        status_reason=f"AIOps workflow node={node_name}, status={status}",
+        session_id=session_id,
+    )
+    if incident_state.incident_id and incident_state.incident_id != "incident-unknown":
+        if not store.create_aiops_session_snapshot_with_incident(snapshot, incident_state):
+            return False
+    elif not store.create_aiops_session_snapshot(snapshot):
+        return False
+    return True
+
+
+def transition_session_snapshot(
+    store: AIOpsStateStore,
+    *,
+    session_id: str,
+    state: dict[str, Any],
+    status: str,
+    node_name: str,
+    expected_statuses: set[str],
+) -> bool:
+    """Atomically transition a durable snapshot from allowed statuses."""
+    if not state:
+        return False
+
+    snapshot_state = _snapshot_state_with_existing_identity(
+        store,
+        session_id=session_id,
+        state=state,
+    )
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id=session_id,
+        state=snapshot_state,
+        status=status,
+        node_name=node_name,
+    )
+    incident_state = build_incident_state_from_state(
+        state={
+            **snapshot_state,
+            "node_name": node_name,
+        },
+        status=incident_status_from_runtime_status(status),
+        status_reason=f"AIOps workflow node={node_name}, status={status}",
+        session_id=session_id,
+    )
+    if incident_state.incident_id and incident_state.incident_id != "incident-unknown":
+        if not store.update_aiops_session_snapshot_with_incident_if_status(
+            snapshot,
+            incident_state,
+            expected_statuses=expected_statuses,
+        ):
+            return False
+    elif not store.update_aiops_session_snapshot_if_status(
+        snapshot,
+        expected_statuses=expected_statuses,
+    ):
+        return False
+    return True
 
 
 def _snapshot_state_with_existing_identity(
