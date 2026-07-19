@@ -67,6 +67,8 @@ def evaluate_performance(
     selected_events = events[-max(1, limit) :]
     samples = [_event_sample(event, evidence_level=evidence_level) for event in selected_events]
     samples = [sample for sample in samples if sample is not None]
+    samples = bind_request_context(samples)
+    samples = select_latest_acceptance_run(samples)
 
     request_samples = build_request_samples(samples)
     request_counts = Counter(
@@ -287,6 +289,10 @@ def build_request_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]
         source_events = request_events
         latency = max((event["latency_ms"] for event in source_events), default=0.0)
         metadata = _merge_metadata(source_events)
+        summary_events = [
+            event for event in request_events if event["metadata"].get("is_request_summary") is True
+        ]
+        status_events = summary_events or request_events
         requests.append(
             {
                 "request_id": request_id,
@@ -297,7 +303,10 @@ def build_request_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "evidence_level": events[0]["evidence_level"],
                 "status": (
                     "failed"
-                    if any(event["status"] not in {"success", "completed"} for event in events)
+                    if any(
+                        event["status"] not in {"success", "completed", "degraded"}
+                        for event in status_events
+                    )
                     else "success"
                 ),
                 "latency_ms": latency,
@@ -306,6 +315,55 @@ def build_request_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]
             }
         )
     return sorted(requests, key=lambda item: (item["trace_id"], item["request_id"]))
+
+
+def bind_request_context(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project request-summary provenance onto internal events from the same trace."""
+    by_trace: dict[str, dict[str, str]] = {}
+    for sample in samples:
+        metadata = sample.get("metadata") or {}
+        if metadata.get("is_request_summary") is not True:
+            continue
+        by_trace[sample["trace_id"]] = {
+            "request_id": str(sample.get("request_id") or ""),
+            "request_kind": str(sample.get("request_kind") or "unknown"),
+            "evidence_level": str(sample.get("evidence_level") or "unclassified"),
+        }
+
+    bound = []
+    for sample in samples:
+        context = by_trace.get(sample["trace_id"])
+        if not context:
+            bound.append(sample)
+            continue
+        item = dict(sample)
+        if not item.get("request_id"):
+            item["request_id"] = context["request_id"]
+        if item.get("request_kind") == "unknown":
+            item["request_kind"] = context["request_kind"]
+        if item.get("evidence_level") == "unclassified":
+            item["evidence_level"] = context["evidence_level"]
+        bound.append(item)
+    return bound
+
+
+def select_latest_acceptance_run(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one acceptance workload when persisted history contains multiple runs."""
+    summaries = [
+        sample
+        for sample in samples
+        if (sample.get("metadata") or {}).get("is_request_summary") is True
+        and str((sample.get("metadata") or {}).get("acceptance_run_id") or "")
+    ]
+    if not summaries:
+        return samples
+    latest = max(summaries, key=lambda item: str(item.get("created_at") or ""))
+    run_id = str(latest["metadata"]["acceptance_run_id"])
+    return [
+        sample
+        for sample in samples
+        if str((sample.get("metadata") or {}).get("acceptance_run_id") or "") == run_id
+    ]
 
 
 def aggregate_group_latency(

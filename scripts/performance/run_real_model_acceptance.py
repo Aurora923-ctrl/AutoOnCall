@@ -1,5 +1,7 @@
 """Run the bounded stage-6 real-model acceptance workload."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -7,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,10 +19,14 @@ from uuid import uuid4
 import httpx
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from scripts.eval.eval_environment import collect_eval_environment
 
-DEFAULT_RAG_REQUESTS = 20
-DEFAULT_AIOPS_REQUESTS = 10
+DEFAULT_RAG_REQUESTS = 30
+DEFAULT_AIOPS_REQUESTS = 20
 DEFAULT_RAG_CASES_PATH = Path("eval/rag_demo_frozen_cases_20260713.yaml")
 ACCEPTED_AIOPS_TERMINAL_STATUSES = {"completed", "degraded"}
 
@@ -170,6 +177,8 @@ async def _run_rag(
             json={
                 "Id": request_id,
                 "Question": case["query"],
+                "EvidenceLevel": "local_live",
+                "AcceptanceRunId": run_id,
             },
         )
         payload = response.json()
@@ -242,6 +251,9 @@ async def _run_aiops(
             "raw_alert": {
                 "evidence_level": "local_live",
                 "acceptance_run_id": run_id,
+                "alertname": "RedisMaxclientsNearLimit",
+                "dependency": "redis",
+                "redis_instance": "redis-cluster-prod",
             },
         },
     }

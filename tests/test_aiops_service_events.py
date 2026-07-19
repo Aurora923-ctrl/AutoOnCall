@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.services.aiops_service as aiops_service_module
 from app.api.aiops_route_helpers import (
     diagnosis_event_stream,
     resume_diagnosis_event_stream,
@@ -36,6 +37,27 @@ REQUIRED_PROGRESS_FIELDS = {
     "report_status",
     "cursor",
 }
+
+
+def test_aiops_request_trace_metadata_uses_incident_evidence_level() -> None:
+    incident = aiops_service_module.Incident(
+        incident_id="inc-live-trace",
+        title="Redis saturation",
+        service_name="order-service",
+        severity="P2",
+        symptom="Redis timeout",
+        environment="local-live",
+        raw_alert={"evidence_level": "local_live"},
+    )
+
+    metadata = aiops_service_module._request_trace_metadata("session-live", incident)
+
+    assert metadata == {
+        "request_id": "session-live",
+        "request_kind": "aiops",
+        "evidence_level": "local_live",
+        "path": "/api/aiops",
+    }
 
 
 def test_planner_event_includes_structured_plan_for_new_clients() -> None:

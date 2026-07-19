@@ -86,9 +86,9 @@ MODULES = [
     },
     {
         "id": "performance",
-        "evidence_level": "offline_fixture",
+        "evidence_level": "local_live",
         "script": "scripts/eval/eval_performance.py",
-        "extra_args": ["--limit", "50", "--evidence-level", "unclassified"],
+        "extra_args": ["--limit", "5000", "--evidence-level", "local_live"],
     },
 ]
 

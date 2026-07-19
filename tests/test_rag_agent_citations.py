@@ -110,6 +110,35 @@ def test_generation_context_deduplicates_same_content_without_mutating_retrieval
     assert len(payload["retrieval_results"]) == 3
 
 
+def test_generation_evidence_uses_basename_after_duplicate_content_is_collapsed() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "uploads/redis.md",
+                "chunk_id": "redis.md#0001",
+                "content": "Redis maxclients is constrained by the file descriptor limit.",
+            },
+            {
+                "source_file": "docs/knowledge-base/redis.md",
+                "chunk_id": "redis.md#0001",
+                "content": "Redis maxclients is constrained by the file descriptor limit.",
+            },
+        ],
+        "generation_allowlist": [
+            {"source_file": "uploads/redis.md", "chunk_id": "redis.md#0001"},
+            {
+                "source_file": "docs/knowledge-base/redis.md",
+                "chunk_id": "redis.md#0001",
+            },
+        ],
+    }
+
+    evidence = build_generation_evidence(payload)
+
+    assert len(evidence) == 1
+    assert evidence[0]["source_file"] == "redis.md"
+
+
 def test_generation_context_deduplicates_near_duplicate_legacy_chunks() -> None:
     repeated = (
         "步骤1 获取当前时间。步骤2 查询系统监控日志。"

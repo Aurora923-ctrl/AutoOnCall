@@ -70,3 +70,24 @@ async def test_planner_uses_standard_tools_when_mcp_discovery_fails(monkeypatch)
     assert update["warnings"] == [
         "MCP 工具发现失败，Planner 已降级使用本地和标准工具契约继续规划。"
     ]
+
+
+def test_golden_plan_preserves_explicit_redis_instance() -> None:
+    stabilized = planner_module._stabilize_interview_golden_plan(
+        [
+            PlanStep(
+                step_id="model-redis",
+                tool_name="query_redis_status",
+                input_args={"service_name": "order-service"},
+            )
+        ],
+        input_text="order-service Redis saturation",
+        incident={
+            "service_name": "order-service",
+            "symptom": "Redis connection timeout",
+            "raw_alert": {"redis_instance": "redis-cluster-prod"},
+        },
+    )
+
+    redis_step = next(step for step in stabilized if step.tool_name == "query_redis_status")
+    assert redis_step.input_args["redis_instance"] == "redis-cluster-prod"

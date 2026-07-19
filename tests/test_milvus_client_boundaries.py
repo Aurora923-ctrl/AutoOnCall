@@ -88,8 +88,8 @@ def test_readiness_check_does_not_create_or_load_collection(monkeypatch) -> None
     calls: list[tuple[str, object]] = []
 
     class ProbeClient:
-        def __init__(self, *, uri: str, timeout: float) -> None:
-            calls.append(("init", (uri, timeout)))
+        def __init__(self, *, uri: str, timeout: float, alias: str) -> None:
+            calls.append(("init", (uri, timeout, alias)))
 
         def has_collection(self, *, collection_name: str, timeout: float) -> bool:
             calls.append(("has_collection", (collection_name, timeout)))
@@ -184,6 +184,7 @@ def test_readiness_check_does_not_create_or_load_collection(monkeypatch) -> None
     )
 
     assert manager.readiness_check() is True
+    assert calls[0][1][2] == manager.READINESS_CONNECTION_ALIAS
     assert [name for name, _ in calls] == [
         "init",
         "has_collection",

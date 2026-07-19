@@ -4,6 +4,8 @@
 """
 
 import asyncio
+import time
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
@@ -21,6 +23,7 @@ from app.core.auth import (
 from app.models.request import SESSION_ID_MAX_LENGTH, ChatRequest, ClearRequest
 from app.models.response import ApiResponse, ChatApiResponse, SessionInfoResponse
 from app.services.rag_agent_service import rag_agent_service
+from app.services.trace_service import trace_service
 from app.utils.log_safety import sanitize_log_value, summarize_text_for_log
 
 router = APIRouter()
@@ -54,6 +57,16 @@ async def chat(
     Returns:
         统一格式的对话响应
     """
+    started = time.perf_counter()
+    request_metadata = {
+        "request_id": request.id,
+        "request_kind": "rag",
+        "evidence_level": request.evidence_level or "unclassified",
+        "is_request_summary": True,
+        "path": "/api/chat",
+    }
+    if request.acceptance_run_id:
+        request_metadata["acceptance_run_id"] = request.acceptance_run_id
     try:
         session_id = sanitize_log_value(request.id)
         logger.info(
@@ -66,6 +79,30 @@ async def chat(
             session_id=scoped_session_id(principal, request.id),
             metadata_filter=request.metadata_filter,
         )
+        observability = chat_payload.get("observability", {})
+        observability = observability if isinstance(observability, dict) else {}
+        runtime = observability.get("runtime", {})
+        runtime = runtime if isinstance(runtime, dict) else {}
+        token_usage = observability.get("token_usage")
+        trace_metadata: dict[str, Any] = {
+            **request_metadata,
+            "model": str(runtime.get("llm_model") or ""),
+        }
+        if isinstance(token_usage, dict):
+            trace_metadata["token_usage"] = token_usage
+        try:
+            trace_service.create_event(
+                trace_id=f"rag-{request.id}",
+                incident_id=f"RAG-{request.id}",
+                node_name="rag",
+                event_type="request_complete",
+                output_summary="RAG request completed",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status="success",
+                metadata=trace_metadata,
+            )
+        except Exception as trace_exc:
+            logger.warning("Record RAG request trace failed: {}", type(trace_exc).__name__)
 
         logger.info(f"[会话 {session_id}] 快速对话完成")
 
@@ -86,6 +123,20 @@ async def chat(
 
     except Exception as exc:
         logger.error("对话接口错误: error_type={}", type(exc).__name__)
+        try:
+            trace_service.create_event(
+                trace_id=f"rag-{request.id}",
+                incident_id=f"RAG-{request.id}",
+                node_name="rag",
+                event_type="request_complete",
+                output_summary=PUBLIC_CHAT_ERROR_MESSAGE,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status="failed",
+                error_message=PUBLIC_CHAT_ERROR_MESSAGE,
+                metadata=request_metadata,
+            )
+        except Exception as trace_exc:
+            logger.warning("Record failed RAG request trace failed: {}", type(trace_exc).__name__)
         return JSONResponse(
             status_code=500,
             content={

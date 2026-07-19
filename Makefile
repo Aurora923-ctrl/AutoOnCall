@@ -746,7 +746,7 @@ performance-smoke:  ## Run a bounded performance evaluator smoke check
 	$(PYTHON) scripts/eval/eval_performance.py --limit 50 --summary-json logs/performance.json --summary-md logs/performance.md
 
 performance-real-model:  ## Evaluate persisted real-model traces for the stage-6 minimum
-	$(PYTHON) scripts/performance/run_real_model_acceptance.py --rag-requests 20 --aiops-requests 10 --summary-json logs/performance_real_model.json --summary-md logs/performance_real_model.md
+	$(PYTHON) scripts/performance/run_real_model_acceptance.py --rag-requests 30 --aiops-requests 20 --summary-json logs/performance_real_model.json --summary-md logs/performance_real_model.md
 
 performance-rag-runtime:  ## Benchmark the real Milvus RAG path with stage observations
 	$(PYTHON) scripts/performance/run_rag_runtime_benchmark.py

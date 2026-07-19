@@ -3,7 +3,7 @@
 定义 API 请求的 Pydantic 模型
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
@@ -44,6 +44,27 @@ class ChatRequest(BaseModel):
         default=None,
         description="RAG 检索 metadata 精确过滤条件",
         validation_alias=AliasChoices("metadataFilter", "MetadataFilter"),
+    )
+
+    evidence_level: (
+        Literal[
+            "offline_fixture",
+            "local_live",
+            "controlled_fault",
+            "production",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        validation_alias=AliasChoices("evidenceLevel", "EvidenceLevel"),
+        description="Optional provenance level for persisted request performance evidence.",
+    )
+
+    acceptance_run_id: str | None = Field(
+        default=None,
+        max_length=128,
+        validation_alias=AliasChoices("acceptanceRunId", "AcceptanceRunId"),
+        description="Optional bounded run identity for local-live acceptance evidence.",
     )
 
     @field_validator("id", "question", mode="before")

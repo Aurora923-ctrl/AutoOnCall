@@ -26,6 +26,7 @@ class MilvusClientManager:
 
     COLLECTION_NAME: str = "biz"
     CONNECTION_ALIAS: str = "autooncall-schema"
+    READINESS_CONNECTION_ALIAS: str = "autooncall-readiness"
 
     ID_MAX_LENGTH: int = 100
 
@@ -534,7 +535,11 @@ class MilvusClientManager:
         client: MilvusClient | None = None
         try:
             uri = f"http://{config.milvus_host}:{config.milvus_port}"
-            client = MilvusClient(uri=uri, timeout=config.milvus_timeout / 1000)
+            client = MilvusClient(
+                uri=uri,
+                timeout=config.milvus_timeout / 1000,
+                alias=self.READINESS_CONNECTION_ALIAS,
+            )
             if not bool(
                 client.has_collection(
                     collection_name=self.COLLECTION_NAME,

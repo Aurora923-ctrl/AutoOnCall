@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from threading import Lock
 from typing import Any, cast
@@ -65,6 +66,28 @@ from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR, public_exception_me
 NODE_PLANNER = "planner"
 NODE_EXECUTOR = "executor"
 NODE_REPLANNER = "replanner"
+
+
+def _request_trace_metadata(session_id: str, incident: Incident | None) -> dict[str, str]:
+    raw_alert = incident.raw_alert if incident is not None else {}
+    evidence_level = str(raw_alert.get("evidence_level") or "unclassified")
+    if evidence_level not in {
+        "offline_fixture",
+        "local_live",
+        "controlled_fault",
+        "production",
+    }:
+        evidence_level = "unclassified"
+    metadata = {
+        "request_id": session_id,
+        "request_kind": "aiops",
+        "evidence_level": evidence_level,
+        "path": "/api/aiops",
+    }
+    acceptance_run_id = str(raw_alert.get("acceptance_run_id") or "").strip()
+    if acceptance_run_id:
+        metadata["acceptance_run_id"] = acceptance_run_id
+    return metadata
 
 
 class AIOpsRunConflictError(ValueError):
@@ -166,6 +189,7 @@ class AIOpsService:
             Dict[str, Any]: 流式事件
         """
         session_id = session_id or f"session-{uuid4().hex}"
+        started = time.perf_counter()
         progress_index = 0
         run_claimed = False
         terminal_persisted = False
@@ -194,6 +218,7 @@ class AIOpsService:
             )
             trace_id = initial_state["trace_id"]
             incident_id = _extract_incident_id(dict(initial_state))
+            request_trace_metadata = _request_trace_metadata(session_id, incident)
             start_progress = build_progress_payload(
                 dict(initial_state),
                 phase="workflow",
@@ -223,7 +248,7 @@ class AIOpsService:
                     input_summary=user_input,
                     output_summary="AIOps workflow started",
                     status="success",
-                    metadata={"session_id": session_id},
+                    metadata={"session_id": session_id, **request_trace_metadata},
                 )
             except Exception as trace_exc:
                 logger.warning(f"记录 AIOps 启动 Trace 失败: {trace_exc}")
@@ -263,7 +288,10 @@ class AIOpsService:
                             incident_id=incident_id,
                             node_name=node_name,
                             node_output=node_output if isinstance(node_output, dict) else {},
-                            metadata={"sse_type": event_payload.get("type", "")},
+                            metadata={
+                                "sse_type": event_payload.get("type", ""),
+                                **request_trace_metadata,
+                            },
                         )
                     except Exception as trace_exc:
                         logger.warning(f"记录 AIOps 节点 Trace 失败: {trace_exc}")
@@ -391,8 +419,13 @@ class AIOpsService:
                     node_name="workflow",
                     event_type="workflow_completed",
                     output_summary="AIOps workflow completed",
+                    latency_ms=(time.perf_counter() - started) * 1000,
                     status=terminal_status,
-                    metadata={"session_id": session_id},
+                    metadata={
+                        "session_id": session_id,
+                        "is_request_summary": True,
+                        **request_trace_metadata,
+                    },
                 )
             except Exception as trace_exc:
                 logger.warning(f"记录 AIOps 完成 Trace 失败: {trace_exc}")
@@ -461,7 +494,13 @@ class AIOpsService:
                     output_summary="AIOps workflow interrupted before completion",
                     status="failed",
                     error_message="AIOps workflow interrupted before completion",
-                    metadata={"session_id": session_id, "reason": "stream_interrupted"},
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    metadata={
+                        "session_id": session_id,
+                        "reason": "stream_interrupted",
+                        "is_request_summary": True,
+                        **_request_trace_metadata(session_id, incident),
+                    },
                 )
             except Exception as exc:
                 logger.warning(f"记录 AIOps 中断 Trace 失败: {exc}")
@@ -498,7 +537,12 @@ class AIOpsService:
                     output_summary=public_message,
                     status="failed",
                     error_message=public_message,
-                    metadata={"session_id": session_id},
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    metadata={
+                        "session_id": session_id,
+                        "is_request_summary": True,
+                        **_request_trace_metadata(session_id, incident),
+                    },
                 )
             except Exception as trace_exc:
                 logger.warning(f"记录 AIOps 失败 Trace 失败: {trace_exc}")

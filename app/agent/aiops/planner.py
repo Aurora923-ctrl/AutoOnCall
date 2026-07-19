@@ -447,6 +447,16 @@ def _stabilize_interview_golden_plan(
 
     by_tool = {step.tool_name: step for step in steps}
     stabilized = [by_tool.get(step.tool_name, step) for step in golden_steps]
+    redis_instance = str(raw_alert.get("redis_instance") or "").strip()
+    if redis_instance:
+        stabilized = [
+            step.model_copy(
+                update={"input_args": {**step.input_args, "redis_instance": redis_instance}}
+            )
+            if step.tool_name == "query_redis_status"
+            else step
+            for step in stabilized
+        ]
     stabilized = append_incident_requested_action_step(stabilized, incident)
     return [
         step.model_copy(update={"step_id": f"s{index}", "status": "pending"})

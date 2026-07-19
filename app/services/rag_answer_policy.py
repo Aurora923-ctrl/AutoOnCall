@@ -236,7 +236,29 @@ def build_generation_evidence(
         break
     if required_sources and not required_sources.issubset(selected_sources):
         return []
-    return selected
+    return normalize_generation_citation_labels(selected)
+
+
+def normalize_generation_citation_labels(
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use basenames when unique, preserving relative paths for real collisions."""
+    citation_counts: dict[tuple[str, str], int] = {}
+    for item in evidence:
+        source_file = str(item.get("source_file") or "").strip().replace("\\", "/")
+        citation = (source_file.rsplit("/", 1)[-1], str(item.get("chunk_id") or "").strip())
+        citation_counts[citation] = citation_counts.get(citation, 0) + 1
+
+    normalized = []
+    for item in evidence:
+        updated = dict(item)
+        source_file = str(updated.get("source_file") or "").strip().replace("\\", "/")
+        basename = source_file.rsplit("/", 1)[-1]
+        citation = (basename, str(updated.get("chunk_id") or "").strip())
+        if citation_counts.get(citation) == 1:
+            updated["source_file"] = basename
+        normalized.append(updated)
+    return normalized
 
 
 def normalize_evidence_text(content: str) -> str:

@@ -1,6 +1,7 @@
 """Tests for the bounded real-model acceptance runner."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -404,3 +405,37 @@ async def test_real_model_acceptance_rejects_unsafe_degraded_aiops_terminal_stat
     assert result["details"]["acceptance_class"] == "unsafe_degraded"
     assert result["details"]["degradation_analysis"]["category"] == "dependency_timeout"
     assert result["error"] == "degraded AIOps terminal state is not classified as safe"
+
+
+@pytest.mark.asyncio
+async def test_real_model_acceptance_pins_local_live_redis_instance() -> None:
+    captured: dict = {}
+
+    class FakeStream:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"complete","status":"completed"}'
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            captured.update(json.loads(kwargs["content"]))
+            return FakeStream()
+
+    result = await run_real_model_acceptance._run_aiops(
+        FakeClient(),
+        base_url="http://testserver",
+        run_id="run-pinned",
+        index=1,
+    )
+
+    assert result["passed"] is True
+    raw_alert = captured["incident"]["raw_alert"]
+    assert raw_alert["evidence_level"] == "local_live"
+    assert raw_alert["redis_instance"] == "redis-cluster-prod"

@@ -97,6 +97,56 @@ async def test_chat_returns_citations_and_retrieval_metadata(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_chat_persists_local_live_request_summary(monkeypatch) -> None:
+    captured = []
+
+    async def fake_query_with_retrieval(
+        question: str,
+        session_id: str,
+        metadata_filter: dict | None = None,
+    ) -> dict:
+        return {
+            "answer": "Use the Redis runbook.",
+            "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+            "retrieval": {"status": "success"},
+            "observability": {
+                "runtime": {"llm_model": "qwen-max"},
+                "token_usage": {"input_tokens": 10, "output_tokens": 4},
+            },
+            "no_answer": False,
+            "answer_policy": "answer_with_citations",
+        }
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.query_with_retrieval",
+        fake_query_with_retrieval,
+    )
+    monkeypatch.setattr(
+        "app.api.chat.trace_service.create_event",
+        lambda **kwargs: captured.append(kwargs),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "Id": "rag-live-summary",
+                "Question": "Redis timeout",
+                "EvidenceLevel": "local_live",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured[0]["event_type"] == "request_complete"
+    assert captured[0]["status"] == "success"
+    assert captured[0]["latency_ms"] >= 0
+    assert captured[0]["metadata"]["request_id"] == "rag-live-summary"
+    assert captured[0]["metadata"]["request_kind"] == "rag"
+    assert captured[0]["metadata"]["evidence_level"] == "local_live"
+    assert captured[0]["metadata"]["is_request_summary"] is True
+
+
+@pytest.mark.asyncio
 async def test_chat_returns_http_500_when_rag_service_fails(monkeypatch) -> None:
     async def fail_query_with_retrieval(
         question: str,

@@ -6,10 +6,12 @@ from app.models.trace import TraceEvent
 from app.services.aiops_store import create_aiops_store
 from scripts.eval.eval_performance import (
     aggregate_token_usage,
+    bind_request_context,
     calculate_cost,
     distribution,
     evaluate_performance,
     load_price_snapshot,
+    select_latest_acceptance_run,
 )
 from scripts.performance.run_rag_runtime_benchmark import _has_valid_citation
 
@@ -170,6 +172,61 @@ def test_internal_trace_events_do_not_count_as_completed_requests(tmp_path) -> N
     assert result["summary"]["request_counts"] == {}
     assert result["requests"] == []
     assert result["summary"]["latency_ms"]["count"] == 0
+
+
+def test_request_summary_binds_provenance_to_internal_trace_events() -> None:
+    samples = [
+        {
+            "event_id": "evt-node",
+            "trace_id": "trace-live",
+            "request_id": "",
+            "request_kind": "unknown",
+            "evidence_level": "unclassified",
+            "metadata": {},
+        },
+        {
+            "event_id": "evt-complete",
+            "trace_id": "trace-live",
+            "request_id": "request-live",
+            "request_kind": "aiops",
+            "evidence_level": "local_live",
+            "metadata": {"is_request_summary": True},
+        },
+    ]
+
+    bound = bind_request_context(samples)
+
+    assert bound[0]["request_id"] == "request-live"
+    assert bound[0]["request_kind"] == "aiops"
+    assert bound[0]["evidence_level"] == "local_live"
+
+
+def test_latest_acceptance_run_excludes_failed_history() -> None:
+    samples = [
+        {
+            "created_at": "2026-07-19T08:00:00Z",
+            "metadata": {
+                "is_request_summary": True,
+                "acceptance_run_id": "run-old",
+            },
+        },
+        {
+            "created_at": "2026-07-19T09:00:00Z",
+            "metadata": {
+                "is_request_summary": True,
+                "acceptance_run_id": "run-new",
+            },
+        },
+        {
+            "created_at": "2026-07-19T09:00:01Z",
+            "metadata": {"acceptance_run_id": "run-new"},
+        },
+    ]
+
+    selected = select_latest_acceptance_run(samples)
+
+    assert len(selected) == 2
+    assert {item["metadata"]["acceptance_run_id"] for item in selected} == {"run-new"}
 
 
 def test_dated_price_snapshot_calculates_only_known_models(tmp_path) -> None:
