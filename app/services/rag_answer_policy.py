@@ -393,14 +393,26 @@ def _prefix_has_allowlisted_citations(
 
 
 def extract_citation_pairs(answer: str) -> list[tuple[str, str]]:
-    """Parse strict ``[source_file | chunk_id]`` references from an answer."""
+    """Parse allowlist-bound citation references from a grounded answer."""
     pairs: list[tuple[str, str]] = []
     for raw_reference in re.findall(r"\[([^\[\]\r\n]+)\]", str(answer or "")):
-        if "|" not in raw_reference and "#" not in raw_reference:
+        if "|" in raw_reference:
+            if raw_reference.count("|") != 1:
+                return []
+            source_file, chunk_id = (part.strip() for part in raw_reference.split("|", 1))
+        elif "source_file=" in raw_reference and "chunk_id=" in raw_reference:
+            fields = {}
+            for raw_field in raw_reference.split(";"):
+                if "=" not in raw_field:
+                    return []
+                key, value = (part.strip() for part in raw_field.split("=", 1))
+                fields[key] = value
+            source_file = fields.get("source_file", "")
+            chunk_id = fields.get("chunk_id", "")
+        elif "#" not in raw_reference:
             continue
-        if raw_reference.count("|") != 1:
+        else:
             return []
-        source_file, chunk_id = (part.strip() for part in raw_reference.split("|", 1))
         if not source_file or not chunk_id:
             return []
         pairs.append((source_file, chunk_id))

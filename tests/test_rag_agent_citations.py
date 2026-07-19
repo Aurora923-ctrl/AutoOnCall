@@ -167,6 +167,22 @@ def test_generation_evidence_matches_required_sources_by_basename() -> None:
     }
 
 
+def test_supporting_citations_accepts_labeled_grounded_reference() -> None:
+    citations = [
+        {
+            "source_file": "payment_wiki.html",
+            "chunk_id": "payment_wiki.html#0001",
+        }
+    ]
+
+    selected = select_supporting_citations(
+        "检查 active_connections。[source_file=payment_wiki.html; chunk_id=payment_wiki.html#0001]",
+        citations,
+    )
+
+    assert selected == citations
+
+
 def test_generation_context_deduplicates_near_duplicate_legacy_chunks() -> None:
     repeated = (
         "步骤1 获取当前时间。步骤2 查询系统监控日志。"
