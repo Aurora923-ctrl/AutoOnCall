@@ -173,8 +173,11 @@ def test_container_delivery_files_exclude_local_runtime_artifacts() -> None:
     production = (ROOT / "deploy" / "production.md").read_text(encoding="utf-8")
 
     assert "FROM python:3.11.15-slim" in dockerfile
-    assert "python -m pip install ." in dockerfile
-    assert "http://127.0.0.1:${PORT}/health/live" in dockerfile
+    assert "COPY pyproject.toml uv.lock README.md ./" in dockerfile
+    assert "uv sync --locked --no-dev --no-editable" in dockerfile
+    assert "python -m pip install ." not in dockerfile
+    assert "/health/live" in dockerfile
+    assert 'os.environ[\\"PORT\\"]' in dockerfile
     assert "COPY app ./app" in dockerfile
     assert "COPY docs/knowledge-base ./docs/knowledge-base" in dockerfile
     assert "COPY static ./static" in dockerfile

@@ -288,13 +288,11 @@ Approval approved
 安装依赖：
 
 ```bash
-python3.11 -m venv venv
-. venv/bin/activate
-pip install -U pip
-pip install -e ".[dev]"
+uv sync --locked --extra dev
 ```
 
-也可以使用：
+本地、CI 和 Docker 都以 `uv.lock` 为依赖真相；修改依赖后先运行 `uv lock` 并提交
+`pyproject.toml` 与 `uv.lock`。也可以使用：
 
 ```bash
 make bootstrap

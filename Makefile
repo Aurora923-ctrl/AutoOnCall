@@ -26,7 +26,7 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
+.PHONY: help init bootstrap verify verify-local hygiene-check reference-check dependency-lock-check start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-ragas-full-core eval-ragas-full-generated-core eval-ragas-full-runtime-core eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
         api-contract-verify knowledge-quality benchmark-baseline candidate-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
@@ -624,17 +624,17 @@ bootstrap:  ## 安装项目和开发工具，作为新环境的第一步
 
 install:  ## 安装依赖（生产环境）
 	@echo "$(YELLOW)📦 安装依赖...$(NC)"
-	$(PYTHON) -m pip install -r requirements.txt 2>/dev/null || $(PYTHON) -m pip install -e .
+	uv sync --locked --no-dev
 	@echo "$(GREEN)✅ 依赖安装完成$(NC)"
 
 install-dev:  ## 安装开发依赖
 	@echo "$(YELLOW)📦 安装开发依赖...$(NC)"
-	$(PYTHON) -m pip install -e ".[dev]" 2>/dev/null || $(PYTHON) -m pip install -e .
+	uv sync --locked --extra dev
 	@echo "$(GREEN)✅ 开发依赖安装完成$(NC)"
 
 sync:  ## 同步依赖
 	@echo "$(YELLOW)🔄 同步依赖...$(NC)"
-	$(PYTHON) -m pip install -e . --upgrade
+	uv sync --locked --extra dev
 	@echo "$(GREEN)✅ 依赖同步完成$(NC)"
 
 add:  ## 添加依赖包 (用法: make add PKG=package_name)
@@ -770,6 +770,10 @@ reference-check:  ## Verify Markdown links and runtime path references
 	@echo "$(YELLOW)Verifying repository links and path references...$(NC)"
 	$(PYTHON) scripts/maintenance/verify_references.py
 
+dependency-lock-check:  ## Verify supported installs consume uv.lock
+	@echo "$(YELLOW)Verifying locked dependency installation paths...$(NC)"
+	$(PYTHON) scripts/maintenance/verify_dependency_lock.py
+
 verify-local:  ## 面试前本地快速质量验证
 	@echo "$(YELLOW)✅ 运行 AutoOnCall 本地快速验证...$(NC)"
 	@$(MAKE) test-quick
@@ -792,6 +796,7 @@ verify:  ## 运行只验证门禁（不修改源码）
 	@$(MAKE) eval-change
 	@$(MAKE) eval-replanner
 	@$(MAKE) api-contract-verify
+	@$(MAKE) dependency-lock-check
 	@$(MAKE) reference-check
 	@$(MAKE) hygiene-check
 	@echo "$(GREEN)✅ 交付门禁通过！$(NC)"
