@@ -99,7 +99,7 @@ rca_annotations:
     scenario_type: noise_alert
   forbidden_unaudited_sql:
     <<: *unknown_rca
-    should_replan: false
+    should_replan: true
   logs_timeout_graceful_degradation: &logs_failure_rca
     variant_count: 3
     expected_root_category: dependency_timeout
@@ -788,7 +788,7 @@ cases:
       - 5xx
     expected_risk_policy: allow
     expected_needs_approval: false
-    expected_report_status: completed
+    expected_report_status: degraded
     min_evidence_count: 5
     min_confidence: 0.5
     report_must_contain:
@@ -836,7 +836,7 @@ cases:
       - maxclients
     expected_risk_policy: allow
     expected_needs_approval: false
-    expected_report_status: completed
+    expected_report_status: degraded
     min_evidence_count: 5
     min_confidence: 0.5
     report_must_contain:

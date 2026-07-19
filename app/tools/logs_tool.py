@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.integrations.base import adapter_failure, adapter_not_configured
+from app.integrations.base import (
+    adapter_failure,
+    adapter_not_configured,
+    public_adapter_failure_message,
+)
 from app.integrations.log_gateway import HTTPLogGatewayAdapter
 from app.integrations.loki import LokiLogAdapter
 from app.tools.base import (
@@ -12,9 +16,12 @@ from app.tools.base import (
     ToolRetryPolicy,
     clamp_duration,
     clamp_int,
+    extract_tool_error_message,
     invoke_langchain_tool,
+    is_failed_tool_output,
     tool_map,
 )
+from app.utils.public_errors import public_exception_message
 
 
 class QueryLogsTool(AIOpsTool):
@@ -31,6 +38,7 @@ class QueryLogsTool(AIOpsTool):
             "limit": {"type": "integer", "default": 100},
         },
         "required": ["service_name"],
+        "additionalProperties": False,
     }
     output_schema = {"type": "object"}
     risk_level = "low"
@@ -70,16 +78,29 @@ class QueryLogsTool(AIOpsTool):
         input_args.update({"limit": limit, "time_range": time_range})
 
         loki_result = await self._call_loki(service_name, query, time_range, limit)
-        if loki_result is not None:
+        if loki_result is not None and not is_failed_tool_output(loki_result):
             return loki_result
 
         gateway_result = await self._call_log_gateway(service_name, query, time_range, limit)
-        if gateway_result is not None:
-            return gateway_result
+        if gateway_result is not None and not is_failed_tool_output(gateway_result):
+            return _with_fallback_errors(
+                gateway_result,
+                [result for result in (loki_result,) if result],
+            )
 
-        cls_result = await self._call_cls(service_name, query, limit)
+        cls_result = await self._call_cls(service_name, query, time_range, limit)
         if cls_result is not None:
-            return cls_result
+            return _with_fallback_errors(
+                cls_result,
+                [result for result in (loki_result, gateway_result) if result],
+            )
+        if gateway_result is not None:
+            return _with_fallback_errors(
+                gateway_result,
+                [result for result in (loki_result,) if result],
+            )
+        if loki_result is not None:
+            return loki_result
 
         payload = adapter_not_configured(
             "logs",
@@ -140,16 +161,53 @@ class QueryLogsTool(AIOpsTool):
             )
             return payload
 
-    async def _call_cls(self, service_name: str, query: str, limit: int) -> dict[str, Any] | None:
+    async def _call_cls(
+        self,
+        service_name: str,
+        query: str,
+        time_range: str,
+        limit: int,
+    ) -> dict[str, Any] | None:
         topic_result = await self._search_topic(service_name)
+        if is_failed_tool_output(topic_result):
+            return {
+                "status": "failed",
+                "service_name": service_name,
+                "query": query,
+                "time_range": time_range,
+                "source": "mcp_cls",
+                "topic": topic_result,
+                "logs": {"total": 0, "logs": []},
+                "error_message": extract_tool_error_message(topic_result)
+                or "CLS topic lookup returned no usable data",
+                "summary": "CLS topic lookup failed",
+            }
         topic_id = self._extract_topic_id(topic_result)
         if not topic_id or "search_log" not in self._tools:
             return None
-        logs_result = await self._search_log(topic_id, query, limit)
+        logs_result = await self._search_log(topic_id, query, time_range, limit)
+        if is_failed_tool_output(logs_result):
+            return {
+                "status": "failed",
+                "service_name": service_name,
+                "query": query,
+                "time_range": time_range,
+                "source": "mcp_cls",
+                "topic": topic_result,
+                "logs": logs_result,
+                "error_message": extract_tool_error_message(logs_result)
+                or "CLS log query returned no usable data",
+                "summary": "CLS log query failed",
+            }
+        synthetic = _is_synthetic_mcp_payload(topic_result) or _is_synthetic_mcp_payload(
+            logs_result
+        )
         return {
             "service_name": service_name,
             "query": query,
-            "source": "mcp_cls",
+            "time_range": time_range,
+            "source": "mock" if synthetic else "mcp_cls",
+            "synthetic": synthetic,
             "topic": topic_result,
             "logs": logs_result,
             "summary": f"CLS query completed; topic_id={topic_id}",
@@ -166,11 +224,24 @@ class QueryLogsTool(AIOpsTool):
         try:
             return await invoke_langchain_tool(tool, {"service_name": service_name, "fuzzy": True})
         except Exception as exc:
-            return {"total": 0, "topics": [], "error_message": str(exc)}
+            return {
+                "status": "failed",
+                "total": 0,
+                "topics": [],
+                "error_type": "mcp_error",
+                "error_message": public_exception_message(exc),
+            }
 
-    async def _search_log(self, topic_id: str, query: str, limit: int) -> Any:
+    async def _search_log(
+        self,
+        topic_id: str,
+        query: str,
+        time_range: str,
+        limit: int,
+    ) -> Any:
         current_ts = await self._current_timestamp()
-        start_ts = current_ts - 10 * 60 * 1000
+        window_seconds = _duration_seconds(time_range)
+        start_ts = current_ts - window_seconds * 1000
         return await invoke_langchain_tool(
             self._tools["search_log"],
             {
@@ -200,3 +271,43 @@ class QueryLogsTool(AIOpsTool):
             topic_id = topic_result.get("topic_id")
             return str(topic_id) if topic_id else None
         return None
+
+
+def _duration_seconds(value: str) -> int:
+    text = str(value or "").strip().lower()
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if len(text) < 2 or text[-1] not in multipliers:
+        return 600
+    try:
+        amount = int(text[:-1])
+    except ValueError:
+        return 600
+    return max(amount, 1) * multipliers[text[-1]]
+
+
+def _is_synthetic_mcp_payload(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        str(value.get("source") or "").lower() == "mock" or value.get("synthetic") is True
+    )
+
+
+def _with_fallback_errors(
+    result: dict[str, Any],
+    previous: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not previous:
+        return result
+    output = dict(result)
+    output["fallback_errors"] = [
+        *(output.get("fallback_errors") or []),
+        *[
+            {
+                "source": str(item.get("source") or "unknown"),
+                "error_message": public_adapter_failure_message(
+                    str(item.get("error_type") or "adapter_error")
+                ),
+            }
+            for item in previous
+        ],
+    ]
+    return output

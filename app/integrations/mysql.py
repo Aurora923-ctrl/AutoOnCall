@@ -8,7 +8,14 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from app.config import config
-from app.integrations.base import ExternalAdapterError, adapter_success, require_config
+from app.integrations.base import (
+    ExternalAdapterError,
+    ExternalAdapterNotFoundError,
+    adapter_success,
+    classify_adapter_error,
+    public_adapter_failure_message,
+    require_config,
+)
 
 
 class MySQLStatusAdapter:
@@ -18,6 +25,7 @@ class MySQLStatusAdapter:
         self.dsn = config.resolved_mysql_dsn
         self.instance_dsns = config.mysql_instance_map
         self.timeout_seconds = config.mysql_timeout_seconds
+        self.include_processlist = config.mysql_include_processlist
         self.store_raw_external_payload = config.aiops_store_raw_external_payload
 
     @property
@@ -48,6 +56,7 @@ class MySQLStatusAdapter:
             **self._connection_kwargs(dsn),
             connect_timeout=int(self.timeout_seconds),
             read_timeout=int(self.timeout_seconds),
+            write_timeout=int(self.timeout_seconds),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:
@@ -59,8 +68,12 @@ class MySQLStatusAdapter:
                     "'Innodb_row_lock_waits')",
                 )
                 status_rows = list(cursor.fetchall())
-                self._execute_read_only(cursor, "SHOW FULL PROCESSLIST")
-                process_rows = [self._redact_process_row(row) for row in cursor.fetchall()]
+                self._execute_read_only(cursor, "SHOW VARIABLES LIKE 'max_connections'")
+                variable_rows = list(cursor.fetchall())
+                process_rows: list[dict[str, Any]] = []
+                if self.include_processlist:
+                    self._execute_read_only(cursor, "SHOW FULL PROCESSLIST")
+                    process_rows = [self._redact_process_row(row) for row in cursor.fetchall()]
                 incident_evidence, optional_errors = self._query_incident_evidence(
                     cursor,
                     service_name,
@@ -78,10 +91,11 @@ class MySQLStatusAdapter:
         max_used = int(status["Max_used_connections"])
         slow_queries = int(status["Slow_queries"])
         lock_waits = int(status["Innodb_row_lock_waits"])
+        server_max_connections = self._max_connections(variable_rows)
         slow_query_items = self._slow_query_items(incident_evidence, slow_queries)
         pool_waiting = self._pool_waiting(incident_evidence)
-        connection_max = self._connection_pool_max(incident_evidence, max_used)
-        diagnostic_active = self._diagnostic_active_connections(incident_evidence, active)
+        pool_active = self._pool_active_connections(incident_evidence)
+        pool_max = self._connection_pool_max(incident_evidence)
         diagnostic_lock_waits = max(
             lock_waits,
             self._safe_int(incident_evidence.get("lock_waits"), 0),
@@ -89,8 +103,10 @@ class MySQLStatusAdapter:
         slow_query_count = self._slow_query_count(slow_query_items, slow_queries)
         evidence_chain = self._build_evidence_chain(
             slow_query_items=slow_query_items,
-            active=diagnostic_active,
-            connection_max=connection_max,
+            threads_connected=active,
+            server_max_connections=server_max_connections,
+            pool_active=pool_active,
+            pool_max=pool_max,
             pool_waiting=pool_waiting,
             slow_query_counter=slow_queries,
             incident_evidence=incident_evidence,
@@ -99,18 +115,22 @@ class MySQLStatusAdapter:
             source="mysql",
             summary=self._build_summary(
                 service_name=service_name,
-                active=diagnostic_active,
-                connection_max=connection_max,
+                threads_connected=active,
+                server_max_connections=server_max_connections,
+                pool_active=pool_active,
+                pool_max=pool_max,
                 slow_query_items=slow_query_items,
                 pool_waiting=pool_waiting,
                 incident_evidence=incident_evidence,
             ),
             signals={
-                "active_connections": diagnostic_active,
-                "max_connections": connection_max,
+                "threads_connected": active,
+                "max_connections": server_max_connections,
                 "max_used_connections": max_used,
                 "slow_queries": slow_queries,
                 "slow_query_count": slow_query_count,
+                "pool_active_connections": pool_active,
+                "pool_max_connections": pool_max,
                 "pool_waiting": pool_waiting,
                 "lock_waits": diagnostic_lock_waits,
                 "live_threads_connected": active,
@@ -122,12 +142,13 @@ class MySQLStatusAdapter:
                 "processlist_sample": (
                     process_rows[:10]
                     if self.store_raw_external_payload
-                    else self._compact_processlist(process_rows)
+                    else self._public_processlist(process_rows)
                 ),
                 "incident_evidence": incident_evidence,
                 "live_status": {
                     "Threads_connected": active,
                     "Max_used_connections": max_used,
+                    "max_connections": server_max_connections,
                     "Slow_queries": slow_queries,
                     "Innodb_row_lock_waits": lock_waits,
                     "scope": "current MySQL container runtime counters",
@@ -139,16 +160,18 @@ class MySQLStatusAdapter:
             slow_queries=slow_query_items,
             slow_query_status={"count": slow_queries, "status": "checked"},
             connections={
-                "active": diagnostic_active,
-                "max": connection_max,
+                "threads_connected": active,
+                "max_connections": server_max_connections,
                 "max_used": max_used,
+                "pool_active": pool_active,
+                "pool_max": pool_max,
                 "pool_waiting": pool_waiting,
-                "live_threads_connected": active,
             },
             incident_evidence=incident_evidence,
             live_status={
                 "Threads_connected": active,
                 "Max_used_connections": max_used,
+                "max_connections": server_max_connections,
                 "Slow_queries": slow_queries,
                 "Innodb_row_lock_waits": lock_waits,
                 "scope": "current MySQL container runtime counters",
@@ -156,7 +179,8 @@ class MySQLStatusAdapter:
             evidence_chain=evidence_chain,
             fact=(
                 f"MySQL incident evidence shows slow_query_count={slow_query_count}, "
-                f"active_connections={diagnostic_active}/{connection_max}, "
+                f"pool_active_connections={pool_active}/{pool_max}, "
+                f"live_threads_connected={active}/{server_max_connections}, "
                 f"pool_waiting={pool_waiting}."
             ),
             inference=(
@@ -170,7 +194,11 @@ class MySQLStatusAdapter:
                 if incident_evidence
                 else "Evidence comes from current MySQL runtime counters only; no incident table row was found."
             ),
-            processlist_sample=process_rows[:10],
+            processlist_sample=(
+                process_rows[:10]
+                if self.store_raw_external_payload
+                else self._public_processlist(process_rows)
+            ),
             lock_waits=diagnostic_lock_waits,
             partial_errors=optional_errors,
             evidence_origin="mysql_live_evidence_tables" if incident_evidence else "mysql_status",
@@ -186,6 +214,7 @@ class MySQLStatusAdapter:
             **self._connection_kwargs(dsn),
             connect_timeout=int(self.timeout_seconds),
             read_timeout=int(self.timeout_seconds),
+            write_timeout=int(self.timeout_seconds),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:
@@ -201,7 +230,13 @@ class MySQLStatusAdapter:
         }
 
     def _resolve_dsn(self, mysql_instance: str = "") -> str:
-        dsn = self.instance_dsns.get(mysql_instance) if mysql_instance else ""
+        dsn = ""
+        if mysql_instance:
+            dsn = self.instance_dsns.get(mysql_instance, "")
+            if not dsn:
+                raise ExternalAdapterNotFoundError(
+                    f"MySQL instance {mysql_instance!r} is not configured"
+                )
         return require_config(dsn or self.dsn, "MYSQL_DSN, MYSQL_URL, or MYSQL_HOST")
 
     @staticmethod
@@ -251,6 +286,13 @@ class MySQLStatusAdapter:
         return status
 
     @staticmethod
+    def _max_connections(variable_rows: list[dict[str, Any]]) -> int:
+        for row in variable_rows:
+            if str(row.get("Variable_name") or "").lower() == "max_connections":
+                return MySQLStatusAdapter._safe_int(row.get("Value"), 0)
+        raise ExternalAdapterError("MySQL variables response missing max_connections")
+
+    @staticmethod
     def _missing_required_status_fields(status: dict[str, str]) -> list[str]:
         return [
             field_name
@@ -290,6 +332,18 @@ class MySQLStatusAdapter:
                 }
             )
         return compact_rows
+
+    @staticmethod
+    def _public_processlist(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "Command": row.get("Command"),
+                "Time": row.get("Time"),
+                "State": row.get("State"),
+                "has_statement": bool(row.get("Info")),
+            }
+            for row in rows[:5]
+        ]
 
     def _query_incident_evidence(
         self,
@@ -341,7 +395,14 @@ class MySQLStatusAdapter:
                 if row:
                     handler(evidence, row)
             except Exception as exc:  # pragma: no cover - optional sandbox tables may be absent
-                errors.append({"query": label, "error_message": str(exc)})
+                error_type = classify_adapter_error(exc)
+                errors.append(
+                    {
+                        "query": label,
+                        "error_type": error_type,
+                        "error_message": public_adapter_failure_message(error_type),
+                    }
+                )
         return evidence, errors
 
     @classmethod
@@ -435,16 +496,12 @@ class MySQLStatusAdapter:
         return 0
 
     @classmethod
-    def _connection_pool_max(cls, evidence: dict[str, Any], max_used: int) -> int:
-        if evidence:
-            return max(cls._safe_int(evidence.get("connection_max"), 200), max_used, 1)
-        return max(max_used, 1)
+    def _connection_pool_max(cls, evidence: dict[str, Any]) -> int:
+        return max(cls._safe_int(evidence.get("connection_max"), 0), 0)
 
     @classmethod
-    def _diagnostic_active_connections(cls, evidence: dict[str, Any], active: int) -> int:
-        if evidence:
-            return max(cls._safe_int(evidence.get("active_connections"), 188), active)
-        return active
+    def _pool_active_connections(cls, evidence: dict[str, Any]) -> int:
+        return max(cls._safe_int(evidence.get("active_connections"), 0), 0)
 
     @staticmethod
     def _slow_query_count(items: list[dict[str, Any]], fallback: int) -> int:
@@ -456,8 +513,10 @@ class MySQLStatusAdapter:
     def _build_summary(
         *,
         service_name: str,
-        active: int,
-        connection_max: int,
+        threads_connected: int,
+        server_max_connections: int,
+        pool_active: int,
+        pool_max: int,
         slow_query_items: list[dict[str, Any]],
         pool_waiting: int,
         incident_evidence: dict[str, Any],
@@ -471,10 +530,13 @@ class MySQLStatusAdapter:
         suffix = (
             f" from MySQL live incident evidence ({seed_source})"
             if incident_evidence and seed_source
-            else " from MySQL live incident evidence" if incident_evidence else ""
+            else " from MySQL live incident evidence"
+            if incident_evidence
+            else ""
         )
         return (
-            f"{service_name} MySQL active_connections={active}/{connection_max}, "
+            f"{service_name} MySQL threads_connected={threads_connected}/"
+            f"{server_max_connections}, pool_active_connections={pool_active}/{pool_max}, "
             f"slow_query_count={slow_count}, pool_waiting={pool_waiting}{suffix}"
         )
 
@@ -483,8 +545,10 @@ class MySQLStatusAdapter:
         cls,
         *,
         slow_query_items: list[dict[str, Any]],
-        active: int,
-        connection_max: int,
+        threads_connected: int,
+        server_max_connections: int,
+        pool_active: int,
+        pool_max: int,
         pool_waiting: int,
         slow_query_counter: int,
         incident_evidence: dict[str, Any],
@@ -513,7 +577,11 @@ class MySQLStatusAdapter:
             },
             {
                 "stage": "connection_pool_wait",
-                "fact": f"active_connections={active}/{connection_max}, pool_waiting={pool_waiting}.",
+                "fact": (
+                    f"application_pool_active={pool_active}/{pool_max}, "
+                    f"pool_waiting={pool_waiting}; MySQL Threads_connected="
+                    f"{threads_connected}/{server_max_connections}."
+                ),
                 "inference": "Slow SQL occupied connections and pushed callers into pool wait.",
                 "uncertainty": "Pool waiting is application-side incident evidence, not a raw MySQL counter.",
                 "source": source,

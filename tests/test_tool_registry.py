@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
+from langchain_core.tools import StructuredTool
+from mcp.types import CallToolResult, TextContent
 
 from app.config import config
-from app.tools.base import AIOpsTool, ToolRetryPolicy
+from app.tools.base import (
+    AIOpsTool,
+    ToolExecutionResult,
+    ToolRetryPolicy,
+    invoke_langchain_tool,
+    normalize_langchain_tool_output,
+    tool_map,
+)
 from app.tools.registry import ToolRegistry, create_default_tool_registry
 
 
@@ -28,6 +38,16 @@ class FailingAsyncTool:
 
     async def ainvoke(self, input_args: dict):
         raise RuntimeError(f"{self.name} unavailable")
+
+
+class MCPContentBlockTool:
+    def __init__(self, name: str, output: dict):
+        self.name = name
+        self.description = f"MCP content block {name}"
+        self.output = output
+
+    async def ainvoke(self, input_args: dict):
+        return [{"type": "text", "text": json.dumps(self.output)}]
 
 
 class MutableContractTool(AIOpsTool):
@@ -147,6 +167,76 @@ class TotalBudgetTimeoutTool(AIOpsTool):
         return {"status": "success"}
 
 
+class RequiredInputTool(AIOpsTool):
+    name = "required_input"
+    input_schema = {
+        "type": "object",
+        "properties": {"service_name": {"type": "string", "minLength": 1}},
+        "required": ["service_name"],
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def _call(self, input_args: dict):
+        self.calls += 1
+        return {"status": "success"}
+
+
+class InvalidSchemaTool(AIOpsTool):
+    name = "invalid_schema"
+    input_schema = {"type": "definitely-not-a-json-schema-type"}
+
+    async def _call(self, input_args: dict):
+        return {"status": "success"}
+
+
+class DefaultsInputTool(AIOpsTool):
+    name = "defaults_input"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string"},
+            "time_range": {"type": "string", "default": "10m"},
+            "options": {"type": "object", "default": {"limit": 5}},
+        },
+        "required": ["service_name"],
+    }
+
+    async def _call(self, input_args: dict):
+        input_args["options"]["limit"] = 6
+        return {"status": "success"}
+
+
+class CancelledTool(AIOpsTool):
+    name = "cancelled_tool"
+
+    async def _call(self, input_args: dict):
+        raise asyncio.CancelledError
+
+
+class InvalidOutputTool(AIOpsTool):
+    name = "invalid_output"
+    output_schema = {
+        "type": "object",
+        "properties": {"signals": {"type": "object"}},
+        "required": ["signals"],
+    }
+
+    async def _call(self, input_args: dict):
+        return {"summary": "missing required signals"}
+
+
+class MisdeclaredReadOnlyTool(AIOpsTool):
+    name = "query_misdeclared_action"
+    read_only = True
+    risk_level = "low"
+
+    async def _call(self, input_args: dict):
+        return {"status": "success"}
+
+
 def test_registry_registers_standard_aiops_tools() -> None:
     registry = create_default_tool_registry([])
     names = {item["name"] for item in registry.list_tools()}
@@ -158,6 +248,52 @@ def test_registry_registers_standard_aiops_tools() -> None:
     assert "query_redis_status" in names
     assert "search_runbook" in names
     assert "suggest_remediation" in names
+
+
+def test_registry_rejects_duplicate_tool_names() -> None:
+    registry = ToolRegistry()
+    registry.register(MutableContractTool())
+
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(MutableContractTool())
+
+
+def test_tool_execution_result_normalizes_structured_failure_semantics() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_metrics",
+        status="success",
+        output={
+            "status": "failed",
+            "error_type": "server_error",
+            "error_message": "backend unavailable",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "backend unavailable"
+
+
+def test_discovered_tool_map_rejects_duplicate_names() -> None:
+    with pytest.raises(ValueError, match="Duplicate discovered tool name"):
+        tool_map(
+            [
+                FakeAsyncTool("query_cpu_metrics", {}),
+                FakeAsyncTool("query_cpu_metrics", {}),
+            ]
+        )
+
+
+def test_registry_test_fixture_replacement_requires_existing_name() -> None:
+    registry = ToolRegistry()
+    with pytest.raises(ValueError, match="not registered"):
+        registry.replace_for_test(MutableContractTool())
+
+    original = MutableContractTool()
+    replacement = MutableContractTool()
+    registry.register(original)
+    registry.replace_for_test(replacement)
+
+    assert registry.get(replacement.name) is replacement
 
 
 def test_registry_exposes_auditable_tool_contracts() -> None:
@@ -280,6 +416,168 @@ async def test_tool_timeout_uses_total_budget_without_starting_phantom_retry() -
 
 
 @pytest.mark.asyncio
+async def test_registry_enforces_input_contract_on_real_plan_execution_path() -> None:
+    registry = ToolRegistry()
+    tool = RequiredInputTool()
+    registry.register(tool, trusted=True)
+
+    result = await registry.arun(
+        "required_input",
+        {},
+        step={
+            "tool_name": "required_input",
+            "purpose": "validate required input",
+            "input_args": {},
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.output["error_type"] == "invalid_input"
+    assert tool.calls == 0
+
+
+def test_registry_rejects_invalid_tool_schema_during_registration() -> None:
+    registry = ToolRegistry()
+    with pytest.raises(ValueError, match="invalid input schema"):
+        registry.register(InvalidSchemaTool(), trusted=True)
+
+
+@pytest.mark.asyncio
+async def test_default_registry_rejects_unknown_arguments_before_adapter_call() -> None:
+    registry = create_default_tool_registry([])
+
+    result = await registry.arun(
+        "query_k8s_status",
+        {"service_name": "order-service", "command": "delete pod"},
+    )
+
+    assert result.status == "failed"
+    assert result.output["error_type"] == "invalid_input"
+    assert result.output["validation_error"]["validator"] == "additionalProperties"
+
+
+@pytest.mark.asyncio
+async def test_registry_applies_schema_defaults_before_policy_and_execution() -> None:
+    registry = ToolRegistry()
+    registry.register(DefaultsInputTool(), trusted=True)
+
+    result = await registry.arun("defaults_input", {"service_name": "order-service"})
+
+    assert result.status == "success"
+    assert result.input_args["time_range"] == "10m"
+    assert result.input_args["options"] == {"limit": 6}
+    assert DefaultsInputTool.input_schema["properties"]["options"]["default"] == {"limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_registry_rejects_success_that_violates_output_contract() -> None:
+    registry = ToolRegistry()
+    registry.register(InvalidOutputTool(), trusted=True)
+
+    result = await registry.arun("invalid_output", {})
+
+    assert result.status == "failed"
+    assert result.output["error_type"] == "invalid_output"
+    assert result.output["validation_error"]["validator"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_untrusted_tool_cannot_self_declare_as_low_risk_read_only() -> None:
+    registry = ToolRegistry()
+    tool = MisdeclaredReadOnlyTool()
+    registry.register(tool)
+
+    result = await registry.arun("query_misdeclared_action", {})
+
+    assert result.status == "failed"
+    assert result.output["policy"] == "approval_required"
+    assert result.risk_level == "high"
+    assert result.read_only is False
+    assert "tool:not-read-only" in result.output["matched_rules"]
+
+
+@pytest.mark.asyncio
+async def test_aiops_tool_propagates_cancellation() -> None:
+    with pytest.raises(asyncio.CancelledError):
+        await CancelledTool().arun({})
+
+
+def test_normalize_call_tool_result_error_envelope() -> None:
+    result = CallToolResult(
+        content=[TextContent(type="text", text="backend rejected request")],
+        isError=True,
+    )
+
+    normalized = normalize_langchain_tool_output(result)
+
+    assert normalized == {
+        "status": "failed",
+        "error_type": "mcp_error",
+        "error_message": "backend rejected request",
+    }
+
+
+@pytest.mark.asyncio
+async def test_invoke_langchain_tool_normalizes_mcp_text_content_object() -> None:
+    class TextContentTool:
+        name = "text_content_tool"
+
+        async def ainvoke(self, input_args: dict):
+            return TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "status": "failed",
+                        "error_type": "server_error",
+                        "error_message": "backend unavailable",
+                    }
+                ),
+            )
+
+    normalized = await invoke_langchain_tool(TextContentTool(), {})
+
+    assert normalized["status"] == "failed"
+    assert normalized["error_type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_invoke_langchain_tool_rejects_unknown_schema_arguments() -> None:
+    async def coroutine(service_name: str) -> dict:
+        return {"service_name": service_name}
+
+    tool = StructuredTool.from_function(
+        name="schema_tool",
+        description="schema tool",
+        coroutine=coroutine,
+    )
+
+    with pytest.raises(ValueError, match="unsupported arguments: time_range"):
+        await invoke_langchain_tool(
+            tool,
+            {"service_name": "order-service", "time_range": "10m"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_invoke_langchain_tool_rejects_unknown_json_schema_arguments() -> None:
+    class JsonSchemaTool:
+        name = "json_schema_tool"
+        args_schema = {
+            "type": "object",
+            "properties": {"service_name": {"type": "string"}},
+        }
+
+        async def ainvoke(self, input_args: dict):
+            return input_args
+
+    with pytest.raises(ValueError, match="unsupported arguments: time_range"):
+        await invoke_langchain_tool(
+            JsonSchemaTool(),
+            {"service_name": "order-service", "time_range": "10m"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_registry_policy_guard_blocks_non_read_only_prod_action() -> None:
     registry = ToolRegistry().with_incident_context(
         {"environment": "prod", "service_name": "order-service"}
@@ -300,7 +598,172 @@ async def test_registry_policy_guard_blocks_non_read_only_prod_action() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_metrics_fails_partial_mcp_without_synthetic_backfill() -> None:
+async def test_registry_rejects_policy_step_for_a_different_tool() -> None:
+    registry = ToolRegistry().with_incident_context(
+        {"environment": "prod", "service_name": "order-service"}
+    )
+    tool = RestartServiceTool()
+    registry.register(tool)
+
+    result = await registry.arun(
+        "restart_service",
+        {"service_name": "order-service"},
+        step={
+            "tool_name": "query_metrics",
+            "purpose": "query metrics",
+            "input_args": {"service_name": "order-service"},
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.output["policy"] == "forbidden"
+    assert result.output["matched_rules"] == ["tool:step-name-mismatch"]
+    assert result.risk_level == "high"
+
+
+@pytest.mark.asyncio
+async def test_query_metrics_treats_real_mcp_content_block_failures_as_failed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(config, "prometheus_base_url", "")
+    registry = create_default_tool_registry(
+        [
+            MCPContentBlockTool(
+                "query_cpu_metrics",
+                {
+                    "status": "failed",
+                    "error_type": "server_error",
+                    "error_message": "CPU backend unavailable",
+                },
+            ),
+            MCPContentBlockTool(
+                "query_memory_metrics",
+                {
+                    "status": "failed",
+                    "error_type": "server_error",
+                    "error_message": "memory backend unavailable",
+                },
+            ),
+        ]
+    )
+
+    result = await registry.arun("query_metrics", {"service_name": "order-service"})
+
+    assert result.status == "failed"
+    assert result.output["source"] == "mcp_monitor_mixed"
+    assert "partially available" in result.output["summary"]
+    assert len(result.output["partial_errors"]) == 2
+    assert result.metadata["retry"]["attempt_count"] == 1
+    assert result.metadata["retry"]["stop_reason"] == "non_retryable_failure"
+
+
+@pytest.mark.asyncio
+async def test_query_metrics_normalizes_langchain_structured_tool_content_blocks(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(config, "prometheus_base_url", "")
+
+    async def cpu_coroutine(**_: object):
+        return (
+            [{"type": "text", "text": json.dumps({"status": "failed", "error": "boom"})}],
+            None,
+        )
+
+    async def memory_coroutine(**_: object):
+        return (
+            [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "status": "success",
+                            "metric_name": "memory_usage_percent",
+                            "statistics": {"max": 76},
+                        }
+                    ),
+                }
+            ],
+            None,
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string"},
+            "interval": {"type": "string"},
+        },
+        "required": ["service_name"],
+    }
+    registry = create_default_tool_registry(
+        [
+            StructuredTool(
+                name="query_cpu_metrics",
+                description="CPU",
+                args_schema=schema,
+                coroutine=cpu_coroutine,
+                response_format="content_and_artifact",
+            ),
+            StructuredTool(
+                name="query_memory_metrics",
+                description="memory",
+                args_schema=schema,
+                coroutine=memory_coroutine,
+                response_format="content_and_artifact",
+            ),
+        ]
+    )
+
+    result = await registry.arun("query_metrics", {"service_name": "order-service"})
+
+    assert result.status == "failed"
+    assert result.output["source"] == "mcp_monitor_mixed"
+    assert result.output["available_metrics"]["memory"]["metric_name"] == ("memory_usage_percent")
+    assert result.output["partial_errors"][0]["error_message"] == "外部依赖暂时不可用"
+    assert "boom" not in str(result.output)
+
+
+@pytest.mark.asyncio
+async def test_query_metrics_marks_synthetic_mcp_monitor_as_mock() -> None:
+    registry = create_default_tool_registry(
+        [
+            FakeAsyncTool(
+                "query_cpu_metrics",
+                {
+                    "status": "success",
+                    "source": "mock",
+                    "synthetic": True,
+                    "metric_name": "cpu_usage_percent",
+                },
+            ),
+            FakeAsyncTool(
+                "query_memory_metrics",
+                {
+                    "status": "success",
+                    "source": "mock",
+                    "synthetic": True,
+                    "metric_name": "memory_usage_percent",
+                },
+            ),
+        ]
+    )
+
+    result = await registry.arun("query_metrics", {"service_name": "order-service"})
+
+    assert result.status == "success"
+    assert result.output["source"] == "mock"
+    assert result.output["source_detail"] == {
+        "cpu": "mock",
+        "memory": "mock",
+        "qps": "unavailable",
+        "p95_latency_ms": "unavailable",
+        "error_rate": "unavailable",
+    }
+    assert result.output["synthetic_fields"] == ["cpu", "memory"]
+
+
+@pytest.mark.asyncio
+async def test_query_metrics_fails_partial_mcp_without_synthetic_backfill(monkeypatch) -> None:
+    monkeypatch.setattr(config, "prometheus_base_url", "")
     registry = create_default_tool_registry(
         [
             FailingAsyncTool("query_cpu_metrics"),
@@ -318,11 +781,8 @@ async def test_query_metrics_fails_partial_mcp_without_synthetic_backfill() -> N
 
     assert result.status == "failed"
     assert result.output["source"] == "mcp_monitor_mixed"
-    assert result.output["source_detail"]["cpu"] == "unavailable"
-    assert result.output["source_detail"]["memory"] == "mcp_monitor"
-    assert result.output["available_metrics"]["memory"]["metric_name"] == "memory_usage_percent"
-    assert result.output["partial_errors"][0]["tool_name"] == "query_cpu_metrics"
-    assert "synthetic backfill is disabled" in result.output["summary"]
+    assert "partially available" in result.output["summary"]
+    assert result.output["available_metrics"]["memory"]["metric_name"] == ("memory_usage_percent")
 
 
 @pytest.mark.asyncio

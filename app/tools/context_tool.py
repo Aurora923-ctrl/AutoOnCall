@@ -12,6 +12,13 @@ from app.tools.base import AIOpsTool, ToolRetryPolicy, clamp_int
 class QueryServiceContextTool(AIOpsTool):
     name = "query_service_context"
     description = "Query service owner, namespace, dependencies, and business context."
+    input_schema = {
+        "type": "object",
+        "properties": {"service_name": {"type": "string", "minLength": 1}},
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "low"
     read_only = True
     timeout_seconds = 8.0
@@ -58,6 +65,16 @@ class QueryServiceContextTool(AIOpsTool):
 class QueryDeployHistoryTool(AIOpsTool):
     name = "query_deploy_history"
     description = "Query recent service deployments, changes, and rollback records."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string", "minLength": 1},
+            "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 50},
+        },
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "low"
     read_only = True
     timeout_seconds = 8.0

@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from app.config import config
-from app.integrations.base import ExternalAdapterError
+from app.integrations.base import ExternalAdapterError, ExternalAdapterNotFoundError
 from app.integrations.mysql import MySQLStatusAdapter
 
 
@@ -33,35 +33,13 @@ class MySQLBusinessDataAdapter:
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._search_tickets_sync, service_name, query, limit)
 
-    async def create_ticket(
-        self,
-        *,
-        service_name: str,
-        title: str,
-        description: str,
-        severity: str,
-        approval_id: str = "",
-        risk_action: str = "",
-        idempotency_key: str = "",
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._create_ticket_sync,
-            service_name,
-            title,
-            description,
-            severity,
-            approval_id,
-            risk_action,
-            idempotency_key,
-        )
-
     def _query_service_catalog_sync(self, service_name: str) -> dict[str, Any]:
         row = self._fetch_one(
             "SELECT payload FROM aiops_service_catalog WHERE service_name=%s",
             (service_name,),
         )
         if not row:
-            raise ExternalAdapterError(f"service catalog not found for {service_name}")
+            raise ExternalAdapterNotFoundError(f"service catalog not found for {service_name}")
         return self._json_payload(row, "payload")
 
     def _query_deploy_history_sync(self, service_name: str) -> dict[str, Any]:
@@ -70,7 +48,7 @@ class MySQLBusinessDataAdapter:
             (service_name,),
         )
         if not row:
-            raise ExternalAdapterError(f"deployment history not found for {service_name}")
+            raise ExternalAdapterNotFoundError(f"deployment history not found for {service_name}")
         return self._json_payload(row, "payload")
 
     def _search_tickets_sync(
@@ -101,43 +79,6 @@ class MySQLBusinessDataAdapter:
                 tickets = filtered
         return tickets[: min(max(int(limit), 1), 20)]
 
-    def _create_ticket_sync(
-        self,
-        service_name: str,
-        title: str,
-        description: str,
-        severity: str,
-        approval_id: str,
-        risk_action: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        ticket_id = idempotency_key or f"{service_name}:{title}"
-        payload = {
-            "ticket_id": ticket_id,
-            "service_name": service_name,
-            "title": title,
-            "description": description,
-            "severity": severity,
-            "approval_id": approval_id,
-            "risk_action": risk_action,
-            "status": "created",
-        }
-        self._execute_write(
-            """
-            INSERT INTO aiops_history_tickets
-                (ticket_id, service_name, title, severity, root_cause, resolution,
-                 customer_impact, labels_text, payload)
-            VALUES (%s, %s, %s, %s, '', '', '', '', %s)
-            ON DUPLICATE KEY UPDATE
-                title=VALUES(title),
-                severity=VALUES(severity),
-                payload=VALUES(payload),
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (ticket_id, service_name, title, severity, json.dumps(payload, ensure_ascii=False)),
-        )
-        return payload
-
     def _fetch_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
         rows = self._fetch_all(sql, params)
         return rows[0] if rows else None
@@ -155,34 +96,13 @@ class MySQLBusinessDataAdapter:
             **MySQLStatusAdapter._connection_kwargs(self.dsn),
             connect_timeout=int(self.timeout_seconds),
             read_timeout=int(self.timeout_seconds),
+            write_timeout=int(self.timeout_seconds),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:
             with connection.cursor() as cursor:
                 MySQLStatusAdapter._execute_read_only_with_params(cursor, sql, params)
                 return list(cursor.fetchall())
-        finally:
-            connection.close()
-
-    def _execute_write(self, sql: str, params: tuple[Any, ...]) -> None:
-        try:
-            import pymysql
-        except ImportError as exc:
-            raise ExternalAdapterError("PyMySQL is required for MySQL business data") from exc
-
-        if not self.dsn:
-            raise ExternalAdapterError("MYSQL_DSN is not configured")
-
-        connection = pymysql.connect(
-            **MySQLStatusAdapter._connection_kwargs(self.dsn),
-            connect_timeout=int(self.timeout_seconds),
-            read_timeout=int(self.timeout_seconds),
-            cursorclass=pymysql.cursors.DictCursor,
-        )
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(sql, params)
-            connection.commit()
         finally:
             connection.close()
 

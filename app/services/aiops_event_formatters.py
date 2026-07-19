@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.utils.structured_data import dict_list
+
 
 def format_planner_event(state: dict[str, Any] | None) -> dict[str, Any]:
     """Format a Planner node update as a stable SSE payload."""
     if not state:
         return {"type": "status", "stage": "planner", "message": "规划节点执行中"}
 
-    plan = state.get("plan", [])
-    current_plan = state.get("current_plan", [])
+    plan = list(state.get("plan") or [])
+    current_plan = dict_list(state.get("current_plan"), wrap_scalars=True)
 
     return {
         "type": "plan",
@@ -27,12 +29,12 @@ def format_executor_event(state: dict[str, Any] | None) -> dict[str, Any]:
     if not state:
         return {"type": "status", "stage": "executor", "message": "执行节点运行中"}
 
-    plan = state.get("plan", [])
-    past_steps = state.get("past_steps", [])
-    gathered_evidence = state.get("gathered_evidence", [])
-    tool_call_records = state.get("tool_call_records", [])
-    errors = state.get("errors", [])
-    warnings = state.get("warnings", [])
+    plan = list(state.get("plan") or [])
+    past_steps = list(state.get("past_steps") or [])
+    gathered_evidence = list(state.get("gathered_evidence") or [])
+    tool_call_records = list(state.get("tool_call_records") or [])
+    errors = list(state.get("errors") or [])
+    warnings = list(state.get("warnings") or [])
     pending_approval = state.get("pending_approval")
 
     if pending_approval:
@@ -47,7 +49,7 @@ def format_executor_event(state: dict[str, Any] | None) -> dict[str, Any]:
         }
 
     if past_steps:
-        last_step, result = past_steps[-1]
+        last_step, result = _past_step_parts(past_steps[-1])
         result_text = str(result)
         return {
             "type": "step_complete",
@@ -71,7 +73,7 @@ def format_replanner_event(state: dict[str, Any] | None) -> dict[str, Any]:
 
     pending_approval = state.get("pending_approval")
     response = state.get("response", "")
-    plan = state.get("current_plan") or state.get("plan", [])
+    plan = list(state.get("current_plan") or state.get("plan") or [])
     structured_report = state.get("report")
     warnings = state.get("warnings", [])
 
@@ -93,6 +95,11 @@ def format_replanner_event(state: dict[str, Any] | None) -> dict[str, Any]:
             "message": "最终报告已生成",
             "report": response,
             "structured_report": structured_report,
+            "degradation_analysis": (
+                structured_report.get("degradation_analysis", {})
+                if isinstance(structured_report, dict)
+                else {}
+            ),
             "hypotheses": state.get("hypotheses", []),
             "final_diagnosis": state.get("final_diagnosis", ""),
             "warnings": warnings,
@@ -106,3 +113,14 @@ def format_replanner_event(state: dict[str, Any] | None) -> dict[str, Any]:
         "final_diagnosis": state.get("final_diagnosis", ""),
         "warnings": warnings,
     }
+
+
+def _past_step_parts(value: Any) -> tuple[Any, Any]:
+    """Read legacy tuple or durable normalized past-step values."""
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return value[0], value[1]
+    if isinstance(value, dict):
+        step = value.get("step", value.get("task", value))
+        result = value.get("result", value.get("output", value.get("value", "")))
+        return step, result
+    return value, ""

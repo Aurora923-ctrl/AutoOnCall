@@ -228,9 +228,11 @@ async def test_aiops_run_status_assembles_recovery_payload(monkeypatch) -> None:
     assert payload["tool_call_records"][0]["status"] == "success"
     assert payload["warnings"][0].startswith("步骤 s9 使用了 LLM ToolNode")
     assert payload["gathered_evidence"][0]["source_tool"] == "query_redis_status"
-    assert payload["progress"]["phase"] == "executing"
+    assert payload["progress"]["phase"] == "approval"
     assert payload["progress"]["current_tool"] == "query_redis_status"
     assert payload["progress"]["tool_success_count"] == 1
+    assert payload["progress"]["status"] == "waiting_approval"
+    assert payload["progress"]["report_status"] == "waiting_approval"
     assert payload["progress_cursor"] == "run-recover:000003"
     assert payload["progress_events"][0]["cursor"] == "run-recover:000003"
     assert payload["trace_summary"]["event_count"] == 1
@@ -563,3 +565,202 @@ async def test_aiops_run_status_derives_progress_for_legacy_snapshot(monkeypatch
     assert progress["risk_policy"] == "allow"
     assert progress["report_status"] == "not_started"
     assert payload["progress_cursor"] == "run-legacy-progress:snapshot"
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_status_reconciles_stored_progress_with_effective_status(
+    monkeypatch,
+) -> None:
+    incident_id = "INC-EFFECTIVE-PROGRESS"
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="run-effective-progress",
+        status="running",
+        node_name="executor",
+        state={
+            "trace_id": "trace-effective-progress",
+            "incident": {"incident_id": incident_id},
+            "progress": {
+                "phase": "executing",
+                "node_name": "executor",
+                "cursor": "run-effective-progress:000004",
+                "status": "running",
+                "report_status": "not_started",
+            },
+        },
+    )
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="pending",
+        metadata={"session_id": snapshot.session_id},
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(snapshot),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([approval]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(f"/api/aiops/runs/{snapshot.session_id}")
+
+    payload = response.json()
+    assert payload["status"] == "waiting_approval"
+    assert payload["progress"]["status"] == "waiting_approval"
+    assert payload["progress"]["phase"] == "approval"
+    assert payload["progress_cursor"] == "run-effective-progress:000004"
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_status_keeps_failed_snapshot_over_older_report(monkeypatch) -> None:
+    incident_id = "INC-FAILED-OVER-REPORT"
+    trace_id = "trace-failed-over-report"
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="run-failed-over-report",
+        status="failed",
+        node_name="workflow",
+        state={
+            "trace_id": trace_id,
+            "incident": {"incident_id": incident_id},
+            "errors": ["resume failed"],
+            "progress": {
+                "phase": "error",
+                "node_name": "workflow",
+                "cursor": "run-failed-over-report:resume-failed",
+                "status": "failed",
+            },
+        },
+    )
+    report = DiagnosisReport(
+        incident_id=incident_id,
+        trace_id=trace_id,
+        status="waiting_approval",
+        title="Older report",
+        service_name="order-service",
+        severity="P1",
+        environment="prod",
+        markdown="# Older report",
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(snapshot),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(report),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(f"/api/aiops/runs/{snapshot.session_id}")
+
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["progress"]["status"] == "failed"
+    assert payload["progress"]["phase"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_status_redacts_nested_processlist_details(monkeypatch) -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="run-public-redaction",
+        status="completed",
+        state={
+            "trace_id": "trace-public-redaction",
+            "incident": {"incident_id": "INC-REDACT", "service_name": "payment-service"},
+            "tool_call_records": [
+                {
+                    "tool_name": "query_mysql_status",
+                    "output": {
+                        "source": "mysql",
+                        "processlist_sample": [
+                            {
+                                "User": "root",
+                                "Host": "mysql.internal:3306",
+                                "db": "payments",
+                                "Command": "Query",
+                                "Time": 2,
+                                "State": "executing",
+                                "Info": "SELECT secret FROM payment_cards",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(snapshot),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/aiops/runs/run-public-redaction")
+
+    payload = response.json()
+    sample = payload["tool_call_records"][0]["output"]["processlist_sample"][0]
+    assert sample == {
+        "Command": "Query",
+        "Time": 2,
+        "State": "executing",
+        "has_statement": True,
+    }
+    assert "mysql.internal" not in str(payload)
+    assert "payment_cards" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_aiops_run_status_publicizes_nested_partial_errors(monkeypatch) -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="run-partial-error-redaction",
+        status="completed",
+        state={
+            "trace_id": "trace-partial-error-redaction",
+            "incident": {"incident_id": "INC-PARTIAL", "service_name": "payment-service"},
+            "tool_call_records": [
+                {
+                    "tool_name": "query_mysql_status",
+                    "output": {
+                        "source": "mysql",
+                        "partial_errors": [
+                            {
+                                "query": "payment_events",
+                                "error_message": "Table payments.secret_events does not exist",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(snapshot),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    transport = httpx.ASGITransport(app=test_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/aiops/runs/run-partial-error-redaction")
+
+    payload = response.json()
+    error = payload["tool_call_records"][0]["output"]["partial_errors"][0]
+    assert error["query"] == "payment_events"
+    assert error["error_type"] == "adapter_error"
+    assert "secret_events" not in str(payload)

@@ -178,3 +178,47 @@ cases:
       - delete_pod
     expected_llm_call_count: 0
     expected_first_step_id: s3-retry
+
+  - id: llm_add_steps_preserves_remaining_risk_action
+    title: Replanner keeps the existing approval-gated action when adding diagnostics
+    input: order-service Redis connection timeout with a pending production restart
+    incident:
+      service_name: order-service
+      severity: P1
+      environment: prod-cn
+      symptom: Redis connection timeout in logs
+    evidence:
+      - tool_name: query_logs
+        step_id: s1
+        output:
+          summary: Redis connection timeout in application logs
+    current_plan:
+      - step_id: pending-restart
+        tool_name: restart_service
+        purpose: Restart the production service after operator approval
+        input_args:
+          service_name: order-service
+        expected_evidence: Service health recovers after the approved restart
+        risk_level: medium
+    llm_decision:
+      decision: add_steps
+      reason: Add a read-only metrics check before the pending action
+      new_steps:
+        - step_id: llm-metrics-before-action
+          tool_name: query_metrics
+          purpose: Check latency and error rate before the pending action
+          input_args:
+            service_name: order-service
+            time_range: 10m
+          expected_evidence: Current latency and error-rate evidence
+          risk_level: low
+    expected_decision: add_steps
+    expected_decision_source: llm_structured
+    expected_plan_tools:
+      - query_metrics
+      - restart_service
+    forbidden_plan_tools:
+      - delete_pod
+      - execute_sql
+    expected_llm_call_count: 1
+    expected_first_step_id: llm-metrics-before-action

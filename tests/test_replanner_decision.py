@@ -164,6 +164,47 @@ async def test_replanner_retries_failed_tool_without_calling_llm(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_replanner_retry_preserves_remaining_risk_action(monkeypatch) -> None:
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", False)
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout",
+        session_id="replanner-retry-preserves-risk",
+    )
+    state["incident"]["environment"] = "prod"
+    state["current_plan"] = [
+        PlanStep(
+            step_id="s-risk",
+            tool_name="restart_service",
+            purpose="重启生产服务",
+            input_args={"service_name": "order-service"},
+            expected_evidence="服务恢复",
+            risk_level="medium",
+        ).model_dump(mode="json")
+    ]
+    state["plan"] = ["legacy risk step"]
+    state["tool_call_records"] = [
+        {
+            "trace_id": state["trace_id"],
+            "incident_id": state["incident"]["incident_id"],
+            "step_id": "s3",
+            "tool_name": "query_redis_status",
+            "input_args": {"service_name": "order-service"},
+            "status": "failed",
+            "error_message": "redis backend unavailable",
+        }
+    ]
+
+    update = await replanner_module.replanner(state)
+
+    assert [step["tool_name"] for step in update["current_plan"]] == [
+        "query_redis_status",
+        "restart_service",
+    ]
+    assert update["current_plan"][1]["step_id"] == "s-risk"
+    assert len(update["plan"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> None:
     llm_step = PlanStep(
         step_id="llm-redis",
@@ -208,6 +249,237 @@ async def test_replanner_uses_enabled_llm_structured_decision(monkeypatch) -> No
     assert any(
         "Evidence Analyzer 摘要" in content for _, content in fake_prompt.payload["messages"]
     )
+
+
+@pytest.mark.asyncio
+async def test_replanner_add_steps_preserves_remaining_risk_action(monkeypatch) -> None:
+    llm_step = PlanStep(
+        step_id="llm-metrics",
+        tool_name="query_metrics",
+        purpose="补查 order-service 指标",
+        input_args={"service_name": "order-service"},
+        expected_evidence="补充延迟和错误率证据",
+        risk_level="low",
+    )
+    fake_prompt = FakeReplannerPrompt(
+        replanner_module.ReplanDecision(
+            decision="add_steps",
+            reason="补充指标证据",
+            new_steps=[llm_step],
+        )
+    )
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", True)
+    monkeypatch.setattr(replanner_module, "_create_llm", lambda: FakeStructuredLLM())
+    monkeypatch.setattr(replanner_module, "replanner_prompt", fake_prompt)
+    monkeypatch.setattr(
+        replanner_module,
+        "analyze_evidence",
+        lambda _: EvidenceAnalysis(
+            decision="continue_investigation",
+            reason="仍有剩余计划",
+            evidence_sufficient=False,
+        ),
+    )
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout",
+        session_id="replanner-add-preserves-risk",
+    )
+    state["incident"]["environment"] = "prod"
+    state["current_plan"] = [
+        PlanStep(
+            step_id="s-risk",
+            tool_name="restart_service",
+            purpose="重启生产服务",
+            input_args={"service_name": "order-service"},
+            expected_evidence="服务恢复",
+            risk_level="medium",
+        ).model_dump(mode="json")
+    ]
+    state["plan"] = ["legacy risk step"]
+
+    update = await replanner_module.replanner(state)
+
+    assert [step["tool_name"] for step in update["current_plan"]] == [
+        "query_metrics",
+        "restart_service",
+    ]
+    assert update["current_plan"][1]["step_id"] == "s-risk"
+    assert len(update["plan"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_replanner_add_steps_preserves_legacy_only_remaining_plan(monkeypatch) -> None:
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", False)
+    monkeypatch.setattr(
+        replanner_module,
+        "analyze_evidence",
+        lambda _: EvidenceAnalysis(
+            decision="add_steps",
+            reason="需要补充指标证据",
+            recommended_steps=[
+                PlanStep(
+                    step_id="s-new",
+                    tool_name="query_metrics",
+                    purpose="补查指标",
+                    input_args={"service_name": "order-service"},
+                    expected_evidence="延迟和错误率证据",
+                )
+            ],
+        ),
+    )
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-add-preserves-legacy",
+    )
+    state["plan"] = ["legacy diagnostic step"]
+
+    update = await replanner_module.replanner(state)
+
+    assert [step["tool_name"] for step in update["current_plan"]] == [
+        "query_metrics",
+        "manual_analysis",
+    ]
+    assert update["current_plan"][1]["purpose"] == "legacy diagnostic step"
+    assert len(update["plan"]) == 2
+
+
+def test_replanned_steps_do_not_duplicate_existing_queue_entries() -> None:
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-deduplicate-queue",
+    )
+    existing_step = PlanStep(
+        step_id="existing-metrics",
+        tool_name="query_metrics",
+        purpose="检查指标",
+        input_args={"service_name": "order-service"},
+        expected_evidence="延迟和错误率证据",
+    )
+    state["current_plan"] = [existing_step.model_dump(mode="json")]
+    state["plan"] = ["legacy metrics"]
+    new_step = existing_step.model_copy(update={"step_id": "new-metrics"})
+
+    update = replanner_module._steps_with_remaining_plan_state_update(state, [new_step])
+
+    assert len(update["current_plan"]) == 1
+    assert update["current_plan"][0]["step_id"] == "new-metrics"
+    assert len(update["plan"]) == 1
+
+
+def test_replanned_steps_reassign_colliding_step_ids() -> None:
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-unique-step-ids",
+    )
+    state["current_plan"] = [
+        PlanStep(
+            step_id="same-id",
+            tool_name="query_logs",
+            purpose="检查日志",
+            input_args={"service_name": "order-service"},
+            expected_evidence="错误日志",
+        ).model_dump(mode="json")
+    ]
+    new_step = PlanStep(
+        step_id="same-id",
+        tool_name="query_metrics",
+        purpose="检查指标",
+        input_args={"service_name": "order-service"},
+        expected_evidence="延迟和错误率",
+    )
+
+    update = replanner_module._steps_with_remaining_plan_state_update(state, [new_step])
+
+    step_ids = [step["step_id"] for step in update["current_plan"]]
+    assert len(step_ids) == len(set(step_ids))
+
+
+def test_replanned_steps_do_not_repeat_already_executed_diagnostics() -> None:
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-deduplicate-executed",
+    )
+    executed_step = PlanStep(
+        step_id="done-metrics",
+        tool_name="query_metrics",
+        purpose="检查指标",
+        input_args={"service_name": "order-service"},
+        expected_evidence="延迟和错误率",
+        status="success",
+    )
+    state["executed_steps"] = [executed_step.model_dump(mode="json")]
+    repeated_step = executed_step.model_copy(
+        update={"step_id": "repeat-metrics", "status": "pending"}
+    )
+
+    update = replanner_module._steps_with_remaining_plan_state_update(state, [repeated_step])
+
+    assert update == {"current_plan": [], "plan": []}
+
+
+def test_retry_steps_can_repeat_failed_execution_identity() -> None:
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-allow-explicit-retry",
+    )
+    failed_step = PlanStep(
+        step_id="failed-redis",
+        tool_name="query_redis_status",
+        purpose="检查 Redis",
+        input_args={"service_name": "order-service"},
+        expected_evidence="Redis 状态",
+        status="failed",
+    )
+    state["executed_steps"] = [failed_step.model_dump(mode="json")]
+    retry_step = failed_step.model_copy(
+        update={"step_id": "failed-redis-retry", "status": "pending", "retry_count": 1}
+    )
+
+    update = replanner_module._steps_with_remaining_plan_state_update(
+        state,
+        [retry_step],
+        allow_executed_duplicates=True,
+    )
+
+    assert [step["step_id"] for step in update["current_plan"]] == ["failed-redis-retry"]
+
+
+@pytest.mark.asyncio
+async def test_replanner_escalates_when_add_steps_only_repeats_executed_work(
+    monkeypatch,
+) -> None:
+    repeated_step = PlanStep(
+        step_id="repeat-metrics",
+        tool_name="query_metrics",
+        purpose="检查指标",
+        input_args={"service_name": "order-service"},
+        expected_evidence="延迟和错误率",
+    )
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", False)
+    monkeypatch.setattr(
+        replanner_module,
+        "analyze_evidence",
+        lambda _: EvidenceAnalysis(
+            decision="add_steps",
+            reason="错误地重复相同指标查询",
+            recommended_steps=[repeated_step],
+        ),
+    )
+    state = create_initial_aiops_state(
+        "order-service timeout",
+        session_id="replanner-repeated-work-escalation",
+    )
+    state["executed_steps"] = [
+        repeated_step.model_copy(
+            update={"step_id": "done-metrics", "status": "success"}
+        ).model_dump(mode="json")
+    ]
+
+    update = await replanner_module.replanner(state)
+
+    assert update["report"]["status"] == "escalated"
+    assert "未产生新的可执行步骤" in update["response"]
+    assert update["errors"] == ["重规划未产生新的可执行步骤，停止重复排查并升级人工处理"]
 
 
 @pytest.mark.asyncio
@@ -332,12 +604,7 @@ async def test_replanner_checks_remaining_risk_before_generating_report(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_replanner_max_steps_forces_response(monkeypatch) -> None:
-    monkeypatch.setattr(
-        replanner_module,
-        "_generate_response_with_analysis",
-        fake_generate_response_with_analysis,
-    )
+async def test_replanner_max_steps_fails_closed_for_legacy_remaining_plan() -> None:
     state = create_initial_aiops_state(
         "diagnose stubborn incident",
         session_id="replanner-max-steps",
@@ -349,7 +616,89 @@ async def test_replanner_max_steps_forces_response(monkeypatch) -> None:
 
     update = await replanner_module.replanner(state)
 
-    assert update["response"].startswith("report:")
+    assert update["risk_assessment"]["policy"] == "forbidden"
+    assert "plan:legacy-unassessed" in update["risk_assessment"]["matched_rules"]
+    assert update["pending_approval"] is None
+
+
+@pytest.mark.asyncio
+async def test_replanner_max_steps_counts_executions_not_administrative_history(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(replanner_module.config, "aiops_replanner_llm_enabled", False)
+    monkeypatch.setattr(
+        replanner_module,
+        "analyze_evidence",
+        lambda _: EvidenceAnalysis(
+            decision="continue_investigation",
+            reason="仍有一步可执行",
+            evidence_sufficient=False,
+        ),
+    )
+    state = create_initial_aiops_state(
+        "continue bounded diagnosis",
+        session_id="replanner-execution-count",
+    )
+    state["past_steps"] = [
+        (f"administrative-{index}", "postponed") for index in range(replanner_module.MAX_STEPS)
+    ]
+    state["executed_steps"] = [
+        PlanStep(step_id="done-1", tool_name="query_metrics", status="success").model_dump(
+            mode="json"
+        )
+    ]
+    state["current_plan"] = [
+        PlanStep(step_id="next-1", tool_name="query_logs").model_dump(mode="json")
+    ]
+    state["plan"] = ["legacy next"]
+
+    update = await replanner_module.replanner(state)
+
+    assert "response" not in update
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "risk_level", "expected_policy"),
+    [
+        ("restart_service", "medium", "approval_required"),
+        ("delete_pod", "high", "forbidden"),
+    ],
+)
+async def test_replanner_max_steps_applies_risk_gate_before_terminal_response(
+    tool_name: str,
+    risk_level: str,
+    expected_policy: str,
+) -> None:
+    state = create_initial_aiops_state(
+        "diagnose stubborn production incident",
+        session_id=f"replanner-max-steps-{tool_name}",
+    )
+    state["incident"]["environment"] = "prod"
+    state["past_steps"] = [
+        (f"step-{index}", "result") for index in range(replanner_module.MAX_STEPS)
+    ]
+    state["current_plan"] = [
+        PlanStep(
+            step_id="s-risk",
+            tool_name=tool_name,
+            purpose=f"执行生产动作 {tool_name}",
+            input_args={"service_name": "order-service"},
+            expected_evidence="生产动作结果",
+            risk_level=risk_level,
+        ).model_dump(mode="json")
+    ]
+    state["plan"] = ["legacy risk step"]
+
+    update = await replanner_module.replanner(state)
+
+    assert update["risk_assessment"]["policy"] == expected_policy
+    if expected_policy == "approval_required":
+        assert update["pending_approval"]["tool_name"] == tool_name
+        assert "等待人工审批" in update["response"]
+    else:
+        assert update["pending_approval"] is None
+        assert "已拦截危险动作" in update["response"]
 
 
 @pytest.mark.asyncio
@@ -388,3 +737,150 @@ async def test_replanner_request_approval_writes_structured_state(monkeypatch) -
     assert update["pending_approval"]["step_id"] == "s9"
     assert "等待人工审批" in update["response"]
     assert "Agent 不会自动执行生产变更" in update["response"]
+
+
+def test_extract_risk_decision_fails_closed_for_invalid_structured_step() -> None:
+    state = create_initial_aiops_state(
+        "diagnose invalid remaining plan",
+        session_id="replanner-invalid-risk-step",
+    )
+    state["current_plan"] = [
+        {
+            "step_id": "broken-risk",
+            "tool_name": "restart_service",
+            "purpose": "重启生产服务",
+            "input_args": [],
+        }
+    ]
+
+    decision = replanner_module._extract_risk_decision(state)
+
+    assert decision is not None
+    assert decision.policy == "forbidden"
+    assert "plan:invalid-step" in decision.matched_rules
+
+
+def test_extract_risk_decision_fails_closed_for_legacy_text_only_plan() -> None:
+    state = create_initial_aiops_state(
+        "restart production service",
+        session_id="replanner-legacy-risk-plan",
+    )
+    state["plan"] = ["restart production service"]
+
+    decision = replanner_module._extract_risk_decision(state)
+
+    assert decision is not None
+    assert decision.policy == "forbidden"
+    assert decision.risk_level == "high"
+    assert "plan:legacy-unassessed" in decision.matched_rules
+
+
+@pytest.mark.asyncio
+async def test_replanner_blocks_legacy_text_only_plan(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        replanner_module,
+        "analyze_evidence",
+        lambda _: EvidenceAnalysis(
+            decision="continue_investigation",
+            reason="remaining legacy action",
+        ),
+    )
+    monkeypatch.setattr(
+        replanner_module.trace_service,
+        "record_risk_decision",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        replanner_module,
+        "_with_generated_report",
+        lambda _state, update, status: {**update, "report_status": status},
+    )
+    state = create_initial_aiops_state(
+        "restart production service",
+        session_id="replanner-legacy-plan-block",
+    )
+    state["plan"] = ["restart production service"]
+
+    update = await replanner_module.replanner(state)
+
+    assert update["risk_assessment"]["policy"] == "forbidden"
+    assert update["pending_approval"] is None
+    assert update["report_status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_budgets_long_context_and_keeps_latest_failure() -> None:
+    class CapturingChain:
+        def __init__(self) -> None:
+            self.payload: dict[str, Any] | None = None
+
+        async def ainvoke(self, payload: dict[str, Any]) -> dict[str, str]:
+            self.payload = payload
+            return {"response": "bounded"}
+
+    class CapturingPrompt:
+        def __init__(self, chain: CapturingChain) -> None:
+            self.chain = chain
+
+        def __or__(self, _llm: Any) -> CapturingChain:
+            return self.chain
+
+    chain = CapturingChain()
+    original_prompt = replanner_module.response_prompt
+    replanner_module.response_prompt = CapturingPrompt(chain)
+    try:
+        state = create_initial_aiops_state(
+            "x" * 10_000,
+            session_id="replanner-bounded-final-response",
+        )
+        state["past_steps"] = [
+            ("old step", "old result " * 1000),
+            ("latest step", "LATEST_FAILED_RESULT"),
+        ]
+        state["gathered_evidence"] = [
+            {
+                "source_tool": "query_logs",
+                "step_id": f"s-{index}",
+                "summary": "old evidence " * 100,
+                "raw_data": {"status": "success"},
+            }
+            for index in range(20)
+        ] + [
+            {
+                "source_tool": "query_redis_status",
+                "step_id": "latest",
+                "summary": "LATEST_FAILED_EVIDENCE",
+                "raw_data": {"status": "failed"},
+            }
+        ]
+        state["tool_call_records"] = [
+            {
+                "tool_name": "query_logs",
+                "step_id": f"s-{index}",
+                "status": "success",
+                "error_message": "",
+            }
+            for index in range(100)
+        ] + [
+            {
+                "tool_name": "query_redis_status",
+                "step_id": "latest",
+                "status": "failed",
+                "error_message": "LATEST_TOOL_FAILURE",
+            }
+        ]
+
+        update = await replanner_module._generate_response(state, FakeStructuredLLM())
+    finally:
+        replanner_module.response_prompt = original_prompt
+
+    assert update == {"response": "bounded"}
+    assert chain.payload is not None
+    messages = chain.payload["messages"]
+    for _, content in messages[:-1]:
+        assert len(content) <= replanner_module.RESPONSE_CONTEXT_CHAR_LIMIT + 32
+    assert any("LATEST_FAILED_RESULT" in content for _, content in messages)
+    assert any("LATEST_FAILED_EVIDENCE" in content for _, content in messages)
+    assert any("LATEST_TOOL_FAILURE" in content for _, content in messages)

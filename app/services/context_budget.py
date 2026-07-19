@@ -29,7 +29,13 @@ class ContextBudgeter:
     def __init__(self, budget: ContextBudget | None = None) -> None:
         self.budget = budget or ContextBudget()
 
-    def text(self, value: Any, *, limit: int | None = None) -> str:
+    def text(
+        self,
+        value: Any,
+        *,
+        limit: int | None = None,
+        preserve_tail: bool = False,
+    ) -> str:
         """Convert a value to text and keep the rendered output within ``limit`` characters."""
         text = "" if value is None else str(value)
         max_chars = self._normalize_limit(limit)
@@ -40,7 +46,12 @@ class ContextBudgeter:
             return ""
         if len(marker) >= max_chars:
             return marker[:max_chars]
-        return f"{text[: max_chars - len(marker)]}{marker}"
+        content_chars = max_chars - len(marker)
+        if not preserve_tail or content_chars < 2:
+            return f"{text[:content_chars]}{marker}"
+        head_chars = (content_chars + 1) // 2
+        tail_chars = content_chars - head_chars
+        return f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
 
     def json(
         self,
@@ -48,6 +59,7 @@ class ContextBudgeter:
         *,
         limit: int | None = None,
         sort_keys: bool = False,
+        preserve_tail: bool = False,
     ) -> str:
         """Serialize a value as JSON where possible, then apply the text budget."""
         try:
@@ -60,7 +72,7 @@ class ContextBudgeter:
             )
         except TypeError:
             text = str(value)
-        return self.text(text, limit=limit)
+        return self.text(text, limit=limit, preserve_tail=preserve_tail)
 
     def sections(
         self,

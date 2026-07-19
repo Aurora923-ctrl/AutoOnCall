@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 from typing import Any
 
 import httpx
@@ -13,7 +15,9 @@ from app.integrations.base import (
     bearer_headers,
     escape_prometheus_label_value,
     first_float,
+    parse_duration_seconds,
     require_config,
+    require_success_payload,
 )
 
 
@@ -46,12 +50,15 @@ class PrometheusMetricsAdapter:
     ) -> dict[str, Any]:
         base_url = require_config(self.base_url, "PROMETHEUS_BASE_URL")
         queries = {
-            "qps": config.prometheus_qps_query,
-            "error_rate": config.prometheus_error_rate_query,
-            "p95_latency_ms": config.prometheus_p95_query,
+            "qps": _apply_prometheus_window(config.prometheus_qps_query, time_range),
+            "error_rate": _apply_prometheus_window(config.prometheus_error_rate_query, time_range),
+            "p95_latency_ms": _apply_prometheus_window(config.prometheus_p95_query, time_range),
             "cpu_usage_percent": config.prometheus_cpu_query,
             "memory_working_set_bytes": config.prometheus_memory_query,
         }
+        end_seconds = time.time()
+        start_seconds = end_seconds - max(parse_duration_seconds(time_range), 1)
+        step_seconds = max(parse_duration_seconds(interval, default_seconds=60), 1)
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
             headers=bearer_headers(self.token),
@@ -60,8 +67,14 @@ class PrometheusMetricsAdapter:
             values: dict[str, float] = {}
             empty_queries: list[str] = []
             for name, template in queries.items():
-                value, has_data = await self._query_instant(
-                    client, base_url, template, service_name
+                value, has_data = await self._query_range(
+                    client,
+                    base_url,
+                    template,
+                    service_name,
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    step_seconds=step_seconds,
                 )
                 values[name] = value
                 if not has_data:
@@ -97,7 +110,9 @@ class PrometheusMetricsAdapter:
             "status": (
                 "missing"
                 if "p95_latency_ms" in empty_queries
-                else "high" if values["p95_latency_ms"] >= 1000 else "normal"
+                else "high"
+                if values["p95_latency_ms"] >= 1000
+                else "normal"
             ),
         }
         error_rate: dict[str, Any] = {
@@ -106,7 +121,9 @@ class PrometheusMetricsAdapter:
             "status": (
                 "missing"
                 if "error_rate" in empty_queries
-                else "high" if values["error_rate"] >= 0.01 else "normal"
+                else "high"
+                if values["error_rate"] >= 0.01
+                else "normal"
             ),
         }
         cpu_current = round(values["cpu_usage_percent"], 2)
@@ -160,33 +177,54 @@ class PrometheusMetricsAdapter:
             memory=memory,
         )
 
-    async def _query_instant(
+    async def _query_range(
         self,
         client: httpx.AsyncClient,
         base_url: str,
         query_template: str,
         service_name: str,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+        step_seconds: int,
     ) -> tuple[float, bool]:
         query = query_template.replace(
             "{service_name}",
             escape_prometheus_label_value(service_name),
         )
-        response = await client.get(f"{base_url}/api/v1/query", params={"query": query})
+        response = await client.get(
+            f"{base_url}/api/v1/query_range",
+            params={
+                "query": query,
+                "start": f"{start_seconds:.3f}",
+                "end": f"{end_seconds:.3f}",
+                "step": str(step_seconds),
+            },
+        )
         response.raise_for_status()
-        payload = response.json()
+        payload = require_success_payload(
+            response.json(),
+            system_name="Prometheus",
+        )
         if payload.get("status") != "success":
-            raise ExternalAdapterError(f"Prometheus query failed: {payload}")
+            raise ExternalAdapterError("Prometheus query returned a non-success status")
         result = payload.get("data", {}).get("result", [])
         if not isinstance(result, list) or not result:
             return 0.0, False
-        first_result = result[0]
-        if not isinstance(first_result, dict):
-            return 0.0, False
-        value_payload = first_result.get("value", [None, 0])
-        if not isinstance(value_payload, (list, tuple)) or len(value_payload) < 2:
-            return 0.0, False
-        value = value_payload[1]
-        return first_float(value), True
+        for series in result:
+            if not isinstance(series, dict):
+                continue
+            samples = series.get("values")
+            if not isinstance(samples, list):
+                value = series.get("value")
+                samples = [value] if isinstance(value, (list, tuple)) else []
+            for sample in reversed(samples):
+                if not isinstance(sample, (list, tuple)) or len(sample) < 2:
+                    continue
+                value = first_float(sample[1], default=float("nan"))
+                if math.isfinite(value):
+                    return value, True
+        return 0.0, False
 
 
 def _metric_inference(
@@ -218,3 +256,9 @@ def _metric_uncertainty(service_name: str) -> str:
         "Prometheus metrics describe impact and timing but require logs and dependency-domain "
         "evidence before selecting a root cause."
     )
+
+
+def _apply_prometheus_window(query_template: str, time_range: str) -> str:
+    """Use the requested bounded window for rate/range-vector queries."""
+    seconds = min(max(parse_duration_seconds(time_range), 1), 3600)
+    return query_template.replace("[5m]", f"[{seconds}s]")

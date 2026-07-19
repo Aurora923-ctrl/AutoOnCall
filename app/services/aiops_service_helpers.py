@@ -119,6 +119,16 @@ def _merge_checkpoint_with_node_output(
     """Merge LangGraph node deltas into a durable snapshot without losing additive fields."""
     merged = dict(checkpoint_state or {})
     for key, value in node_output.items():
+        if key in {"session_id", "trace_id", "incident_id"} and key in merged:
+            # These identifiers belong to the run, not to an individual node delta.
+            continue
+        if key == "incident" and isinstance(merged.get("incident"), dict):
+            existing_incident = dict(merged["incident"])
+            incoming_incident = value if isinstance(value, dict) else {}
+            existing_id = str(existing_incident.get("incident_id") or "")
+            incoming_id = str(incoming_incident.get("incident_id") or "")
+            if existing_id and incoming_id and existing_id != incoming_id:
+                continue
         if key not in ADDITIVE_STATE_FIELDS or not isinstance(value, list):
             merged[key] = value
             continue

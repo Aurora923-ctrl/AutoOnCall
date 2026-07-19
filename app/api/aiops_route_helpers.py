@@ -6,6 +6,7 @@ the existing URL contracts and response payloads.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 from uuid import uuid4
@@ -22,7 +23,10 @@ from app.services.aiops_read_models import (
     filter_aiops_run_summaries,
     is_known_incident_id,
     list_run_trace_events,
+    select_run_approvals,
+    select_run_report,
 )
+from app.services.aiops_service import AIOpsResumeConflictError, AIOpsRunConflictError
 from app.services.approval_service import ApprovalNotFoundError
 from app.services.change_execution_read_models import build_change_execution_read_model
 from app.services.change_execution_service import (
@@ -36,6 +40,7 @@ from app.services.demo_incidents import (
     canonical_demo_case_id,
     demo_incident_aliases,
 )
+from app.utils.log_safety import sanitize_log_value
 from app.utils.public_errors import (
     GENERIC_CHANGE_ERROR,
     GENERIC_DIAGNOSIS_ERROR,
@@ -106,12 +111,8 @@ def _build_filtered_aiops_run_summaries(
     items = []
     for snapshot in snapshots:
         known_incident = is_known_incident_id(snapshot.incident_id)
-        approvals = (
-            approval_service.list_requests(incident_id=snapshot.incident_id)
-            if known_incident
-            else []
-        )
-        report = report_generator.get_report(snapshot.incident_id) if known_incident else None
+        approvals = _run_approvals(snapshot, approval_service) if known_incident else []
+        report = _run_report(snapshot, report_generator) if known_incident else None
         items.append(
             build_aiops_run_summary(
                 snapshot,
@@ -140,16 +141,25 @@ def build_aiops_run_status_payload(
         raise HTTPException(status_code=404, detail="AIOps diagnosis run not found")
     known_incident = is_known_incident_id(snapshot.incident_id)
     events = list_run_trace_events(snapshot, trace_service) if known_incident else []
-    approvals = (
-        approval_service.list_requests(incident_id=snapshot.incident_id) if known_incident else []
-    )
-    report = report_generator.get_report(snapshot.incident_id) if known_incident else None
+    approvals = _run_approvals(snapshot, approval_service) if known_incident else []
+    report = _run_report(snapshot, report_generator) if known_incident else None
     return build_aiops_run_status(
         snapshot,
         events=events,
         approvals=approvals,
         report=report,
     )
+
+
+def _run_approvals(snapshot: Any, approval_service: Any) -> list[ApprovalRequest]:
+    """Return approvals explicitly associated with one diagnosis session."""
+    approvals = approval_service.list_requests(incident_id=snapshot.incident_id)
+    return select_run_approvals(snapshot, approvals)
+
+
+def _run_report(snapshot: Any, report_generator: Any) -> Any:
+    """Return the incident report only when it belongs to this run."""
+    return select_run_report(snapshot, report_generator.get_report(snapshot.incident_id))
 
 
 async def diagnosis_event_stream(
@@ -159,6 +169,8 @@ async def diagnosis_event_stream(
     incident: Any,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield SSE messages for the normal AIOps diagnosis workflow."""
+    safe_session_id = sanitize_log_value(session_id)
+    terminal_emitted = False
     try:
         async for event in aiops_service.diagnose(
             session_id=session_id,
@@ -167,18 +179,49 @@ async def diagnosis_event_stream(
             yield sse_message(event)
 
             if is_terminal_event(event):
+                terminal_emitted = True
                 break
 
-        logger.info(f"[会话 {session_id}] AIOps 诊断流式响应完成")
+        if not terminal_emitted:
+            logger.error(f"[会话 {safe_session_id}] AIOps 诊断流在 terminal event 前结束")
+            yield sse_message(
+                {
+                    "type": "error",
+                    "stage": "stream_ended_without_terminal",
+                    "status": "failed",
+                    "message": GENERIC_DIAGNOSIS_ERROR,
+                    "session_id": session_id,
+                }
+            )
+            return
+        logger.info(f"[会话 {safe_session_id}] AIOps 诊断流式响应完成")
 
+    except asyncio.CancelledError:
+        raise
+    except AIOpsRunConflictError as exc:
+        yield sse_message(
+            {
+                "type": "error",
+                "stage": "run_conflict",
+                "status": "failed",
+                "message": str(exc),
+                "session_id": session_id,
+            }
+        )
     except Exception as exc:
-        logger.error(f"[会话 {session_id}] AIOps 诊断流式响应异常: {exc}", exc_info=True)
+        logger.error(
+            "[会话 {}] AIOps 诊断流式响应异常: error_type={}",
+            safe_session_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
         yield sse_message(
             {
                 "type": "error",
                 "stage": "exception",
                 "status": "failed",
                 "message": public_exception_message(exc, fallback=GENERIC_DIAGNOSIS_ERROR),
+                "session_id": session_id,
             }
         )
 
@@ -221,31 +264,16 @@ def resolve_demo_incident(case_id: str) -> Any:
 def resolve_resume_approval(
     approval_service: Any,
     incident_id: str,
-    approval_id: str | None,
+    approval_id: str,
 ) -> ApprovalRequest:
     """Return the approval decision that authorizes diagnosis resume."""
     try:
-        if approval_id:
-            approval = approval_service.get_request(approval_id)
-            if approval.incident_id != incident_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="approval_id does not belong to the requested incident",
-                )
-        else:
-            pending = approval_service.list_requests(incident_id=incident_id, status="pending")
-            if pending:
-                raise HTTPException(
-                    status_code=409,
-                    detail="approval is still pending",
-                )
-            approved = approval_service.list_requests(incident_id=incident_id, status="approved")
-            if not approved:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No approved approval for incident {incident_id}",
-                )
-            approval = approved[-1]
+        approval = approval_service.get_request(approval_id)
+        if approval.incident_id != incident_id:
+            raise HTTPException(
+                status_code=400,
+                detail="approval_id does not belong to the requested incident",
+            )
     except HTTPException:
         raise
     except ApprovalNotFoundError as exc:
@@ -255,6 +283,11 @@ def resolve_resume_approval(
         raise HTTPException(
             status_code=409,
             detail=f"approval is {approval.status}, expected approved",
+        )
+    if hasattr(approval_service, "is_expired") and approval_service.is_expired(approval):
+        raise HTTPException(
+            status_code=409,
+            detail="approval authorization has expired",
         )
     return cast(ApprovalRequest, approval)
 
@@ -267,6 +300,8 @@ async def resume_diagnosis_event_stream(
     approval: Any,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield SSE messages for post-approval diagnosis resume."""
+    safe_session_id = sanitize_log_value(session_id)
+    terminal_emitted = False
     try:
         async for event in aiops_service.resume_after_approval(
             session_id=session_id,
@@ -275,7 +310,22 @@ async def resume_diagnosis_event_stream(
         ):
             yield sse_message(event)
             if is_terminal_event(event):
+                terminal_emitted = True
                 break
+        if not terminal_emitted:
+            logger.error(f"[会话 {safe_session_id}] AIOps resume 流在 terminal event 前结束")
+            yield sse_message(
+                {
+                    "type": "error",
+                    "stage": "resume_ended_without_terminal",
+                    "status": "failed",
+                    "message": GENERIC_DIAGNOSIS_ERROR,
+                    "session_id": session_id,
+                    "incident_id": incident_id,
+                }
+            )
+    except asyncio.CancelledError:
+        raise
     except LookupError as exc:
         yield sse_message(
             {
@@ -283,6 +333,7 @@ async def resume_diagnosis_event_stream(
                 "stage": "resume_not_found",
                 "status": "failed",
                 "message": public_exception_message(exc),
+                "session_id": session_id,
                 "incident_id": incident_id,
             }
         )
@@ -290,20 +341,31 @@ async def resume_diagnosis_event_stream(
         yield sse_message(
             {
                 "type": "error",
-                "stage": "resume_rejected",
+                "stage": (
+                    "resume_conflict"
+                    if isinstance(exc, AIOpsResumeConflictError)
+                    else "resume_rejected"
+                ),
                 "status": "failed",
                 "message": public_exception_message(exc),
+                "session_id": session_id,
                 "incident_id": incident_id,
             }
         )
     except Exception as exc:
-        logger.error(f"[会话 {session_id}] AIOps resume 异常: {exc}", exc_info=True)
+        logger.error(
+            "[会话 {}] AIOps resume 异常: error_type={}",
+            safe_session_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
         yield sse_message(
             {
                 "type": "error",
                 "stage": "resume_exception",
                 "status": "failed",
                 "message": public_exception_message(exc, fallback=GENERIC_DIAGNOSIS_ERROR),
+                "session_id": session_id,
                 "incident_id": incident_id,
             }
         )
@@ -320,6 +382,7 @@ async def safe_change_event_stream(
     observe_window_seconds: int,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield SSE messages for safe change workflow resume."""
+    terminal_emitted = False
     try:
         async for event in change_service.start_after_approval(
             incident_id=incident_id,
@@ -331,7 +394,27 @@ async def safe_change_event_stream(
         ):
             yield sse_message(event)
             if is_terminal_event(event):
+                terminal_emitted = True
                 break
+        if not terminal_emitted:
+            logger.error(
+                "Safe change stream ended before a terminal event: "
+                "incident_id={}, change_plan_id={}",
+                incident_id,
+                change_plan_id,
+            )
+            yield sse_message(
+                {
+                    "type": "error",
+                    "stage": "change_stream_ended_without_terminal",
+                    "status": "failed",
+                    "message": GENERIC_CHANGE_ERROR,
+                    "incident_id": incident_id,
+                    "change_plan_id": change_plan_id,
+                }
+            )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         yield sse_message(_change_resume_error_payload(exc, incident_id, change_plan_id))
 
@@ -359,7 +442,13 @@ def _change_resume_error_payload(
             "incident_id": incident_id,
             "change_plan_id": change_plan_id,
         }
-    logger.error(f"安全变更恢复异常: {exc}", exc_info=True)
+    logger.error(
+        "安全变更恢复异常: error_type={}, incident_id={}, change_plan_id={}",
+        type(exc).__name__,
+        sanitize_log_value(incident_id),
+        sanitize_log_value(change_plan_id),
+        exc_info=True,
+    )
     return {
         "type": "error",
         "stage": "change_resume_exception",

@@ -7,8 +7,15 @@ from typing import Any
 import httpx
 
 from app.config import config
-from app.integrations.base import adapter_success, bearer_headers, require_config
+from app.integrations.base import (
+    ExternalAdapterResponseError,
+    adapter_success,
+    bearer_headers,
+    require_config,
+    require_success_payload,
+)
 from app.integrations.mysql_business_data import MySQLBusinessDataAdapter
+from app.integrations.mysql_ticket_writer import MySQLTicketWriterAdapter
 
 
 class TicketingAdapter:
@@ -19,12 +26,14 @@ class TicketingAdapter:
         url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         mysql_adapter: MySQLBusinessDataAdapter | None = None,
+        mysql_writer: MySQLTicketWriterAdapter | None = None,
     ):
         self.url = url if url is not None else config.ticket_api_url
         self.token = config.ticket_api_bearer_token
         self.timeout_seconds = config.ticket_api_timeout_seconds
         self.transport = transport
         self.mysql_adapter = mysql_adapter or MySQLBusinessDataAdapter()
+        self.mysql_writer = mysql_writer or MySQLTicketWriterAdapter()
 
     @property
     def configured(self) -> bool:
@@ -45,8 +54,15 @@ class TicketingAdapter:
                     params={"service_name": service_name, "query": query, "limit": limit},
                 )
                 response.raise_for_status()
-                payload = response.json()
+                payload = require_success_payload(
+                    response.json(),
+                    system_name="Ticket history API",
+                )
             tickets = payload.get("tickets", payload.get("items", []))
+            if not isinstance(tickets, list):
+                raise ExternalAdapterResponseError(
+                    "Ticket history response tickets/items must be an array"
+                )
             normalized_tickets = [
                 self._ticket_summary(ticket)
                 for ticket in self._filter_tickets(tickets, service_name, query, limit)
@@ -79,7 +95,7 @@ class TicketingAdapter:
     ) -> dict[str, Any]:
         if not self.url:
             ticket = self._ticket_summary(
-                await self.mysql_adapter.create_ticket(
+                await self.mysql_writer.create_ticket(
                     service_name=service_name,
                     title=title,
                     description=description,
@@ -117,7 +133,10 @@ class TicketingAdapter:
         ) as client:
             response = await client.post(url, json=request)
             if response.status_code == 409:
-                payload = response.json()
+                payload = require_success_payload(
+                    response.json(),
+                    system_name="Ticket creation API",
+                )
                 ticket = self._ticket_summary(payload.get("ticket", payload))
                 return adapter_success(
                     source="ticket_api",
@@ -130,8 +149,13 @@ class TicketingAdapter:
                     duplicate=True,
                 )
             response.raise_for_status()
-            payload = response.json()
+            payload = require_success_payload(
+                response.json(),
+                system_name="Ticket creation API",
+            )
         ticket = self._ticket_summary(payload.get("ticket", payload))
+        if not ticket["ticket_id"]:
+            raise ExternalAdapterResponseError("Ticket creation response missing ticket_id")
         return adapter_success(
             source="ticket_api",
             summary=f"工单创建成功: {ticket.get('ticket_id', '')}",

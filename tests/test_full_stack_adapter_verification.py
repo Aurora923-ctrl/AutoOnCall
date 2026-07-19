@@ -43,7 +43,7 @@ class FakeRegistry:
                 "feature_flag_change": True,
                 "slow_query_count": 18,
                 "pool_waiting": 6,
-                "active_connections": 188,
+                "pool_active_connections": 188,
             },
         }
         if source == "failed":

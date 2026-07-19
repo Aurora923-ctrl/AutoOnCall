@@ -1,5 +1,6 @@
 """Tests for trace events emitted by AIOps workflow components."""
 
+import asyncio
 import importlib
 from typing import Any
 
@@ -11,7 +12,7 @@ from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.plan import PlanStep
 from app.models.report import DiagnosisReport
-from app.services.aiops_service import AIOpsService
+from app.services.aiops_service import AIOpsResumeConflictError, AIOpsService
 from app.services.approval_service import ApprovalService
 from app.services.report_generator import ReportGenerator
 from app.services.sqlite_store import AIOpsSQLiteStore
@@ -174,6 +175,17 @@ async def test_resume_after_approval_uses_persisted_report_when_checkpoint_is_mi
             markdown="# order-service AIOps 诊断报告",
         )
     )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="missing-after-restart",
+            status="waiting_approval",
+            state={
+                "trace_id": trace_id,
+                "incident": {"incident_id": incident_id},
+                "pending_approval": approval.model_dump(mode="json"),
+            },
+        )
+    )
 
     monkeypatch.setattr(aiops_service_module, "trace_service", trace_store)
     monkeypatch.setattr(aiops_service_module, "report_generator", report_store)
@@ -201,11 +213,11 @@ async def test_resume_after_approval_uses_persisted_report_when_checkpoint_is_mi
     assert business_events[0]["execution_boundary"] == "agent_does_not_execute_production_change"
     assert "不会自动执行生产变更" in business_events[0]["message"]
     assert events[-1]["status"] == "approval_resumed"
-    assert events[-1]["resume_source"] == "report_fallback"
+    assert events[-1]["resume_source"] == "session_snapshot"
     assert events[-1]["execution_boundary"] == "agent_does_not_execute_production_change"
     assert "未执行任何生产变更" in events[-1]["message"]
     assert events[-1]["structured_report"]["approval_status"] == "approved"
-    assert "审批恢复记录" in events[-1]["structured_report"]["markdown"]
+    assert "AIOps 诊断报告" in events[-1]["structured_report"]["markdown"]
     assert report_store.get_report(incident_id).status == "approval_resumed"
     assert trace_store.list_events(incident_id=incident_id, event_type="diagnosis_resumed")
     assert service.get_session_snapshot("missing-after-restart").status == "approval_resumed"
@@ -323,3 +335,386 @@ async def test_resume_after_approval_uses_persisted_session_snapshot_when_checkp
     assert saved_snapshot.pending_approval is None
     assert saved_snapshot.final_report_id == events[-1]["structured_report"]["report_id"]
     assert report_store.get_report(incident_id).status == "approval_resumed"
+
+
+def test_diagnosis_session_claim_rejects_existing_snapshot(tmp_path) -> None:
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "session-claim.db")
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="session-existing",
+            status="completed",
+            state={
+                "trace_id": "trace-existing",
+                "incident": {"incident_id": "inc-existing"},
+            },
+        )
+    )
+
+    service._claim_diagnosis_session("session-existing")
+    service._release_diagnosis_session("session-existing")
+
+
+def test_atomic_session_snapshot_create_rejects_duplicate_identity(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "session-create.db")
+    first = AIOpsSessionSnapshot.from_state(
+        session_id="session-atomic",
+        state={"trace_id": "trace-first", "incident": {"incident_id": "inc-first"}},
+    )
+    second = AIOpsSessionSnapshot.from_state(
+        session_id="session-atomic",
+        state={"trace_id": "trace-second", "incident": {"incident_id": "inc-second"}},
+    )
+
+    assert store.create_aiops_session_snapshot(first) is True
+    assert store.create_aiops_session_snapshot(second) is False
+    saved = store.get_aiops_session_snapshot("session-atomic")
+    assert saved is not None
+    assert saved.trace_id == "trace-first"
+    assert saved.incident_id == "inc-first"
+
+
+def test_resolve_resume_session_id_scans_all_snapshot_pages(tmp_path) -> None:
+    incident_id = "inc-resume-paged"
+    approval = ApprovalRequest(
+        approval_id="apr-resume-paged",
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": "trace-target", "session_id": "session-target"},
+    )
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "resume-paged.db")
+
+    for index in range(101):
+        state = {
+            "trace_id": f"trace-other-{index}",
+            "incident": {"incident_id": incident_id},
+            "pending_approval": {"approval_id": f"apr-other-{index}"},
+        }
+        service.state_store.save_aiops_session_snapshot(
+            AIOpsSessionSnapshot.from_state(
+                session_id=f"session-other-{index}",
+                status="waiting_approval",
+                state=state,
+            )
+        )
+
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="session-target",
+            status="waiting_approval",
+            state={
+                "trace_id": "trace-target",
+                "incident": {"incident_id": incident_id},
+                "pending_approval": approval.model_dump(mode="json"),
+            },
+        )
+    )
+
+    assert (
+        service.resolve_resume_session_id(
+            incident_id=incident_id,
+            approval=approval,
+        )
+        == "session-target"
+    )
+
+
+def test_reconcile_incomplete_runs_scans_all_snapshot_pages(tmp_path) -> None:
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "reconcile-paged.db")
+
+    for index in range(101):
+        service.state_store.save_aiops_session_snapshot(
+            AIOpsSessionSnapshot.from_state(
+                session_id=f"session-terminal-{index}",
+                status="completed",
+                state={
+                    "trace_id": f"trace-terminal-{index}",
+                    "incident": {"incident_id": f"inc-terminal-{index}"},
+                },
+            )
+        )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="session-running-after-page",
+            status="running",
+            state={
+                "trace_id": "trace-running-after-page",
+                "incident": {"incident_id": "inc-running-after-page"},
+            },
+        )
+    )
+
+    assert service.reconcile_incomplete_runs() == 1
+    saved = service.get_session_snapshot("session-running-after-page")
+    assert saved is not None
+    assert saved.status == "failed"
+
+
+def test_resolve_resume_session_id_requires_matching_paused_snapshot(tmp_path) -> None:
+    incident_id = "inc-resume-identity"
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": "trace-old"},
+    )
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "resume-identity.db")
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="session-newer",
+            status="waiting_approval",
+            state={
+                "trace_id": "trace-newer",
+                "incident": {"incident_id": incident_id},
+                "pending_approval": {"approval_id": "apr-other"},
+            },
+        )
+    )
+
+    with pytest.raises(LookupError, match="No paused checkpoint"):
+        service.resolve_resume_session_id(incident_id=incident_id, approval=approval)
+
+
+def test_report_fallback_rejects_unrelated_approval() -> None:
+    report = DiagnosisReport(
+        incident_id="inc-report-identity",
+        trace_id="trace-report-identity",
+        title="Diagnosis report",
+        service_name="order-service",
+        severity="P1",
+        environment="prod",
+        status="approval_approved",
+        summary="Waiting for approved mitigation",
+        root_cause="Redis saturation",
+        approval_decision={"approval_id": "apr-report"},
+        markdown="# Diagnosis report",
+    )
+    approval = ApprovalRequest(
+        approval_id="apr-other",
+        incident_id=report.incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": report.trace_id},
+    )
+
+    with pytest.raises(ValueError, match="persisted diagnosis report"):
+        AIOpsService._validate_resume_report(report, approval)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resume_claim_is_rejected_until_first_finishes(monkeypatch) -> None:
+    service = AIOpsService()
+    approval = ApprovalRequest(
+        incident_id="inc-resume-concurrent",
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+    )
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def blocking_resume(**_kwargs):
+        started.set()
+        yield {"type": "status"}
+        await release.wait()
+        yield {"type": "complete"}
+
+    monkeypatch.setattr(service, "_resume_after_approval_impl", blocking_resume)
+
+    first_stream = service.resume_after_approval(
+        session_id="session-resume-concurrent",
+        incident_id=approval.incident_id,
+        approval=approval,
+    )
+    assert (await anext(first_stream))["type"] == "status"
+    await started.wait()
+
+    second_stream = service.resume_after_approval(
+        session_id="session-resume-concurrent",
+        incident_id=approval.incident_id,
+        approval=approval,
+    )
+    with pytest.raises(AIOpsResumeConflictError, match="already in progress"):
+        await anext(second_stream)
+
+    release.set()
+    assert (await anext(first_stream))["type"] == "complete"
+    with pytest.raises(StopAsyncIteration):
+        await anext(first_stream)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resume_is_rejected_after_first_completion(monkeypatch, tmp_path) -> None:
+    incident_id = "inc-resume-once"
+    trace_id = "trace-resume-once"
+    session_id = "session-resume-once"
+    database_path = tmp_path / "resume-once.db"
+    trace_store = TraceService(database_path)
+    report_store = ReportGenerator(database_path)
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(database_path)
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": trace_id, "session_id": session_id},
+    )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id=session_id,
+            status="waiting_approval",
+            state={
+                "trace_id": trace_id,
+                "incident": {
+                    "incident_id": incident_id,
+                    "service_name": "order-service",
+                },
+                "pending_approval": approval.model_dump(mode="json"),
+            },
+        )
+    )
+    monkeypatch.setattr(aiops_service_module, "trace_service", trace_store)
+    monkeypatch.setattr(aiops_service_module, "report_generator", report_store)
+
+    first_events = [
+        event
+        async for event in service.resume_after_approval(
+            session_id=session_id,
+            incident_id=incident_id,
+            approval=approval,
+        )
+    ]
+    assert first_events[-1]["type"] == "complete"
+
+    with pytest.raises(ValueError, match="not waiting"):
+        service.resolve_resume_session_id(
+            incident_id=incident_id,
+            approval=approval,
+            requested_session_id=session_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resume_persistence_failure_does_not_emit_complete(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    incident_id = "inc-resume-persistence-failed"
+    trace_id = "trace-resume-persistence-failed"
+    session_id = "session-resume-persistence-failed"
+    database_path = tmp_path / "resume-persistence-failed.db"
+    trace_store = TraceService(database_path)
+    report_store = ReportGenerator(database_path)
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(database_path)
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": trace_id, "session_id": session_id},
+    )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id=session_id,
+            status="waiting_approval",
+            state={
+                "trace_id": trace_id,
+                "incident": {
+                    "incident_id": incident_id,
+                    "service_name": "order-service",
+                },
+                "pending_approval": approval.model_dump(mode="json"),
+            },
+        )
+    )
+    original_save = service._save_session_snapshot
+
+    def fail_terminal_save(**kwargs):
+        if kwargs.get("required"):
+            raise RuntimeError("snapshot unavailable")
+        return original_save(**kwargs)
+
+    monkeypatch.setattr(aiops_service_module, "trace_service", trace_store)
+    monkeypatch.setattr(aiops_service_module, "report_generator", report_store)
+    monkeypatch.setattr(service, "_save_session_snapshot", fail_terminal_save)
+
+    events = []
+    with pytest.raises(RuntimeError, match="snapshot unavailable"):
+        async for event in service.resume_after_approval(
+            session_id=session_id,
+            incident_id=incident_id,
+            approval=approval,
+        ):
+            events.append(event)
+
+    assert not any(event["type"] == "complete" for event in events)
+    snapshot = service.get_session_snapshot(session_id)
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.progress["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_retry_uses_distinct_progress_cursors(monkeypatch, tmp_path) -> None:
+    incident_id = "inc-resume-retry-cursor"
+    trace_id = "trace-resume-retry-cursor"
+    session_id = "session-resume-retry-cursor"
+    database_path = tmp_path / "resume-retry-cursor.db"
+    trace_store = TraceService(database_path)
+    report_store = ReportGenerator(database_path)
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(database_path)
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": trace_id, "session_id": session_id},
+    )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id=session_id,
+            status="failed",
+            state={
+                "trace_id": trace_id,
+                "incident": {
+                    "incident_id": incident_id,
+                    "service_name": "order-service",
+                },
+                "pending_approval": approval.model_dump(mode="json"),
+                "resume_approval_id": approval.approval_id,
+                "resume_status": "failed",
+                "resume_attempt": 1,
+            },
+        )
+    )
+    monkeypatch.setattr(aiops_service_module, "trace_service", trace_store)
+    monkeypatch.setattr(aiops_service_module, "report_generator", report_store)
+
+    events = [
+        event
+        async for event in service.resume_after_approval(
+            session_id=session_id,
+            incident_id=incident_id,
+            approval=approval,
+        )
+    ]
+
+    cursors = [event["progress_cursor"] for event in events if event.get("progress_cursor")]
+    assert cursors
+    assert all(":resume-02-" in cursor for cursor in cursors)
+    assert len(set(cursors)) == 3
+    saved = service.get_session_snapshot(session_id)
+    assert saved is not None
+    assert saved.resume_attempt == 2
+    assert saved.resume_approval_id == approval.approval_id
+    assert saved.resume_status == "completed"

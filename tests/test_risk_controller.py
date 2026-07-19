@@ -77,6 +77,23 @@ def test_production_restart_service_is_high_risk_approval() -> None:
     assert "tool:not-read-only" in decision.matched_rules
 
 
+def test_qualified_production_environment_keeps_write_action_high_risk() -> None:
+    for environment in ("prod-cn", "production-us", "prd_east"):
+        decision = assess_plan_step(
+            PlanStep(
+                step_id=f"restart-{environment}",
+                tool_name="restart_service",
+                purpose="Restart the affected service",
+                input_args={"service_name": "order-service"},
+                risk_level="medium",
+            ),
+            incident={"environment": environment, "service_name": "order-service"},
+        )
+
+        assert decision.policy == "approval_required"
+        assert decision.risk_level == "high"
+
+
 def test_read_only_pod_restart_count_query_is_not_approval_action() -> None:
     decision = assess_plan_step(
         PlanStep(
@@ -95,6 +112,44 @@ def test_read_only_pod_restart_count_query_is_not_approval_action() -> None:
 
     assert decision.policy == "allow"
     assert decision.need_approval is False
+
+
+def test_read_only_query_is_not_blocked_by_incident_action_text() -> None:
+    decision = assess_plan_step(
+        PlanStep(
+            step_id="s-context",
+            tool_name="query_metrics",
+            purpose="检查服务指标",
+            input_args={"service_name": "order-service"},
+            expected_evidence="确认延迟和错误率",
+            risk_level="low",
+        ),
+        incident={
+            "environment": "prod",
+            "service_name": "order-service",
+            "symptom": "operator requested restart service after diagnosis",
+        },
+    )
+
+    assert decision.policy == "allow"
+    assert decision.need_approval is False
+
+
+def test_action_pattern_inside_step_input_still_requires_approval() -> None:
+    decision = assess_plan_step(
+        PlanStep(
+            step_id="s-action-input",
+            tool_name="custom_action",
+            purpose="执行操作员请求",
+            input_args={"requested_action": "restart service"},
+            expected_evidence="动作执行结果",
+            risk_level="medium",
+        ),
+        incident={"environment": "prod", "service_name": "order-service"},
+    )
+
+    assert decision.policy == "approval_required"
+    assert "action:restart" in decision.matched_rules
 
 
 def test_delete_pod_is_forbidden_by_default() -> None:

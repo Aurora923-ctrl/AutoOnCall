@@ -8,6 +8,11 @@ from app.models.evidence import (
     infer_evidence_stance,
     infer_evidence_type,
 )
+from app.services.diagnostic_signal_rules import (
+    evidence_matches_category,
+    is_metric_abnormal,
+    missing_tools_from_context,
+)
 from app.tools.base import ToolExecutionResult
 
 DEFAULT_DATA_SOURCE_BY_TOOL = {
@@ -314,6 +319,55 @@ def test_analyzer_detects_redis_log_status_conflict_and_lowers_confidence() -> N
     assert any("证据冲突降低置信度" in reason for reason in analysis.confidence_reasons)
 
 
+def test_analyzer_does_not_treat_all_refuting_successes_as_sufficient() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis maxclients alert",
+        session_id="analysis-all-refuting",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_metrics",
+            {
+                "summary": "P95 and 5xx are within threshold",
+                "p95_latency_ms": {"status": "normal"},
+                "error_rate": {"status": "normal"},
+            },
+            "s1",
+        ),
+        evidence_from_tool(
+            "query_logs",
+            {
+                "summary": "no error or timeout log found",
+                "signals": {"log_count": 0},
+                "logs": {"total": 0, "logs": []},
+            },
+            "s2",
+        ),
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "Redis connected_clients is normal",
+                "connected_clients": 1200,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.12,
+                "alert_info": {"triggered": False},
+            },
+            "s3",
+        ),
+    ]
+
+    analysis = analyze_evidence(state)
+    redis_hypothesis = next(
+        item for item in analysis.hypothesis_ranking if item.category == "redis_maxclients"
+    )
+
+    assert analysis.evidence_sufficient is False
+    assert analysis.confidence < 0.86
+    assert redis_hypothesis.supporting_evidence_ids == []
+    assert redis_hypothesis.refuting_evidence_ids
+
+
 def test_analyzer_degrades_to_incomplete_report_after_retry_failed() -> None:
     state = create_initial_aiops_state(
         "order-service Redis connection timeout and 5xx",
@@ -355,6 +409,100 @@ def test_analyzer_degrades_to_incomplete_report_after_retry_failed() -> None:
     assert any("工具失败降级" in reason for reason in analysis.confidence_reasons)
 
 
+def test_failed_tool_payload_does_not_create_root_cause_hypothesis() -> None:
+    state = create_initial_aiops_state(
+        "order-service request failures",
+        session_id="analysis-failed-payload-hypothesis",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "connected_clients reached maxclients",
+                "connected_clients": 10000,
+                "maxclients": 10000,
+                "error_message": "redis backend unavailable",
+            },
+            "s3-retry",
+            status="failed",
+        )
+    ]
+    state["tool_call_records"] = [
+        {
+            "step_id": "s3-retry",
+            "tool_name": "query_redis_status",
+            "status": "failed",
+            "error_message": "redis backend unavailable",
+        }
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert not any("Redis" in item and "maxclients" in item for item in analysis.hypotheses)
+    assert not any(item.category == "redis_maxclients" for item in analysis.hypothesis_ranking)
+    assert analysis.decision != "generate_report"
+
+
+def test_stale_tool_payload_does_not_create_root_cause_hypothesis() -> None:
+    state = create_initial_aiops_state(
+        "order-service request failures",
+        session_id="analysis-stale-payload-hypothesis",
+    )
+    evidence = evidence_from_tool(
+        "query_redis_status",
+        {
+            "summary": "connected_clients reached maxclients",
+            "connected_clients": 10000,
+            "maxclients": 10000,
+            "stale": True,
+        },
+        "s-stale",
+    )
+    evidence["stance"] = "unknown"
+    evidence["raw_data"]["metadata"] = {
+        "evidence_quality": {
+            "status": "stale",
+            "usable": False,
+            "reasons": ["result_marked_stale_or_expired"],
+        }
+    }
+    state["gathered_evidence"] = [evidence]
+
+    analysis = analyze_evidence(state)
+
+    assert not any(item.category == "redis_maxclients" for item in analysis.hypothesis_ranking)
+
+
+def test_stale_success_is_still_reported_as_missing_tool_evidence() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis maxclients alert",
+        session_id="analysis-stale-success-missing",
+    )
+    evidence = evidence_from_tool(
+        "query_redis_status",
+        {
+            "summary": "connected_clients reached maxclients",
+            "connected_clients": 10000,
+            "maxclients": 10000,
+        },
+        "s-stale-missing",
+    )
+    evidence["stance"] = "unknown"
+    evidence["raw_data"]["metadata"] = {
+        "evidence_quality": {
+            "status": "stale",
+            "usable": False,
+            "reasons": ["result_marked_stale_or_expired"],
+        }
+    }
+    state["gathered_evidence"] = [evidence]
+
+    analysis = analyze_evidence(state)
+
+    assert "query_redis_status" in analysis.missing_evidence
+
+
 def test_failed_and_unclassified_evidence_use_unknown_stance() -> None:
     failed_stance = infer_evidence_stance(
         source_tool="query_redis_status",
@@ -374,6 +522,20 @@ def test_failed_and_unclassified_evidence_use_unknown_stance() -> None:
         stance=failed_stance,
     ).startswith("工具失败")
     assert unclassified_stance == "unknown"
+
+
+def test_reference_results_are_neutral_context_not_direct_support() -> None:
+    for source_tool in ["search_runbook", "search_history_ticket"]:
+        stance = infer_evidence_stance(
+            source_tool=source_tool,
+            raw_data={
+                "status": "success",
+                "output": {"summary": "similar Redis maxclients guidance"},
+            },
+            summary="similar Redis maxclients guidance",
+        )
+
+        assert stance == "neutral"
 
 
 def test_analyzer_ranks_mysql_slow_query_hypothesis() -> None:
@@ -404,6 +566,263 @@ def test_analyzer_ranks_mysql_slow_query_hypothesis() -> None:
     assert analysis.hypothesis_ranking[0].category == "mysql_slow_query"
     assert "MySQL" in analysis.hypothesis_ranking[0].title
     assert analysis.hypothesis_ranking[0].supporting_evidence_ids
+
+
+def test_evidence_type_alone_does_not_match_unrelated_category() -> None:
+    assert (
+        evidence_matches_category(
+            "redis_maxclients",
+            "redis",
+            "redis status is healthy and no saturation signal is present",
+            ["redis", "maxclients"],
+        )
+        is False
+    )
+    assert (
+        evidence_matches_category(
+            "k8s_crashloop",
+            "k8s",
+            "pod was oomkilled after exceeding its memory limit",
+            ["crashloop", "pod"],
+        )
+        is False
+    )
+
+
+def test_flat_error_rate_uses_ratio_units_for_abnormal_metric_detection() -> None:
+    assert is_metric_abnormal({"error_rate": 0.082}) is True
+    assert is_metric_abnormal({"error_rate": 0.001}) is False
+
+
+def test_nested_metric_current_values_are_checked_without_status_labels() -> None:
+    assert is_metric_abnormal({"p95_latency_ms": {"current": 3200}}) is True
+    assert is_metric_abnormal({"error_rate": {"current": 0.082}}) is True
+    assert (
+        is_metric_abnormal(
+            {
+                "p95_latency_ms": {"current": 120},
+                "error_rate": {"current": 0.001},
+            }
+        )
+        is False
+    )
+
+
+def test_default_unknown_identity_does_not_create_human_handoff_hypothesis() -> None:
+    state = create_initial_aiops_state(
+        "checkout-service latency investigation",
+        session_id="analysis-unknown-defaults",
+    )
+    state["incident"].update(
+        {
+            "service_name": "unknown-service",
+            "environment": "unknown",
+            "symptom": "P95 latency increased",
+        }
+    )
+    state["gathered_evidence"] = []
+
+    analysis = analyze_evidence(state)
+
+    assert not any(item.category == "unknown_needs_human" for item in analysis.hypothesis_ranking)
+
+
+def test_incomplete_metric_output_is_unknown_not_refuting() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_metrics",
+        raw_data={"status": "success", "output": {"qps": 120}},
+        summary="QPS observed",
+    )
+
+    assert stance == "unknown"
+
+
+def test_incomplete_redis_output_is_unknown_not_refuting() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_redis_status",
+        raw_data={"status": "success", "output": {"redis_version": "7.2"}},
+        summary="Redis status returned",
+    )
+
+    assert stance == "unknown"
+
+
+def test_mysql_zero_value_signal_is_not_supporting() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_mysql_status",
+        raw_data={
+            "status": "success",
+            "output": {
+                "slow_queries": [],
+                "signals": {"slow_query_count": 0, "pool_waiting": 0},
+            },
+        },
+        summary="slow_query_count=0, pool_waiting=0",
+    )
+
+    assert stance == "refuting"
+
+
+def test_missing_tools_use_category_specific_matching() -> None:
+    missing = missing_tools_from_context(
+        {"query_metrics", "query_logs"},
+        "pod restarted once after a routine deployment",
+    )
+
+    assert "query_k8s_status" not in missing
+
+
+def test_generic_timeout_does_not_match_dependency_timeout_category() -> None:
+    assert (
+        evidence_matches_category(
+            "dependency_timeout",
+            "metric",
+            "order-service Redis connection timeout",
+            ["dependency", "timeout"],
+        )
+        is False
+    )
+
+
+def test_generic_restart_does_not_match_crashloop_category() -> None:
+    assert (
+        evidence_matches_category(
+            "k8s_crashloop",
+            "k8s",
+            "pod restarted once after deployment",
+            ["crashloop", "restart"],
+        )
+        is False
+    )
+
+
+def test_normal_metric_summary_is_refuting_not_supporting() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_metrics",
+        raw_data={
+            "status": "success",
+            "output": {
+                "summary": "P95 is normal and 5xx is below threshold",
+                "p95_latency_ms": {"current": 120, "status": "normal"},
+                "error_rate": {"current": 0.001, "status": "normal"},
+            },
+        },
+        summary="P95 is normal and 5xx is below threshold",
+    )
+
+    assert stance == "refuting"
+
+
+def test_partial_metric_result_is_neutral_not_refuting() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_metrics",
+        raw_data={
+            "status": "success",
+            "output": {
+                "source": "prometheus",
+                "summary": "P95 and error rate queries returned no series",
+                "data_quality": "partial",
+                "empty_queries": ["p95_latency_ms", "error_rate"],
+                "p95_latency_ms": {"current": 0, "status": "missing"},
+                "error_rate": {"current": 0, "status": "missing"},
+            },
+        },
+        summary="P95 and error rate queries returned no series",
+    )
+
+    assert stance == "neutral"
+
+
+def test_duplicate_observation_counts_once_for_hypothesis_confidence() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis maxclients alert",
+        session_id="analysis-duplicate-observation",
+    )
+    first = evidence_from_tool(
+        "query_redis_status",
+        {
+            "summary": "connected_clients reached maxclients",
+            "connected_clients": 10000,
+            "maxclients": 10000,
+        },
+        "s1",
+    )
+    second = dict(first)
+    second["evidence_id"] = "evd-duplicate-copy"
+    second["step_id"] = "s1-replayed"
+    state["gathered_evidence"] = [first, second]
+
+    analysis = analyze_evidence(state)
+    redis_hypothesis = next(
+        item for item in analysis.hypothesis_ranking if item.category == "redis_maxclients"
+    )
+
+    assert len(redis_hypothesis.supporting_evidence_ids) == 1
+
+
+def test_empty_log_result_ignores_error_keywords_from_query_metadata() -> None:
+    stance = infer_evidence_stance(
+        source_tool="query_logs",
+        raw_data={
+            "status": "success",
+            "output": {
+                "summary": "Loki 返回 0 条 order-service 日志",
+                "query": "ERROR OR timeout",
+                "signals": {"log_count": 0},
+                "logs": {"total": 0, "logs": []},
+            },
+        },
+        summary="Loki 返回 0 条 order-service 日志",
+    )
+
+    assert stance == "refuting"
+
+
+def test_incident_timeout_text_without_log_evidence_does_not_claim_log_observation() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis timeout and maxclients alert",
+        session_id="analysis-alert-only-timeout",
+    )
+    state["incident"]["symptom"] = "Redis timeout and maxclients alert"
+    state["gathered_evidence"] = []
+
+    analysis = analyze_evidence(state)
+
+    assert not any("错误日志出现 timeout" in item for item in analysis.hypotheses)
+
+
+def test_incident_metric_text_without_metric_evidence_does_not_claim_metric_observation() -> None:
+    state = create_initial_aiops_state(
+        "order-service P95 and 5xx alert",
+        session_id="analysis-alert-only-metrics",
+    )
+    state["incident"]["symptom"] = "P95 latency and 5xx error rate increased"
+    state["gathered_evidence"] = []
+
+    analysis = analyze_evidence(state)
+
+    assert not any("服务 P95 延迟或 5xx 错误率异常升高" in item for item in analysis.hypotheses)
+
+
+def test_normal_memory_text_does_not_create_false_k8s_oom_conflict() -> None:
+    state = create_initial_aiops_state(
+        "payment-service memory usage normal; mysql slow query",
+        session_id="analysis-normal-memory",
+    )
+    state["incident"]["symptom"] = "memory usage normal; mysql slow query"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_mysql_status",
+            {
+                "summary": "MySQL slow query detected",
+                "slow_queries": [{"sql_digest": "digest-1", "avg_ms": 1200}],
+            },
+        )
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert not any("K8s OOM" in item for item in analysis.conflicts)
 
 
 def test_mysql_golden_incident_requires_release_and_reference_evidence() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Any
 
@@ -130,17 +131,25 @@ def build_incident_evidence_graph(
                 or hypothesis.get("description")
                 or f"hypothesis {index}",
                 "hypothesis_id": hypothesis_id,
-                "selected": hypothesis_id == selected_root_cause_id
-                or (not selected_root_cause_id and index == 1),
+                "selected": bool(selected_root_cause_id)
+                and hypothesis_id == selected_root_cause_id,
                 "category": hypothesis.get("category", "unknown"),
                 "confidence": float(hypothesis.get("confidence") or 0.0),
                 "confidence_reason": hypothesis.get("confidence_reason", ""),
             }
         )
         add_edge(incident_node_id, node_id, "has_hypothesis", rank=index)
-        for evidence_id in _string_list(hypothesis.get("supporting_evidence_ids")):
+        for evidence_id in _valid_linked_evidence_ids(
+            hypothesis.get("supporting_evidence_ids"),
+            evidence_by_id,
+            stance="supporting",
+        ):
             add_edge(node_id, f"evidence:{evidence_id}", "supported_by")
-        for evidence_id in _string_list(hypothesis.get("refuting_evidence_ids")):
+        for evidence_id in _valid_linked_evidence_ids(
+            hypothesis.get("refuting_evidence_ids"),
+            evidence_by_id,
+            stance="refuting",
+        ):
             add_edge(node_id, f"evidence:{evidence_id}", "refuted_by")
 
     for item in evidence:
@@ -197,6 +206,8 @@ def build_incident_evidence_graph(
                 "data_source": call.get("data_source", "unknown"),
                 "latency_ms": call.get("latency_ms", 0.0),
                 "read_only": call.get("read_only", True),
+                "invocation_kind": call.get("invocation_kind", "tool"),
+                "actual_tool_invoked": call.get("actual_tool_invoked", True),
             }
         )
         add_edge(incident_node_id, node_id, "investigated_by")
@@ -274,13 +285,22 @@ def _root_supporting_evidence_ids(
             break
     root_field = as_dict(as_dict(conclusion_alignment.get("fields")).get("root_cause"))
     ids.extend(_string_list(root_field.get("evidence_ids")))
-    if not ids:
+    if not ids and selected_root_cause_id:
         ids.extend(
             str(item.get("evidence_id"))
             for item in evidence
-            if item.get("evidence_id") and item.get("stance") == "supporting"
+            if item.get("evidence_id")
+            and item.get("stance") == "supporting"
+            and _is_usable_graph_evidence(item)
         )
-    return {item for item in ids if item}
+    valid_ids = {
+        str(item.get("evidence_id"))
+        for item in evidence
+        if item.get("evidence_id")
+        and item.get("stance") == "supporting"
+        and _is_usable_graph_evidence(item)
+    }
+    return {item for item in ids if item in valid_ids}
 
 
 def _root_cause_closure(
@@ -323,14 +343,56 @@ def _root_cause_closure(
 def _tool_node_id_for_evidence(evidence: dict[str, Any], tool_calls: list[dict[str, Any]]) -> str:
     evidence_tool = str(evidence.get("source_tool") or "")
     evidence_step = str(evidence.get("step_id") or "")
+    tool_candidates: list[dict[str, Any]] = []
     for call in tool_calls:
         step_id = str(call.get("step_id") or "")
         tool_name = str(call.get("tool_name") or "")
         if evidence_step and step_id == evidence_step:
             return f"tool:{call.get('call_id') or step_id or tool_name}"
         if evidence_tool and tool_name == evidence_tool:
-            return f"tool:{call.get('call_id') or step_id or tool_name}"
+            tool_candidates.append(call)
+    evidence_args = as_dict(as_dict(evidence.get("raw_data")).get("input_args"))
+    if evidence_args:
+        matching_args = [
+            call
+            for call in tool_candidates
+            if _stable_mapping(as_dict(call.get("input_args"))) == _stable_mapping(evidence_args)
+        ]
+        if len(matching_args) == 1:
+            call = matching_args[0]
+            return f"tool:{call.get('call_id') or call.get('step_id') or evidence_tool}"
+    if len(tool_candidates) == 1:
+        call = tool_candidates[0]
+        return f"tool:{call.get('call_id') or call.get('step_id') or evidence_tool}"
     return ""
+
+
+def _stable_mapping(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _is_usable_graph_evidence(evidence: dict[str, Any]) -> bool:
+    raw_data = as_dict(evidence.get("raw_data"))
+    if raw_data.get("status") != "success":
+        return False
+    metadata = as_dict(raw_data.get("metadata"))
+    quality = as_dict(metadata.get("evidence_quality"))
+    return quality.get("usable", True) is not False
+
+
+def _valid_linked_evidence_ids(
+    value: Any,
+    evidence_by_id: dict[str, dict[str, Any]],
+    *,
+    stance: str,
+) -> list[str]:
+    return [
+        evidence_id
+        for evidence_id in _string_list(value)
+        if evidence_id in evidence_by_id
+        and str(evidence_by_id[evidence_id].get("stance") or "") == stance
+        and _is_usable_graph_evidence(evidence_by_id[evidence_id])
+    ]
 
 
 def _evidence_label(item: dict[str, Any]) -> str:

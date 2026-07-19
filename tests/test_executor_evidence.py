@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from app.agent.aiops import create_initial_aiops_state
+from app.agent.aiops.execution_fallbacks import FallbackExecutionOutcome
 from app.config import config
 from app.models.plan import PlanStep
 from app.tools.base import AIOpsTool, ToolExecutionResult
@@ -101,7 +102,8 @@ def create_fanout_registry(
                 name,
                 coordinator if name in {"query_metrics", "query_logs"} else None,
                 status="failed" if name == failed_tool else "success",
-            )
+            ),
+            trusted=True,
         )
     return registry
 
@@ -134,6 +136,8 @@ def test_executor_persistence_redacts_sensitive_tool_input_args() -> None:
                 {"message": "cookie=session-secret", "password": "raw-password"},
             ],
         },
+        error_message="password=error-secret",
+        metadata={"debug": "token=metadata-secret"},
     )
 
     persisted = executor_module._result_for_persistence(result)
@@ -146,6 +150,171 @@ def test_executor_persistence_redacts_sensitive_tool_input_args() -> None:
     assert persisted.output["logs"][0] == "Authorization: Bearer [REDACTED]"
     assert persisted.output["logs"][1]["message"] == "cookie=[REDACTED]"
     assert persisted.output["logs"][1]["password"] == "[REDACTED]"
+    assert persisted.error_message == "password=[REDACTED]"
+    assert persisted.metadata["debug"] == "token=[REDACTED]"
+
+    step = PlanStep(
+        step_id="s-redact",
+        tool_name="query_logs",
+        purpose="check logs",
+        input_args={"service_name": "order-service"},
+    )
+    evidence = executor_module._tool_result_to_evidence(persisted, step).model_dump(mode="json")
+    assert "error-secret" not in str(evidence)
+    assert "metadata-secret" not in str(evidence)
+
+
+def test_tool_call_record_builder_redacts_raw_results_without_preprocessing() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_logs",
+        status="success",
+        input_args={"api_token": "input-secret"},
+        output={"summary": "token=output-secret"},
+        error_message="password=error-secret",
+        metadata={"cookie": "metadata-secret"},
+    )
+    step = PlanStep(step_id="s-record-redact", tool_name="query_logs", purpose="check logs")
+
+    record = executor_module._tool_result_to_call_record(
+        result,
+        step,
+        {"trace_id": "trace-record-redact", "incident": {"incident_id": "inc-record-redact"}},
+    )
+    serialized = record.model_dump_json()
+
+    for secret in ("input-secret", "output-secret", "error-secret", "metadata-secret"):
+        assert secret not in serialized
+    assert "[REDACTED]" in serialized
+
+
+def test_evidence_builder_redacts_raw_results_without_preprocessing() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_logs",
+        status="success",
+        input_args={"api_token": "input-secret"},
+        output={"summary": "Authorization: Bearer output-secret"},
+        metadata={"password": "metadata-secret"},
+    )
+    step = PlanStep(step_id="s-evidence-redact", tool_name="query_logs", purpose="check logs")
+
+    evidence = executor_module._tool_result_to_evidence(result, step)
+    serialized = evidence.model_dump_json()
+
+    for secret in ("input-secret", "output-secret", "metadata-secret"):
+        assert secret not in serialized
+    assert "[REDACTED]" in serialized
+
+
+def test_executor_persistence_compacts_top_level_processlist_sample() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_mysql_status",
+        status="success",
+        output={
+            "source": "mysql",
+            "summary": "mysql ok",
+            "processlist_sample": [
+                {
+                    "Id": 12,
+                    "User": "internal_user",
+                    "Host": "10.0.0.8:3306",
+                    "db": "payments",
+                    "Command": "Query",
+                    "Time": 5,
+                    "State": "executing",
+                    "Info": "SELECT card_number FROM payment_secrets",
+                }
+            ],
+        },
+    )
+
+    persisted = executor_module._result_for_persistence(result)
+
+    assert persisted.output["processlist_sample"] == [
+        {
+            "Command": "Query",
+            "Time": 5,
+            "State": "executing",
+            "has_statement": True,
+        }
+    ]
+    assert "internal_user" not in str(persisted.output)
+    assert "payment_secrets" not in str(persisted.output)
+
+
+def test_executor_persistence_removes_internal_endpoint_and_publicizes_fallback_errors() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_logs",
+        status="success",
+        output={
+            "source": "loki",
+            "endpoint": "loki.internal:3100",
+            "summary": "fallback succeeded",
+            "fallback_errors": [
+                {
+                    "source": "log_gateway",
+                    "error_type": "connection_error",
+                    "error_message": "http://logs.internal:8080 unavailable",
+                }
+            ],
+        },
+    )
+
+    persisted = executor_module._result_for_persistence(result)
+
+    assert "endpoint" not in persisted.output
+    assert "logs.internal" not in str(persisted.output)
+    assert persisted.output["fallback_errors"][0]["error_type"] == "connection_error"
+
+
+def test_executor_persistence_normalizes_success_with_empty_output_to_failure() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_metrics",
+        status="success",
+        input_args={"service_name": "order-service"},
+        output=None,
+    )
+    step = PlanStep(
+        step_id="s-empty",
+        tool_name="query_metrics",
+        purpose="check metrics",
+    )
+
+    persisted = executor_module._result_for_persistence(result)
+    evidence = executor_module._tool_result_to_evidence(persisted, step)
+
+    assert persisted.status == "failed"
+    assert persisted.error_message == "Tool returned no usable data"
+    assert persisted.metadata["evidence_quality"]["status"] == "failed"
+    assert evidence.stance == "unknown"
+    assert evidence.confidence == 0.1
+
+
+def test_executor_stale_result_is_not_supporting_evidence() -> None:
+    result = ToolExecutionResult(
+        tool_name="query_redis_status",
+        status="success",
+        output={
+            "source": "redis_info",
+            "stale": True,
+            "connected_clients": 10000,
+            "maxclients": 10000,
+            "summary": "cached Redis saturation result",
+        },
+    )
+    step = PlanStep(
+        step_id="s-stale",
+        tool_name="query_redis_status",
+        purpose="check Redis",
+    )
+
+    persisted = executor_module._result_for_persistence(result)
+    evidence = executor_module._tool_result_to_evidence(persisted, step)
+
+    assert persisted.status == "success"
+    assert persisted.metadata["evidence_quality"]["status"] == "stale"
+    assert evidence.stance == "unknown"
+    assert evidence.confidence == 0.15
+    assert "过期" in evidence.uncertainty
 
 
 def test_executor_persistence_materializes_large_tool_output_artifact(
@@ -212,6 +381,62 @@ def state_with_steps(steps: list[PlanStep]) -> dict[str, Any]:
     state["current_plan"] = [step.model_dump(mode="json") for step in steps]
     state["plan"] = [executor_module._format_plan_step_for_execution(step) for step in steps]
     return state
+
+
+@pytest.mark.asyncio
+async def test_executor_fails_closed_for_legacy_text_only_plan(monkeypatch) -> None:
+    monkeypatch.setattr(
+        executor_module.trace_service,
+        "record_risk_decision",
+        lambda **_: None,
+    )
+    state = create_initial_aiops_state(
+        "restart production service",
+        session_id="executor-legacy-plan-risk",
+    )
+    state["plan"] = ["restart production service"]
+
+    update = await executor_module.executor(state)
+
+    assert update["risk_assessment"]["policy"] == "forbidden"
+    assert update["risk_assessment"]["risk_level"] == "high"
+    assert "plan:legacy-unassessed" in update["risk_assessment"]["matched_rules"]
+    assert update["pending_approval"] is None
+    assert update["errors"]
+    assert update["current_plan"] == []
+    assert update["plan"] == ["restart production service"]
+
+
+@pytest.mark.asyncio
+async def test_executor_fails_closed_for_invalid_structured_step_with_legacy_plan(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        executor_module.trace_service,
+        "record_risk_decision",
+        lambda **_: None,
+    )
+    state = create_initial_aiops_state(
+        "diagnose invalid plan",
+        session_id="executor-invalid-plan-risk",
+    )
+    state["current_plan"] = [
+        {
+            "step_id": "broken",
+            "tool_name": "restart_service",
+            "purpose": "restart production service",
+            "input_args": [],
+        }
+    ]
+    state["plan"] = ["restart production service"]
+
+    update = await executor_module.executor(state)
+
+    assert update["risk_assessment"]["policy"] == "forbidden"
+    assert "plan:invalid-step" in update["risk_assessment"]["matched_rules"]
+    assert update["pending_approval"] is None
+    assert update["current_plan"] == state["current_plan"]
+    assert update["plan"] == state["plan"]
 
 
 @pytest.mark.asyncio
@@ -495,7 +720,7 @@ class FailingRedisTool(AIOpsTool):
 
 def create_failing_registry(_: list[Any] | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(FailingRedisTool())
+    registry.register(FailingRedisTool(), trusted=True)
     return registry
 
 
@@ -562,7 +787,7 @@ class StructuredFailingRedisTool(AIOpsTool):
 
 def create_structured_failing_registry(_: list[Any] | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(StructuredFailingRedisTool())
+    registry.register(StructuredFailingRedisTool(), trusted=True)
     return registry
 
 
@@ -637,6 +862,8 @@ async def test_executor_manual_step_is_wrapped_as_structured_evidence(monkeypatc
     assert "人工分析兜底路径" in update["warnings"][0]
     assert update["tool_call_records"][0]["tool_name"] == "manual_analysis"
     assert update["tool_call_records"][0]["status"] == "success"
+    assert update["tool_call_records"][0]["invocation_kind"] == "analysis_fallback"
+    assert update["tool_call_records"][0]["actual_tool_invoked"] is False
 
 
 @pytest.mark.asyncio
@@ -684,3 +911,120 @@ async def test_executor_unregistered_tool_fallback_is_failed_evidence(monkeypatc
     assert record["error_message"]
     assert record["output"]["structured_tool_registered"] is False
     assert record["output"]["fallback_reason"] == ("structured_tool_not_registered")
+
+
+@pytest.mark.asyncio
+async def test_executor_fallback_records_actual_safe_tool_call(monkeypatch) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "get_mcp_client_with_retry",
+        fake_get_mcp_client_with_retry,
+    )
+
+    async def fake_llm_executor(task: str, all_tools: list[Any]) -> FallbackExecutionOutcome:
+        return FallbackExecutionOutcome(
+            text="fallback used current time",
+            tool_results=[
+                ToolExecutionResult(
+                    tool_name="get_current_time",
+                    status="success",
+                    input_args={},
+                    output={"summary": "2026-07-18 12:00:00"},
+                    latency_ms=4.5,
+                    metadata={
+                        "execution_path": "llm_toolnode_fallback",
+                        "invocation_kind": "tool",
+                        "actual_tool_invoked": True,
+                    },
+                )
+            ],
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_with_llm_tools", fake_llm_executor)
+    step = PlanStep(
+        step_id="s-fallback-audit",
+        tool_name="query_unregistered_system",
+        purpose="检查未注册系统",
+        input_args={"service_name": "order-service"},
+    )
+
+    update = await executor_module.executor(state_with_step(step))
+
+    assert [item["tool_name"] for item in update["tool_call_records"]] == [
+        "get_current_time",
+        "query_unregistered_system",
+    ]
+    actual = update["tool_call_records"][0]
+    assert actual["status"] == "success"
+    assert actual["actual_tool_invoked"] is True
+    assert actual["invocation_kind"] == "tool"
+    wrapper = update["tool_call_records"][1]
+    assert wrapper["status"] == "failed"
+    assert wrapper["actual_tool_invoked"] is False
+
+
+@pytest.mark.asyncio
+async def test_fanout_cancellation_records_partial_and_cancelled_calls(monkeypatch) -> None:
+    completed = asyncio.Event()
+    release_slow = asyncio.Event()
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_fanout_item(
+        step: PlanStep,
+        registry: ToolRegistry,
+        state: dict[str, Any],
+        *,
+        batch_metadata: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+        if step.step_id == "s-fast":
+            completed.set()
+            return (
+                "ok",
+                "success",
+                {},
+                {
+                    "trace_id": state["trace_id"],
+                    "incident_id": state["incident"]["incident_id"],
+                    "step_id": step.step_id,
+                    "tool_name": step.tool_name,
+                    "status": "success",
+                    "execution_metadata": {"evidence_batch": dict(batch_metadata)},
+                },
+            )
+        await release_slow.wait()
+        raise AssertionError("slow task should be cancelled")
+
+    class TraceCollector:
+        def record_tool_call(self, record: Any) -> None:
+            recorded.append(
+                record.model_dump(mode="json") if hasattr(record, "model_dump") else dict(record)
+            )
+
+    monkeypatch.setattr(executor_module, "_execute_registered_fanout_item", fake_fanout_item)
+    monkeypatch.setattr(executor_module, "trace_service", TraceCollector())
+    state = create_initial_aiops_state(
+        "cancel fanout",
+        session_id="fanout-cancel",
+    )
+    steps = [
+        PlanStep(step_id="s-fast", tool_name="query_metrics", purpose="fast"),
+        PlanStep(step_id="s-slow", tool_name="query_logs", purpose="slow"),
+    ]
+    task = asyncio.create_task(
+        executor_module._execute_registered_step_fanout(steps, ToolRegistry(), state)
+    )
+    await asyncio.wait_for(completed.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [item["step_id"] for item in recorded] == ["s-fast", "s-slow"]
+    assert recorded[0]["status"] == "success"
+    assert (
+        recorded[0]["execution_metadata"]["evidence_batch"]["commit_status"]
+        == "cancelled_before_state_commit"
+    )
+    assert recorded[1]["status"] == "failed"
+    assert recorded[1]["execution_metadata"]["failure_kind"] == "cancelled"

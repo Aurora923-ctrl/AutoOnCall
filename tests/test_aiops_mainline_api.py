@@ -58,6 +58,12 @@ def _parse_sse_events(text: str) -> list[dict[str, Any]]:
 
 
 def _build_test_app(monkeypatch: pytest.MonkeyPatch, tmp_path) -> FastAPI:
+    monkeypatch.setattr(config, "api_auth_enabled", True)
+    monkeypatch.setattr(config, "api_auth_tokens", "")
+    monkeypatch.setattr(config, "api_read_token", "")
+    monkeypatch.setattr(config, "api_operator_token", "operator-secret-token")
+    monkeypatch.setattr(config, "api_approver_token", "approver-secret-token")
+    monkeypatch.setattr(config, "api_admin_token", "")
     test_app = FastAPI()
     test_app.include_router(aiops.router, prefix="/api")
     test_app.include_router(approvals.router, prefix="/api")
@@ -117,6 +123,7 @@ async def test_aiops_api_runs_real_graph_nodes_with_fallbacks(monkeypatch, tmp_p
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/aiops",
+            headers={"Authorization": "Bearer operator-secret-token"},
             json={
                 "session_id": f"mainline-{uuid4().hex}",
                 "incident": {
@@ -162,10 +169,23 @@ async def test_aiops_api_runs_real_graph_nodes_with_fallbacks(monkeypatch, tmp_p
         assert incident_id == structured_report["incident_id"]
         assert complete_event["trace_id"] == structured_report["trace_id"]
 
-        trace_response = await client.get(f"/api/incidents/{incident_id}/trace")
-        report_response = await client.get(f"/api/incidents/{incident_id}/report")
-        overview_response = await client.get(f"/api/incidents/{incident_id}")
-        approval_response = await client.get(f"/api/incidents/{incident_id}/approval")
+        read_headers = {"Authorization": "Bearer operator-secret-token"}
+        trace_response = await client.get(
+            f"/api/incidents/{incident_id}/trace",
+            headers=read_headers,
+        )
+        report_response = await client.get(
+            f"/api/incidents/{incident_id}/report",
+            headers=read_headers,
+        )
+        overview_response = await client.get(
+            f"/api/incidents/{incident_id}",
+            headers=read_headers,
+        )
+        approval_response = await client.get(
+            f"/api/incidents/{incident_id}/approval",
+            headers=read_headers,
+        )
 
         assert trace_response.status_code == 200
         assert report_response.status_code == 200
@@ -188,6 +208,7 @@ async def test_aiops_sse_contract_exposes_structured_terminal_status(monkeypatch
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/aiops",
+            headers={"Authorization": "Bearer operator-secret-token"},
             json={
                 "session_id": f"sse-contract-{uuid4().hex}",
                 "incident": {
@@ -216,6 +237,10 @@ async def test_aiops_sse_contract_exposes_structured_terminal_status(monkeypatch
     assert complete_event["structured_report"]
     assert complete_event["status"] == complete_event["structured_report"]["status"]
     assert complete_event["diagnosis"]["status"] == complete_event["structured_report"]["status"]
+    assert (
+        complete_event["degradation_analysis"]
+        == complete_event["structured_report"]["degradation_analysis"]
+    )
 
     approval_events = [event for event in events if event["type"] == "approval_required"]
     for event in approval_events:
@@ -234,6 +259,7 @@ async def test_incident_approval_rejects_cross_incident_approval_id_without_muta
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/aiops",
+            headers={"Authorization": "Bearer operator-secret-token"},
             json={
                 "session_id": f"approval-guard-{uuid4().hex}",
                 "incident": {
@@ -255,13 +281,17 @@ async def test_incident_approval_rejects_cross_incident_approval_id_without_muta
         complete_event = events[-1]
         incident_id = complete_event["incident_id"]
 
-        approval_response = await client.get(f"/api/incidents/{incident_id}/approval")
+        approval_response = await client.get(
+            f"/api/incidents/{incident_id}/approval",
+            headers={"Authorization": "Bearer operator-secret-token"},
+        )
         assert approval_response.status_code == 200
         pending_approval = approval_response.json()["items"][-1]
 
         wrong_incident_id = f"{incident_id}-other"
         rejected_response = await client.post(
             f"/api/incidents/{wrong_incident_id}/approval",
+            headers={"Authorization": "Bearer approver-secret-token"},
             json={
                 "approval_id": pending_approval["approval_id"],
                 "decision": "approve",
@@ -276,6 +306,9 @@ async def test_incident_approval_rejects_cross_incident_approval_id_without_muta
             == "approval_id does not belong to the requested incident"
         )
 
-        approval_response_after = await client.get(f"/api/incidents/{incident_id}/approval")
+        approval_response_after = await client.get(
+            f"/api/incidents/{incident_id}/approval",
+            headers={"Authorization": "Bearer operator-secret-token"},
+        )
         assert approval_response_after.status_code == 200
         assert approval_response_after.json()["items"][-1]["status"] == "pending"

@@ -9,11 +9,16 @@ import httpx
 
 from app.config import config
 from app.integrations.base import (
+    ExternalAdapterNotFoundError,
+    ExternalAdapterResponseError,
     adapter_success,
     bearer_headers,
+    classify_adapter_error,
     parse_duration_seconds,
+    public_adapter_failure_message,
     require_config,
     require_kubernetes_label_value,
+    require_success_payload,
 )
 
 
@@ -49,20 +54,39 @@ class KubernetesStatusAdapter:
                 params={"labelSelector": selector},
             )
             pod_response.raise_for_status()
-            pods_payload = pod_response.json()
+            pods_payload = require_success_payload(
+                pod_response.json(),
+                system_name="Kubernetes pods API",
+            )
+            if not isinstance(pods_payload.get("items"), list):
+                raise ExternalAdapterResponseError("Kubernetes pods response missing items")
             events_payload: dict[str, Any] = {"items": []}
-            events_error = ""
+            events_error: dict[str, Any] | None = None
             try:
                 event_response = await client.get(
                     f"{api_server}/api/v1/namespaces/{self.namespace}/events",
                     params={"fieldSelector": "involvedObject.kind=Pod"},
                 )
                 event_response.raise_for_status()
-                events_payload = event_response.json()
+                events_payload = require_success_payload(
+                    event_response.json(),
+                    system_name="Kubernetes events API",
+                )
+                if not isinstance(events_payload.get("items"), list):
+                    raise ExternalAdapterResponseError("Kubernetes events response missing items")
             except Exception as exc:
-                events_error = str(exc)
+                error_type = classify_adapter_error(exc)
+                events_error = {
+                    "query": "events",
+                    "error_type": error_type,
+                    "error_message": public_adapter_failure_message(error_type),
+                }
 
         pods = [self._pod_summary(item) for item in pods_payload.get("items", [])]
+        if not pods:
+            raise ExternalAdapterNotFoundError(
+                f"No Kubernetes pods matched service {service_name!r}"
+            )
         pod_names = {pod["name"] for pod in pods if pod.get("name")}
         window_seconds = parse_duration_seconds(time_range)
         window_started_at = datetime.now(UTC) - timedelta(seconds=window_seconds)
@@ -87,16 +111,18 @@ class KubernetesStatusAdapter:
                 "restart_count": restart_count,
                 "warning_event_count": warning_count,
             },
-            raw={"pods": pods_payload, "events": events_payload},
+            raw={
+                "pods": pods,
+                "events": events,
+                "raw_truncated": True,
+            },
             service_name=service_name,
             namespace=self.namespace,
             time_range=time_range,
             event_window_seconds=window_seconds,
             pods=pods,
             events=events,
-            partial_errors=(
-                [{"query": "events", "error_message": events_error}] if events_error else []
-            ),
+            partial_errors=[events_error] if events_error else [],
         )
 
     @staticmethod
@@ -110,7 +136,6 @@ class KubernetesStatusAdapter:
             "ready": ready,
             "restarts": restarts,
             "status": status.get("phase", "Unknown"),
-            "node": status.get("hostIP", ""),
             "started_at": status.get("startTime", ""),
         }
 
@@ -121,7 +146,7 @@ class KubernetesStatusAdapter:
             "pod": involved.get("name", ""),
             "type": item.get("type", ""),
             "reason": item.get("reason", ""),
-            "message": item.get("message", ""),
+            "message_present": bool(item.get("message")),
             "count": item.get("count", 1),
             "last_timestamp": item.get("lastTimestamp") or item.get("eventTime") or "",
         }

@@ -10,10 +10,12 @@ import httpx
 
 from app.config import config
 from app.integrations.base import (
+    ExternalAdapterResponseError,
     adapter_success,
     bearer_headers,
     parse_duration_seconds,
     require_config,
+    require_success_payload,
 )
 
 
@@ -66,7 +68,11 @@ class LokiLogAdapter:
                 },
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = require_success_payload(response.json(), system_name="Loki")
+
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("result"), list):
+            raise ExternalAdapterResponseError("Loki response missing data.result")
 
         logs = self._normalize_streams(payload)
         mysql_details = self._mysql_log_details(logs)

@@ -402,16 +402,23 @@ def evidence_type_for_quality(evidence: dict[str, Any]) -> str:
 def is_successful_diagnostic_evidence(evidence: dict[str, Any], evidence_type: str) -> bool:
     if evidence_type in NON_DIAGNOSTIC_EVIDENCE_TYPES:
         return False
-    return as_dict(evidence.get("raw_data")).get("status") == "success"
+    return _evidence_is_usable(evidence)
 
 
 def is_successful_or_reference_evidence(evidence: dict[str, Any], evidence_type: str) -> bool:
     raw_data = as_dict(evidence.get("raw_data"))
-    if raw_data.get("status") == "success":
-        return True
-    if evidence_type in REFERENCE_EVIDENCE_TYPES and evidence.get("stance") == "supporting":
+    if raw_data.get("status") == "success" and _evidence_is_usable(evidence):
         return True
     return False
+
+
+def _evidence_is_usable(evidence: dict[str, Any]) -> bool:
+    raw_data = as_dict(evidence.get("raw_data"))
+    if raw_data.get("status") != "success":
+        return False
+    metadata = as_dict(raw_data.get("metadata"))
+    quality = as_dict(metadata.get("evidence_quality"))
+    return quality.get("usable", True) is not False
 
 
 def is_resource_domain_metric(evidence: dict[str, Any], evidence_type: str) -> bool:

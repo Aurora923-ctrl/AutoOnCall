@@ -9,10 +9,12 @@ import httpx
 
 from app.config import config
 from app.integrations.base import (
+    ExternalAdapterResponseError,
     adapter_success,
     bearer_headers,
     parse_duration_seconds,
     require_config,
+    require_success_payload,
 )
 
 
@@ -63,9 +65,14 @@ class HTTPLogGatewayAdapter:
         ) as client:
             response = await client.post(url, json=request)
             response.raise_for_status()
-            payload = response.json()
+            payload = require_success_payload(
+                response.json(),
+                system_name="Log gateway",
+            )
 
         logs = payload.get("logs", payload.get("items", []))
+        if not isinstance(logs, list):
+            raise ExternalAdapterResponseError("Log gateway response logs/items must be an array")
         return adapter_success(
             source="log_gateway",
             summary=f"日志网关返回 {len(logs)} 条记录",

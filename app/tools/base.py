@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 import time
 from copy import deepcopy
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.integrations.base import classify_adapter_error
 from app.utils.public_errors import public_exception_message
@@ -47,6 +48,8 @@ class ToolContract(BaseModel):
 class ToolExecutionResult(BaseModel):
     """Structured output returned by every AIOps tool."""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     tool_name: str
     status: ToolStatus
     input_args: dict[str, Any] = Field(default_factory=dict)
@@ -56,6 +59,21 @@ class ToolExecutionResult(BaseModel):
     read_only: bool = True
     error_message: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def keep_status_and_error_semantics_consistent(self) -> ToolExecutionResult:
+        """Normalize contradictory result envelopes before they reach evidence conversion."""
+        if self.status == "success":
+            output_error = extract_tool_error_message(self.output)
+            if self.error_message or is_failed_tool_output(self.output):
+                object.__setattr__(self, "status", "failed")
+                if not self.error_message:
+                    object.__setattr__(
+                        self,
+                        "error_message",
+                        output_error or "Tool returned a structured failure result",
+                    )
+        return self
 
 
 class AIOpsTool:
@@ -87,7 +105,7 @@ class AIOpsTool:
     async def arun(self, input_args: dict[str, Any]) -> ToolExecutionResult:
         """Run the tool within one total timeout budget and an explicit retry policy."""
         started_at = time.perf_counter()
-        safe_args = dict(input_args or {})
+        safe_args = dict(input_args)
         retry_policy = _normalized_retry_policy(self.retry_policy)
         max_attempts = retry_policy.max_attempts if self.read_only else 1
         retry_on = {item.strip().lower() for item in retry_policy.retry_on if item.strip()}
@@ -153,6 +171,8 @@ class AIOpsTool:
                         retry_on=retry_on,
                     )
                     break
+            except asyncio.CancelledError:
+                raise
             except TimeoutError as exc:
                 failure_kind = "timeout"
                 final_error = public_exception_message(exc)
@@ -275,32 +295,170 @@ async def invoke_langchain_tool(tool: Any, input_args: dict[str, Any]) -> Any:
     """Invoke a LangChain/MCP tool object with schema-aware argument filtering."""
     filtered_args = filter_tool_args(tool, input_args)
     if hasattr(tool, "ainvoke"):
-        return await tool.ainvoke(filtered_args)
+        return normalize_langchain_tool_output(await tool.ainvoke(filtered_args))
     if hasattr(tool, "invoke"):
         value = tool.invoke(filtered_args)
         if inspect.isawaitable(value):
-            return await value
-        return value
+            value = await value
+        return normalize_langchain_tool_output(value)
     if callable(tool):
         value = tool(**filtered_args)
         if inspect.isawaitable(value):
-            return await value
-        return value
+            value = await value
+        return normalize_langchain_tool_output(value)
     raise TypeError(f"Tool {getattr(tool, 'name', tool)} is not invokable")
 
 
+def normalize_langchain_tool_output(value: Any) -> Any:
+    """Recover structured payloads from LangChain/MCP content-and-artifact results."""
+    if bool(getattr(value, "isError", False)):
+        return {
+            "status": "failed",
+            "error_type": "mcp_error",
+            "error_message": _normalized_tool_error_message(getattr(value, "content", None)),
+        }
+
+    object_structured = getattr(value, "structuredContent", None) or getattr(
+        value, "structured_content", None
+    )
+    if isinstance(object_structured, dict):
+        return dict(object_structured)
+
+    artifact_payload = _structured_content_from_artifact(getattr(value, "artifact", None))
+    if artifact_payload is not None:
+        return artifact_payload
+
+    if isinstance(value, tuple) and len(value) == 2:
+        content, artifact = value
+        artifact_payload = _structured_content_from_artifact(artifact)
+        return (
+            artifact_payload
+            if artifact_payload is not None
+            else normalize_langchain_tool_output(content)
+        )
+
+    if not isinstance(value, (str, bytes, dict, list, tuple)):
+        if str(getattr(value, "type", "")).lower() == "text" and hasattr(value, "text"):
+            return _parse_json_text(str(value.text or ""))
+        content = getattr(value, "content", None)
+        if content is not None:
+            if str(getattr(value, "status", "")).lower() == "error":
+                return {
+                    "status": "failed",
+                    "error_type": "mcp_error",
+                    "error_message": _normalized_tool_error_message(content),
+                }
+            return normalize_langchain_tool_output(content)
+
+    if isinstance(value, dict):
+        structured = value.get("structuredContent") or value.get("structured_content")
+        if isinstance(structured, dict):
+            return structured
+        if value.get("type") == "text" and "text" in value:
+            return _parse_json_text(str(value.get("text") or ""))
+        return value
+
+    if isinstance(value, list):
+        text = _content_blocks_text(value)
+        if text is not None:
+            return _parse_json_text(text)
+        return [normalize_langchain_tool_output(item) for item in value]
+
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return _parse_json_text(value)
+    return value
+
+
+def _structured_content_from_artifact(artifact: Any) -> dict[str, Any] | None:
+    if artifact is None:
+        return None
+    if isinstance(artifact, dict):
+        structured = artifact.get("structured_content") or artifact.get("structuredContent")
+    else:
+        structured = getattr(artifact, "structured_content", None)
+    return dict(structured) if isinstance(structured, dict) else None
+
+
+def _content_blocks_text(value: list[Any]) -> str | None:
+    parts: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text") or ""))
+            continue
+        return None
+    return "\n".join(parts)
+
+
+def _parse_json_text(value: str) -> Any:
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return value
+
+
+def _normalized_tool_error_message(content: Any) -> str:
+    normalized = normalize_langchain_tool_output(content)
+    if isinstance(normalized, dict):
+        return (
+            extract_tool_error_message(normalized)
+            or str(normalized.get("summary") or "")
+            or "MCP tool returned an error result"
+        )
+    if isinstance(normalized, list):
+        parts = [str(item) for item in normalized if item not in (None, "")]
+        return "\n".join(parts) or "MCP tool returned an error result"
+    text = str(normalized or "").strip()
+    return text or "MCP tool returned an error result"
+
+
 def filter_tool_args(tool: Any, input_args: dict[str, Any]) -> dict[str, Any]:
-    """Keep only arguments accepted by a LangChain tool when schema is available."""
+    """Reject unknown arguments instead of silently changing an MCP invocation."""
     schema = getattr(tool, "args_schema", None)
     fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None)
-    if not fields:
+    if fields:
+        accepted = set(fields)
+    elif isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
+        accepted = set(schema["properties"])
+    else:
+        tool_args = getattr(tool, "args", None)
+        accepted = set(tool_args) if isinstance(tool_args, dict) else set()
+    if not accepted:
         return dict(input_args)
-    return {key: value for key, value in input_args.items() if key in fields}
+    unknown = sorted(key for key in input_args if key not in accepted)
+    if unknown:
+        tool_name = str(getattr(tool, "name", "") or "unknown")
+        raise ValueError(f"Tool {tool_name} received unsupported arguments: {', '.join(unknown)}")
+    return dict(input_args)
 
 
 def tool_map(tools: list[Any] | None) -> dict[str, Any]:
     """Index heterogeneous tool objects by their public name."""
-    return {getattr(tool, "name", ""): tool for tool in tools or [] if getattr(tool, "name", "")}
+    indexed: dict[str, Any] = {}
+    for tool in tools or []:
+        name = str(getattr(tool, "name", "") or "")
+        if not name:
+            continue
+        if name in indexed:
+            raise ValueError(f"Duplicate discovered tool name: {name}")
+        indexed[name] = tool
+    return indexed
+
+
+def select_named_tools(
+    tools: list[Any] | None,
+    allowed_names: set[str] | frozenset[str],
+) -> list[Any]:
+    """Return a duplicate-checked allowlist subset of discovered tools."""
+    indexed = tool_map(tools)
+    return [indexed[name] for name in sorted(allowed_names) if name in indexed]
 
 
 def elapsed_ms(started_at: float) -> float:

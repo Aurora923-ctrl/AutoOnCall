@@ -16,7 +16,7 @@ from langchain_qwq import ChatQwen
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_retry
 from app.config import config
 from app.models.evidence import Evidence
 from app.models.plan import PlanStep
@@ -30,6 +30,8 @@ from .plan_fallback import (
     append_incident_requested_action_step,
     build_fallback_plan,
     build_golden_dependency_plan,
+    deduplicate_plan_steps,
+    ensure_unique_step_ids,
     infer_dependency_hint,
     infer_service_name,
     infer_symptom,
@@ -202,11 +204,11 @@ async def planner(
         mcp_tools: list[Any] = []
         try:
             mcp_client = await mcp_client_factory()
-            mcp_tools = await mcp_client.get_tools()
+            mcp_tools = await discover_safe_mcp_tools(mcp_client)
         except Exception as exc:
             warning = "MCP 工具发现失败，Planner 已降级使用本地和标准工具契约继续规划。"
             planner_warnings.append(warning)
-            logger.warning(f"{warning} error={exc}")
+            logger.warning(f"{warning} {summarize_text_for_log(exc, label='mcp_discovery_error')}")
 
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
@@ -252,7 +254,12 @@ async def planner(
         structured_steps = _stabilize_interview_golden_plan(
             _merge_runbook_steps(
                 runbook_steps,
-                normalize_plan_steps(raw_steps, input_text, incident),
+                normalize_plan_steps(
+                    raw_steps,
+                    input_text,
+                    incident,
+                    allowed_tool_names=set(standard_tool_names),
+                ),
             ),
             input_text=input_text,
             incident=incident,
@@ -408,14 +415,7 @@ def _merge_runbook_steps(
     """Prepend unique Runbook SOP steps without dropping model/fallback coverage."""
     if not runbook_steps:
         return model_steps
-    seen: set[str] = set()
-    merged: list[PlanStep] = []
-    for step in runbook_steps + model_steps:
-        key = f"{step.tool_name}:{step.input_args}"
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(step)
+    merged = ensure_unique_step_ids(deduplicate_plan_steps(runbook_steps + model_steps))
     return [
         step.model_copy(update={"step_id": f"s{index}", "status": "pending"})
         for index, step in enumerate(merged, 1)

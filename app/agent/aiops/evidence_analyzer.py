@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -11,6 +13,7 @@ from app.models.plan import PlanStep
 from app.services.diagnostic_signal_rules import (
     DIAGNOSTIC_SIGNAL_CANDIDATES,
     build_signal_hypotheses,
+    category_context_matches,
     dedupe_strings,
     evidence_matches_category,
     evidence_output,
@@ -66,15 +69,16 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
     incident = state.get("incident") or {}
     input_text = str(state.get("input", ""))
     service_name = _extract_service_name(incident)
+    hypothesis_evidence = _hypothesis_evidence_items(evidence_items)
 
     successful_tools = _successful_tools(evidence_items)
     failed_records_all = _failed_tool_records(tool_records, evidence_items)
     failed_records = _retryable_failed_records(failed_records_all, successful_tools)
     exhausted_failed_records = _exhausted_failed_records(failed_records_all, successful_tools)
     missing_tools = _missing_tools(evidence_items, input_text, incident)
-    hypotheses = _build_hypotheses(evidence_items, input_text, incident)
+    hypotheses = _build_hypotheses(hypothesis_evidence, input_text, incident)
     hypothesis_ranking = _build_hypothesis_ranking(
-        evidence_items=evidence_items,
+        evidence_items=hypothesis_evidence,
         input_text=input_text,
         incident=incident,
         missing_tools=missing_tools,
@@ -84,7 +88,7 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
     retry_steps = _build_retry_steps(failed_records)
     recommended_steps = _build_recommended_steps(missing_tools, service_name)
     evidence_profile = _build_evidence_profile(evidence_items, tool_records)
-    conflicts = _detect_conflicts(evidence_items, input_text, incident)
+    conflicts = _detect_conflicts(hypothesis_evidence, input_text, incident)
     confidence_reasons = _build_confidence_reasons(
         evidence_items, conflicts, exhausted_failed_records
     )
@@ -95,6 +99,8 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
         successful_tools,
         conflicts,
         exhausted_failed_records,
+        hypothesis_ranking,
+        hypothesis_evidence,
     )
     sufficient, confidence, reason, quality_reason = _apply_source_quality_gate(
         sufficient=sufficient,
@@ -138,7 +144,7 @@ def analyze_evidence(state: PlanExecuteState) -> EvidenceAnalysis:
             confidence=confidence,
         )
 
-    if exhausted_failed_records and hypotheses:
+    if exhausted_failed_records and hypotheses and hypothesis_evidence:
         failed_tools = ", ".join(
             dedupe_strings([str(item.get("tool_name", "")) for item in exhausted_failed_records])
         )
@@ -293,9 +299,43 @@ def _successful_tools(evidence_items: list[Any]) -> set[str]:
         if not isinstance(evidence, dict):
             continue
         raw_data = evidence.get("raw_data") or {}
-        if raw_data.get("status") == "success":
+        metadata = raw_data.get("metadata") if isinstance(raw_data, dict) else {}
+        quality = metadata.get("evidence_quality") if isinstance(metadata, dict) else {}
+        if (
+            isinstance(raw_data, dict)
+            and raw_data.get("status") == "success"
+            and (not isinstance(quality, dict) or quality.get("usable", True) is not False)
+        ):
             tools.add(str(evidence.get("source_tool") or raw_data.get("tool_name") or ""))
     return {tool for tool in tools if tool}
+
+
+def _hypothesis_evidence_items(evidence_items: list[Any]) -> list[Any]:
+    """Exclude failed, empty, stale, and fallback payloads from RCA ranking."""
+    usable: list[Any] = []
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            continue
+        raw_data = evidence.get("raw_data") or {}
+        if isinstance(raw_data, dict) and str(raw_data.get("status") or "").lower() == "failed":
+            continue
+        metadata = raw_data.get("metadata") if isinstance(raw_data, dict) else {}
+        quality = metadata.get("evidence_quality") if isinstance(metadata, dict) else {}
+        if isinstance(quality, dict) and not quality.get("usable", True):
+            continue
+        data_source = str(evidence.get("data_source") or "").lower()
+        if data_source in {
+            "failed",
+            "not_configured",
+            "manual_analysis",
+            "llm_toolnode_fallback",
+            "rule_based",
+        }:
+            continue
+        if str(evidence.get("stance") or "").lower() == "unknown":
+            continue
+        usable.append(evidence)
+    return usable
 
 
 def _failed_tool_records(
@@ -397,7 +437,7 @@ def _build_hypothesis_ranking(
         tools = [str(item) for item in candidate["tools"]]
         supporting = _matching_evidence_ids(evidence_items, category, keywords, "supporting")
         refuting = _matching_evidence_ids(evidence_items, category, keywords, "refuting")
-        mentioned = mentions_any(context, keywords)
+        mentioned = category_context_matches(category, context, keywords)
         if not mentioned and not supporting and not refuting:
             continue
         missing = [tool for tool in tools if tool in missing_tools]
@@ -435,6 +475,7 @@ def _matching_evidence_ids(
     stance: str,
 ) -> list[str]:
     ids: list[str] = []
+    seen_observations: set[str] = set()
     for index, evidence in enumerate(evidence_items, 1):
         if not isinstance(evidence, dict):
             continue
@@ -442,8 +483,12 @@ def _matching_evidence_ids(
             continue
         evidence_type = _type_from_tool(evidence)
         output = evidence_output(evidence)
+        observation_key = _evidence_observation_key(evidence)
         if isinstance(output, dict) and output.get("rca_category"):
             if str(output["rca_category"]) == category:
+                if observation_key in seen_observations:
+                    continue
+                seen_observations.add(observation_key)
                 ids.append(
                     str(
                         evidence.get("evidence_id")
@@ -453,10 +498,27 @@ def _matching_evidence_ids(
             continue
         text = f"{evidence.get('summary', '')} {output}".lower()
         if evidence_matches_category(category, evidence_type, text, keywords):
+            if observation_key in seen_observations:
+                continue
+            seen_observations.add(observation_key)
             ids.append(
                 str(evidence.get("evidence_id") or f"{evidence.get('source_tool', 'tool')}-{index}")
             )
     return dedupe_strings(ids)
+
+
+def _evidence_observation_key(evidence: dict[str, Any]) -> str:
+    """Deduplicate repeated persistence/retry copies of the same observation."""
+    raw_data = evidence.get("raw_data")
+    raw_payload = raw_data if isinstance(raw_data, dict) else {}
+    payload = {
+        "source_tool": evidence.get("source_tool"),
+        "stance": evidence.get("stance"),
+        "input_args": raw_payload.get("input_args"),
+        "output": raw_payload.get("output"),
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _score_hypothesis(
@@ -623,18 +685,22 @@ def _judge_sufficiency(
     successful_tools: set[str],
     conflicts: list[str],
     exhausted_failed_records: list[dict[str, Any]],
+    hypothesis_ranking: list[RootCauseHypothesis],
+    evidence_items: list[Any],
 ) -> tuple[bool, float, str]:
     has_redis_root_cause = any("Redis" in item and "maxclients" in item for item in hypotheses)
-    has_metrics = "query_metrics" in successful_tools
-    has_logs = "query_logs" in successful_tools
-    has_redis = "query_redis_status" in successful_tools
-    has_runbook = "search_runbook" in successful_tools or "retrieve_knowledge" in successful_tools
-    has_history = "search_history_ticket" in successful_tools
+    supporting_tools = _tools_with_stance(evidence_items, "supporting")
+    has_metrics = "query_metrics" in supporting_tools
+    has_logs = "query_logs" in supporting_tools
+    has_redis = "query_redis_status" in supporting_tools
+    has_runbook = "search_runbook" in supporting_tools or "retrieve_knowledge" in supporting_tools
+    has_history = "search_history_ticket" in supporting_tools
     has_mysql_root_cause = any(
         "MySQL" in item and ("慢" in item or "pool" in item.lower()) for item in hypotheses
     )
-    has_mysql = "query_mysql_status" in successful_tools
-    has_deploy_history = "query_deploy_history" in successful_tools
+    has_mysql = "query_mysql_status" in supporting_tools
+    has_deploy_history = "query_deploy_history" in supporting_tools
+    has_supported_hypothesis = any(item.supporting_evidence_ids for item in hypothesis_ranking)
 
     confidence_penalty = 0.0
     if conflicts:
@@ -678,7 +744,7 @@ def _judge_sufficiency(
             "MySQL 慢 SQL、连接池等待、发布关联、知识依据和历史经验均已覆盖，可以生成报告",
         )
 
-    if len(successful_tools) >= 3 and hypotheses:
+    if len(successful_tools) >= 3 and hypotheses and has_supported_hypothesis:
         return (
             not conflicts,
             _bounded_confidence(0.72 - confidence_penalty),
@@ -693,6 +759,26 @@ def _judge_sufficiency(
         )
 
     return False, _bounded_confidence(0.2 - confidence_penalty), "尚未形成可靠根因假设"
+
+
+def _tools_with_stance(evidence_items: list[Any], stance: str) -> set[str]:
+    tools: set[str] = set()
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            continue
+        if str(evidence.get("stance") or "").lower() != stance:
+            continue
+        raw_data = evidence.get("raw_data") or {}
+        if isinstance(raw_data, dict) and raw_data.get("status") != "success":
+            continue
+        metadata = raw_data.get("metadata") if isinstance(raw_data, dict) else {}
+        quality = metadata.get("evidence_quality") if isinstance(metadata, dict) else {}
+        if isinstance(quality, dict) and quality.get("usable", True) is False:
+            continue
+        tool_name = str(evidence.get("source_tool") or raw_data.get("tool_name") or "")
+        if tool_name:
+            tools.add(tool_name)
+    return tools
 
 
 def _is_redis_interview_golden_incident(incident: Any, context: str) -> bool:
@@ -832,10 +918,9 @@ def _logs_refuting(evidence_items: list[Any]) -> bool:
 
 
 def _log_points_to_redis(evidence_items: list[Any], context: str) -> bool:
-    if "redis" in context and "timeout" in context:
-        return True
     return any(
         _type_from_tool(item) == "log"
+        and _evidence_supporting(item)
         and mentions_any(str(evidence_output(item)).lower(), ["redis", "timeout"])
         for item in evidence_items
     )

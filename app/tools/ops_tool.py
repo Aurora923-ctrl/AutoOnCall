@@ -15,6 +15,16 @@ from app.tools.base import AIOpsTool, ToolRetryPolicy, clamp_duration, clamp_int
 class QueryK8sStatusTool(AIOpsTool):
     name = "query_k8s_status"
     description = "Query pod status, restarts, image versions, and deployment timing."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string", "minLength": 1},
+            "time_range": {"type": "string", "default": "10m"},
+        },
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "low"
     read_only = True
     retry_policy = ToolRetryPolicy(
@@ -65,6 +75,16 @@ class QueryK8sStatusTool(AIOpsTool):
 class QueryMySQLStatusTool(AIOpsTool):
     name = "query_mysql_status"
     description = "Query MySQL slow SQL, connection pool, lock waits, and active connections."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string", "minLength": 1},
+            "mysql_instance": {"type": "string"},
+        },
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "low"
     read_only = True
     retry_policy = ToolRetryPolicy(
@@ -114,6 +134,18 @@ class QueryMySQLStatusTool(AIOpsTool):
 class SearchHistoryTicketTool(AIOpsTool):
     name = "search_history_ticket"
     description = "Search historical tickets for similar incidents."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string", "minLength": 1},
+            "query": {"type": "string"},
+            "symptom": {"type": "string"},
+            "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20},
+        },
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "low"
     read_only = True
     retry_policy = ToolRetryPolicy(
@@ -167,6 +199,17 @@ class SearchHistoryTicketTool(AIOpsTool):
 class SuggestRemediationTool(AIOpsTool):
     name = "suggest_remediation"
     description = "Generate remediation suggestions from evidence without executing risky actions."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string", "minLength": 1},
+            "symptom": {"type": "string"},
+            "query": {"type": "string"},
+        },
+        "required": ["service_name"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
     risk_level = "medium"
     read_only = True
     data_sources = ["diagnosis evidence", "rule based policy"]

@@ -157,3 +157,20 @@ def test_failed_k8s_domain_tool_blocks_metric_only_primary_substitution() -> Non
     assert sufficiency["complete"] is False
     assert sufficiency["has_primary_domain_evidence"] is False
     assert "query_k8s_status" in sufficiency["failed_tools"]
+
+
+def test_stale_success_is_excluded_from_quality_and_sufficiency() -> None:
+    item = _evidence("redis_info", data_source="redis_info", evidence_type="redis")
+    item["raw_data"]["metadata"] = {
+        "evidence_quality": {
+            "status": "stale",
+            "usable": False,
+            "reasons": ["result_marked_stale_or_expired"],
+        }
+    }
+
+    profile = build_evidence_quality_profile([item])
+
+    assert profile["diagnostic_success_count"] == 0
+    assert profile["sufficiency"]["has_primary_domain_evidence"] is False
+    assert profile["root_cause_closure"]["has_live_evidence"] is False

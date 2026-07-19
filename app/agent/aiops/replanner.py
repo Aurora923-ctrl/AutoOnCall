@@ -28,13 +28,15 @@ from app.services.trace_service import trace_service
 from app.tools.registry import create_default_tool_registry
 
 from .evidence_analyzer import EvidenceAnalysis, analyze_evidence, render_analysis_summary
+from .plan_fallback import deduplicate_plan_steps, ensure_unique_step_ids
 from .risk_controller import RiskControlDecision, assess_plan_step
-from .state import PlanExecuteState, normalize_plan_state_update
+from .state import PlanExecuteState, normalize_plan_state_update, parse_plan_step
 from .utils import format_tools_description
 
 MAX_STEPS = 8
 LLM_DECISION_SAFE_SKIP_DECISIONS = {"retry_failed_tool", "request_approval"}
 REPLANNER_CONTEXT_CHAR_LIMIT = 3000
+RESPONSE_CONTEXT_CHAR_LIMIT = 4000
 
 
 class Response(BaseModel):
@@ -165,17 +167,31 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     analysis_decision = _decision_from_analysis(analysis)
     state_update = _analysis_state_update(analysis)
 
-    if len(past_steps) >= MAX_STEPS:
+    executed_step_count = _executed_step_count(state)
+    if executed_step_count >= MAX_STEPS:
         _record_replanner_decision(
             state,
             analysis_decision,
             analysis,
             decision_source="max_steps_guard",
         )
-        logger.warning(
-            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {MAX_STEPS}，强制生成最终响应"
+        max_steps_reason = (
+            f"已执行 {executed_step_count} 个步骤，达到最大限制 {MAX_STEPS}，停止自动排查"
         )
-        return await _generate_response_with_analysis(state, analysis)
+        logger.warning(f"{max_steps_reason}并生成最终响应")
+        risk_gate_update = _approval_state_update(state, max_steps_reason, force=False)
+        if risk_gate_update:
+            logger.warning("达到最大步骤限制，但剩余计划包含风险动作，先进入风险控制流程")
+            state_update.update(risk_gate_update)
+            return _with_generated_report(
+                state,
+                state_update,
+                status=_infer_report_status(state_update),
+            )
+
+        response_update = await _generate_response_with_analysis(state, analysis)
+        response_update.update(state_update)
+        return response_update
 
     decision, decision_source = await _decide_with_llm_or_analysis(
         state,
@@ -208,11 +224,31 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
 
     if decision.decision == "retry_failed_tool" and decision.new_steps:
         logger.info(f"重试失败工具: {decision.new_steps[0].tool_name}")
-        return _merge_updates(state_update, _steps_to_state_update(decision.new_steps))
+        return _merge_updates(
+            state_update,
+            _steps_with_remaining_plan_state_update(
+                state,
+                decision.new_steps,
+                allow_executed_duplicates=True,
+            ),
+        )
 
     if decision.decision == "add_steps" and decision.new_steps:
         logger.info(f"追加证据采集步骤: {len(decision.new_steps)}")
-        return _merge_updates(state_update, _steps_to_state_update(decision.new_steps))
+        plan_update = _steps_with_remaining_plan_state_update(state, decision.new_steps)
+        if not plan_update["current_plan"] and not plan_update["plan"]:
+            reason = "重规划未产生新的可执行步骤，停止重复排查并升级人工处理"
+            logger.warning(reason)
+            state_update["response"] = _generate_escalation_response(
+                state,
+                analysis.model_copy(update={"reason": reason}),
+            )
+            state_update["errors"] = [reason]
+            return _with_generated_report(state, state_update, status="escalated")
+        return _merge_updates(
+            state_update,
+            plan_update,
+        )
 
     if decision.decision == "escalate_to_human":
         logger.warning("证据不足且无法安全继续，升级人工处理")
@@ -483,7 +519,7 @@ def _json_preview(
     budgeter: ContextBudgeter | None = None,
 ) -> str:
     active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
-    return active_budgeter.json(value, limit=limit)
+    return active_budgeter.json(value, limit=limit, preserve_tail=True)
 
 
 def _text_preview(
@@ -492,7 +528,7 @@ def _text_preview(
     budgeter: ContextBudgeter | None = None,
 ) -> str:
     active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
-    return active_budgeter.text(text, limit=limit)
+    return active_budgeter.text(text, limit=limit, preserve_tail=True)
 
 
 def _analysis_state_update(analysis: EvidenceAnalysis) -> dict[str, Any]:
@@ -506,9 +542,82 @@ def _analysis_state_update(analysis: EvidenceAnalysis) -> dict[str, Any]:
     return update
 
 
+def _executed_step_count(state: PlanExecuteState) -> int:
+    """Count actual executions without charging administrative history entries."""
+    executed_steps = state.get("executed_steps") or []
+    if executed_steps:
+        return len(executed_steps)
+    tool_call_records = state.get("tool_call_records") or []
+    if tool_call_records:
+        return len(tool_call_records)
+    return len(state.get("past_steps") or [])
+
+
 def _steps_to_state_update(steps: list[PlanStep]) -> dict[str, Any]:
     """Synchronize structured and legacy plan queues."""
     return normalize_plan_state_update(steps)
+
+
+def _steps_with_remaining_plan_state_update(
+    state: PlanExecuteState,
+    new_steps: list[PlanStep],
+    *,
+    allow_executed_duplicates: bool = False,
+) -> dict[str, Any]:
+    """Prepend replanned steps without discarding the remaining execution queue."""
+    novel_steps = (
+        list(new_steps)
+        if allow_executed_duplicates
+        else _exclude_executed_duplicate_steps(state, new_steps)
+    )
+    current_plan = list(state.get("current_plan") or [])
+    legacy_plan = list(state.get("plan") or [])
+    if not current_plan and legacy_plan:
+        legacy_steps = [
+            PlanStep(
+                step_id=f"legacy-replan-{index}",
+                tool_name="manual_analysis",
+                purpose=str(task),
+                input_args={"task": str(task)},
+                expected_evidence="Legacy plan step preserved during replanning",
+                risk_level="low",
+                status="pending",
+            )
+            for index, task in enumerate(legacy_plan, 1)
+        ]
+        return normalize_plan_state_update([*novel_steps, *legacy_steps])
+
+    parsed_remaining = [parse_plan_step(raw_step) for raw_step in current_plan]
+
+    if all(step is not None for step in parsed_remaining):
+        remaining_steps = [step for step in parsed_remaining if step is not None]
+        merged_steps = ensure_unique_step_ids(
+            deduplicate_plan_steps([*novel_steps, *remaining_steps])
+        )
+        return normalize_plan_state_update(merged_steps)
+
+    new_plan_update = normalize_plan_state_update(novel_steps)
+    return {
+        "current_plan": [*new_plan_update["current_plan"], *current_plan],
+        "plan": [*new_plan_update["plan"], *legacy_plan],
+    }
+
+
+def _exclude_executed_duplicate_steps(
+    state: PlanExecuteState,
+    new_steps: list[PlanStep],
+) -> list[PlanStep]:
+    """Drop repeated diagnostics; explicit retry decisions bypass this filter."""
+    executed_steps = [
+        step
+        for raw_step in state.get("executed_steps") or []
+        if (step := parse_plan_step(raw_step)) is not None
+    ]
+    if not executed_steps:
+        return list(new_steps)
+    unique_executed_steps = deduplicate_plan_steps(executed_steps)
+    combined = deduplicate_plan_steps([*unique_executed_steps, *new_steps])
+    return combined[len(unique_executed_steps) :]
 
 
 def _merge_updates(*updates: dict[str, Any]) -> dict[str, Any]:
@@ -581,11 +690,34 @@ def _approval_state_update(
 def _extract_risk_decision(state: PlanExecuteState) -> RiskControlDecision | None:
     """Infer risk from remaining structured plan steps."""
     registry = create_default_tool_registry([])
-    for raw_step in state.get("current_plan", []):
+    current_plan = state.get("current_plan", [])
+    if not current_plan and state.get("plan"):
+        return RiskControlDecision(
+            action="Legacy text-only plan",
+            risk_level="high",
+            read_only=False,
+            policy="forbidden",
+            need_approval=True,
+            allowed=False,
+            forbidden=True,
+            reason="Legacy text-only plan cannot be risk assessed safely",
+            matched_rules=["plan:legacy-unassessed"],
+        )
+    for raw_step in current_plan:
         try:
             step = raw_step if isinstance(raw_step, PlanStep) else PlanStep(**raw_step)
         except Exception:
-            continue
+            return RiskControlDecision(
+                action="Invalid structured plan step",
+                risk_level="high",
+                read_only=False,
+                policy="forbidden",
+                need_approval=True,
+                allowed=False,
+                forbidden=True,
+                reason="Remaining plan contains an invalid structured step and cannot be assessed safely",
+                matched_rules=["plan:invalid-step"],
+            )
         decision = assess_plan_step(
             step,
             tool_registry=registry,
@@ -726,27 +858,46 @@ async def _generate_response(state: dict[str, Any], llm: ChatQwen) -> dict[str, 
     hypotheses = state.get("hypotheses", [])
     evidence_analysis = state.get("evidence_analysis")
 
-    execution_history = "\n\n".join(
-        [f"### 步骤: {step}\n**结果:**\n{result}" for step, result in past_steps]
+    execution_history = _text_preview(
+        "\n\n".join([f"### 步骤: {step}\n**结果:**\n{result}" for step, result in past_steps]),
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
     )
-    evidence_history = _format_evidence_for_prompt(gathered_evidence)
-    tool_call_history = _format_tool_calls_for_prompt(tool_call_records)
+    evidence_history = _text_preview(
+        _format_evidence_for_prompt(gathered_evidence),
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
+    )
+    tool_call_history = _text_preview(
+        _format_tool_calls_for_prompt(tool_call_records),
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
+    )
     analysis_summary = (
         render_analysis_summary(EvidenceAnalysis(**evidence_analysis))
         if isinstance(evidence_analysis, dict)
         else ""
+    )
+    input_preview = _text_preview(
+        str(input_text),
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
+    )
+    hypotheses_preview = _text_preview(
+        _format_list(hypotheses),
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
+    )
+    analysis_preview = _text_preview(
+        analysis_summary,
+        limit=RESPONSE_CONTEXT_CHAR_LIMIT,
     )
 
     response_gen = response_prompt | llm.with_structured_output(Response)
 
     try:
         messages = [
-            ("user", f"原始任务: {input_text}"),
+            ("user", f"原始任务: {input_preview}"),
             ("user", f"执行历史:\n{execution_history}"),
             ("user", f"结构化证据:\n{evidence_history}"),
             ("user", f"工具调用记录:\n{tool_call_history}"),
-            ("user", f"根因假设:\n{_format_list(hypotheses)}"),
-            ("user", f"证据分析:\n{analysis_summary}"),
+            ("user", f"根因假设:\n{hypotheses_preview}"),
+            ("user", f"证据分析:\n{analysis_preview}"),
             ("user", "请基于以上信息生成全面的最终响应"),
         ]
 

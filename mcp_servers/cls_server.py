@@ -11,6 +11,8 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from app.utils.log_safety import summarize_text_for_log
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -31,16 +33,15 @@ def log_tool_call(func):
         logger.info("=" * 80)
         logger.info(f"调用方法: {method_name}")
 
-        # 记录参数（排除self等）
+        # Record only a fingerprint so tool inputs never enter server logs verbatim.
         if kwargs:
-            # 使用 json.dumps 格式化参数，处理可能的序列化错误
             try:
-                params_str = json.dumps(kwargs, ensure_ascii=False, indent=2)
+                params_str = json.dumps(kwargs, ensure_ascii=False, default=str, sort_keys=True)
             except (TypeError, ValueError):
                 params_str = str(kwargs)
-            logger.info(f"参数信息:\n{params_str}")
+            logger.info(summarize_text_for_log(params_str, label="tool_args"))
         else:
-            logger.info("参数信息: 无")
+            logger.info("tool_args_len=0")
 
         # 执行方法
         try:
@@ -65,9 +66,12 @@ def log_tool_call(func):
             return result
 
         except Exception as e:
-            # 记录错误状态
             logger.error("返回状态: ERROR")
-            logger.error(f"错误信息: {str(e)}")
+            logger.error(
+                "工具调用失败: error_type=%s, %s",
+                type(e).__name__,
+                summarize_text_for_log(e, label="error"),
+            )
             logger.error("=" * 80)
             raise
 
@@ -337,6 +341,9 @@ def search_topic_by_service_name(
                 matched_topics.append(topic)
 
     return {
+        "status": "success",
+        "source": "mock",
+        "synthetic": True,
         "total": len(matched_topics),
         "topics": matched_topics,
         "query": {"service_name": service_name, "region_code": region_code, "fuzzy": fuzzy},
@@ -434,6 +441,9 @@ def search_log(
             current_time_ms += 60 * 1000
 
         return {
+            "status": "success",
+            "source": "mock",
+            "synthetic": True,
             "topic_id": topic_id,
             "start_time": start_time,
             "end_time": end_time,
@@ -447,6 +457,9 @@ def search_log(
     else:
         # 其他 topic_id: 返回错误，表示 topic 不存在
         return {
+            "status": "failed",
+            "source": "mock",
+            "synthetic": True,
             "topic_id": topic_id,
             "start_time": start_time,
             "end_time": end_time,
@@ -456,6 +469,7 @@ def search_log(
             "logs": [],
             "took_ms": 0,
             "error": f"主题不存在: {topic_id}",
+            "error_message": f"主题不存在: {topic_id}",
             "message": f"错误: 未找到主题 {topic_id}，请检查 topic_id 是否正确",
         }
 

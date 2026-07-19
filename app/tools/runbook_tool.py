@@ -22,6 +22,7 @@ class SearchRunbookTool(AIOpsTool):
             "top_k": {"type": "integer"},
         },
         "required": ["query"],
+        "additionalProperties": False,
     }
     output_schema = {"type": "object"}
     risk_level = "low"

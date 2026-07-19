@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from loguru import logger
 
+from app.config import config
 from app.core.auth import DIAGNOSE_SCOPE, READ_SCOPE, require_scope
 from app.models.alert import (
     AlertDetailResponse,
@@ -19,7 +20,11 @@ from app.models.alert import (
 )
 from app.models.incident_state import IncidentState
 from app.services.aiops_service import aiops_service
-from app.services.alert_ingestion_service import AlertIngestionService, alert_ingestion_service
+from app.services.alert_ingestion_service import (
+    AlertIngestionService,
+    AlertPayloadValidationError,
+    alert_ingestion_service,
+)
 from app.services.trace_service import trace_service
 from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR, public_exception_message
 
@@ -47,7 +52,10 @@ async def ingest_alertmanager_webhook(
 ) -> AlertIngestionResult:
     """Ingest Alertmanager webhook payloads and create/update Incident state."""
     service = get_alert_ingestion_service()
-    result = service.ingest_alertmanager_webhook(payload)
+    try:
+        result = service.ingest_alertmanager_webhook(payload)
+    except AlertPayloadValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if result.received == 0:
         raise HTTPException(
             status_code=400,
@@ -57,9 +65,33 @@ async def ingest_alertmanager_webhook(
         for item in result.items:
             if item.event.status == "resolved" or not (item.created or item.reopened):
                 continue
-            if _mark_alert_diagnosis_in_flight(item.event.incident_id):
-                background_tasks.add_task(_run_alert_diagnosis_guarded, item.event)
+            if not _mark_alert_diagnosis_in_flight(item.event.incident_id):
+                logger.info(
+                    "Alert auto diagnosis already running: incident_id={}, fingerprint={}",
+                    item.event.incident_id,
+                    item.event.fingerprint,
+                )
+                continue
+            try:
+                claim_token = service.store.claim_alert_auto_diagnosis(item.event.incident_id)
+            except Exception as exc:
+                _clear_alert_diagnosis_in_flight(item.event.incident_id)
+                logger.error(
+                    "Failed to claim alert auto diagnosis: incident_id={}, fingerprint={}, error={}",
+                    item.event.incident_id,
+                    item.event.fingerprint,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            if claim_token:
+                background_tasks.add_task(
+                    _run_alert_diagnosis_guarded,
+                    item.event,
+                    claim_token,
+                )
             else:
+                _clear_alert_diagnosis_in_flight(item.event.incident_id)
                 logger.info(
                     "Alert auto diagnosis already running: incident_id={}, fingerprint={}",
                     item.event.incident_id,
@@ -108,8 +140,9 @@ async def _run_alert_diagnosis(event: AlertEvent) -> None:
     incident = service.build_incident(event)
     session_id = f"alert-{event.incident_id}-{uuid4().hex}"
     try:
-        async for _ in aiops_service.diagnose(session_id=session_id, incident=incident):
-            pass
+        async with asyncio.timeout(config.alert_auto_diagnosis_timeout_seconds):
+            async for _ in aiops_service.diagnose(session_id=session_id, incident=incident):
+                pass
     except Exception as exc:
         logger.error(
             "Alert auto diagnosis failed: incident_id={}, fingerprint={}, error={}",
@@ -121,12 +154,23 @@ async def _run_alert_diagnosis(event: AlertEvent) -> None:
         _record_alert_diagnosis_failure(service, event, session_id, exc)
 
 
-async def _run_alert_diagnosis_guarded(event: AlertEvent) -> None:
+async def _run_alert_diagnosis_guarded(event: AlertEvent, claim_token: str) -> None:
     """Run one auto diagnosis with process-local dedupe and backpressure."""
     try:
         async with _alert_auto_diagnosis_semaphore:
             await _run_alert_diagnosis(event)
     finally:
+        try:
+            get_alert_ingestion_service().store.release_alert_auto_diagnosis(
+                event.incident_id,
+                claim_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to release alert auto diagnosis claim: incident_id={}, error={}",
+                event.incident_id,
+                exc,
+            )
         _clear_alert_diagnosis_in_flight(event.incident_id)
 
 
@@ -173,12 +217,28 @@ def _record_alert_diagnosis_failure(
     metadata = dict(existing.metadata if existing else {})
     metadata.update(
         {
+            "source": "alert_auto_diagnosis",
             "alert_auto_diagnosis_status": "failed",
             "alert_auto_diagnosis_error": public_error,
             "alert_auto_diagnosis_session_id": session_id,
             "alert_auto_diagnosis_trace_event_id": trace_event.event_id,
         }
     )
+    if existing is not None and existing.status in {
+        "waiting_approval",
+        "approval_approved",
+        "approval_rejected",
+        "approval_cancelled",
+        "approval_resumed",
+    }:
+        metadata["source"] = (existing.metadata or {}).get("source") or "approval"
+        service.store.save_incident_state(existing.model_copy(update={"metadata": metadata}))
+        logger.warning(
+            "Preserving approval lifecycle after alert diagnosis failure: incident_id={}, status={}",
+            event.incident_id,
+            existing.status,
+        )
+        return
     state = (
         existing
         if existing is not None

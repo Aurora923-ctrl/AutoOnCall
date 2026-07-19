@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_retry
 from app.models.approval import ApprovalRequest
 from app.models.evidence import Evidence
 from app.models.plan import PlanStep
@@ -36,6 +36,7 @@ from app.utils.log_safety import summarize_text_for_log
 from app.utils.public_errors import public_exception_message
 
 from .execution_fallbacks import (
+    FallbackExecutionOutcome,
     ensure_plan_step,
     execute_with_llm_tools,
     fallback_text_to_tool_result,
@@ -81,7 +82,26 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return {}
 
     plan_step = _get_current_plan_step(current_plan)
-    task = _format_plan_step_for_execution(plan_step) if plan_step else plan[0]
+    if current_plan and plan_step is None:
+        return _invalid_plan_contract_state_update(
+            state,
+            current_plan,
+            plan,
+            reason="Structured plan contains an invalid next step and cannot be executed safely",
+            matched_rule="plan:invalid-step",
+        )
+    if not current_plan and plan:
+        return _invalid_plan_contract_state_update(
+            state,
+            current_plan,
+            plan,
+            reason="Legacy text-only plan cannot be risk assessed and requires operator review",
+            matched_rule="plan:legacy-unassessed",
+        )
+
+    if plan_step is None:
+        return {}
+    task = _format_plan_step_for_execution(plan_step)
     logger.info(f"当前任务: {summarize_text_for_log(task, label='task')}")
 
     try:
@@ -90,9 +110,12 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         mcp_tools = []
         try:
             mcp_client = await get_mcp_client_with_retry()
-            mcp_tools = await mcp_client.get_tools()
+            mcp_tools = await discover_safe_mcp_tools(mcp_client)
         except Exception as exc:
-            logger.warning(f"获取 MCP 工具失败，将继续使用本地和 mock 工具: {exc}")
+            logger.warning(
+                "获取 MCP 工具失败，将继续使用本地工具: "
+                f"{summarize_text_for_log(exc, label='mcp_discovery_error')}"
+            )
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         all_tools = local_tools + mcp_tools
@@ -151,21 +174,27 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 if step_status == "failed":
                     errors.append(_format_tool_error(tool_call_record))
             else:
-                result, step_status, evidence, tool_call_record = await _execute_fallback_step(
+                (
+                    result,
+                    step_status,
+                    evidence_items,
+                    fallback_records,
+                ) = await _execute_fallback_step(
                     task,
                     plan_step,
                     all_tools,
                     state,
                 )
-                gathered_evidence.append(evidence)
-                tool_call_records.append(tool_call_record)
+                gathered_evidence.extend(evidence_items)
+                tool_call_records.extend(fallback_records)
                 past_steps.append((task, result))
                 marked = _mark_step(plan_step, step_status) if plan_step else None
                 if marked:
                     executed_steps.append(marked)
-                warnings.extend(_fallback_warnings(tool_call_record, plan_step))
+                wrapper_record = fallback_records[-1]
+                warnings.extend(_fallback_warnings(wrapper_record, plan_step))
                 if step_status == "failed":
-                    errors.append(_format_tool_error(tool_call_record))
+                    errors.append(_format_tool_error(wrapper_record))
 
         logger.info(
             f"Executor 完成 {len(past_steps)} 个步骤，"
@@ -217,7 +246,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return state_update
 
 
-async def _execute_with_llm_tools(task: str, all_tools: list) -> str:
+async def _execute_with_llm_tools(task: str, all_tools: list) -> str | FallbackExecutionOutcome:
     """Compatibility wrapper for the extracted fallback executor."""
     return await execute_with_llm_tools(task, all_tools)
 
@@ -238,6 +267,7 @@ async def _try_execute_registered_step(
     state: PlanExecuteState,
     *,
     batch_metadata: dict[str, Any] | None = None,
+    persist_trace: bool = True,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]] | None:
     """Try deterministic execution through the Tool Registry."""
     if not plan_step or plan_step.tool_name == "manual_analysis":
@@ -264,7 +294,8 @@ async def _try_execute_registered_step(
     persisted_result = _result_for_persistence(result)
     evidence = _tool_result_to_evidence(persisted_result, plan_step)
     tool_call_record = _tool_result_to_call_record(persisted_result, plan_step, state)
-    trace_service.record_tool_call(tool_call_record)
+    if persist_trace:
+        trace_service.record_tool_call(tool_call_record)
     return (
         json.dumps(
             persisted_result.model_dump(mode="json"),
@@ -272,7 +303,7 @@ async def _try_execute_registered_step(
             default=str,
             indent=2,
         ),
-        "success" if result.status == "success" else "failed",
+        "success" if persisted_result.status == "success" else "failed",
         evidence.model_dump(mode="json"),
         tool_call_record.model_dump(mode="json"),
     )
@@ -326,20 +357,33 @@ async def _execute_registered_step_fanout(
     """Execute a bounded batch of read-only steps while preserving plan order."""
     batch_id = f"fanout-{steps[0].step_id}-{len(steps)}"
     tasks = [
-        _execute_registered_fanout_item(
-            step,
-            registry,
-            state,
-            batch_metadata={
-                "batch_id": batch_id,
-                "batch_size": len(steps),
-                "batch_index": index,
-                "execution_mode": "bounded_read_only_fanout",
-            },
+        asyncio.create_task(
+            _execute_registered_fanout_item(
+                step,
+                registry,
+                state,
+                batch_metadata={
+                    "batch_id": batch_id,
+                    "batch_size": len(steps),
+                    "batch_index": index,
+                    "execution_mode": "bounded_read_only_fanout",
+                },
+            )
         )
         for index, step in enumerate(steps, 1)
     ]
-    return await asyncio.gather(*tasks)
+    try:
+        results = await asyncio.gather(*tasks)
+        for _, _, _, tool_call_record in results:
+            trace_service.record_tool_call(tool_call_record)
+        return results
+    except asyncio.CancelledError:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _record_cancelled_fanout(steps, tasks, state, batch_id)
+        raise
 
 
 async def _execute_registered_fanout_item(
@@ -356,6 +400,7 @@ async def _execute_registered_fanout_item(
             registry,
             state,
             batch_metadata=batch_metadata,
+            persist_trace=False,
         )
         if result is not None:
             return result
@@ -375,7 +420,9 @@ async def _execute_registered_fanout_item(
     )
     persisted_result = _result_for_persistence(failed_result)
     evidence = _tool_result_to_evidence(persisted_result, step)
-    tool_call_record = _record_and_dump_tool_call(persisted_result, step, state)
+    tool_call_record = _tool_result_to_call_record(persisted_result, step, state).model_dump(
+        mode="json"
+    )
     return (
         json.dumps(
             persisted_result.model_dump(mode="json"),
@@ -394,14 +441,82 @@ async def _execute_fallback_step(
     plan_step: PlanStep | None,
     all_tools: list,
     state: PlanExecuteState,
-) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Execute the legacy fallback path and normalize it into evidence records."""
     normalized_step = _ensure_plan_step(plan_step, task)
-    result_text = await _execute_with_llm_tools(task, all_tools)
+    fallback_outcome = await _execute_with_llm_tools(task, all_tools)
+    if isinstance(fallback_outcome, FallbackExecutionOutcome):
+        result_text = fallback_outcome.text
+        actual_results = fallback_outcome.tool_results
+    else:
+        result_text = fallback_outcome
+        actual_results = []
+    evidence_items: list[dict[str, Any]] = []
+    tool_call_records: list[dict[str, Any]] = []
+    for index, actual_result in enumerate(actual_results, 1):
+        actual_step = PlanStep(
+            step_id=f"{normalized_step.step_id}-fallback-tool-{index}",
+            tool_name=actual_result.tool_name,
+            purpose=f"LLM fallback invoked safe tool {actual_result.tool_name}",
+            input_args=actual_result.input_args,
+            expected_evidence="Actual safe fallback tool result",
+            risk_level="low",
+        )
+        persisted_actual = _result_for_persistence(actual_result)
+        evidence_items.append(
+            _tool_result_to_evidence(persisted_actual, actual_step).model_dump(mode="json")
+        )
+        tool_call_records.append(_record_and_dump_tool_call(persisted_actual, actual_step, state))
     result = _fallback_text_to_tool_result(task, result_text, normalized_step)
-    evidence = _tool_result_to_evidence(result, normalized_step)
-    tool_call_record = _record_and_dump_tool_call(result, normalized_step, state)
-    return result_text, result.status, evidence.model_dump(mode="json"), tool_call_record
+    persisted_wrapper = _result_for_persistence(result)
+    evidence_items.append(
+        _tool_result_to_evidence(persisted_wrapper, normalized_step).model_dump(mode="json")
+    )
+    tool_call_records.append(_record_and_dump_tool_call(persisted_wrapper, normalized_step, state))
+    return result_text, persisted_wrapper.status, evidence_items, tool_call_records
+
+
+def _record_cancelled_fanout(
+    steps: list[PlanStep],
+    tasks: list[asyncio.Task],
+    state: PlanExecuteState,
+    batch_id: str,
+) -> None:
+    """Persist truthful partial/cancelled call records when state commit is interrupted."""
+    for step, task in zip(steps, tasks, strict=False):
+        if task.done() and not task.cancelled():
+            try:
+                result = task.result()
+            except Exception:
+                result = None
+            if result is not None:
+                record_data = dict(result[3])
+                metadata = dict(record_data.get("execution_metadata") or {})
+                batch = dict(metadata.get("evidence_batch") or {})
+                batch["commit_status"] = "cancelled_before_state_commit"
+                metadata["evidence_batch"] = batch
+                record_data["execution_metadata"] = metadata
+                trace_service.record_tool_call(record_data)
+                continue
+        cancelled_result = ToolExecutionResult(
+            tool_name=step.tool_name,
+            status="failed",
+            input_args=step.input_args,
+            error_message="Fanout execution cancelled before completion",
+            risk_level=step.risk_level,
+            read_only=True,
+            metadata={
+                "evidence_batch": {
+                    "batch_id": batch_id,
+                    "execution_mode": "bounded_read_only_fanout",
+                    "commit_status": "cancelled_before_state_commit",
+                },
+                "failure_kind": "cancelled",
+                "invocation_kind": "tool",
+                "actual_tool_invoked": True,
+            },
+        )
+        trace_service.record_tool_call(_tool_result_to_call_record(cancelled_result, step, state))
 
 
 def _ensure_plan_step(plan_step: PlanStep | None, task: str) -> PlanStep:
@@ -487,6 +602,49 @@ def _risk_gate_state_update(
     state_update["pending_approval"] = None
     state_update["errors"] = [decision.reason]
     return state_update
+
+
+def _invalid_plan_contract_state_update(
+    state: PlanExecuteState,
+    current_plan: list[dict[str, Any]],
+    plan: list[str],
+    *,
+    reason: str,
+    matched_rule: str,
+) -> dict[str, Any]:
+    """Fail closed when the next action has no valid structured PlanStep contract."""
+    decision = RiskControlDecision(
+        action="Unassessable plan step",
+        tool_name="",
+        step_id=None,
+        risk_level="high",
+        read_only=False,
+        policy="forbidden",
+        need_approval=True,
+        allowed=False,
+        forbidden=True,
+        reason=reason,
+        matched_rules=[matched_rule],
+    )
+    trace_service.record_risk_decision(
+        trace_id=state.get("trace_id") or "trace-unknown",
+        incident_id=extract_incident_id(state),
+        step_id=None,
+        action=decision.action,
+        policy=decision.policy,
+        risk_level=decision.risk_level,
+        reason=decision.reason,
+        matched_rules=decision.matched_rules,
+        status="blocked",
+    )
+    return {
+        "current_plan": current_plan,
+        "plan": plan,
+        "risk_assessment": decision.to_risk_assessment().model_dump(mode="json"),
+        "pending_approval": None,
+        "response": _generate_risk_stop_response(decision),
+        "errors": [reason],
+    }
 
 
 def _postpone_risky_step_until_read_only_evidence_complete(

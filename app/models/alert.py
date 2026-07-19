@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.incident import utc_now
 
@@ -43,6 +43,23 @@ class AlertEvent(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @field_validator("starts_at", "ends_at", "created_at", "updated_at")
+    @classmethod
+    def datetimes_must_include_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("alert datetimes must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def lifecycle_times_must_be_ordered(self) -> AlertEvent:
+        if (
+            self.ends_at is not None
+            and self.starts_at is not None
+            and self.ends_at < self.starts_at
+        ):
+            raise ValueError("ends_at must not be earlier than starts_at")
+        return self
+
 
 class AlertIngestionItem(BaseModel):
     """One normalized alert and the Incident lifecycle result it produced."""
@@ -53,6 +70,7 @@ class AlertIngestionItem(BaseModel):
     previous_status: str | None = None
     status_changed: bool = False
     reopened: bool = False
+    stale_ignored: bool = False
     incident_id: str
     incident_status: str
     status_reason: str = ""
@@ -66,6 +84,7 @@ class AlertIngestionResult(BaseModel):
     created: int = 0
     deduplicated: int = 0
     resolved: int = 0
+    stale_ignored: int = 0
     items: list[AlertIngestionItem] = Field(default_factory=list)
 
 

@@ -54,6 +54,13 @@ class Incident(BaseModel):
         """Trim text fields before Pydantic length validation."""
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("start_time", "created_at", "updated_at")
+    @classmethod
+    def datetimes_must_include_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("incident datetimes must include a timezone")
+        return value
+
     @field_validator("raw_alert")
     @classmethod
     def raw_alert_must_be_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:

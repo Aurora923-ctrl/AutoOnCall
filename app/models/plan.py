@@ -14,13 +14,19 @@ class PlanStep(BaseModel):
     """A machine-consumable diagnostic step."""
 
     step_id: str = Field(default_factory=lambda: new_model_id("step"), min_length=1, max_length=128)
-    tool_name: str = Field(default="manual_analysis", max_length=120)
-    purpose: str = Field(default="Execute diagnostic step", max_length=1000)
+    tool_name: str = Field(default="manual_analysis", min_length=1, max_length=120)
+    purpose: str = Field(default="Execute diagnostic step", min_length=1, max_length=1000)
     input_args: dict[str, Any] = Field(default_factory=dict)
     expected_evidence: str = Field(default="", max_length=1000)
     risk_level: Literal["low", "medium", "high"] = "low"
     status: Literal["pending", "running", "success", "failed", "skipped"] = "pending"
     retry_count: int = Field(default=0, ge=0, le=3)
+
+    @field_validator("step_id", "tool_name", "purpose", mode="before")
+    @classmethod
+    def required_text_must_not_be_blank(cls, value: Any) -> Any:
+        """Trim required identifiers and reject whitespace-only plan fields."""
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator("input_args")
     @classmethod

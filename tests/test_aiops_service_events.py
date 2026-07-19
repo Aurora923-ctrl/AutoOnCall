@@ -1,17 +1,27 @@
 """Tests for AIOps service SSE event formatting."""
 
+import asyncio
 import importlib
+import json
+from types import SimpleNamespace
 
 import pytest
 
+from app.api.aiops_route_helpers import (
+    diagnosis_event_stream,
+    resume_diagnosis_event_stream,
+    safe_change_event_stream,
+)
 from app.services.aiops_progress import build_progress_payload
 from app.services.aiops_service import (
+    AIOpsService,
     _build_fallback_final_response,
     _merge_checkpoint_with_node_output,
     _terminal_event_status,
     aiops_service,
 )
 from app.services.report_generator import ReportGenerator
+from app.services.sqlite_store import AIOpsSQLiteStore
 from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR
 
 REQUIRED_PROGRESS_FIELDS = {
@@ -68,6 +78,29 @@ def test_executor_event_exposes_evidence_tool_records_and_result_preview() -> No
     assert event["result_preview"] == "connected_clients=9940/10000"
     assert event["evidence"][0]["source_tool"] == "query_redis_status"
     assert event["tool_call_records"][0]["tool_name"] == "query_redis_status"
+
+
+def test_executor_event_accepts_durable_normalized_past_step() -> None:
+    event = aiops_service._format_executor_event(
+        {
+            "plan": None,
+            "past_steps": [
+                {
+                    "step": {"step_id": "s1", "tool_name": "query_metrics"},
+                    "result": {"status": "success", "summary": "P95 high"},
+                }
+            ],
+            "gathered_evidence": None,
+            "tool_call_records": None,
+            "errors": None,
+            "warnings": None,
+        }
+    )
+
+    assert event["type"] == "step_complete"
+    assert event["current_step"]["step_id"] == "s1"
+    assert "P95 high" in event["result_preview"]
+    assert event["remaining_steps"] == 0
 
 
 def test_progress_payload_exposes_stable_recovery_contract() -> None:
@@ -194,6 +227,28 @@ def test_snapshot_merge_appends_additive_delta_when_checkpoint_is_stale() -> Non
     assert merged["past_steps"] == [("s1", "ok"), ("s2", "ok")]
 
 
+def test_snapshot_merge_keeps_run_identity_from_checkpoint() -> None:
+    merged = _merge_checkpoint_with_node_output(
+        {
+            "session_id": "session-canonical",
+            "trace_id": "trace-canonical",
+            "incident": {"incident_id": "inc-canonical", "service_name": "orders"},
+        },
+        {
+            "session_id": "session-forged",
+            "trace_id": "trace-forged",
+            "incident": {"incident_id": "inc-forged", "service_name": "payments"},
+            "response": "node output",
+        },
+    )
+
+    assert merged["session_id"] == "session-canonical"
+    assert merged["trace_id"] == "trace-canonical"
+    assert merged["incident"]["incident_id"] == "inc-canonical"
+    assert merged["incident"]["service_name"] == "orders"
+    assert merged["response"] == "node output"
+
+
 def test_terminal_event_status_prefers_structured_report_status() -> None:
     assert (
         _terminal_event_status(
@@ -308,3 +363,393 @@ async def test_execute_error_event_uses_public_message_without_raw_exception() -
     assert "secret" not in serialized
     assert "db.internal" not in serialized
     assert "orders unavailable" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_execute_marks_interrupted_run_failed(monkeypatch, tmp_path) -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "interrupted.db")
+    session_id = "session-interrupted"
+    initial_state = {
+        "session_id": session_id,
+        "trace_id": "trace-interrupted",
+        "incident": {"incident_id": "inc-interrupted"},
+    }
+
+    class BlockingGraph:
+        async def astream(self, **_kwargs):
+            yield {"planner": {"plan": ["collect evidence"]}}
+            await asyncio.Event().wait()
+
+        def get_state(self, _config):
+            return SimpleNamespace(values=initial_state)
+
+    monkeypatch.setattr(
+        service_module,
+        "create_initial_aiops_state",
+        lambda **_kwargs: dict(initial_state),
+    )
+    service.graph = BlockingGraph()
+
+    stream = service.execute("diagnose", session_id=session_id)
+    await anext(stream)
+    await anext(stream)
+    await anext(stream)
+    await stream.aclose()
+
+    snapshot = service.get_session_snapshot(session_id)
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.progress["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_mark_terminal_run_failed_when_stream_closes_after_completion(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+    monkeypatch.setattr(
+        service_module, "report_generator", ReportGenerator(tmp_path / "terminal-report.db")
+    )
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "terminal.db")
+    final_state = {
+        "session_id": "session-terminal",
+        "trace_id": "trace-terminal",
+        "incident": {"incident_id": "inc-terminal"},
+        "response": "# complete",
+        "report": {
+            "report_id": "report-terminal",
+            "incident_id": "inc-terminal",
+            "trace_id": "trace-terminal",
+            "status": "completed",
+            "markdown": "# complete",
+        },
+    }
+
+    class CompleteGraph:
+        async def astream(self, **_kwargs):
+            if False:
+                yield {}
+
+        def get_state(self, _config):
+            return SimpleNamespace(values=final_state)
+
+    monkeypatch.setattr(
+        service_module,
+        "create_initial_aiops_state",
+        lambda **_kwargs: dict(final_state),
+    )
+    service.graph = CompleteGraph()
+
+    stream = service.execute("diagnose", session_id="session-terminal")
+    while True:
+        event = await anext(stream)
+        if event["type"] == "complete":
+            break
+    await stream.aclose()
+
+    snapshot = service.get_session_snapshot("session-terminal")
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execute_keeps_terminal_event_when_trace_persistence_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "trace-terminal.db")
+    final_state = {
+        "session_id": "session-trace-terminal",
+        "trace_id": "trace-terminal-failure",
+        "incident": {"incident_id": "inc-trace-terminal"},
+        "response": "# complete",
+        "report": {
+            "report_id": "report-trace-terminal",
+            "incident_id": "inc-trace-terminal",
+            "trace_id": "trace-terminal-failure",
+            "status": "completed",
+            "markdown": "# complete",
+        },
+    }
+
+    class CompleteGraph:
+        async def astream(self, **_kwargs):
+            if False:
+                yield {}
+
+        def get_state(self, _config):
+            return SimpleNamespace(values=final_state)
+
+    trace_call_count = 0
+
+    def flaky_trace_create_event(**_kwargs):
+        nonlocal trace_call_count
+        trace_call_count += 1
+        if trace_call_count > 1:
+            raise RuntimeError("trace unavailable")
+        return SimpleNamespace(
+            event_id="evt-start",
+            trace_id="trace-terminal-failure",
+            model_dump=lambda mode="json": {"event_id": "evt-start"},
+        )
+
+    monkeypatch.setattr(
+        service_module,
+        "create_initial_aiops_state",
+        lambda **_kwargs: dict(final_state),
+    )
+    monkeypatch.setattr(service_module.trace_service, "create_event", flaky_trace_create_event)
+    service.graph = CompleteGraph()
+
+    events = [
+        event
+        async for event in service.execute(
+            "diagnose",
+            session_id="session-trace-terminal",
+        )
+    ]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["status"] == "completed"
+    assert "trace_event_id" not in events[-1]
+
+
+@pytest.mark.asyncio
+async def test_execute_keeps_error_terminal_when_trace_persistence_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "trace-error.db")
+    initial_state = {
+        "session_id": "session-trace-error",
+        "trace_id": "trace-error-failure",
+        "incident": {"incident_id": "inc-trace-error"},
+    }
+
+    class FailingGraph:
+        async def astream(self, **_kwargs):
+            raise RuntimeError("planner unavailable")
+            yield {}
+
+    trace_call_count = 0
+
+    def flaky_trace_create_event(**_kwargs):
+        nonlocal trace_call_count
+        trace_call_count += 1
+        if trace_call_count > 1:
+            raise RuntimeError("trace unavailable")
+        return SimpleNamespace(
+            event_id="evt-start",
+            trace_id="trace-error-failure",
+            model_dump=lambda mode="json": {"event_id": "evt-start"},
+        )
+
+    monkeypatch.setattr(
+        service_module,
+        "create_initial_aiops_state",
+        lambda **_kwargs: dict(initial_state),
+    )
+    monkeypatch.setattr(service_module.trace_service, "create_event", flaky_trace_create_event)
+    service.graph = FailingGraph()
+
+    events = [
+        event
+        async for event in service.execute(
+            "diagnose",
+            session_id="session-trace-error",
+        )
+    ]
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["status"] == "failed"
+    assert "trace_event_id" not in events[-1]
+
+
+@pytest.mark.asyncio
+async def test_execute_continues_when_start_and_node_trace_persistence_fail(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service_module = importlib.import_module("app.services.aiops_service")
+    monkeypatch.setattr(
+        service_module, "report_generator", ReportGenerator(tmp_path / "trace-all-report.db")
+    )
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "trace-all.db")
+    final_state = {
+        "session_id": "session-trace-all",
+        "trace_id": "trace-all",
+        "incident": {"incident_id": "inc-trace-all"},
+        "response": "# complete",
+        "report": {
+            "report_id": "report-trace-all",
+            "incident_id": "inc-trace-all",
+            "trace_id": "trace-all",
+            "status": "completed",
+            "markdown": "# complete",
+        },
+    }
+
+    class CompleteGraph:
+        async def astream(self, **_kwargs):
+            yield {"planner": {"plan": ["collect metrics"]}}
+
+        def get_state(self, _config):
+            return SimpleNamespace(values=final_state)
+
+    monkeypatch.setattr(
+        service_module,
+        "create_initial_aiops_state",
+        lambda **_kwargs: dict(final_state),
+    )
+    monkeypatch.setattr(
+        service_module.trace_service,
+        "create_event",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+    monkeypatch.setattr(
+        service_module.trace_service,
+        "record_node_event",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("trace unavailable")),
+    )
+    service.graph = CompleteGraph()
+
+    events = [
+        event
+        async for event in service.execute(
+            "diagnose",
+            session_id="session-trace-all",
+        )
+    ]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["status"] == "completed"
+    assert not any("trace_event_id" in event for event in events)
+
+
+@pytest.mark.asyncio
+async def test_diagnosis_event_stream_emits_error_when_service_ends_without_terminal() -> None:
+    class IncompleteService:
+        async def diagnose(self, **_kwargs):
+            yield {"type": "status", "stage": "planner", "status": "running"}
+
+    messages = [
+        message
+        async for message in diagnosis_event_stream(
+            aiops_service=IncompleteService(),
+            session_id="session-no-terminal",
+            incident=None,
+        )
+    ]
+    payloads = [json.loads(message["data"]) for message in messages]
+
+    assert payloads[-1]["type"] == "error"
+    assert payloads[-1]["stage"] == "stream_ended_without_terminal"
+    assert payloads[-1]["session_id"] == "session-no-terminal"
+
+
+@pytest.mark.asyncio
+async def test_resume_event_stream_emits_error_when_service_ends_without_terminal() -> None:
+    class IncompleteResumeService:
+        async def resume_after_approval(self, **_kwargs):
+            yield {"type": "status", "stage": "diagnosis_resumed", "status": "running"}
+
+    approval = SimpleNamespace(approval_id="apr-no-terminal")
+    messages = [
+        message
+        async for message in resume_diagnosis_event_stream(
+            aiops_service=IncompleteResumeService(),
+            session_id="session-resume-no-terminal",
+            incident_id="inc-resume-no-terminal",
+            approval=approval,
+        )
+    ]
+    payloads = [json.loads(message["data"]) for message in messages]
+
+    assert payloads[-1]["type"] == "error"
+    assert payloads[-1]["stage"] == "resume_ended_without_terminal"
+    assert payloads[-1]["session_id"] == "session-resume-no-terminal"
+    assert payloads[-1]["incident_id"] == "inc-resume-no-terminal"
+
+
+@pytest.mark.asyncio
+async def test_safe_change_event_stream_emits_error_when_service_ends_without_terminal() -> None:
+    class IncompleteChangeService:
+        async def start_after_approval(self, **_kwargs):
+            yield {"type": "change_precheck", "status": "passed"}
+
+    messages = [
+        message
+        async for message in safe_change_event_stream(
+            change_service=IncompleteChangeService(),
+            incident_id="inc-change-no-terminal",
+            change_plan_id="chg-change-no-terminal",
+            approval_id="apr-change-no-terminal",
+            mode="dry_run_only",
+            operator="change_operator",
+            observe_window_seconds=300,
+        )
+    ]
+    payloads = [json.loads(message["data"]) for message in messages]
+
+    assert payloads[-1]["type"] == "error"
+    assert payloads[-1]["stage"] == "change_stream_ended_without_terminal"
+    assert payloads[-1]["incident_id"] == "inc-change-no-terminal"
+    assert payloads[-1]["change_plan_id"] == "chg-change-no-terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stream_factory",
+    [
+        lambda: diagnosis_event_stream(
+            aiops_service=type(
+                "CancelledDiagnosisService",
+                (),
+                {"diagnose": lambda self, **_kwargs: _cancelled_stream()},
+            )(),
+            session_id="session-cancelled",
+            incident=None,
+        ),
+        lambda: resume_diagnosis_event_stream(
+            aiops_service=type(
+                "CancelledResumeService",
+                (),
+                {"resume_after_approval": lambda self, **_kwargs: _cancelled_stream()},
+            )(),
+            session_id="session-resume-cancelled",
+            incident_id="inc-resume-cancelled",
+            approval=SimpleNamespace(approval_id="apr-cancelled"),
+        ),
+        lambda: safe_change_event_stream(
+            change_service=type(
+                "CancelledChangeService",
+                (),
+                {"start_after_approval": lambda self, **_kwargs: _cancelled_stream()},
+            )(),
+            incident_id="inc-change-cancelled",
+            change_plan_id="chg-change-cancelled",
+            approval_id="apr-change-cancelled",
+            mode="dry_run_only",
+            operator="change_operator",
+            observe_window_seconds=300,
+        ),
+    ],
+)
+async def test_sse_route_helpers_propagate_client_cancellation(stream_factory) -> None:
+    with pytest.raises(asyncio.CancelledError):
+        async for _message in stream_factory():
+            pass
+
+
+async def _cancelled_stream():
+    raise asyncio.CancelledError
+    yield {}

@@ -1,5 +1,7 @@
 """Regression tests for the first industrial AIOps model upgrade."""
 
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -7,6 +9,7 @@ from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.planner import _build_planner_retrieval_query
 from app.agent.aiops.state import normalize_plan_state_update, remaining_plan_state_update
 from app.models.aiops import AIOpsRequest, AIOpsResumeRequest
+from app.models.alert import AlertEvent
 from app.models.approval import ApprovalDecisionRequest, ApprovalRequest, RiskAssessment
 from app.models.change_execution import ChangeResumeRequest, ManualExecutionResultRequest
 from app.models.evidence import Evidence
@@ -50,6 +53,8 @@ def test_aiops_resume_request_rejects_invalid_ids() -> None:
         AIOpsResumeRequest(session_id="s" * 129)
     with pytest.raises(ValidationError):
         AIOpsResumeRequest(approval_id="")
+    with pytest.raises(ValidationError):
+        AIOpsResumeRequest()
 
 
 def test_aiops_request_ids_reject_control_characters() -> None:
@@ -112,6 +117,27 @@ def test_core_models_reject_oversized_user_controlled_fields() -> None:
         PlanStep(retry_count=4)
     with pytest.raises(ValidationError):
         PlanStep(input_args={"payload": "x" * 20_001})
+
+
+def test_core_lifecycle_models_reject_naive_datetimes() -> None:
+    naive = datetime(2026, 6, 30, 10, 0, 0)
+
+    with pytest.raises(ValidationError, match="timezone"):
+        Incident(start_time=naive)
+    with pytest.raises(ValidationError, match="timezone"):
+        IncidentState(incident_id="inc-naive", created_at=naive)
+    with pytest.raises(ValidationError, match="timezone"):
+        AlertEvent(
+            fingerprint="fp-naive",
+            incident_id="inc-naive",
+            starts_at=naive,
+        )
+    with pytest.raises(ValidationError):
+        PlanStep(step_id=" ")
+    with pytest.raises(ValidationError):
+        PlanStep(tool_name=" ")
+    with pytest.raises(ValidationError):
+        PlanStep(purpose=" ")
     with pytest.raises(ValidationError):
         ApprovalDecisionRequest(decision="approve", reason="x" * 2001)
     with pytest.raises(ValidationError):
@@ -125,6 +151,8 @@ def test_core_models_reject_oversized_user_controlled_fields() -> None:
         ChangeResumeRequest(approval_id="")
     with pytest.raises(ValidationError):
         ManualExecutionResultRequest(status="succeeded", notes="x" * 4001)
+    with pytest.raises(ValidationError):
+        ManualExecutionResultRequest(status="succeeded")
     with pytest.raises(ValidationError):
         IncidentState(incident_id="inc-1", metadata={"payload": "x" * 20_001})
 
@@ -305,3 +333,26 @@ def test_plan_state_helpers_keep_canonical_and_legacy_plan_in_sync() -> None:
 
     assert [step["step_id"] for step in remaining["current_plan"]] == ["s2"]
     assert remaining["plan"] == [update["plan"][1]]
+
+
+def test_remaining_plan_state_preserves_invalid_structured_item_for_fail_closed_handling() -> None:
+    update = remaining_plan_state_update(
+        [
+            PlanStep(step_id="s1", tool_name="query_metrics").model_dump(mode="json"),
+            {
+                "step_id": "broken",
+                "tool_name": "restart_service",
+                "input_args": [],
+            },
+        ],
+        ["metrics", "restart production service"],
+    )
+
+    assert update["current_plan"] == [
+        {
+            "step_id": "broken",
+            "tool_name": "restart_service",
+            "input_args": [],
+        }
+    ]
+    assert update["plan"] == ["restart production service"]

@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
@@ -42,6 +42,7 @@ from app.services.incident_lifecycle import AIOPS_RUN_FILTER_STATUSES, status_ca
 from app.services.report_generator import ReportGenerator, report_generator
 from app.services.trace_service import TraceService, trace_service
 from app.tools.registry import create_default_tool_registry
+from app.utils.log_safety import sanitize_log_value
 
 router = APIRouter()
 RESOURCE_ID_MAX_LENGTH = 128
@@ -131,7 +132,7 @@ async def diagnose_stream(request: AIOpsRequest):
     """Run the Plan-Execute-Replan AIOps diagnosis workflow as an SSE stream."""
     session_id = request.session_id or f"session-{uuid4().hex}"
 
-    logger.info(f"[会话 {session_id}] 收到 AIOps 诊断请求（流式）")
+    logger.info(f"[会话 {sanitize_log_value(session_id)}] 收到 AIOps 诊断请求（流式）")
     return EventSourceResponse(
         diagnosis_event_stream(
             aiops_service=aiops_service,
@@ -174,13 +175,21 @@ async def resume_diagnosis_stream(
 ):
     """Record an approved human decision and close the paused diagnosis loop."""
     approval = _resolve_resume_approval(incident_id, request.approval_id)
-    session_id = request.session_id or str(approval.metadata.get("session_id") or "")
-    if not session_id:
-        session_id = f"resume-{incident_id}"
+    try:
+        session_id = aiops_service.resolve_resume_session_id(
+            incident_id=incident_id,
+            approval=approval,
+            requested_session_id=request.session_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     logger.info(
-        f"[会话 {session_id}] 收到 AIOps resume 请求: "
-        f"incident={incident_id}, approval={approval.approval_id}"
+        f"[会话 {sanitize_log_value(session_id)}] 收到 AIOps resume 请求: "
+        f"incident={sanitize_log_value(incident_id)}, "
+        f"approval={sanitize_log_value(approval.approval_id)}"
     )
     return EventSourceResponse(
         resume_diagnosis_event_stream(
@@ -254,7 +263,7 @@ async def submit_manual_change_result(
 
 def _resolve_resume_approval(
     incident_id: str,
-    approval_id: str | None,
+    approval_id: str,
 ) -> ApprovalRequest:
     """Return the approval decision that authorizes diagnosis resume."""
     return resolve_resume_approval(get_approval_service(), incident_id, approval_id)

@@ -2,10 +2,12 @@
 
 from app.agent.aiops.plan_fallback import (
     build_fallback_plan,
+    ensure_unique_step_ids,
     normalize_plan_steps,
     render_plan_step,
 )
 from app.agent.aiops.risk_controller import assess_plan_step
+from app.models.plan import PlanStep
 
 
 def test_redis_timeout_fallback_plan_contains_expected_tools() -> None:
@@ -173,6 +175,7 @@ def test_requested_action_stays_inside_eight_step_execution_budget() -> None:
     steps = build_fallback_plan("catalog-service Redis maxclients exhausted", incident)
 
     assert steps[0].tool_name == "restart_service"
+    assert len(steps) <= 8
     assert assess_plan_step(steps[0], incident=incident).policy == "approval_required"
 
 
@@ -197,3 +200,109 @@ def test_normalize_plan_steps_resets_status_and_renders_legacy_plan() -> None:
     assert steps[0].status == "pending"
     assert steps[1].tool_name == "manual_analysis"
     assert "query_logs" in render_plan_step(steps[0])
+
+
+def test_normalize_plan_steps_deduplicates_and_rejects_unavailable_tools() -> None:
+    steps = normalize_plan_steps(
+        raw_steps=[
+            {
+                "step_id": "s1",
+                "tool_name": "query_metrics",
+                "purpose": "检查指标",
+                "input_args": {"service_name": "order-service"},
+                "expected_evidence": "指标证据",
+            },
+            {
+                "step_id": "duplicate-id",
+                "tool_name": "query_metrics",
+                "purpose": "重复检查同一指标",
+                "input_args": {"service_name": "order-service"},
+                "expected_evidence": "重复指标证据",
+            },
+            {
+                "step_id": "unknown",
+                "tool_name": "query_unavailable_backend",
+                "purpose": "调用不可用工具",
+                "input_args": {"service_name": "order-service"},
+                "expected_evidence": "不可用工具证据",
+            },
+        ],
+        input_text="order-service timeout",
+        incident={"service_name": "order-service"},
+        allowed_tool_names={"query_metrics"},
+    )
+
+    assert [(step.step_id, step.tool_name) for step in steps] == [("s1", "query_metrics")]
+
+
+def test_normalize_plan_steps_uses_fallback_when_all_structured_items_are_invalid() -> None:
+    steps = normalize_plan_steps(
+        raw_steps=[
+            {
+                "step_id": "broken",
+                "tool_name": "query_metrics",
+                "purpose": "x" * 1001,
+            }
+        ],
+        input_text="order-service timeout",
+        incident={"service_name": "order-service"},
+        allowed_tool_names={"query_metrics"},
+    )
+
+    assert steps
+    assert {step.tool_name for step in steps} == {"query_metrics"}
+    assert all(step.tool_name != "manual_analysis" for step in steps)
+
+
+def test_normalize_plan_steps_respects_explicitly_empty_tool_contract() -> None:
+    steps = normalize_plan_steps(
+        raw_steps=[
+            {
+                "step_id": "s1",
+                "tool_name": "query_metrics",
+                "purpose": "检查指标",
+                "input_args": {"service_name": "order-service"},
+                "expected_evidence": "指标证据",
+            }
+        ],
+        input_text="order-service timeout",
+        incident={"service_name": "order-service"},
+        allowed_tool_names=set(),
+    )
+
+    assert len(steps) == 1
+    assert steps[0].tool_name == "manual_analysis"
+
+
+def test_invalid_model_plan_keeps_requested_action_for_risk_control() -> None:
+    incident = {
+        "service_name": "order-service",
+        "environment": "prod",
+        "raw_alert": {
+            "requested_action": "restart_service",
+            "reason": "operator requested restart",
+        },
+    }
+
+    steps = normalize_plan_steps(
+        raw_steps=[{"tool_name": "query_metrics", "purpose": "x" * 1001}],
+        input_text="order-service timeout",
+        incident=incident,
+        allowed_tool_names=set(),
+    )
+
+    assert [step.tool_name for step in steps] == ["restart_service"]
+    assert assess_plan_step(steps[0], incident=incident).policy == "approval_required"
+
+
+def test_ensure_unique_step_ids_handles_generated_id_collisions() -> None:
+    steps = ensure_unique_step_ids(
+        [
+            PlanStep(step_id="s2", tool_name="query_metrics"),
+            PlanStep(step_id="s2", tool_name="query_logs"),
+            PlanStep(step_id="s3", tool_name="query_redis_status"),
+        ]
+    )
+
+    step_ids = [step.step_id for step in steps]
+    assert len(step_ids) == len(set(step_ids))

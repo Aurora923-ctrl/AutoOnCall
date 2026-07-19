@@ -19,7 +19,8 @@ def test_replanner_eval_cases_cover_llm_guardrails() -> None:
     assert "llm_generate_report_blocked_when_evidence_insufficient" in case_ids
     assert "llm_unsafe_tool_falls_back_to_evidence_analyzer" in case_ids
     assert "failed_tool_retry_skips_llm_decision" in case_ids
-    assert len(cases) == 5
+    assert "llm_add_steps_preserves_remaining_risk_action" in case_ids
+    assert len(cases) == 6
 
     for case in cases:
         assert case.get("llm_decision")
@@ -31,8 +32,8 @@ def test_replanner_eval_cases_cover_llm_guardrails() -> None:
 async def test_replanner_eval_cases_all_pass_offline() -> None:
     payload = await evaluate_cases("eval/replanner_cases.yaml")
 
-    assert payload["summary"]["case_count"] == 5
-    assert payload["summary"]["passed_count"] == 5
+    assert payload["summary"]["case_count"] == 6
+    assert payload["summary"]["passed_count"] == 6
     assert payload["summary"]["pass_rate"] == 1.0
     assert payload["summary"]["all_passed"] is True
     assert payload["summary"]["failed_cases"] == []
@@ -69,13 +70,17 @@ async def test_replanner_eval_cases_all_pass_offline() -> None:
     )
     assert result_by_id["failed_tool_retry_skips_llm_decision"]["llm_call_count"] == 0
     assert result_by_id["failed_tool_retry_skips_llm_decision"]["first_step_id"] == "s3-retry"
+    assert result_by_id["llm_add_steps_preserves_remaining_risk_action"]["actual_plan_tools"] == [
+        "query_metrics",
+        "restart_service",
+    ]
 
     summary_text = render_summary(payload)
-    assert "Replanner eval: 5/5 cases passed" in summary_text
+    assert "Replanner eval: 6/6 cases passed" in summary_text
     assert "guardrail=100%" in summary_text
     assert "llm_structured=100%" in summary_text
 
     markdown = render_markdown_summary(payload)
-    assert "Replanner 评测通过率：5/5 (100%)" in markdown
+    assert "Replanner 评测通过率：6/6 (100%)" in markdown
     assert "LLM structured 正向路径命中率：100%" in markdown
     assert "`llm_adds_read_only_trace_step`" in markdown

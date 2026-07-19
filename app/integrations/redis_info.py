@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from app.config import config
-from app.integrations.base import ExternalAdapterError, adapter_success, require_config
+from app.integrations.base import (
+    ExternalAdapterError,
+    ExternalAdapterNotFoundError,
+    adapter_success,
+    classify_adapter_error,
+    parse_duration_seconds,
+    public_adapter_failure_message,
+    require_config,
+)
 
 
 class RedisInfoAdapter:
@@ -63,6 +73,22 @@ class RedisInfoAdapter:
         connected_clients = int(info["connected_clients"])
         blocked_clients = int(info["blocked_clients"])
         slowlog_len = int(slowlog_len_text or "0")
+        window_started_at = datetime.now(UTC) - timedelta(
+            seconds=max(parse_duration_seconds(time_range), 1)
+        )
+        incident_evidence = self._evidence_within_window(
+            incident_evidence,
+            window_started_at=window_started_at,
+        )
+        evidence_hash = self._evidence_within_window(
+            evidence_hash,
+            window_started_at=window_started_at,
+        )
+        timeline = self._timeline_within_window(
+            timeline,
+            window_started_at=window_started_at,
+        )
+        hotkeys = hotkeys if incident_evidence or evidence_hash or timeline else []
         big_key_analysis = self._big_key_analysis(info)
         if hotkeys:
             big_key_analysis["hotkeys"] = hotkeys
@@ -117,6 +143,22 @@ class RedisInfoAdapter:
                 "live_connected_clients": connected_clients,
                 "live_maxclients": maxclients,
             },
+            signal_scopes={
+                "connected_clients": (
+                    "incident_window_evidence" if incident_evidence else "current_runtime"
+                ),
+                "maxclients": (
+                    "incident_window_evidence" if incident_evidence else "current_runtime"
+                ),
+                "blocked_clients": (
+                    "incident_window_evidence" if incident_evidence else "current_runtime"
+                ),
+                "slowlog_len": (
+                    "incident_window_evidence" if incident_evidence else "current_runtime"
+                ),
+                "live_connected_clients": "current_runtime",
+                "live_maxclients": "current_runtime",
+            },
             raw={
                 "info": info if self.store_raw_external_payload else self._compact_info(info),
                 "maxclients_response": maxclients_text,
@@ -153,9 +195,17 @@ class RedisInfoAdapter:
                 signal_values=signal_values,
             ),
             fact=(
-                "Redis evidence key shows connected_clients close to maxclients: "
-                f"{signal_values['connected_clients']}/{signal_values['maxclients']}, "
-                f"blocked_clients={signal_values['blocked_clients']}."
+                (
+                    "Redis incident-window evidence shows connected_clients close to "
+                    "maxclients: "
+                    f"{signal_values['connected_clients']}/{signal_values['maxclients']}, "
+                    f"blocked_clients={signal_values['blocked_clients']}."
+                )
+                if incident_evidence
+                else (
+                    "Current Redis INFO reports connected_clients="
+                    f"{connected_clients}/{maxclients}, blocked_clients={blocked_clients}."
+                )
             ),
             inference=(
                 "Application Redis connection acquisition likely waited or timed out, "
@@ -263,23 +313,35 @@ class RedisInfoAdapter:
             )
         except ExternalAdapterError as exc:
             maxclients_text = str(info.get("maxclients", "0"))
-            optional_errors.append({"command": "CONFIG GET maxclients", "error_message": str(exc)})
+            optional_errors.append(self._optional_command_error("CONFIG GET maxclients", exc))
         try:
             slowlog_len_text = await self._send_command(reader, writer, "SLOWLOG", "LEN")
         except ExternalAdapterError as exc:
             slowlog_len_text = "0"
-            optional_errors.append({"command": "SLOWLOG LEN", "error_message": str(exc)})
+            optional_errors.append(self._optional_command_error("SLOWLOG LEN", exc))
         return maxclients_text, slowlog_len_text, optional_errors
+
+    @staticmethod
+    def _optional_command_error(command: str, exc: Exception) -> dict[str, str]:
+        error_type = classify_adapter_error(exc)
+        return {
+            "command": command,
+            "error_type": error_type,
+            "error_message": public_adapter_failure_message(error_type),
+        }
 
     async def _send_command(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         *parts: str,
-    ) -> str:
+    ) -> Any:
         command = self._encode_resp(parts)
         writer.write(command)
         await writer.drain()
+        return await self._read_resp(reader)
+
+    async def _read_resp(self, reader: asyncio.StreamReader) -> Any:
         line = await asyncio.wait_for(reader.readline(), timeout=self.timeout_seconds)
         if not line:
             raise ExternalAdapterError("Redis closed connection")
@@ -291,7 +353,7 @@ class RedisInfoAdapter:
         if prefix == b"$":
             length = int(line[1:].strip())
             if length < 0:
-                return ""
+                return None
             data = await asyncio.wait_for(
                 reader.readexactly(length + 2),
                 timeout=self.timeout_seconds,
@@ -299,19 +361,12 @@ class RedisInfoAdapter:
             return data[:-2].decode(errors="replace")
         if prefix == b"*":
             count = int(line[1:].strip())
-            values = [await self._read_bulk(reader) for _ in range(count)]
-            return "\n".join(values)
+            if count < 0:
+                return None
+            return [await self._read_resp(reader) for _ in range(count)]
         if prefix == b":":
-            return line[1:].decode(errors="replace").strip()
+            return int(line[1:].decode(errors="replace").strip())
         return line.decode(errors="replace").strip()
-
-    async def _read_bulk(self, reader: asyncio.StreamReader) -> str:
-        line = await asyncio.wait_for(reader.readline(), timeout=self.timeout_seconds)
-        if not line.startswith(b"$"):
-            return line.decode(errors="replace").strip()
-        length = int(line[1:].strip())
-        data = await asyncio.wait_for(reader.readexactly(length + 2), timeout=self.timeout_seconds)
-        return data[:-2].decode(errors="replace")
 
     async def _read_incident_evidence(
         self,
@@ -377,7 +432,13 @@ class RedisInfoAdapter:
         return self._parse_stream_entries(text)
 
     def _resolve_target(self, redis_instance: str = "") -> dict[str, Any]:
-        url = self.instance_urls.get(redis_instance) if redis_instance else ""
+        url = ""
+        if redis_instance:
+            url = self.instance_urls.get(redis_instance, "")
+            if not url:
+                raise ExternalAdapterNotFoundError(
+                    f"Redis instance {redis_instance!r} is not configured"
+                )
         url = require_config(url or self.redis_url, "REDIS_URL or REDIS_HOST")
         parsed = urlparse(url)
         if parsed.scheme and parsed.scheme not in {"redis", "rediss"}:
@@ -403,9 +464,9 @@ class RedisInfoAdapter:
         return payload.encode()
 
     @staticmethod
-    def _parse_info(text: str) -> dict[str, str]:
+    def _parse_info(text: Any) -> dict[str, str]:
         result = {}
-        for line in text.splitlines():
+        for line in str(text or "").splitlines():
             if not line or line.startswith("#") or ":" not in line:
                 continue
             key, value = line.split(":", 1)
@@ -413,13 +474,13 @@ class RedisInfoAdapter:
         return result
 
     @staticmethod
-    def _parse_flat_key_values(text: str) -> dict[str, str]:
-        lines = [line for line in text.splitlines() if line]
+    def _parse_flat_key_values(text: Any) -> dict[str, str]:
+        lines = RedisInfoAdapter._flat_strings(text)
         return {lines[index]: lines[index + 1] for index in range(0, len(lines) - 1, 2)}
 
     @staticmethod
-    def _parse_zset_pairs(text: str) -> list[dict[str, Any]]:
-        lines = [line for line in text.splitlines() if line]
+    def _parse_zset_pairs(text: Any) -> list[dict[str, Any]]:
+        lines = RedisInfoAdapter._flat_strings(text)
         pairs = []
         for index in range(0, len(lines) - 1, 2):
             pairs.append(
@@ -428,24 +489,112 @@ class RedisInfoAdapter:
         return pairs
 
     @staticmethod
-    def _parse_stream_entries(text: str) -> list[dict[str, Any]]:
-        lines = [line for line in text.splitlines() if line]
+    def _parse_stream_entries(text: Any) -> list[dict[str, Any]]:
+        if not isinstance(text, list):
+            return []
         entries: list[dict[str, Any]] = []
-        index = 0
-        while index < len(lines):
-            entry_id = lines[index]
-            index += 1
+        for item in text:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            entry_id = str(item[0] or "")
+            field_values = item[1]
+            if not entry_id or not isinstance(field_values, list):
+                continue
             fields: dict[str, str] = {"id": entry_id}
-            while index + 1 < len(lines) and "-" not in lines[index]:
-                fields[lines[index]] = lines[index + 1]
-                index += 2
+            flat_fields = RedisInfoAdapter._flat_strings(field_values)
+            for index in range(0, len(flat_fields) - 1, 2):
+                fields[flat_fields[index]] = flat_fields[index + 1]
             entries.append(fields)
         return entries
 
     @staticmethod
-    def _parse_maxclients(text: str) -> int:
-        lines = [line for line in text.splitlines() if line and line != "maxclients"]
-        return int(lines[0]) if lines else 0
+    def _parse_maxclients(text: Any) -> int:
+        if isinstance(text, int):
+            return text
+        lines = [line for line in RedisInfoAdapter._flat_strings(text) if line != "maxclients"]
+        return RedisInfoAdapter._safe_int(lines[0], 0) if lines else 0
+
+    @staticmethod
+    def _flat_strings(value: Any) -> list[str]:
+        if isinstance(value, list):
+            result: list[str] = []
+            for item in value:
+                result.extend(RedisInfoAdapter._flat_strings(item))
+            return result
+        if value is None:
+            return []
+        return [line for line in str(value).splitlines() if line]
+
+    @classmethod
+    def _evidence_within_window(
+        cls,
+        evidence: dict[str, str],
+        *,
+        window_started_at: datetime,
+    ) -> dict[str, str]:
+        if not evidence:
+            return {}
+        observed_at = cls._parse_timestamp(
+            evidence.get("observed_at")
+            or evidence.get("updated_at")
+            or evidence.get("timestamp")
+            or evidence.get("ts")
+        )
+        if observed_at is None or observed_at < window_started_at:
+            return {}
+        return evidence
+
+    @classmethod
+    def _timeline_within_window(
+        cls,
+        timeline: list[dict[str, Any]],
+        *,
+        window_started_at: datetime,
+    ) -> list[dict[str, Any]]:
+        return [
+            entry
+            for entry in timeline
+            if (
+                (observed_at := cls._timeline_observed_at(entry)) is not None
+                and observed_at >= window_started_at
+            )
+        ]
+
+    @classmethod
+    def _timeline_observed_at(cls, entry: dict[str, Any]) -> datetime | None:
+        for key in ("ts", "timestamp", "observed_at", "updated_at"):
+            parsed = cls._parse_timestamp(entry.get(key))
+            if parsed is not None:
+                return parsed
+        entry_id = str(entry.get("id") or "")
+        match = re.fullmatch(r"(\d+)-\d+", entry_id)
+        if not match:
+            return None
+        return datetime.fromtimestamp(int(match.group(1)) / 1000, tz=UTC)
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            if numeric > 10_000_000_000:
+                numeric /= 1000
+            try:
+                return datetime.fromtimestamp(numeric, tz=UTC)
+            except (OSError, OverflowError, ValueError):
+                return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     @classmethod
     def _diagnostic_signal_values(

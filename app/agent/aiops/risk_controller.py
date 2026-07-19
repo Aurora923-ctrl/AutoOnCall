@@ -120,7 +120,7 @@ def assess_plan_step(
     metadata = _get_tool_metadata(plan_step.tool_name, tool_registry)
     read_only = _resolve_read_only(plan_step, metadata)
     risk_level = _max_risk(plan_step.risk_level, _metadata_risk(metadata))
-    context = _step_context(plan_step, incident)
+    context = _step_context(plan_step)
 
     forbidden_rules = _matched_forbidden_rules(plan_step, context)
     if forbidden_rules:
@@ -179,12 +179,18 @@ def is_auto_executable(
 
 
 def _get_tool_metadata(tool_name: str, tool_registry: Any | None) -> Any | None:
-    if not tool_registry or not hasattr(tool_registry, "get"):
+    if not tool_registry:
+        return None
+    if hasattr(tool_registry, "get_policy_metadata"):
+        return tool_registry.get_policy_metadata(tool_name)
+    if not hasattr(tool_registry, "get"):
         return None
     return tool_registry.get(tool_name)
 
 
 def _resolve_read_only(step: PlanStep, metadata: Any | None) -> bool:
+    if isinstance(metadata, dict) and "read_only" in metadata:
+        return bool(metadata["read_only"])
     if metadata is not None and hasattr(metadata, "read_only"):
         return bool(metadata.read_only)
     if step.tool_name in HARD_FORBIDDEN_TOOLS or step.tool_name in ACTION_TOOLS_REQUIRING_APPROVAL:
@@ -193,7 +199,13 @@ def _resolve_read_only(step: PlanStep, metadata: Any | None) -> bool:
 
 
 def _metadata_risk(metadata: Any | None) -> RiskLevel:
-    value = getattr(metadata, "risk_level", "low") if metadata is not None else "low"
+    value = (
+        metadata.get("risk_level", "low")
+        if isinstance(metadata, dict)
+        else getattr(metadata, "risk_level", "low")
+        if metadata is not None
+        else "low"
+    )
     return cast(RiskLevel, value) if value in RISK_ORDER else "low"
 
 
@@ -207,37 +219,15 @@ def _max_risk(*levels: str) -> RiskLevel:
     return max(normalized, key=lambda level: RISK_ORDER[level])
 
 
-def _step_context(step: PlanStep, incident: Any | None) -> str:
+def _step_context(step: PlanStep) -> str:
+    """Return only action-owned text used for action-pattern matching."""
     parts = [
         step.tool_name,
         step.purpose,
         step.expected_evidence,
         _json_text(step.input_args),
-        _incident_context(incident),
     ]
     return " ".join(part for part in parts if part).lower()
-
-
-def _incident_context(incident: Any | None) -> str:
-    if not incident:
-        return ""
-    if isinstance(incident, dict):
-        values = [
-            incident.get("title", ""),
-            incident.get("service_name", ""),
-            incident.get("severity", ""),
-            incident.get("symptom", ""),
-            incident.get("environment", ""),
-        ]
-    else:
-        values = [
-            getattr(incident, "title", ""),
-            getattr(incident, "service_name", ""),
-            getattr(incident, "severity", ""),
-            getattr(incident, "symptom", ""),
-            getattr(incident, "environment", ""),
-        ]
-    return " ".join(str(value) for value in values if value)
 
 
 def _json_text(value: Any) -> str:
@@ -283,9 +273,11 @@ def _matched_approval_rules(
     read_only: bool,
     risk_level: RiskLevel,
 ) -> list[str]:
+    if step.tool_name == "suggest_remediation":
+        return []
+    if read_only and step.tool_name != "manual_analysis":
+        return []
     rules: list[str] = []
-    if read_only and step.tool_name == "suggest_remediation":
-        return _dedupe(rules)
     if risk_level == "high" or (risk_level == "medium" and not read_only):
         rules.append(f"risk:{risk_level}")
     if not read_only:

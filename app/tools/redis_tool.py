@@ -18,10 +18,12 @@ class QueryRedisStatusTool(AIOpsTool):
     input_schema = {
         "type": "object",
         "properties": {
-            "service_name": {"type": "string"},
+            "service_name": {"type": "string", "minLength": 1},
             "time_range": {"type": "string", "default": "10m"},
             "redis_instance": {"type": "string"},
         },
+        "required": ["service_name"],
+        "additionalProperties": False,
     }
     output_schema = {"type": "object"}
     risk_level = "low"
@@ -52,7 +54,7 @@ class QueryRedisStatusTool(AIOpsTool):
         time_range = clamp_duration(
             input_args.get("time_range"),
             default="10m",
-            maximum_seconds=3600,
+            maximum_seconds=30 * 86400,
         )
         input_args["time_range"] = time_range
 

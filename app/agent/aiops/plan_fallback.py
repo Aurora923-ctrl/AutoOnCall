@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
@@ -80,11 +81,18 @@ def render_plan_step(step: PlanStep) -> str:
 
 
 def normalize_plan_steps(
-    raw_steps: list[Any], input_text: str, incident: dict[str, Any] | None
+    raw_steps: list[Any],
+    input_text: str,
+    incident: dict[str, Any] | None,
+    allowed_tool_names: set[str] | None = None,
 ) -> list[PlanStep]:
     """Coerce model output into valid PlanStep objects."""
     steps: list[PlanStep] = []
     service_name = infer_service_name(input_text, incident)
+    allowed_tools = (
+        set(STANDARD_TOOL_NAMES) if allowed_tool_names is None else set(allowed_tool_names)
+    )
+    allowed_tools.add("manual_analysis")
 
     for index, raw_step in enumerate(raw_steps, 1):
         try:
@@ -100,6 +108,8 @@ def normalize_plan_steps(
                     expected_evidence="人工分析该步骤是否完成",
                 )
 
+            if step.tool_name not in allowed_tools:
+                continue
             if not step.step_id:
                 step.step_id = f"s{index}"
             if not step.input_args:
@@ -107,20 +117,35 @@ def normalize_plan_steps(
             step.status = "pending"
             steps.append(step)
         except Exception:
-            steps.append(
-                PlanStep(
-                    step_id=f"s{index}",
-                    tool_name="manual_analysis",
-                    purpose=str(raw_step),
-                    input_args={"service_name": service_name},
-                    expected_evidence="模型输出无法结构化，保留为人工分析步骤",
-                )
-            )
+            continue
 
     if not steps:
-        return build_fallback_plan(input_text=input_text, incident=incident)
+        fallback_steps = build_fallback_plan(input_text=input_text, incident=incident)
+        requested_step = build_incident_requested_action_step(incident)
+        available_fallback_steps = [
+            step
+            for step in fallback_steps
+            if step.tool_name in allowed_tools
+            or (
+                requested_step is not None
+                and _has_equivalent_requested_action([step], requested_step)
+            )
+        ]
+        if available_fallback_steps:
+            return ensure_unique_step_ids(available_fallback_steps)
+        return [
+            PlanStep(
+                step_id="s1",
+                tool_name="manual_analysis",
+                purpose="Review the incident because no executable diagnostic tool is available.",
+                input_args={"service_name": service_name, "task": input_text},
+                expected_evidence="Record the unavailable-tool boundary and escalate for operator review.",
+                risk_level="low",
+                status="pending",
+            )
+        ]
 
-    return append_incident_requested_action_step(steps, incident)
+    return append_incident_requested_action_step(deduplicate_plan_steps(steps), incident)
 
 
 def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None) -> list[PlanStep]:
@@ -153,12 +178,25 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
         expected_evidence = (
             expected_evidence or "Collect diagnostic evidence for the current incident."
         )
+        normalized_input_args = (
+            dict(input_args)
+            if input_args is not None
+            else default_input_args(tool_name, service_name, symptom)
+        )
+        if tool_name in {
+            "query_service_context",
+            "query_deploy_history",
+            "query_mysql_status",
+            "search_history_ticket",
+            "suggest_remediation",
+        }:
+            normalized_input_args.setdefault("service_name", service_name)
         steps.append(
             PlanStep(
                 step_id=f"s{len(steps) + 1}",
                 tool_name=tool_name,
                 purpose=purpose,
-                input_args=input_args or default_input_args(tool_name, service_name, symptom),
+                input_args=normalized_input_args,
                 expected_evidence=expected_evidence,
                 risk_level=risk_level,  # type: ignore[arg-type]
                 status="pending",
@@ -581,11 +619,12 @@ def append_incident_requested_action_step(
         return normalized
     if _has_equivalent_requested_action(normalized, requested_step):
         return normalized
+    if len(normalized) >= 8:
+        without_advice = [step for step in normalized if step.tool_name != "suggest_remediation"]
+        normalized = (without_advice or normalized)[:7]
     if not _is_interview_golden_requested_action(incident):
         requested_step = requested_step.model_copy(update={"step_id": "s1"})
         return ensure_unique_step_ids([requested_step, *normalized])
-    if len(normalized) >= 8:
-        normalized = [step for step in normalized if step.tool_name != "suggest_remediation"][:7]
     requested_step = requested_step.model_copy(update={"step_id": f"s{len(normalized) + 1}"})
     return ensure_unique_step_ids([*normalized, requested_step])
 
@@ -676,7 +715,13 @@ def default_input_args(tool_name: str, service_name: str, symptom: str) -> dict[
     if tool_name == "query_metrics":
         return {"service_name": service_name, "time_range": "10m", "interval": "1m"}
     if tool_name == "query_deploy_history":
-        return {"service_name": service_name, "time_range": "24h", "limit": 5}
+        return {"service_name": service_name, "limit": 5}
+    if tool_name == "query_mysql_status":
+        return {"service_name": service_name}
+    if tool_name == "search_history_ticket":
+        return {"service_name": service_name, "symptom": symptom, "limit": 5}
+    if tool_name == "query_service_context":
+        return {"service_name": service_name}
     return {"service_name": service_name, "time_range": "10m"}
 
 
@@ -923,10 +968,38 @@ def ensure_unique_step_ids(steps: list[PlanStep]) -> list[PlanStep]:
     for index, step in enumerate(steps, 1):
         step_id = step.step_id or f"s{index}"
         if step_id in seen:
-            step_id = f"s{index}"
+            suffix = index
+            step_id = f"s{suffix}"
+            while step_id in seen:
+                suffix += 1
+                step_id = f"s{suffix}"
         seen.add(step_id)
         normalized.append(step.model_copy(update={"step_id": step_id, "status": "pending"}))
     return normalized
+
+
+def deduplicate_plan_steps(steps: list[PlanStep]) -> list[PlanStep]:
+    """Remove semantically repeated steps while preserving the first occurrence."""
+    seen: set[str] = set()
+    deduplicated: list[PlanStep] = []
+    for step in steps:
+        signature_payload: dict[str, Any] = {
+            "tool_name": step.tool_name,
+            "input_args": step.input_args,
+        }
+        if step.tool_name == "manual_analysis":
+            signature_payload["purpose"] = step.purpose
+        signature = json.dumps(
+            signature_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduplicated.append(step)
+    return deduplicated
 
 
 def contains_any(text: str, keywords: list[str]) -> bool:

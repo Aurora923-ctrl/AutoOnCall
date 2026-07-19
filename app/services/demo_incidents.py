@@ -133,7 +133,8 @@ def build_demo_incident(case_id: str) -> Incident:
 
 def canonical_demo_case_id(case_id: str) -> str:
     """Normalize a demo case alias to its canonical id."""
-    return DEMO_INCIDENT_ALIASES.get(case_id, case_id)
+    normalized = str(case_id or "").strip().lower()
+    return DEMO_INCIDENT_ALIASES.get(normalized, normalized)
 
 
 def demo_incident_aliases(case_id: str) -> list[str]:

@@ -56,11 +56,10 @@ class AIOpsResumeRequest(BaseModel):
         max_length=AIOPS_SESSION_ID_MAX_LENGTH,
         description="原诊断会话 ID；新审批会从 metadata 自动推断，旧审批可显式传入。",
     )
-    approval_id: str | None = Field(
-        default=None,
+    approval_id: str = Field(
         min_length=1,
         max_length=AIOPS_APPROVAL_ID_MAX_LENGTH,
-        description="要恢复的审批 ID；不传时使用该事件最新 approved 审批。",
+        description="要恢复的审批 ID。",
     )
 
     model_config = ConfigDict(

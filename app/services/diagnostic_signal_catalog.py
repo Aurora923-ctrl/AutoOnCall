@@ -107,7 +107,7 @@ DIAGNOSTIC_SIGNAL_CANDIDATES: list[dict[str, Any]] = [
     {
         "category": "unknown_needs_human",
         "title": "现有证据不足以确认根因，需要人工补充上下文或接管。",
-        "keywords": ["unclassified", "unknown", "无法归类", "证据不足", "unaudited", "delete pod"],
+        "keywords": ["unclassified", "无法归类", "证据不足", "unaudited", "delete pod"],
         "tools": ["query_metrics", "query_logs"],
         "evidence_type": "unknown",
     },

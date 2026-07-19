@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
+
+from pydantic import ValidationError
 
 from app.config import config
 from app.models.alert import (
@@ -14,7 +16,7 @@ from app.models.alert import (
     AlertIngestionItem,
     AlertIngestionResult,
 )
-from app.models.incident import Incident, utc_now
+from app.models.incident import Incident
 from app.services.aiops_store import AIOpsStateStore, create_aiops_store
 from app.services.incident_lifecycle import normalize_alert_status
 from app.services.incident_state_builder import build_incident_state_from_alert
@@ -27,6 +29,10 @@ MAX_ENVIRONMENT_LENGTH = 64
 MAX_ALERT_FIELD_VALUE_LENGTH = 4096
 
 
+class AlertPayloadValidationError(ValueError):
+    """Raised when an external alert cannot form a reliable lifecycle event."""
+
+
 class AlertIngestionService:
     """Ingest Alertmanager-compatible webhooks into the Incident lifecycle."""
 
@@ -36,30 +42,45 @@ class AlertIngestionService:
     def ingest_alertmanager_webhook(self, payload: dict[str, Any]) -> AlertIngestionResult:
         """Normalize and persist all alerts from an Alertmanager webhook payload."""
         alerts = _extract_alert_items(payload)
+        normalized_items: list[tuple[AlertEvent, Incident]] = []
+        for index, raw_alert in enumerate(alerts):
+            try:
+                event = _normalize_alertmanager_alert(payload, raw_alert)
+                normalized_items.append((event, _build_incident(event)))
+            except AlertPayloadValidationError as exc:
+                raise AlertPayloadValidationError(f"alerts[{index}]: {exc}") from exc
+            except ValidationError as exc:
+                raise AlertPayloadValidationError(
+                    f"alerts[{index}]: normalized alert exceeds model limits"
+                ) from exc
+
         items: list[AlertIngestionItem] = []
         created_count = 0
         deduplicated_count = 0
         resolved_count = 0
+        stale_ignored_count = 0
 
-        for raw_alert in alerts:
-            event = _normalize_alertmanager_alert(payload, raw_alert)
-            existing = self.store.get_alert_event(event.fingerprint)
-            created = existing is None
-            previous_status = existing.status if existing is not None else None
-            status_changed = previous_status is not None and previous_status != event.status
-            reopened = previous_status == "resolved" and event.status == "firing"
-            if existing is not None:
-                event.created_at = existing.created_at
-                deduplicated_count += 1
-            else:
+        for event, incident in normalized_items:
+            (
+                event,
+                incident_state,
+                created,
+                previous_status,
+                stale_ignored,
+                reopened,
+            ) = self.store.persist_alert_ingestion(event, incident)
+            status_changed = (
+                not stale_ignored
+                and previous_status is not None
+                and previous_status != event.status
+            )
+            if created:
                 created_count += 1
-            event.updated_at = utc_now()
-
-            self.store.save_alert_event(event)
-            incident = _build_incident(event)
-            incident_state = self._build_incident_state(event, incident)
-            self.store.save_incident_state(incident_state)
-            if event.status == "resolved":
+            else:
+                deduplicated_count += 1
+            if stale_ignored:
+                stale_ignored_count += 1
+            elif event.status == "resolved":
                 resolved_count += 1
 
             items.append(
@@ -70,6 +91,7 @@ class AlertIngestionService:
                     previous_status=previous_status,
                     status_changed=status_changed,
                     reopened=reopened,
+                    stale_ignored=stale_ignored,
                     incident_id=incident.incident_id,
                     incident_status=incident_state.status,
                     status_reason=incident_state.status_reason,
@@ -82,6 +104,7 @@ class AlertIngestionService:
             created=created_count,
             deduplicated=deduplicated_count,
             resolved=resolved_count,
+            stale_ignored=stale_ignored_count,
             items=items,
         )
 
@@ -119,7 +142,15 @@ class AlertIngestionService:
 def _extract_alert_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     alerts = payload.get("alerts")
     if isinstance(alerts, list):
-        return [item for item in alerts if isinstance(item, dict)]
+        invalid_index = next(
+            (index for index, item in enumerate(alerts) if not isinstance(item, dict)),
+            None,
+        )
+        if invalid_index is not None:
+            raise AlertPayloadValidationError(f"alerts[{invalid_index}] must be an object")
+        return alerts
+    if alerts is not None:
+        raise AlertPayloadValidationError("alerts must be an array")
     if isinstance(payload.get("labels"), dict):
         return [payload]
     return []
@@ -129,15 +160,28 @@ def _normalize_alertmanager_alert(
     webhook_payload: dict[str, Any],
     raw_alert: dict[str, Any],
 ) -> AlertEvent:
-    common_labels = _as_dict(webhook_payload.get("commonLabels"))
-    common_annotations = _as_dict(webhook_payload.get("commonAnnotations"))
-    labels = {**common_labels, **_as_dict(raw_alert.get("labels"))}
-    annotations = {**common_annotations, **_as_dict(raw_alert.get("annotations"))}
+    common_labels = _optional_mapping(webhook_payload, "commonLabels")
+    common_annotations = _optional_mapping(webhook_payload, "commonAnnotations")
+    alert_labels = _optional_mapping(raw_alert, "labels")
+    alert_annotations = _optional_mapping(raw_alert, "annotations")
+    labels = {**common_labels, **alert_labels}
+    annotations = {**common_annotations, **alert_annotations}
+    alertname_value = labels.get("alertname") or raw_alert.get("alertname")
+    if not str(alertname_value or "").strip():
+        raise AlertPayloadValidationError("alertname is required")
+
     stored_labels = _redact_mapping(labels)
     stored_annotations = _redact_mapping(annotations)
-    status = _normalize_status(raw_alert.get("status") or webhook_payload.get("status"))
+    try:
+        status = normalize_alert_status(
+            raw_alert.get("status") or webhook_payload.get("status"),
+            strict=True,
+        )
+    except ValueError as exc:
+        raise AlertPayloadValidationError(str(exc)) from exc
+
     alertname = _truncate_text(
-        str(labels.get("alertname") or raw_alert.get("alertname") or "UnknownAlert"),
+        str(alertname_value),
         MAX_ALERT_NAME_LENGTH,
     )
     service_name = _truncate_text(_infer_service_name(labels), MAX_SERVICE_NAME_LENGTH)
@@ -162,6 +206,21 @@ def _normalize_alertmanager_alert(
         labels=labels,
         raw_fingerprint=raw_alert.get("fingerprint"),
     )
+    starts_at = _parse_datetime(
+        raw_alert.get("startsAt") or raw_alert.get("starts_at"),
+        field_name="startsAt",
+        required=True,
+    )
+    ends_at = _parse_datetime(
+        raw_alert.get("endsAt") or raw_alert.get("ends_at"),
+        field_name="endsAt",
+        required=status == "resolved",
+    )
+    if status == "firing" and ends_at is not None and ends_at.year == 1:
+        ends_at = None
+    if ends_at is not None and starts_at is not None and ends_at < starts_at:
+        raise AlertPayloadValidationError("endsAt must not be earlier than startsAt")
+
     return AlertEvent(
         source=ALERT_SOURCE_ALERTMANAGER,
         fingerprint=fingerprint,
@@ -175,8 +234,8 @@ def _normalize_alertmanager_alert(
         description=description,
         labels=stored_labels,
         annotations=stored_annotations,
-        starts_at=_parse_datetime(raw_alert.get("startsAt") or raw_alert.get("starts_at")),
-        ends_at=_parse_datetime(raw_alert.get("endsAt") or raw_alert.get("ends_at")),
+        starts_at=starts_at,
+        ends_at=ends_at,
         generator_url=_truncate_text(
             str(raw_alert.get("generatorURL") or raw_alert.get("generator_url") or ""),
             MAX_ALERT_URL_LENGTH,
@@ -290,16 +349,29 @@ def _infer_environment(labels: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _parse_datetime(value: Any) -> datetime | None:
+def _parse_datetime(
+    value: Any,
+    *,
+    field_name: str,
+    required: bool,
+) -> datetime | None:
     if isinstance(value, datetime):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            if required:
+                raise AlertPayloadValidationError(f"{field_name} is required")
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise AlertPayloadValidationError(
+                f"{field_name} must be a valid ISO-8601 datetime"
+            ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AlertPayloadValidationError(f"{field_name} must include a timezone")
+    return parsed.astimezone(UTC)
 
 
 def _raw_payload_for_storage(
@@ -356,6 +428,15 @@ def _truncate_text(value: str, max_length: int) -> str:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _optional_mapping(payload: dict[str, Any], field_name: str) -> dict[str, Any]:
+    value = payload.get(field_name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AlertPayloadValidationError(f"{field_name} must be an object")
+    return value
 
 
 def _redact_mapping(values: dict[str, Any]) -> dict[str, Any]:

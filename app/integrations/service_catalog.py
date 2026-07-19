@@ -7,7 +7,13 @@ from typing import Any
 import httpx
 
 from app.config import config
-from app.integrations.base import adapter_success, bearer_headers, require_config
+from app.integrations.base import (
+    ExternalAdapterResponseError,
+    adapter_success,
+    bearer_headers,
+    require_config,
+    require_success_payload,
+)
 from app.integrations.mysql_business_data import MySQLBusinessDataAdapter
 
 
@@ -44,7 +50,11 @@ class CMDBAdapter:
         else:
             payload = await self.mysql_adapter.query_service_catalog(service_name)
         service = payload.get("service", payload)
+        if not isinstance(service, dict):
+            raise ExternalAdapterResponseError("CMDB response service must be an object")
         dependencies = service.get("dependencies", [])
+        if not isinstance(dependencies, list):
+            raise ExternalAdapterResponseError("CMDB response dependencies must be an array")
         business_context = service.get("business_context", {})
         critical_endpoints = service.get("critical_endpoints", [])
         slo = service.get("slo", {})
@@ -114,7 +124,9 @@ class DeployHistoryAdapter:
             payload.get("recent_deployments", payload.get("items", [])),
         )
         if not isinstance(deployments, list):
-            deployments = []
+            raise ExternalAdapterResponseError(
+                "Deploy history response deployments must be an array"
+            )
         deployments = deployments[: min(max(int(limit), 1), 20)]
         recent_change = deployments[0] if deployments else {}
         high_risk_changes = [
@@ -213,5 +225,9 @@ async def _get_json(
     ) as client:
         response = await client.get(url)
         response.raise_for_status()
-        payload = response.json()
+        payload = require_success_payload(
+            response.json(),
+            system_name="Business context API",
+            allow_list=True,
+        )
     return payload if isinstance(payload, dict) else {"items": payload}

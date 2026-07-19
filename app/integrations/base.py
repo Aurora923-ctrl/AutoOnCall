@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
@@ -13,6 +13,17 @@ _KUBERNETES_LABEL_VALUE_RE = re.compile(r"^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}
 
 class ExternalAdapterError(RuntimeError):
     """Raised when a configured external adapter cannot return usable data."""
+
+
+class ExternalAdapterResponseError(ExternalAdapterError):
+    """Raised when an external system returns a syntactically valid business failure."""
+
+    def __init__(self, message: str = "External dependency returned a failed response"):
+        super().__init__(message)
+
+
+class ExternalAdapterNotFoundError(ExternalAdapterError):
+    """Raised when a requested external dependency instance is not configured."""
 
 
 def require_config(value: str, name: str) -> str:
@@ -85,6 +96,54 @@ def adapter_success(
     }
 
 
+@overload
+def require_success_payload(
+    payload: Any,
+    *,
+    system_name: str,
+    allow_list: Literal[False] = False,
+) -> dict[str, Any]: ...
+
+
+@overload
+def require_success_payload(
+    payload: Any,
+    *,
+    system_name: str,
+    allow_list: Literal[True],
+) -> dict[str, Any] | list[Any]: ...
+
+
+def require_success_payload(
+    payload: Any,
+    *,
+    system_name: str,
+    allow_list: bool = False,
+) -> dict[str, Any] | list[Any]:
+    """Validate a JSON response and reject 2xx business-failure envelopes."""
+    if not isinstance(payload, (dict, list)):
+        raise ExternalAdapterResponseError(
+            f"{system_name} response must be a JSON object" + (" or array" if allow_list else "")
+        )
+    if isinstance(payload, list):
+        if allow_list:
+            return payload
+        raise ExternalAdapterResponseError(f"{system_name} response must be a JSON object")
+
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"failed", "failure", "error"}:
+        raise ExternalAdapterResponseError(f"{system_name} returned a failed status")
+    if payload.get("success") is False or payload.get("ok") is False:
+        raise ExternalAdapterResponseError(f"{system_name} returned success=false")
+    if payload.get("error") not in (None, "", False) or payload.get("error_message") not in (
+        None,
+        "",
+        False,
+    ):
+        raise ExternalAdapterResponseError(f"{system_name} returned an error payload")
+    return payload
+
+
 def adapter_failure(
     source: str,
     exc: Exception,
@@ -128,6 +187,10 @@ def adapter_not_configured(
 
 def classify_adapter_error(exc: Exception) -> str:
     """Classify common adapter failures into stable eval/report categories."""
+    if isinstance(exc, ExternalAdapterNotFoundError):
+        return "not_found"
+    if isinstance(exc, PermissionError):
+        return "permission_denied"
     if isinstance(exc, TimeoutError | asyncio.TimeoutError | httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.ConnectError | ConnectionError | OSError):
@@ -141,6 +204,8 @@ def classify_adapter_error(exc: Exception) -> str:
         if status_code >= 500:
             return "server_error"
         return "http_error"
+    if isinstance(exc, ExternalAdapterResponseError):
+        return "server_error"
     text = str(exc).lower()
     if "not configured" in text or "未配置" in text:
         return "not_configured"

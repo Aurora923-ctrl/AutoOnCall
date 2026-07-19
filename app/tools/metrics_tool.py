@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.integrations.base import adapter_failure, adapter_not_configured
+from app.integrations.base import (
+    adapter_failure,
+    adapter_not_configured,
+    public_adapter_failure_message,
+)
 from app.integrations.prometheus import PrometheusMetricsAdapter
 from app.tools.base import (
     AIOpsTool,
@@ -14,6 +18,7 @@ from app.tools.base import (
     is_failed_tool_output,
     tool_map,
 )
+from app.utils.public_errors import public_exception_message
 
 
 class QueryMetricsTool(AIOpsTool):
@@ -29,6 +34,7 @@ class QueryMetricsTool(AIOpsTool):
             "interval": {"type": "string", "default": "1m"},
         },
         "required": ["service_name"],
+        "additionalProperties": False,
     }
     output_schema = {"type": "object"}
     risk_level = "low"
@@ -65,12 +71,16 @@ class QueryMetricsTool(AIOpsTool):
         input_args.update({"interval": interval, "time_range": time_range})
 
         mcp_result = await self._call_mcp_metrics(service_name, interval)
-        if mcp_result is not None:
+        if mcp_result is not None and not is_failed_tool_output(mcp_result):
             return mcp_result
 
         prometheus_result = await self._call_prometheus(service_name, time_range, interval)
+        if prometheus_result is not None and not is_failed_tool_output(prometheus_result):
+            return self._with_fallback_errors(prometheus_result, mcp_result)
         if prometheus_result is not None:
-            return prometheus_result
+            return self._with_fallback_errors(prometheus_result, mcp_result)
+        if mcp_result is not None:
+            return mcp_result
 
         return adapter_not_configured(
             "metrics",
@@ -93,8 +103,8 @@ class QueryMetricsTool(AIOpsTool):
             "query_memory_metrics",
             {"service_name": service_name, "interval": interval},
         )
-        cpu_output = None if is_failed_tool_output(cpu_result) else cpu_result
-        memory_output = None if is_failed_tool_output(memory_result) else memory_result
+        cpu_output = cpu_result if self._usable_mcp_metric_output(cpu_result) else None
+        memory_output = memory_result if self._usable_mcp_metric_output(memory_result) else None
         partial_errors = self._mcp_errors(cpu_result, memory_result)
 
         if cpu_output and memory_output:
@@ -123,8 +133,10 @@ class QueryMetricsTool(AIOpsTool):
             "available_metrics": available_metrics,
             "partial_errors": partial_errors,
             "source_detail": {
-                "cpu": "mcp_monitor" if cpu_output else "unavailable",
-                "memory": "mcp_monitor" if memory_output else "unavailable",
+                "cpu": self._mcp_metric_source(cpu_output) if cpu_output else "unavailable",
+                "memory": self._mcp_metric_source(memory_output)
+                if memory_output
+                else "unavailable",
                 "qps": "unavailable",
                 "p95_latency_ms": "unavailable",
                 "error_rate": "unavailable",
@@ -140,21 +152,41 @@ class QueryMetricsTool(AIOpsTool):
         memory: Any,
         partial_errors: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        cpu_source = QueryMetricsTool._mcp_metric_source(cpu)
+        memory_source = QueryMetricsTool._mcp_metric_source(memory)
+        synthetic_fields = [
+            name
+            for name, source in (("cpu", cpu_source), ("memory", memory_source))
+            if source == "mock"
+        ]
+        source = (
+            "mock"
+            if len(synthetic_fields) == 2
+            else "mcp_monitor_mixed"
+            if synthetic_fields
+            else "mcp_monitor"
+        )
         output = {
             "service_name": service_name,
             "interval": interval,
-            "source": "mcp_monitor",
+            "source": source,
             "cpu": cpu,
             "memory": memory,
             "source_detail": {
-                "cpu": "mcp_monitor",
-                "memory": "mcp_monitor",
+                "cpu": cpu_source,
+                "memory": memory_source,
                 "qps": "unavailable",
                 "p95_latency_ms": "unavailable",
                 "error_rate": "unavailable",
             },
-            "summary": f"{service_name} metrics_source=mcp_monitor, available_metrics=cpu,memory",
+            "summary": f"{service_name} metrics_source={source}, available_metrics=cpu,memory",
         }
+        if synthetic_fields:
+            output["synthetic_fields"] = synthetic_fields
+            output["uncertainty"] = (
+                "CPU/memory metrics come from the local synthetic MCP monitor and are not "
+                "production observations."
+            )
         if partial_errors:
             output["partial_errors"] = partial_errors
         return output
@@ -186,7 +218,11 @@ class QueryMetricsTool(AIOpsTool):
         try:
             return await invoke_langchain_tool(tool, input_args)
         except Exception as exc:
-            return {"status": "failed", "error_message": str(exc)}
+            return {
+                "status": "failed",
+                "error_type": "mcp_error",
+                "error_message": public_exception_message(exc),
+            }
 
     def _mcp_errors(self, cpu_result: Any, memory_result: Any) -> list[dict[str, Any]]:
         errors: list[dict[str, Any]] = []
@@ -205,15 +241,50 @@ class QueryMetricsTool(AIOpsTool):
             return
         if is_failed_tool_output(result):
             errors.append({"tool_name": tool_name, "error_message": self._mcp_metric_error(result)})
+            return
+        if not isinstance(result, dict):
+            errors.append(
+                {
+                    "tool_name": tool_name,
+                    "error_message": "MCP metric tool returned a non-object payload",
+                }
+            )
+
+    @staticmethod
+    def _usable_mcp_metric_output(result: Any) -> bool:
+        return isinstance(result, dict) and not is_failed_tool_output(result)
+
+    @staticmethod
+    def _mcp_metric_source(result: Any) -> str:
+        if isinstance(result, dict) and (
+            str(result.get("source") or "").lower() == "mock" or result.get("synthetic") is True
+        ):
+            return "mock"
+        return "mcp_monitor"
 
     @staticmethod
     def _mcp_metric_error(result: Any) -> str:
         if isinstance(result, dict):
-            return str(
-                result.get("error_message")
-                or result.get("error")
-                or result.get("summary")
-                or result.get("message")
-                or "no usable MCP metric output"
-            )
+            error_type = str(result.get("error_type") or "adapter_error")
+            return public_adapter_failure_message(error_type)
         return "no usable MCP metric output"
+
+    @staticmethod
+    def _with_fallback_errors(
+        result: dict[str, Any],
+        previous: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not previous:
+            return result
+        output = dict(result)
+        errors = list(output.get("fallback_errors") or [])
+        errors.append(
+            {
+                "source": str(previous.get("source") or "mcp_monitor"),
+                "error_message": public_adapter_failure_message(
+                    str(previous.get("error_type") or "adapter_error")
+                ),
+            }
+        )
+        output["fallback_errors"] = errors
+        return output
