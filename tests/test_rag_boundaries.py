@@ -273,3 +273,36 @@ async def test_rag_agent_initialization_falls_back_when_mcp_is_unavailable(monke
     assert service.mcp_tools == []
     assert created["tools"] == service.tools
     assert created["checkpointer"] is service.checkpointer
+
+
+@pytest.mark.asyncio
+async def test_rag_agent_filters_unapproved_mcp_tools_before_model_binding(monkeypatch) -> None:
+    created = {}
+
+    class Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class FakeMCPClient:
+        async def get_tools(self):
+            return [Tool("query_cpu_metrics"), Tool("restart_service")]
+
+    async def fake_mcp_client():
+        return FakeMCPClient()
+
+    def fake_create_agent(model, tools, checkpointer):
+        created["tools"] = tools
+        return object()
+
+    monkeypatch.setattr(rag_agent_module.config, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(rag_agent_module, "ChatQwen", lambda **_kwargs: object())
+    monkeypatch.setattr(rag_agent_module, "get_mcp_client_with_retry", fake_mcp_client)
+    monkeypatch.setattr(rag_agent_module, "create_agent", fake_create_agent)
+
+    service = rag_agent_module.RagAgentService()
+    await service._initialize_agent()
+
+    assert [tool.name for tool in service.mcp_tools] == ["query_cpu_metrics"]
+    assert "restart_service" not in [
+        getattr(tool, "name", getattr(tool, "__name__", "")) for tool in created["tools"]
+    ]

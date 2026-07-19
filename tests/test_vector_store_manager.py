@@ -33,7 +33,10 @@ def test_delete_by_source_escapes_milvus_metadata_expression(monkeypatch) -> Non
     deleted = manager.delete_by_source('/tmp/runbook"quoted\\path.md')
 
     assert deleted == 3
-    assert collection.expr == 'metadata["_source"] == "/tmp/runbook\\"quoted\\\\path.md"'
+    assert collection.expr == (
+        'metadata["_source_id"] == "/tmp/runbook\\"quoted/path.md" '
+        'or metadata["_source"] == "/tmp/runbook\\"quoted\\\\path.md"'
+    )
 
 
 def test_add_documents_uses_stable_vector_ids(monkeypatch) -> None:
@@ -150,9 +153,25 @@ def test_delete_by_source_except_ids_keeps_current_batch(monkeypatch) -> None:
 
     assert deleted == 3
     assert collection.expr == (
-        'metadata["_source"] == "/tmp/runbook\\"quoted.md" and id not in ["vec-a", "vec-b"]'
+        '(metadata["_source_id"] == "/tmp/runbook\\"quoted.md" '
+        'or metadata["_source"] == "/tmp/runbook\\"quoted.md") '
+        'and id not in ["vec-a", "vec-b"]'
     )
     assert collection.flushed is True
+
+
+def test_delete_by_source_uses_canonical_identity_for_known_roots(monkeypatch) -> None:
+    collection = FakeCollection()
+    manager = vector_store_module.VectorStoreManager()
+    monkeypatch.setattr(vector_store_module.milvus_manager, "connect", lambda: object())
+    monkeypatch.setattr(vector_store_module.milvus_manager, "get_collection", lambda: collection)
+
+    manager.delete_by_source("C:/repo/docs/knowledge-base/redis.md")
+
+    assert collection.expr == (
+        'metadata["_source_id"] == "docs/knowledge-base/redis.md" '
+        'or metadata["_source"] == "C:/repo/docs/knowledge-base/redis.md"'
+    )
 
 
 def test_vector_id_is_stable_across_deployment_roots() -> None:
@@ -209,8 +228,20 @@ def test_vector_id_changes_when_chunk_version_changes() -> None:
 
 def test_add_documents_fails_when_flush_cannot_confirm_visibility(monkeypatch) -> None:
     manager = vector_store_module.VectorStoreManager()
+    captured: dict[str, object] = {}
 
     class FakeVectorStore:
+        class FakeClient:
+            def delete(self, *, collection_name, ids, timeout):
+                captured["deleted"] = (collection_name, ids, timeout)
+                return FakeDeleteResult()
+
+            def flush(self, *, collection_name, timeout):
+                captured["flush_calls"] = int(captured.get("flush_calls", 0)) + 1
+                raise RuntimeError("flush unavailable")
+
+        client = FakeClient()
+
         def upsert(self, ids, documents, batch_size, timeout) -> None:
             return None
 
@@ -225,6 +256,11 @@ def test_add_documents_fails_when_flush_cannot_confirm_visibility(monkeypatch) -
                 )
             ]
         )
+
+    deleted = captured["deleted"]
+    assert isinstance(deleted, tuple)
+    assert deleted[0] == "biz"
+    assert len(deleted[1]) == 1
 
 
 def test_add_documents_compensates_known_ids_when_upsert_raises(monkeypatch) -> None:
@@ -327,3 +363,37 @@ def test_similarity_search_rejects_non_string_expr_before_initializing_store(mon
 
     with pytest.raises(TypeError, match="expr"):
         manager.similarity_search("Redis", expr=1)  # type: ignore[arg-type]
+
+
+def test_similarity_search_rejects_excessive_k_before_initializing_store(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+    monkeypatch.setattr(
+        manager,
+        "_ensure_vector_store",
+        lambda: pytest.fail("invalid input must not initialize Milvus"),
+    )
+
+    with pytest.raises(ValueError, match="不能超过"):
+        manager.similarity_search("Redis", k=501)
+
+
+def test_scored_similarity_search_uses_validated_manager_boundary(monkeypatch) -> None:
+    manager = vector_store_module.VectorStoreManager()
+    captured: dict[str, object] = {}
+    document = Document(page_content="Redis", metadata={})
+
+    class FakeVectorStore:
+        def similarity_search_with_score(self, query, k, **kwargs):
+            captured.update({"query": query, "k": k, **kwargs})
+            return [(document, 0.2)]
+
+    monkeypatch.setattr(manager, "_ensure_vector_store", lambda: FakeVectorStore())
+
+    result = manager.similarity_search_with_score(" Redis ", k=2, expr='metadata["x"] == 1')
+
+    assert result == [(document, 0.2)]
+    assert captured == {
+        "query": "Redis",
+        "k": 2,
+        "expr": 'metadata["x"] == 1',
+    }

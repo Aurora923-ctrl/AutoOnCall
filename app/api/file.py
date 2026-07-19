@@ -1,6 +1,7 @@
 """文件上传接口模块"""
 
 import asyncio
+import codecs
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -473,8 +474,32 @@ def _validate_upload_mime_type(extension: str, content_type: str | None) -> None
 
 def _validate_saved_file_signature(path: Path, extension: str) -> None:
     """Validate strong binary signatures before replacing an existing upload."""
-    content = path.read_bytes()
-    prefix = content[:1024]
+    prefix = b""
+    contains_null = False
+    utf8_decoder = (
+        codecs.getincrementaldecoder("utf-8")()
+        if extension
+        in {
+            "txt",
+            "md",
+            "markdown",
+        }
+        else None
+    )
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(UPLOAD_READ_CHUNK_SIZE):
+                if len(prefix) < 1024:
+                    prefix += chunk[: 1024 - len(prefix)]
+                if extension in {"txt", "md", "markdown", "html", "htm", "csv"}:
+                    contains_null = contains_null or b"\x00" in chunk
+                if utf8_decoder is not None:
+                    utf8_decoder.decode(chunk, final=False)
+        if utf8_decoder is not None:
+            utf8_decoder.decode(b"", final=True)
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="文本文件编码必须为 UTF-8") from exc
+
     normalized_prefix = prefix.lstrip(b"\xef\xbb\xbf \t\r\n")
     is_pdf = normalized_prefix.startswith(b"%PDF-")
     is_zip = prefix.startswith(b"PK\x03\x04")
@@ -495,13 +520,8 @@ def _validate_saved_file_signature(path: Path, extension: str) -> None:
         if not required.issubset(names):
             raise HTTPException(status_code=400, detail="XLSX 文件结构无效")
 
-    if extension in {"txt", "md", "markdown", "html", "htm", "csv"} and b"\x00" in content:
+    if contains_null:
         raise HTTPException(status_code=400, detail="文本文件包含二进制内容")
-    if extension in {"txt", "md", "markdown"}:
-        try:
-            path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise HTTPException(status_code=400, detail="文本文件编码必须为 UTF-8") from exc
 
 
 def _cleanup_stale_upload_temps(file_path: Path) -> None:

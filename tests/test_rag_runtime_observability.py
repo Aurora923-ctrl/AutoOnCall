@@ -19,6 +19,7 @@ from scripts.performance.run_rag_runtime_benchmark import (
     distribution,
     load_benchmark_cases,
     parse_args,
+    runtime_execution_identity,
     select_generated_case_ids,
     write_artifacts,
 )
@@ -142,7 +143,7 @@ def test_runtime_benchmark_summary_and_artifacts(tmp_path) -> None:
         {
             "id": "one",
             "generated": False,
-            "passed": True,
+            "passed": False,
             "retrieval_passed": True,
             "generation_passed": None,
             "observability": {
@@ -188,11 +189,14 @@ def test_runtime_benchmark_summary_and_artifacts(tmp_path) -> None:
         "status": "failed",
         "passed_count": 0,
         "case_count": 1,
+        "scope": "selected_product_end_to_end_cases_including_refusals",
         "failed_cases": ["two"],
     }
     assert summary["token_usage_status"] == "observed"
     failed = json.loads((tmp_path / "failed.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in failed["failed_cases"]] == ["two"]
+    assert [item["id"] for item in failed["retrieval_failed_cases"]] == []
+    assert [item["id"] for item in failed["generation_failed_cases"]] == ["two"]
+    assert summary["failed_cases"] == ["two"]
 
 
 def test_runtime_generation_requires_citation_from_retrieved_sources() -> None:
@@ -223,7 +227,7 @@ def test_runtime_retrieval_only_summary_does_not_claim_generation() -> None:
             {
                 "id": "one",
                 "generated": False,
-                "passed": True,
+                "passed": False,
                 "retrieval_passed": True,
                 "generation_passed": None,
                 "observability": {},
@@ -232,8 +236,30 @@ def test_runtime_retrieval_only_summary_does_not_claim_generation() -> None:
     )
 
     assert summary["status"] == "retrieval_only_passed"
+    assert summary["passed_count"] == 0
     assert summary["retrieval"]["status"] == "passed"
     assert summary["generation"]["status"] == "not_run"
+
+
+def test_runtime_execution_identity_uses_observed_models() -> None:
+    identity = runtime_execution_identity(
+        [
+            {
+                "id": "one",
+                "generated": True,
+                "observability": {
+                    "runtime": {
+                        "llm_model": "qwen-max",
+                        "embedding_model": "text-embedding-v4",
+                    }
+                },
+            }
+        ]
+    )
+
+    assert identity["actual_model"] == "qwen-max"
+    assert identity["actual_embedding_model"] == "text-embedding-v4"
+    assert identity["execution_path"] == "runtime_retrieval_and_generation"
 
 
 def test_runtime_benchmark_rejects_empty_case_set(tmp_path) -> None:

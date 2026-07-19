@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
 from typing import Any
 
 
@@ -33,6 +35,13 @@ def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "metadata_filter_expr": payload.get("metadata_filter_expr"),
         "summary": payload.get("summary", ""),
         "answer_policy": payload.get("answer_policy", ""),
+        "required_sources": list(payload.get("required_sources") or []),
+        "missing_required_sources": list(payload.get("missing_required_sources") or []),
+        "generation_allowlist": [
+            dict(item)
+            for item in payload.get("generation_allowlist", []) or []
+            if isinstance(item, dict)
+        ],
         "no_answer_rejected": bool(payload.get("no_answer_rejected")),
         "retrieval_results": build_citations(payload),
         "rejected_results": [
@@ -61,6 +70,7 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
     compact = {
         "rank": item.get("rank"),
         "doc_id": public_source_path(item.get("doc_id")),
+        "source_id": public_source_id(item.get("source_id") or item.get("doc_id")),
         "source_file": public_source_path(item.get("source_file")) or "未知来源",
         "source_path": public_source_path(item.get("source_path") or item.get("source_file")),
         "heading_path": item.get("heading_path", ""),
@@ -103,6 +113,22 @@ def public_source_path(value: Any) -> str:
     if not text:
         return ""
     return text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def public_source_id(value: Any) -> str:
+    """Return a stable public source identity without exposing absolute directories."""
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    lowered = text.lower()
+    for marker in ("docs/knowledge-base/", "uploads/"):
+        position = lowered.rfind(marker)
+        if position >= 0:
+            return text[position:]
+    if re.match(r"^[A-Za-z]:/", text) or text.startswith("/"):
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        return f"{public_source_path(text)}@{digest}"
+    return text
 
 
 def public_score(score: Any) -> float | str | None:

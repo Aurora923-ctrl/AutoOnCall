@@ -15,11 +15,13 @@ from app.services.rag_agent_service import (
     has_valid_citations,
 )
 from app.services.rag_answer_policy import (
+    answer_claims_are_cited,
     build_generation_context,
     build_generation_evidence,
     build_grounded_question,
     is_explicit_knowledge_refusal,
     select_supporting_citations,
+    validated_citation_prefix,
 )
 from app.services.rag_read_models import compact_retrieval_chunk
 
@@ -186,6 +188,24 @@ def test_generation_evidence_respects_complete_block_budget() -> None:
     assert len(build_generation_context({"retrieval_results": evidence})) <= len(first_block)
 
 
+def test_generation_evidence_preserves_tail_of_first_oversized_block() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "runbook.md",
+                "chunk_id": "runbook.md#0001",
+                "content": ("background " * 100) + "ROLLBACK_REQUIRED",
+            }
+        ]
+    }
+
+    evidence = build_generation_evidence(payload, limit=180)
+
+    assert len(evidence) == 1
+    assert "ROLLBACK_REQUIRED" in evidence[0]["content"]
+    assert "...<truncated>" in evidence[0]["content"]
+
+
 def test_grounded_question_requires_claim_level_citation_and_concise_answer() -> None:
     prompt = build_grounded_question(
         "如何处理？",
@@ -227,6 +247,56 @@ def test_select_supporting_citations_keeps_only_chunks_named_by_answer() -> None
     assert selected == [{"source_file": "redis.md", "chunk_id": "redis.md#0002"}]
 
 
+def test_generation_evidence_respects_explicit_allowlist() -> None:
+    evidence = build_generation_evidence(
+        {
+            "retrieval_results": [
+                {
+                    "source_file": "redis.md",
+                    "chunk_id": "redis.md#0001",
+                    "content": "trusted",
+                },
+                {
+                    "source_file": "noise.md",
+                    "chunk_id": "noise.md#0001",
+                    "content": "noise",
+                },
+            ],
+            "generation_allowlist": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+        }
+    )
+
+    assert [(item["source_file"], item["chunk_id"]) for item in evidence] == [
+        ("redis.md", "redis.md#0001")
+    ]
+
+
+def test_every_substantive_claim_requires_one_allowlisted_citation() -> None:
+    allowed = {("redis.md", "redis.md#0001")}
+
+    assert answer_claims_are_cited(
+        "已知上下文事实：\n- 检查 maxclients。[redis.md | redis.md#0001]",
+        allowed_pairs=allowed,
+    )
+    assert not answer_claims_are_cited(
+        "- 检查 maxclients。[redis.md | redis.md#0001]\n- 当前连接已耗尽。",
+        allowed_pairs=allowed,
+    )
+
+
+def test_validated_citation_prefix_only_releases_complete_allowlisted_claims() -> None:
+    citations = [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}]
+
+    assert (
+        validated_citation_prefix(
+            "先检查连接数。[redis.md | redis.md#0001]后续草稿",
+            citations,
+        )
+        == "先检查连接数。[redis.md | redis.md#0001]"
+    )
+    assert validated_citation_prefix("先检查连接数。", citations) == ""
+
+
 def test_select_supporting_citations_does_not_fallback_to_all_top_k() -> None:
     citations = [
         {"source_file": "redis.md", "chunk_id": "redis.md#0001"},
@@ -245,10 +315,13 @@ def test_select_supporting_citations_does_not_accept_prefix_or_wrong_source() ->
     assert select_supporting_citations("[redis.md | redis.md#00010]", citations) == [citations[1]]
     assert select_supporting_citations("[redis.md#00010]", citations) == []
     assert select_supporting_citations("[other.md | redis.md#0001]", citations) == []
-    assert select_supporting_citations(
-        "[other.md | redis.md#0001] [redis.md | redis.md#0001]",
-        citations,
-    ) == []
+    assert (
+        select_supporting_citations(
+            "[other.md | redis.md#0001] [redis.md | redis.md#0001]",
+            citations,
+        )
+        == []
+    )
 
 
 def test_ensure_citation_block_does_not_accept_wrong_source_with_valid_chunk_id() -> None:
@@ -450,6 +523,8 @@ async def test_query_with_retrieval_uses_tool_free_grounded_model(monkeypatch) -
     assert [item["role"] for item in history] == ["user", "assistant"]
     assert history[0]["content"] == "Redis timeout 怎么处理？"
     assert "redis.md#0001" in history[1]["content"]
+    assert history[1]["metadata"]["citations"][0]["chunk_id"] == "redis.md#0001"
+    assert history[1]["metadata"]["answerPolicy"] == "answer_with_citations"
 
 
 @pytest.mark.asyncio
@@ -740,6 +815,50 @@ async def test_query_stream_with_retrieval_emits_only_validated_final_answer(
 
 
 @pytest.mark.asyncio
+async def test_query_stream_with_retrieval_releases_validated_claim_before_model_finishes(
+    monkeypatch,
+) -> None:
+    release_second_chunk = asyncio.Event()
+
+    class DelayedGroundedModel:
+        async def astream(self, _messages):
+            yield SimpleNamespace(content="第一条。[redis.md | redis.md#0001]")
+            await release_second_chunk.wait()
+            yield SimpleNamespace(content="第二条。[redis.md | redis.md#0001]")
+
+    service = rag_module.RagAgentService(streaming=True)
+    service.model = DelayedGroundedModel()
+    monkeypatch.setattr(
+        rag_module,
+        "retrieve_structured_knowledge",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "retrieval_results": [
+                {
+                    "source_file": "redis.md",
+                    "chunk_id": "redis.md#0001",
+                    "content": "第一条和第二条。",
+                }
+            ],
+        },
+    )
+
+    stream = service.query_stream_with_retrieval("question", "incremental-stream")
+    assert (await anext(stream))["type"] == "search_results"
+    first_content_task = asyncio.create_task(anext(stream))
+
+    first_content = await asyncio.wait_for(first_content_task, timeout=0.1)
+    assert first_content["type"] == "content"
+    assert first_content["data"] == "第一条。[redis.md | redis.md#0001]"
+    assert not release_second_chunk.is_set()
+
+    release_second_chunk.set()
+    remaining = [event async for event in stream]
+    assert remaining[0]["data"] == "第二条。[redis.md | redis.md#0001]"
+    assert remaining[-1]["type"] == "complete"
+
+
+@pytest.mark.asyncio
 async def test_query_with_retrieval_offloads_sync_retrieval(monkeypatch) -> None:
     service = rag_module.RagAgentService()
 
@@ -929,38 +1048,35 @@ async def test_grounded_model_cancellation_is_not_retried(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grounded_stream_retry_discards_partial_failed_attempt(monkeypatch) -> None:
+async def test_grounded_stream_does_not_retry_after_provider_content(monkeypatch) -> None:
     attempts = 0
 
     class RetryStreamModel:
         async def astream(self, _messages):
             nonlocal attempts
             attempts += 1
-            if attempts == 1:
-                yield SimpleNamespace(content="partial")
-                raise ConnectionError("temporary connection failure")
-            yield SimpleNamespace(content="final")
+            yield SimpleNamespace(content="partial")
+            raise ConnectionError("temporary connection failure")
 
     service = rag_module.RagAgentService(streaming=True)
     service.model = RetryStreamModel()
     monkeypatch.setattr(rag_module.config, "rag_model_max_retries", 1)
     monkeypatch.setattr(rag_module.config, "rag_model_retry_delay_seconds", 0.0)
 
-    events = [
-        event
+    events = []
+    with pytest.raises(ConnectionError, match="temporary connection failure"):
         async for event in service.query_grounded_stream(
             "prompt",
             "stream-retry-session",
-        )
-    ]
+        ):
+            events.append(event)
 
-    assert [event.get("data") for event in events if event["type"] == "content"] == ["final"]
-    assert events[-1] == {"type": "complete"}
-    assert attempts == 2
+    assert [event.get("data") for event in events] == ["partial"]
+    assert attempts == 1
 
 
 @pytest.mark.asyncio
-async def test_grounded_stream_spools_large_validated_output(monkeypatch) -> None:
+async def test_grounded_stream_rejects_output_over_configured_limit(monkeypatch) -> None:
     class LargeStreamModel:
         async def astream(self, _messages):
             yield SimpleNamespace(content="a" * 64)
@@ -970,13 +1086,12 @@ async def test_grounded_stream_spools_large_validated_output(monkeypatch) -> Non
     service.model = LargeStreamModel()
     monkeypatch.setattr(rag_module.config, "rag_stream_spool_max_memory_bytes", 32)
 
-    events = [
-        event
+    events = []
+    with pytest.raises(ValueError, match="安全上限"):
         async for event in service.query_grounded_stream(
             "prompt",
             "stream-spool-session",
-        )
-    ]
+        ):
+            events.append(event)
 
-    assert [event["data"] for event in events[:-1]] == ["a" * 64, "b" * 64]
-    assert events[-1] == {"type": "complete"}
+    assert events == []

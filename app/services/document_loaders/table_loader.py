@@ -92,7 +92,13 @@ def _load_xlsx(path: Path) -> tuple[list[LoadedDocument], list[str]]:
             if sheet_index > MAX_WORKBOOK_SHEETS:
                 _append_warning(warnings, f"ignored sheets after {MAX_WORKBOOK_SHEETS}")
                 break
-            rows = worksheet.iter_rows(values_only=True)
+            max_column = min(max(int(worksheet.max_column or 1), 1), MAX_COLUMNS + 1)
+            rows = worksheet.iter_rows(
+                min_row=1,
+                max_row=MAX_TABLE_ROWS + 2,
+                max_col=max_column,
+                values_only=True,
+            )
             headers = _normalize_headers(
                 list(next(rows, [])),
                 warnings=warnings,
@@ -106,8 +112,7 @@ def _load_xlsx(path: Path) -> tuple[list[LoadedDocument], list[str]]:
                 sheet_has_rows = True
                 if row_index > MAX_TABLE_ROWS + 1:
                     _append_warning(
-                        warnings,
-                        f"sheet={worksheet.title} ignored rows after {MAX_TABLE_ROWS}"
+                        warnings, f"sheet={worksheet.title} ignored rows after {MAX_TABLE_ROWS}"
                     )
                     break
                 documents.append(
@@ -159,7 +164,7 @@ def _row_to_document(
         if len(text) > MAX_CELL_CHARS:
             _append_warning(
                 warnings,
-                f"sheet={sheet_name} row={row_number} cell {key} truncated from {len(text)} chars"
+                f"sheet={sheet_name} row={row_number} cell {key} truncated from {len(text)} chars",
             )
             text = text[:MAX_CELL_CHARS] + "...[truncated]"
         clean_items.append((str(key), text))
@@ -246,7 +251,7 @@ def _row_from_values(
         _append_warning(
             warnings,
             f"sheet={sheet_name} row={row_number} extra column {column_index} "
-            f"used generated header {header}"
+            f"used generated header {header}",
         )
     return {
         header: values[index] if index < len(values) else None
@@ -313,6 +318,4 @@ def _validate_xlsx_archive(path: Path) -> None:
     except BadZipFile as exc:
         raise ValueError("XLSX 文件损坏或不是有效工作簿") from exc
     if expanded_size > MAX_XLSX_UNCOMPRESSED_BYTES:
-        raise ValueError(
-            f"XLSX 解压后内容超过限制（最大 {MAX_XLSX_UNCOMPRESSED_BYTES} 字节）"
-        )
+        raise ValueError(f"XLSX 解压后内容超过限制（最大 {MAX_XLSX_UNCOMPRESSED_BYTES} 字节）")

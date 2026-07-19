@@ -120,6 +120,25 @@ def test_html_loader_does_not_duplicate_nested_semantic_blocks(tmp_path: Path) -
     assert docs[0].content.count("kubectl rollout restart") == 1
 
 
+def test_html_loader_preserves_deep_heading_boundaries(tmp_path: Path) -> None:
+    html = tmp_path / "wiki.html"
+    html.write_text(
+        "<h1>Runbook</h1>"
+        "<h4>Rollback</h4><p>restore the previous configuration after validation failure</p>"
+        "<h4>Observation</h4><p>watch latency and error rate for thirty minutes</p>",
+        encoding="utf-8",
+    )
+
+    docs, report = HtmlDocumentLoader().load(html)
+
+    assert report.indexed_units == 2
+    assert [doc.metadata["heading_path"] for doc in docs] == [
+        "Runbook > Rollback",
+        "Runbook > Observation",
+    ]
+    assert [doc.metadata["h4"] for doc in docs] == ["Rollback", "Observation"]
+
+
 def test_plain_text_loader_preserves_markdown_code_and_list_indentation(
     tmp_path: Path,
 ) -> None:
@@ -291,9 +310,7 @@ def test_csv_loader_detects_common_export_delimiters(
     csv_file.write_text(
         delimiter.join(["ticket_id", "service_name", "summary"])
         + "\n"
-        + delimiter.join(
-            ["INC-1", "order-service", "timeout with enough diagnostic context"]
-        )
+        + delimiter.join(["INC-1", "order-service", "timeout with enough diagnostic context"])
         + "\n",
         encoding="utf-8",
     )
@@ -348,8 +365,7 @@ def test_csv_loader_truncates_fields_larger_than_csv_default_limit(tmp_path: Pat
 def test_table_loader_preserves_values_beyond_declared_headers(tmp_path: Path) -> None:
     csv_file = tmp_path / "tickets.csv"
     csv_file.write_text(
-        "ticket_id,summary\n"
-        "INC-1,timeout with enough diagnostic context,order-service\n",
+        "ticket_id,summary\nINC-1,timeout with enough diagnostic context,order-service\n",
         encoding="utf-8",
     )
 
@@ -385,6 +401,56 @@ def test_xlsx_loader_reports_header_only_sheet(tmp_path: Path) -> None:
 
     assert docs == []
     assert any("has a header row but no data rows" in item for item in report.warnings)
+
+
+def test_xlsx_loader_bounds_rows_and_columns_before_materializing_cells(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    xlsx_file = tmp_path / "bounded.xlsx"
+    xlsx_file.write_bytes(b"PK fake workbook")
+    calls: list[dict[str, object]] = []
+
+    class FakeWorksheet:
+        title = "services"
+        max_column = 10_000
+
+        def iter_rows(self, **kwargs):
+            calls.append(kwargs)
+            return iter(
+                [
+                    ("service_name", "summary"),
+                    ("order-service", "timeout with enough diagnostic context"),
+                ]
+            )
+
+    class FakeWorkbook:
+        worksheets = [FakeWorksheet()]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.services.document_loaders.table_loader._validate_xlsx_archive",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "app.services.document_loaders.table_loader.load_workbook",
+        lambda *args, **kwargs: FakeWorkbook(),
+    )
+
+    docs, report = TableDocumentLoader().load(xlsx_file)
+
+    assert report.indexed_units == 1
+    assert docs
+    assert calls == [
+        {
+            "min_row": 1,
+            "max_row": 10_002,
+            "max_col": 25,
+            "values_only": True,
+        }
+    ]
 
 
 def test_xlsx_loader_rejects_excessive_expanded_archive(monkeypatch, tmp_path: Path) -> None:

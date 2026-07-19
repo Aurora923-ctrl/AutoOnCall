@@ -131,6 +131,102 @@ def test_lexical_index_can_replace_chunks_without_clearing_stale_marker(tmp_path
     assert service.search("Redis maxclients", top_k=3)
 
 
+def test_lexical_index_replaces_source_and_clears_stale_in_one_write(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+    source = "docs/knowledge-base/redis.md"
+    service.mark_source_stale(source, "indexing_in_progress")
+    save_calls = {"count": 0}
+    original_save = service._save_index
+
+    def recording_save(payload) -> None:
+        save_calls["count"] += 1
+        original_save(payload)
+
+    monkeypatch.setattr(service, "_save_index", recording_save)
+
+    service.replace_source_and_clear_stale(
+        source,
+        [
+            Document(
+                page_content="Redis maxclients updated runbook",
+                metadata={"_source": source, "_chunk_id": "redis.md#0001"},
+            )
+        ],
+    )
+
+    assert save_calls["count"] == 1
+    assert service.is_source_stale(source) is False
+    assert service.search("Redis maxclients", top_k=3)
+
+
+def test_lexical_index_preserves_term_frequency_for_bm25_scoring(tmp_path) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+    service.upsert_source(
+        "docs/knowledge-base/repeated.md",
+        [
+            Document(
+                page_content="timeout timeout timeout redis",
+                metadata={"_chunk_id": "repeated.md#0001"},
+            )
+        ],
+    )
+    service.upsert_source(
+        "docs/knowledge-base/single.md",
+        [
+            Document(
+                page_content="timeout redis connection latency",
+                metadata={"_chunk_id": "single.md#0001"},
+            )
+        ],
+    )
+
+    hits = service.search("timeout", top_k=2)
+
+    assert [item[0].metadata["_chunk_id"] for item in hits] == [
+        "repeated.md#0001",
+        "single.md#0001",
+    ]
+    assert hits[0][1] > hits[1][1]
+
+
+def test_lexical_source_identity_survives_deployment_root_changes(tmp_path) -> None:
+    service = LexicalIndexService(tmp_path / "lexical.json")
+    old_source = "C:/repo/docs/knowledge-base/redis.md"
+    new_source = "/srv/app/docs/knowledge-base/redis.md"
+    service.upsert_source(
+        old_source,
+        [
+            Document(
+                page_content="old Redis content",
+                metadata={"_source": old_source, "_chunk_id": "redis.md#0001"},
+            )
+        ],
+    )
+
+    service.mark_source_stale(new_source, "indexing_in_progress")
+
+    assert service.is_source_stale(old_source) is True
+    assert service.search("Redis", top_k=3) == []
+
+    service.replace_source_and_clear_stale(
+        new_source,
+        [
+            Document(
+                page_content="new Redis content",
+                metadata={"_source": new_source, "_chunk_id": "redis.md#0001"},
+            )
+        ],
+    )
+
+    payload = json.loads((tmp_path / "lexical.json").read_text(encoding="utf-8"))
+    assert [chunk["source_path"] for chunk in payload["chunks"]] == [new_source]
+    assert payload["chunks"][0]["metadata"]["_source_id"] == "docs/knowledge-base/redis.md"
+    assert service.is_source_stale(old_source) is False
+
+
 def test_lexical_index_writes_json_atomically_without_temp_leftovers(tmp_path) -> None:
     index_path = tmp_path / "lexical.json"
     service = LexicalIndexService(index_path)

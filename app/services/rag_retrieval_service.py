@@ -24,6 +24,8 @@ CITATION_INSTRUCTION = (
     "引用要求: 仅基于下列可信知识回答；回答末尾列出引用来源，格式为 source_file + chunk_id。"
 )
 METADATA_FILTER_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAX_RETRIEVAL_TOP_K = 100
+MAX_RETRIEVAL_CANDIDATES = 500
 
 
 def retrieve_structured_knowledge(
@@ -54,7 +56,7 @@ def retrieve_structured_knowledge(
     normalized_metadata_filter: dict[str, Any] = {}
     expr: str | None = None
     resolved_lexical_index = lexical_index or lexical_index_service
-    resolved_vector_store_provider = vector_store_provider or vector_store_manager.get_vector_store
+    resolved_vector_store_provider = vector_store_provider or (lambda: vector_store_manager)
 
     vector_error_detail = ""
     vector_error_type = ""
@@ -77,8 +79,7 @@ def retrieve_structured_knowledge(
             raise ValueError("query 不能为空")
         if len(safe_query) > 8000:
             raise ValueError("query 长度不能超过 8000")
-        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
-            raise ValueError("top_k 必须是正整数")
+        _validate_retrieval_k(k, label="top_k")
         candidate_k = _candidate_count(k) if hybrid_enabled or rerank_on else k
         if isinstance(threshold, bool):
             raise ValueError("max_distance 必须是非负数")
@@ -186,6 +187,7 @@ def retrieve_structured_knowledge(
             document_to_retrieval_chunk(document, score=score, rank=rank)
             for rank, (document, score) in enumerate(raw_results, 1)
         ]
+        candidates = disambiguate_citation_sources(candidates)
         pre_stale_filter_count = len(candidates)
         candidates = [
             chunk
@@ -250,10 +252,32 @@ def retrieve_structured_knowledge(
         required_sources = _required_sources_from_preferences(
             infer_retrieval_preferences(safe_query)
         )
-        if normalized_fusion_strategy == "weighted" and not required_sources:
-            trusted = prune_low_relevance_candidates(trusted, top_k=k)
-        else:
-            trusted = trusted[:k]
+        trusted_before_source_gate = trusted
+        trusted = select_required_sources(
+            trusted,
+            required_sources=required_sources,
+            top_k=k,
+        )
+        trusted = (
+            prune_low_relevance_candidates(trusted, top_k=k)
+            if normalized_fusion_strategy == "weighted" and not required_sources
+            else trusted[:k]
+        )
+        trusted, missing_required_sources = enforce_source_coverage(
+            trusted,
+            required_sources=required_sources,
+        )
+        if missing_required_sources:
+            rejected.extend(
+                chunk
+                | {
+                    "retrieval_reason": (
+                        "required source coverage missing after trust gate: "
+                        + ", ".join(sorted(missing_required_sources))
+                    )
+                }
+                for chunk in trusted_before_source_gate
+            )
         for rank, chunk in enumerate(trusted, 1):
             chunk["rank"] = rank
 
@@ -283,6 +307,9 @@ def retrieve_structured_knowledge(
                 "answer_policy": "refuse_without_trusted_source",
                 "retrieval_results": [],
                 "rejected_results": rejected,
+                "required_sources": sorted(required_sources),
+                "missing_required_sources": sorted(missing_required_sources),
+                "generation_allowlist": [],
                 "observability": build_retrieval_observability(
                     stage_timings,
                     total_started=total_started,
@@ -328,6 +355,15 @@ def retrieve_structured_knowledge(
             "answer_policy": "answer_with_citations",
             "retrieval_results": trusted,
             "rejected_results": rejected,
+            "required_sources": sorted(required_sources),
+            "missing_required_sources": [],
+            "generation_allowlist": [
+                {
+                    "source_file": str(item.get("source_file") or ""),
+                    "chunk_id": str(item.get("chunk_id") or ""),
+                }
+                for item in trusted
+            ],
             "observability": build_retrieval_observability(
                 stage_timings,
                 total_started=total_started,
@@ -464,6 +500,13 @@ def document_to_retrieval_chunk(
     source_file = str(
         metadata.get("_file_name") or metadata.get("source_file") or source or "未知来源"
     )
+    source_id = str(
+        metadata.get("_source_id")
+        or metadata.get("_doc_id")
+        or metadata.get("doc_id")
+        or source
+        or source_file
+    )
     content = str(document.page_content or "")
     heading_path = build_heading_path(metadata)
     chunk_id = str(
@@ -472,12 +515,13 @@ def document_to_retrieval_chunk(
         or metadata.get("id")
         or _stable_chunk_id(source_file, heading_path, content)
     )
-    doc_id = str(metadata.get("_doc_id") or metadata.get("doc_id") or source or source_file)
+    doc_id = source_id
 
     return {
         "rank": rank,
         "doc_id": doc_id,
         "source_file": source_file,
+        "source_id": source_id,
         "source_path": source,
         "heading_path": heading_path,
         "chunk_id": chunk_id,
@@ -486,6 +530,37 @@ def document_to_retrieval_chunk(
         "content": content,
         "metadata": metadata,
     }
+
+
+def disambiguate_citation_sources(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Make citation source labels unique only when basename/chunk pairs collide."""
+    identities_by_citation: dict[tuple[str, str], set[str]] = {}
+    for chunk in candidates:
+        citation = (
+            str(chunk.get("source_file") or ""),
+            str(chunk.get("chunk_id") or ""),
+        )
+        identities_by_citation.setdefault(citation, set()).add(
+            str(chunk.get("source_id") or chunk.get("doc_id") or "")
+        )
+
+    disambiguated: list[dict[str, Any]] = []
+    for chunk in candidates:
+        citation = (
+            str(chunk.get("source_file") or ""),
+            str(chunk.get("chunk_id") or ""),
+        )
+        if len(identities_by_citation.get(citation, set())) <= 1:
+            disambiguated.append(chunk)
+            continue
+        updated = dict(chunk)
+        updated["source_file"] = _public_source_identity(
+            chunk.get("source_id") or chunk.get("doc_id") or chunk.get("source_path")
+        )
+        disambiguated.append(updated)
+    return disambiguated
 
 
 def is_stale_retrieval_source(
@@ -701,6 +776,8 @@ def is_trusted_retrieval_chunk(
     min_lexical_score: float,
 ) -> bool:
     """Return True when either vector distance or lexical score crosses its own trust gate."""
+    if chunk.get("identity_conflict"):
+        return False
     metadata = dict(chunk.get("metadata") or {})
     retrieval_source = str(metadata.get("_retrieval_source") or "")
     has_vector_signal = (
@@ -721,6 +798,8 @@ def build_retrieval_reason(
     trusted: bool,
 ) -> str:
     """Explain why a retrieval chunk was accepted or rejected."""
+    if chunk.get("identity_conflict"):
+        return "same source_file + chunk_id maps to different content versions"
     metadata = dict(chunk.get("metadata") or {})
     retrieval_source = str(metadata.get("_retrieval_source") or "")
     score = chunk.get("score")
@@ -801,8 +880,7 @@ def rerank_retrieval_candidates(
     prune_low_relevance: bool = True,
 ) -> list[dict[str, Any]]:
     """Blend vector ranking with lexical signals and return final ordered chunks."""
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
-        raise ValueError("top_k 必须是正整数")
+    _validate_retrieval_k(top_k, label="top_k")
     if not candidates:
         return []
 
@@ -816,7 +894,16 @@ def rerank_retrieval_candidates(
             str(metadata.get("_retrieval_source") or "") in {"vector", "hybrid"}
             or metadata.get("_vector_score") is not None
         )
-        lexical_score = compute_lexical_score(query_terms, chunk) if hybrid_search_enabled else 0.0
+        has_lexical_signal = (
+            str(metadata.get("_retrieval_source") or "") in {"lexical", "hybrid"}
+            or metadata.get("_lexical_score") is not None
+            or metadata.get("_lexical_rank") is not None
+        )
+        lexical_score = (
+            compute_lexical_score(query_terms, chunk)
+            if hybrid_search_enabled and has_lexical_signal
+            else 0.0
+        )
         vector_score = normalize_vector_distance(chunk.get("score")) if has_vector_signal else 0.0
         base_rank_score = 1 / max(index, 1)
         weighted_score = _weighted_fusion_score(
@@ -958,6 +1045,8 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
 
     if any(term in lowered for term in {"证据", "取证", "如何收集", "怎样区分"}):
         preferred_heading_terms.update({"排查步骤", "常用命令", "相关工具命令"})
+    if any(term in lowered for term in {"先确认", "哪些信号", "排查步骤"}):
+        preferred_heading_terms.add("排查步骤")
     if any(
         term in lowered
         for term in {
@@ -996,6 +1085,29 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         "loki" in lowered
         and "discarded" in lowered
         and any(term in lowered for term in {"告警", "alert"})
+    ):
+        required_sources.update(
+            {
+                "official_loki_troubleshoot_ingest.md",
+                "official_prometheus_alerting_practices.md",
+            }
+        )
+    if (
+        any(term in lowered for term in {"kubernetes", "k8s"})
+        and "pod" in lowered
+        and "service" in lowered
+        and any(term in lowered for term in {"同时", "联合", "哪些官方文档"})
+    ):
+        required_sources.update(
+            {
+                "official_kubernetes_debug_pods.md",
+                "official_kubernetes_debug_services.md",
+            }
+        )
+    if (
+        any(term in lowered for term in {"loki", "日志", "可观测性"})
+        and any(term in lowered for term in {"ingestion", "摄取", "写入"})
+        and any(term in lowered for term in {"prometheus", "告警", "指标"})
     ):
         required_sources.update(
             {
@@ -1159,14 +1271,30 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         }.items()
         if any(alias in lowered for alias in aliases)
     }
-    if "mysql" in dominant_source_terms or any(
-        term in lowered for term in {"慢 sql", "慢sql", "pool_waiting", "数据库"}
-    ):
+    explicit_mysql_evidence = any(
+        term in lowered
+        for term in {
+            "mysql",
+            "pool_waiting",
+            "active_connections",
+            "数据库",
+            "连接池",
+            "payment",
+        }
+    )
+    mixed_cpu_sql_signal = "cpu" in lowered and "sql" in lowered and not explicit_mysql_evidence
+    if (
+        "mysql" in dominant_source_terms
+        or any(term in lowered for term in {"慢 sql", "慢sql", "pool_waiting", "数据库"})
+    ) and not mixed_cpu_sql_signal:
         dominant_source_terms.discard("cpu")
     if dominant_source_terms & {"cpu", "memory", "disk"}:
         dominant_source_terms.discard("kubernetes")
     if {"redis", "mysql", "kubernetes", "prometheus", "loki"} & dominant_source_terms:
-        dominant_source_terms.difference_update({"cpu", "memory", "disk", "service_unavailable"})
+        overshadowed_generic_terms = {"memory", "disk", "service_unavailable"}
+        if not mixed_cpu_sql_signal:
+            overshadowed_generic_terms.add("cpu")
+        dominant_source_terms.difference_update(overshadowed_generic_terms)
     return {
         "preferred_doc_types": preferred_doc_types,
         "preferred_extensions": preferred_extensions,
@@ -1202,6 +1330,22 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
                 "service 后端",
             }
         ),
+        "prefer_service_backend": any(
+            term in lowered
+            for term in {
+                "endpointslice",
+                "endpoints",
+                "selector",
+                "clusterip",
+                "后端地址",
+                "service 后端",
+            }
+        ),
+        "prefer_redis_clients": "redis" in lowered
+        and any(
+            term in lowered for term in {"maxclients", "connected_clients", "连接数", "客户端"}
+        ),
+        "prefer_error_definition": "400" in lowered,
     }
 
 
@@ -1251,6 +1395,16 @@ def retrieval_intent_multiplier(
     if bool(preferences.get("prefer_service_debug")):
         if "debug_services" in normalized_source or "debug_pods" in normalized_source:
             multiplier *= 1.6
+    if bool(preferences.get("prefer_service_backend")):
+        if "debug_services" in normalized_source:
+            multiplier *= 1.8
+        elif "debug_pods" in normalized_source:
+            multiplier *= 0.72
+    if bool(preferences.get("prefer_redis_clients")):
+        if normalized_source == "official_redis_clients.md":
+            multiplier *= 1.6
+        elif normalized_source == "official_redis_latency.md":
+            multiplier *= 0.35
     if source_file.lower() in required_sources:
         multiplier *= 1.65
     if preferred_heading_terms:
@@ -1268,6 +1422,8 @@ def retrieval_intent_multiplier(
             str(chunk.get("content") or "").lower(),
         ]
     )
+    if bool(preferences.get("prefer_error_definition")) and "400 bad request" in searchable_text:
+        multiplier *= 1.35
     if dominant_source_terms:
         source_matches = sum(term in normalized_source for term in dominant_source_terms)
         content_matches = sum(term in searchable_text for term in dominant_source_terms)
@@ -1306,10 +1462,12 @@ def select_required_sources(
     """Reserve one ranked slot for each source explicitly required by the query."""
     if not candidates or not required_sources or top_k <= 0:
         return candidates
+    if len(required_sources) > top_k:
+        return candidates[:top_k]
 
     selected_ids: set[tuple[str, str]] = set()
     selected: list[dict[str, Any]] = []
-    for source in required_sources:
+    for source in sorted(required_sources):
         match = next(
             (
                 chunk
@@ -1438,11 +1596,26 @@ def deduplicate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, A
     positions: dict[tuple[str, str], int] = {}
     deduped: list[dict[str, Any]] = []
     for chunk in candidates:
-        key = (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
+        key = (
+            str(chunk.get("source_file") or chunk.get("doc_id") or ""),
+            str(chunk.get("chunk_id") or ""),
+        )
         existing_position = positions.get(key)
         if existing_position is None:
             positions[key] = len(deduped)
             deduped.append(dict(chunk))
+            continue
+        current = deduped[existing_position]
+        if normalize_chunk_content(chunk) != normalize_chunk_content(current):
+            conflicted = dict(current)
+            conflicted["identity_conflict"] = True
+            conflicted["conflicting_chunk_hashes"] = sorted(
+                {
+                    chunk_content_hash(chunk),
+                    chunk_content_hash(current),
+                }
+            )
+            deduped[existing_position] = conflicted
             continue
         if _candidate_is_better(chunk, deduped[existing_position]):
             deduped[existing_position] = dict(chunk)
@@ -1461,6 +1634,43 @@ def _candidate_is_better(candidate: dict[str, Any], current: dict[str, Any]) -> 
     candidate_lexical = _coerce_score(candidate.get("metadata", {}).get("_lexical_score"))
     current_lexical = _coerce_score(current.get("metadata", {}).get("_lexical_score"))
     return (candidate_lexical or 0.0) > (current_lexical or 0.0)
+
+
+def enforce_source_coverage(
+    candidates: list[dict[str, Any]],
+    *,
+    required_sources: set[str],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Fail closed when a required multi-source query loses a source."""
+    if not required_sources:
+        return candidates, set()
+    present = {
+        str(item.get("source_file") or "").strip().lower()
+        for item in candidates
+        if str(item.get("source_file") or "").strip()
+    }
+    required = {str(source).strip().lower() for source in required_sources if str(source).strip()}
+    missing = required - present
+    return (candidates if not missing else [], missing)
+
+
+def normalize_chunk_content(chunk: dict[str, Any]) -> str:
+    """Normalize chunk text before checking stable identity conflicts."""
+    return re.sub(
+        r"\s+",
+        " ",
+        str(chunk.get("content") or chunk.get("content_preview") or "").strip(),
+    )
+
+
+def chunk_content_hash(chunk: dict[str, Any]) -> str:
+    """Return an observed or computed content hash for conflict diagnostics."""
+    metadata = chunk.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    observed = str(metadata.get("_chunk_hash") or "").strip()
+    if observed:
+        return observed
+    return hashlib.sha256(normalize_chunk_content(chunk).encode("utf-8")).hexdigest()
 
 
 def compute_lexical_score(query_terms: set[str], chunk: dict[str, Any]) -> float:
@@ -1510,7 +1720,7 @@ def normalize_vector_distance(score: Any) -> float:
     try:
         distance = float(score)
     except (TypeError, ValueError):
-        return 0.5
+        return 0.0
     if not math.isfinite(distance) or distance < 0:
         return 0.0
     return 1 / (1 + distance)
@@ -1721,15 +1931,28 @@ def _call_similarity_search(
 
 
 def _candidate_count(top_k: int) -> int:
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
-        raise ValueError("top_k 必须是正整数")
+    _validate_retrieval_k(top_k, label="top_k")
     multiplier = max(int(config.rag_hybrid_candidate_multiplier or 1), 1)
-    return max(top_k, top_k * multiplier)
+    return min(max(top_k, top_k * multiplier), MAX_RETRIEVAL_CANDIDATES)
+
+
+def _validate_retrieval_k(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} 必须是正整数")
+    if value > MAX_RETRIEVAL_TOP_K:
+        raise ValueError(f"{label} 不能超过 {MAX_RETRIEVAL_TOP_K}")
+    return int(value)
 
 
 def _document_identity(document: Document) -> tuple[str, str]:
     metadata = dict(document.metadata or {})
-    source = str(metadata.get("_doc_id") or metadata.get("_source") or metadata.get("source") or "")
+    source = str(
+        metadata.get("_source_id")
+        or metadata.get("_doc_id")
+        or metadata.get("_source")
+        or metadata.get("source")
+        or ""
+    )
     chunk_id = str(metadata.get("_chunk_id") or metadata.get("chunk_id") or "")
     if source or chunk_id:
         return source, chunk_id
@@ -1759,6 +1982,22 @@ def _elapsed_ms(started_at: float) -> float:
 def _stable_chunk_id(source_file: str, heading_path: str, content: str) -> str:
     digest = hashlib.sha256(f"{source_file}\n{heading_path}\n{content}".encode()).hexdigest()
     return f"chunk-{digest[:12]}"
+
+
+def _public_source_identity(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return "未知来源"
+    lowered = text.lower()
+    for marker in ("docs/knowledge-base/", "uploads/"):
+        position = lowered.rfind(marker)
+        if position >= 0:
+            return text[position:]
+    if re.match(r"^[A-Za-z]:/", text) or text.startswith("/"):
+        basename = text.rsplit("/", 1)[-1] or "document"
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        return f"{basename}@{digest}"
+    return text
 
 
 def _quote_expr_value(value: Any) -> str:

@@ -13,6 +13,7 @@ from fastapi import UploadFile
 
 from app.api import file as file_api
 from app.services.indexing_quality_service import (
+    IndexingQualityRecord,
     IndexingQualityService,
     build_indexing_quality_report,
     build_quality_record,
@@ -203,6 +204,28 @@ def test_quality_service_warns_when_corrupt_lines_are_skipped(monkeypatch, tmp_p
     assert "invalid_count=2" in warnings[0]
     assert "lines=[2, 3]" in warnings[0]
     assert "{broken" not in warnings[0]
+
+
+def test_quality_service_skips_invalid_utf8_lines_without_losing_valid_records(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    storage = tmp_path / "quality.jsonl"
+    valid = IndexingQualityRecord(source_file="runbook.md", status="success")
+    storage.write_bytes(
+        valid.model_dump_json().encode("utf-8") + b"\n" + b'{"source_file":"broken-\xff.md"}\n'
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "app.services.indexing_quality_service.logger.warning",
+        lambda message, *args: warnings.append(message.format(*args)),
+    )
+
+    records = IndexingQualityService(storage).list_records()
+
+    assert [record.source_file for record in records] == ["runbook.md"]
+    assert warnings
+    assert "invalid_count=1" in warnings[0]
 
 
 def test_quality_service_sanitizes_failed_result_objects_and_windows_paths(tmp_path) -> None:

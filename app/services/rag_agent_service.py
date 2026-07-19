@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -25,7 +24,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
 
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_retry
 from app.config import config
 from app.services.rag_answer_policy import (
     build_citation_guard_payload,
@@ -40,6 +39,7 @@ from app.services.rag_answer_policy import (
     is_explicit_knowledge_refusal,
     message_content_to_text,
     select_supporting_citations,
+    validated_citation_prefix,
 )
 from app.services.rag_read_models import (
     build_citations,
@@ -115,7 +115,7 @@ class RagAgentService:
         self.mcp_tools: list = []
 
         self.checkpointer = MemorySaver()
-        self._grounded_history: dict[str, list[dict[str, str]]] = {}
+        self._grounded_history: dict[str, list[dict[str, Any]]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._session_lock_users: dict[str, int] = {}
 
@@ -137,7 +137,7 @@ class RagAgentService:
             model = self._ensure_model()
             try:
                 mcp_client = await get_mcp_client_with_retry()
-                mcp_tools = await mcp_client.get_tools()
+                mcp_tools = await discover_safe_mcp_tools(mcp_client)
                 logger.info(f"成功加载 {len(mcp_tools)} 个 MCP 工具")
             except Exception as exc:
                 logger.warning(
@@ -156,7 +156,9 @@ class RagAgentService:
             self._agent_initialized = True
 
             if all_tools:
-                tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
+                tool_names = [
+                    tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools
+                ]
                 logger.info(f"可用工具列表: {', '.join(tool_names)}")
 
     def _build_system_prompt(self) -> str:
@@ -289,7 +291,19 @@ class RagAgentService:
 
         if retrieval_payload.get("status") != "success":
             answer = build_no_answer_message(retrieval_payload)
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=retrieval_context,
+                    no_answer=True,
+                    answer_policy=retrieval_payload.get(
+                        "answer_policy", "refuse_without_trusted_source"
+                    ),
+                ),
+            )
             return {
                 "success": True,
                 "answer": answer,
@@ -302,6 +316,36 @@ class RagAgentService:
             }
 
         generation_evidence = build_generation_evidence(retrieval_payload)
+        if retrieval_payload.get("required_sources") and not generation_evidence:
+            answer = build_no_answer_message(
+                {
+                    **retrieval_payload,
+                    "status": "no_answer",
+                    "summary": "Required source coverage could not fit inside the generation context budget.",
+                    "missing_required_sources": retrieval_payload.get("required_sources", []),
+                }
+            )
+            guarded_payload = build_citation_guard_payload(retrieval_payload)
+            guarded_context = compact_retrieval_payload(guarded_payload)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=guarded_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_trusted_source",
+                ),
+            )
+            return {
+                "success": True,
+                "answer": answer,
+                "citations": [],
+                "retrieval": guarded_context,
+                "no_answer": True,
+                "answer_policy": "refuse_without_trusted_source",
+            }
         generation_payload = {
             **retrieval_payload,
             "retrieval_results": generation_evidence,
@@ -310,12 +354,23 @@ class RagAgentService:
         if not has_valid_citations(citations):
             answer = build_missing_citation_message()
             guarded_payload = build_citation_guard_payload(retrieval_payload)
-            self._append_grounded_history(session_id, question, answer)
+            guarded_context = compact_retrieval_payload(guarded_payload)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=guarded_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_citation",
+                ),
+            )
             return {
                 "success": True,
                 "answer": answer,
                 "citations": [],
-                "retrieval": compact_retrieval_payload(guarded_payload),
+                "retrieval": guarded_context,
                 "no_answer": True,
                 "answer_policy": "refuse_without_citation",
             }
@@ -348,7 +403,17 @@ class RagAgentService:
                     + round((time.perf_counter() - generation_started) * 1000, 2)
                 ),
             )
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=retrieval_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_trusted_source",
+                ),
+            )
             return {
                 "success": True,
                 "answer": answer,
@@ -362,12 +427,23 @@ class RagAgentService:
         if not has_valid_citations(citations):
             answer = build_missing_citation_message()
             guarded_payload = build_citation_guard_payload(retrieval_payload)
-            self._append_grounded_history(session_id, question, answer)
+            guarded_context = compact_retrieval_payload(guarded_payload)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=guarded_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_citation",
+                ),
+            )
             return {
                 "success": True,
                 "answer": answer,
                 "citations": [],
-                "retrieval": compact_retrieval_payload(guarded_payload),
+                "retrieval": guarded_context,
                 "no_answer": True,
                 "answer_policy": "refuse_without_citation",
                 "observability": build_rag_observability(
@@ -398,7 +474,17 @@ class RagAgentService:
                 + round((time.perf_counter() - generation_started) * 1000, 2)
             ),
         )
-        self._append_grounded_history(session_id, question, answer)
+        self._append_grounded_history(
+            session_id,
+            question,
+            answer,
+            assistant_metadata=_rag_history_metadata(
+                citations=citations,
+                retrieval=retrieval_context,
+                no_answer=False,
+                answer_policy=retrieval_payload.get("answer_policy", "answer_with_citations"),
+            ),
+        )
 
         return {
             "success": True,
@@ -456,7 +542,8 @@ class RagAgentService:
         return answer, {
             "llm_generation_ms": round((time.perf_counter() - started_at) * 1000, 2),
             "llm_ttft_ms": "not_observed",
-            "token_usage": usage or {
+            "token_usage": usage
+            or {
                 "status": "not_observed",
                 "input_tokens": None,
                 "output_tokens": None,
@@ -588,7 +675,19 @@ class RagAgentService:
 
         if retrieval_payload.get("status") != "success":
             answer = build_no_answer_message(retrieval_payload)
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=retrieval_context,
+                    no_answer=True,
+                    answer_policy=retrieval_payload.get(
+                        "answer_policy", "refuse_without_trusted_source"
+                    ),
+                ),
+            )
             yield {
                 "type": "search_results",
                 "data": retrieval_context,
@@ -622,7 +721,17 @@ class RagAgentService:
             answer = build_missing_citation_message()
             guarded_payload = build_citation_guard_payload(retrieval_payload)
             guarded_context = compact_retrieval_payload(guarded_payload)
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=guarded_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_citation",
+                ),
+            )
             yield {
                 "type": "search_results",
                 "data": guarded_context,
@@ -650,6 +759,7 @@ class RagAgentService:
         }
         grounded_question = build_grounded_question(question, generation_payload)
         full_answer = ""
+        streamed_answer = ""
         async for chunk in self.query_grounded_stream(
             grounded_question,
             session_id,
@@ -657,6 +767,15 @@ class RagAgentService:
         ):
             if chunk.get("type") == "content":
                 full_answer += str(chunk.get("data") or "")
+                validated_prefix = validated_citation_prefix(full_answer, citations)
+                if len(validated_prefix) > len(streamed_answer):
+                    delta = validated_prefix[len(streamed_answer) :]
+                    streamed_answer = validated_prefix
+                    yield {
+                        "type": "content",
+                        "data": delta,
+                        "node": "citation_guard",
+                    }
             elif chunk.get("type") == "complete":
                 continue
             else:
@@ -670,9 +789,19 @@ class RagAgentService:
                     "summary": "当前知识库没有足够的相关证据回答该问题。",
                 }
             )
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=retrieval_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_trusted_source",
+                ),
+            )
             yield {
-                "type": "content",
+                "type": "replace_content" if streamed_answer else "content",
                 "data": answer,
                 "node": "retrieval_guard",
             }
@@ -694,11 +823,21 @@ class RagAgentService:
             guarded_payload = build_citation_guard_payload(retrieval_payload)
             guarded_context = compact_retrieval_payload(guarded_payload)
             yield {
-                "type": "content",
+                "type": "replace_content" if streamed_answer else "content",
                 "data": answer,
                 "node": "citation_guard",
             }
-            self._append_grounded_history(session_id, question, answer)
+            self._append_grounded_history(
+                session_id,
+                question,
+                answer,
+                assistant_metadata=_rag_history_metadata(
+                    citations=[],
+                    retrieval=guarded_context,
+                    no_answer=True,
+                    answer_policy="refuse_without_citation",
+                ),
+            )
             yield {
                 "type": "complete",
                 "data": {
@@ -711,13 +850,31 @@ class RagAgentService:
             }
             return
         final_answer = ensure_citation_block(full_answer, citations)
-        if final_answer:
+        if final_answer.startswith(streamed_answer):
+            remaining_answer = final_answer[len(streamed_answer) :]
+            if remaining_answer:
+                yield {
+                    "type": "content",
+                    "data": remaining_answer,
+                    "node": "citation_guard",
+                }
+        elif final_answer != streamed_answer:
             yield {
-                "type": "content",
+                "type": "replace_content",
                 "data": final_answer,
                 "node": "citation_guard",
             }
-        self._append_grounded_history(session_id, question, final_answer)
+        self._append_grounded_history(
+            session_id,
+            question,
+            final_answer,
+            assistant_metadata=_rag_history_metadata(
+                citations=citations,
+                retrieval=retrieval_context,
+                no_answer=False,
+                answer_policy=retrieval_payload.get("answer_policy", "answer_with_citations"),
+            ),
+        )
 
         yield {
             "type": "complete",
@@ -770,7 +927,7 @@ class RagAgentService:
             )
         yield {"type": "complete"}
 
-    async def get_session_history(self, session_id: str) -> list[dict[str, str]]:
+    async def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         """
         获取会话历史（从 MemorySaver checkpointer 中读取）
 
@@ -793,7 +950,7 @@ class RagAgentService:
 
                 messages = checkpoint_data.get("channel_values", {}).get("messages", [])
 
-                history: list[dict[str, str]] = []
+                history: list[dict[str, Any]] = []
                 for msg in messages:
                     if isinstance(msg, SystemMessage):
                         continue
@@ -803,9 +960,7 @@ class RagAgentService:
                         msg.content if hasattr(msg, "content") else msg
                     )
                     timestamp = str(getattr(msg, "timestamp", None) or datetime.now().isoformat())
-                    history.append(
-                        {"role": role, "content": content, "timestamp": timestamp}
-                    )
+                    history.append({"role": role, "content": content, "timestamp": timestamp})
 
                 history.extend(self._grounded_history.get(session_id, []))
                 history.sort(key=lambda item: item.get("timestamp", ""))
@@ -881,13 +1036,29 @@ class RagAgentService:
         checkpoint_data = await self.checkpointer.aget(cast(Any, config))
         return cast(dict[str, Any], checkpoint_data) if isinstance(checkpoint_data, dict) else {}
 
-    def _append_grounded_history(self, session_id: str, question: str, answer: str) -> None:
+    def _append_grounded_history(
+        self,
+        session_id: str,
+        question: str,
+        answer: str,
+        *,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Persist tool-free grounded RAG turns for the session-history API."""
         timestamp = datetime.now().isoformat()
         self._grounded_history.setdefault(session_id, []).extend(
             [
                 {"role": "user", "content": question, "timestamp": timestamp},
-                {"role": "assistant", "content": answer, "timestamp": timestamp},
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "timestamp": timestamp,
+                    **(
+                        {"metadata": dict(assistant_metadata)}
+                        if assistant_metadata is not None
+                        else {}
+                    ),
+                },
             ]
         )
 
@@ -946,31 +1117,34 @@ class RagAgentService:
         *,
         session_id: str,
     ) -> AsyncIterator[AsyncIterator[str]]:
-        """Buffer a model stream in a spooled file so retries never duplicate client output."""
+        """Stream one attempt, retrying only before any provider content is observed."""
         max_attempts = int(config.rag_model_max_retries) + 1
         safe_session_id = sanitize_log_value(session_id)
-        spool = tempfile.SpooledTemporaryFile(
-            max_size=int(config.rag_stream_spool_max_memory_bytes),
-            mode="w+b",
-        )
-        try:
+
+        async def stream_attempts() -> AsyncIterator[str]:
             for attempt in range(1, max_attempts + 1):
-                spool.seek(0)
-                spool.truncate(0)
+                emitted = False
+                emitted_bytes = 0
                 try:
                     async with asyncio.timeout(float(config.rag_model_timeout_seconds)):
                         async for chunk in model.astream(messages):
                             content = chunk.content if hasattr(chunk, "content") else chunk
                             text = message_content_to_text(content)
-                            if text:
-                                _write_stream_record(spool, text)
-                    spool.seek(0)
-                    yield _read_stream_records(spool)
+                            if not text:
+                                continue
+                            next_emitted_bytes = emitted_bytes + len(text.encode("utf-8"))
+                            if not emitted and next_emitted_bytes > int(
+                                config.rag_stream_spool_max_memory_bytes
+                            ):
+                                raise ValueError("RAG 模型流输出超过安全上限")
+                            emitted_bytes = next_emitted_bytes
+                            emitted = True
+                            yield text
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    if attempt >= max_attempts or not _is_retryable_model_error(exc):
+                    if emitted or attempt >= max_attempts or not _is_retryable_model_error(exc):
                         raise
                     logger.warning(
                         "RAG 模型流调用失败，准备重试: session_id={}, attempt={}, error_type={}",
@@ -980,8 +1154,8 @@ class RagAgentService:
                     )
                     await asyncio.sleep(float(config.rag_model_retry_delay_seconds))
             raise RuntimeError("RAG 模型流未返回结果")
-        finally:
-            spool.close()
+
+        yield stream_attempts()
 
     def _replace_latest_human_message(
         self,
@@ -1068,27 +1242,6 @@ def _is_retryable_model_error(exc: Exception) -> bool:
     return any(marker in error_name or marker in message for marker in retryable_markers)
 
 
-def _write_stream_record(spool: Any, text: str) -> None:
-    payload = text.encode("utf-8")
-    spool.write(len(payload).to_bytes(8, byteorder="big", signed=False))
-    spool.write(payload)
-
-
-async def _read_stream_records(spool: Any) -> AsyncIterator[str]:
-    while True:
-        header = spool.read(8)
-        if not header:
-            return
-        if len(header) != 8:
-            raise RuntimeError("RAG 模型流缓存记录损坏")
-        size = int.from_bytes(header, byteorder="big", signed=False)
-        payload = spool.read(size)
-        if len(payload) != size:
-            raise RuntimeError("RAG 模型流缓存记录不完整")
-        yield payload.decode("utf-8")
-        await asyncio.sleep(0)
-
-
 def extract_message_token_usage(message: Any) -> dict[str, Any] | None:
     """Normalize LangChain/OpenAI-compatible usage metadata without estimating tokens."""
     candidates = [
@@ -1101,12 +1254,8 @@ def extract_message_token_usage(message: Any) -> dict[str, Any] | None:
         usage = candidate.get("token_usage") or candidate.get("usage") or candidate
         if not isinstance(usage, dict):
             continue
-        input_tokens = _optional_int(
-            usage.get("input_tokens", usage.get("prompt_tokens"))
-        )
-        output_tokens = _optional_int(
-            usage.get("output_tokens", usage.get("completion_tokens"))
-        )
+        input_tokens = _optional_int(usage.get("input_tokens", usage.get("prompt_tokens")))
+        output_tokens = _optional_int(usage.get("output_tokens", usage.get("completion_tokens")))
         total_tokens = _optional_int(usage.get("total_tokens"))
         if input_tokens is None and output_tokens is None and total_tokens is None:
             continue
@@ -1152,6 +1301,22 @@ def build_rag_observability(
             "price_snapshot": None,
         },
         "limitations": retrieval.get("limitations", []),
+    }
+
+
+def _rag_history_metadata(
+    *,
+    citations: list[dict[str, Any]],
+    retrieval: dict[str, Any],
+    no_answer: bool,
+    answer_policy: str,
+) -> dict[str, Any]:
+    """Build the frontend metadata persisted with one assistant history item."""
+    return {
+        "citations": [dict(item) for item in citations],
+        "retrieval": dict(retrieval),
+        "noAnswer": no_answer,
+        "answerPolicy": answer_policy,
     }
 
 

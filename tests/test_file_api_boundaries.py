@@ -576,6 +576,44 @@ async def test_upload_rejects_binary_content_when_null_byte_is_after_prefix(
     assert not (tmp_path / "runbook.md").exists()
 
 
+def test_saved_file_signature_validation_reads_large_text_in_bounded_chunks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "large.md"
+    source.write_bytes(b"a" * (file_api.UPLOAD_READ_CHUNK_SIZE * 2 + 17))
+    observed_sizes: list[int] = []
+    original_open = Path.open
+
+    class TrackingReader:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.handle.__exit__(exc_type, exc, traceback)
+
+        def read(self, size: int = -1) -> bytes:
+            observed_sizes.append(size)
+            return self.handle.read(size)
+
+    def tracking_open(path: Path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == source and args and args[0] == "rb":
+            return TrackingReader(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    file_api._validate_saved_file_signature(source, "md")
+
+    assert observed_sizes
+    assert all(size == file_api.UPLOAD_READ_CHUNK_SIZE for size in observed_sizes)
+
+
 @pytest.mark.asyncio
 async def test_upload_allows_pdf_signature_text_inside_markdown(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
@@ -901,6 +939,46 @@ def test_index_directory_defaults_to_configured_upload_dir(monkeypatch, tmp_path
     assert [Path(path).name for path in indexed_files] == ["guide.md"]
 
 
+@pytest.mark.parametrize(
+    "file_result",
+    [
+        None,
+        SingleFileIndexingResult(
+            file_path="guide.md",
+            status="success",
+            chunk_count=0,
+        ).finish(),
+        SingleFileIndexingResult(
+            file_path="guide.md",
+            status="failed",
+            chunk_count=0,
+        ).finish(),
+    ],
+)
+def test_index_directory_fails_closed_for_invalid_single_file_results(
+    monkeypatch,
+    tmp_path,
+    file_result,
+) -> None:
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "guide.md").write_text(
+        "# Guide\n\nvalid diagnostic content",
+        encoding="utf-8",
+    )
+    service = VectorIndexService()
+    service.upload_path = str(upload_dir)
+    monkeypatch.setattr(service, "_allowed_index_roots", lambda: [upload_dir.resolve()])
+    monkeypatch.setattr(service, "index_single_file", lambda _path: file_result)
+
+    result = service.index_directory()
+
+    assert result.success is False
+    assert result.success_count == 0
+    assert result.fail_count == 1
+    assert result.failed_files
+
+
 def test_splitter_adds_document_version_metadata() -> None:
     docs = document_splitter_service.split_document(
         "# Redis\n\nRedis timeout runbook", "docs/knowledge-base/redis.md"
@@ -958,6 +1036,19 @@ def test_splitter_merge_keeps_overlap_separate_and_respects_chunk_limit() -> Non
     assert len(content_docs) == 2
     assert all(len(doc.page_content) <= document_splitter_service.chunk_size * 2 for doc in docs)
     assert content_docs[0].page_content[-100:] == content_docs[1].page_content[:100]
+
+
+def test_splitter_source_id_distinguishes_same_basename_outside_known_roots() -> None:
+    left = document_splitter_service.split_document(
+        "left content with enough diagnostic context",
+        "C:/tenant-a/runbook.md",
+    )
+    right = document_splitter_service.split_document(
+        "right content with enough diagnostic context",
+        "C:/tenant-b/runbook.md",
+    )
+
+    assert left[0].metadata["_source_id"] != right[0].metadata["_source_id"]
 
 
 def test_index_single_file_marks_existing_index_stale_when_vector_add_fails(
@@ -1159,7 +1250,7 @@ def test_index_single_file_keeps_source_stale_until_vector_cleanup_finishes(
     ]
 
 
-def test_index_single_file_marks_source_stale_when_vector_cleanup_fails(
+def test_index_single_file_does_not_publish_new_lexical_data_when_vector_cleanup_fails(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1200,9 +1291,6 @@ def test_index_single_file_marks_source_stale_when_vector_cleanup_fails(
         def mark_source_stale(self, source: str, reason: str) -> None:
             self.stale_sources.append((source, reason))
 
-        def clear_source_stale(self, source: str) -> None:
-            raise AssertionError(source)
-
     fake_vector = FailingCleanupVectorStoreManager()
     fake_lexical = RecordingLexicalIndex()
 
@@ -1219,7 +1307,7 @@ def test_index_single_file_marks_source_stale_when_vector_cleanup_fails(
 
     normalized_path = runbook.resolve().as_posix()
     assert fake_lexical.upserted_sources == [normalized_path]
-    assert fake_vector.compensated_ids
+    assert fake_vector.compensated_ids == []
     assert fake_lexical.stale_sources[-1] == (normalized_path, "cleanup unavailable")
 
 
@@ -1273,7 +1361,7 @@ def test_index_single_file_compensates_new_vectors_when_lexical_commit_fails(
     with pytest.raises(RuntimeError, match="索引文件失败"):
         service.index_single_file(str(runbook))
 
-    assert fake_vector.compensated_ids == [["vec-new"]]
+    assert fake_vector.compensated_ids == []
     assert fake_lexical.stale_sources[-1][1] == "lexical disk unavailable"
 
 

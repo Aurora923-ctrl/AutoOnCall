@@ -17,7 +17,8 @@ from app.services.document_loaders.base import (
 )
 
 MAX_HTML_SECTIONS = 10_000
-HTML_CONTENT_TAGS = {"h1", "h2", "h3", "p", "li", "pre", "code", "td", "th"}
+HTML_HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+HTML_CONTENT_TAGS = HTML_HEADING_TAGS | {"p", "li", "pre", "code", "td", "th"}
 
 
 class HtmlDocumentLoader:
@@ -110,7 +111,7 @@ def _extract_heading_sections(
         text = normalize_text(element.get_text(" "))
         if not text:
             continue
-        if name in {"h1", "h2", "h3"}:
+        if name in HTML_HEADING_TAGS:
             flush()
             level = int(name[1])
             current_headings = {
@@ -141,4 +142,4 @@ def _heading_path(headings: dict[int, str]) -> str:
 
 
 def _heading_metadata(headings: dict[int, str]) -> dict[str, Any]:
-    return {f"h{level}": value for level, value in headings.items() if level in {1, 2, 3}}
+    return {f"h{level}": value for level, value in headings.items() if 1 <= level <= 6}

@@ -95,10 +95,82 @@ def test_readiness_check_does_not_create_or_load_collection(monkeypatch) -> None
             calls.append(("has_collection", (collection_name, timeout)))
             return True
 
+        def describe_collection(self, *, collection_name: str, timeout: float):
+            calls.append(("describe_collection", (collection_name, timeout)))
+            return {
+                "auto_id": False,
+                "enable_dynamic_field": False,
+                "fields": [
+                    {
+                        "name": "id",
+                        "type": int(DataType.VARCHAR),
+                        "params": {"max_length": manager.ID_MAX_LENGTH},
+                        "is_primary": True,
+                    },
+                    {
+                        "name": "vector",
+                        "type": int(DataType.FLOAT_VECTOR),
+                        "params": {"dim": manager.vector_dim},
+                    },
+                    {
+                        "name": "content",
+                        "type": int(DataType.VARCHAR),
+                        "params": {"max_length": manager.CONTENT_MAX_LENGTH},
+                    },
+                    {"name": "metadata", "type": int(DataType.JSON), "params": {}},
+                ],
+            }
+
+        def list_indexes(self, *, collection_name: str):
+            calls.append(("list_indexes", collection_name))
+            return ["vector"]
+
+        def describe_index(self, *, collection_name: str, index_name: str, timeout: float):
+            calls.append(("describe_index", (collection_name, index_name, timeout)))
+            return {
+                "metric_type": manager.VECTOR_METRIC_TYPE,
+                "index_type": manager.VECTOR_INDEX_TYPE,
+                "params": {"nlist": manager.VECTOR_INDEX_NLIST},
+                "state": "Finished",
+                "pending_index_rows": 0,
+            }
+
+        def get_load_state(self, *, collection_name: str, timeout: float):
+            calls.append(("get_load_state", (collection_name, timeout)))
+            return {"state": "Loaded"}
+
+        def query(
+            self,
+            *,
+            collection_name: str,
+            filter: str,
+            output_fields: list[str],
+            limit: int,
+            timeout: float,
+        ):
+            calls.append(
+                (
+                    "query",
+                    (collection_name, filter, output_fields, limit, timeout),
+                )
+            )
+            return [
+                {
+                    "id": "vec-sample",
+                    "metadata": {
+                        "_source": "/docs/runbook.md",
+                        "_source_id": "docs/runbook.md",
+                        "_chunk_id": "runbook.md#0001",
+                        "_document_hash": "doc-hash",
+                        "_chunk_hash": "chunk-hash",
+                        "_vector_id": "vec-sample",
+                    },
+                }
+            ]
+
         def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(manager, "health_check", lambda: False)
     monkeypatch.setattr(milvus_client, "MilvusClient", ProbeClient)
     monkeypatch.setattr(
         manager,
@@ -112,7 +184,67 @@ def test_readiness_check_does_not_create_or_load_collection(monkeypatch) -> None
     )
 
     assert manager.readiness_check() is True
-    assert [name for name, _ in calls] == ["init", "has_collection", "close"]
+    assert [name for name, _ in calls] == [
+        "init",
+        "has_collection",
+        "describe_collection",
+        "list_indexes",
+        "describe_index",
+        "get_load_state",
+        "query",
+        "close",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("load_state", "index_state", "pending_rows"),
+    [
+        ({"state": "NotLoad"}, "Finished", 0),
+        ({"state": "Loaded"}, "InProgress", 0),
+        ({"state": "Loaded"}, "Finished", 4),
+    ],
+)
+def test_readiness_runtime_state_rejects_unready_collection(
+    load_state,
+    index_state,
+    pending_rows,
+) -> None:
+    manager = milvus_client.MilvusClientManager()
+
+    with pytest.raises(RuntimeError):
+        manager._validate_collection_runtime_state(
+            load_state=load_state,
+            index_description={
+                "state": index_state,
+                "pending_index_rows": pending_rows,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"id": "vec-sample", "metadata": {}}],
+        [
+            {
+                "id": "vec-sample",
+                "metadata": {
+                    "_source": "/docs/runbook.md",
+                    "_source_id": "docs/runbook.md",
+                    "_chunk_id": "runbook.md#0001",
+                    "_document_hash": "doc-hash",
+                    "_chunk_hash": "chunk-hash",
+                    "_vector_id": "vec-other",
+                },
+            }
+        ],
+    ],
+)
+def test_readiness_rejects_incompatible_sample_metadata(records) -> None:
+    manager = milvus_client.MilvusClientManager()
+
+    with pytest.raises(RuntimeError, match="metadata 不兼容"):
+        manager._validate_collection_sample_metadata(records)
 
 
 def test_connect_retries_and_uses_default_alias(monkeypatch) -> None:

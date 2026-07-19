@@ -82,7 +82,9 @@ class IndexingQualityService:
             status = (
                 "success"
                 if path in success_by_path
-                else "empty" if path in empty_files else "unknown"
+                else "empty"
+                if path in empty_files
+                else "unknown"
             )
             record = build_quality_record(
                 report=report,
@@ -337,13 +339,18 @@ def _read_records(path: Path) -> list[IndexingQualityRecord]:
         return []
     records: list[IndexingQualityRecord] = []
     invalid_line_numbers: list[int] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            records.append(IndexingQualityRecord.model_validate(json.loads(line)))
-        except (json.JSONDecodeError, ValueError):
-            invalid_line_numbers.append(line_number)
+    try:
+        with path.open("rb") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                if not raw_line.strip():
+                    continue
+                try:
+                    line = raw_line.decode("utf-8")
+                    records.append(IndexingQualityRecord.model_validate(json.loads(line)))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    invalid_line_numbers.append(line_number)
+    except OSError as exc:
+        raise RuntimeError(f"读取索引质量记录失败: {path.name}") from exc
     if invalid_line_numbers:
         logger.warning(
             "索引质量记录包含无效行，已跳过: file={}, invalid_count={}, lines={}",

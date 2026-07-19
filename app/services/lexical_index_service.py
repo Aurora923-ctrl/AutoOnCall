@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from loguru import logger
 
 from app.config import config
+from app.services.document_splitter_service import canonical_source_id
 
 DEFAULT_LEXICAL_INDEX_PATH = Path(config.rag_lexical_index_path)
 
@@ -36,58 +37,69 @@ class LexicalIndexService:
         clear_stale: bool = True,
     ) -> None:
         """Replace all chunks for one source in the local lexical index."""
+        source_id = canonical_source_id(source_path)
         with self._locked_payload():
             payload = self._load_index(strict=True)
-            chunks = [
-                self._document_to_record(document, source_path=source_path, rank=rank)
-                for rank, document in enumerate(documents, 1)
-            ]
-            payload["chunks"] = [
-                chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
-            ]
-            payload["chunks"].extend(chunks)
-            if clear_stale:
-                payload["stale_sources"].pop(source_path, None)
+            self._replace_source_in_payload(
+                payload,
+                source_path=source_path,
+                source_id=source_id,
+                documents=documents,
+                clear_stale=clear_stale,
+            )
             self._save_index(payload)
-        logger.info(f"本地词法索引更新完成: source={source_path}, chunks={len(chunks)}")
+        logger.info(f"本地词法索引更新完成: source={source_path}, chunks={len(documents)}")
+
+    def replace_source_and_clear_stale(
+        self,
+        source_path: str,
+        documents: list[Document],
+    ) -> None:
+        """Atomically replace one source and make the new lexical version retrievable."""
+        self.upsert_source(source_path, documents, clear_stale=True)
 
     def delete_source(self, source_path: str) -> int:
         """Delete all lexical chunks for one source."""
+        source_id = canonical_source_id(source_path)
         with self._locked_payload():
             payload = self._load_index(strict=True)
             before = len(payload["chunks"])
             payload["chunks"] = [
-                chunk for chunk in payload["chunks"] if chunk.get("source_path") != source_path
+                chunk
+                for chunk in payload["chunks"]
+                if canonical_source_id(str(chunk.get("source_path") or "")) != source_id
             ]
             deleted = before - len(payload["chunks"])
-            stale_removed = source_path in payload["stale_sources"]
-            payload["stale_sources"].pop(source_path, None)
+            stale_removed = source_id in payload["stale_sources"]
+            payload["stale_sources"].pop(source_id, None)
             if deleted or stale_removed:
                 self._save_index(payload)
             return deleted
 
     def mark_source_stale(self, source_path: str, reason: str) -> None:
         """Mark a source as stale so retrieval will not trust old chunks for it."""
+        source_id = canonical_source_id(source_path)
         with self._locked_payload():
             payload = self._load_index(strict=True)
-            payload["stale_sources"][source_path] = str(reason or "indexing_failed")[:500]
+            payload["stale_sources"][source_id] = str(reason or "indexing_failed")[:500]
             self._save_index(payload)
         logger.warning(f"本地词法索引标记为陈旧: source={source_path}, reason={reason}")
 
     def clear_source_stale(self, source_path: str) -> None:
         """Clear the stale marker for a source after a successful index update."""
+        source_id = canonical_source_id(source_path)
         with self._locked_payload():
             payload = self._load_index(strict=True)
-            if source_path not in payload["stale_sources"]:
+            if source_id not in payload["stale_sources"]:
                 return
-            payload["stale_sources"].pop(source_path, None)
+            payload["stale_sources"].pop(source_id, None)
             self._save_index(payload)
 
     def is_source_stale(self, source_path: str) -> bool:
         """Return True when a source should be excluded from retrieval."""
         with self._locked_payload():
             payload = self._load_index(strict=True)
-        return source_path in payload["stale_sources"]
+        return canonical_source_id(source_path) in payload["stale_sources"]
 
     def search(
         self,
@@ -114,7 +126,7 @@ class LexicalIndexService:
         chunks = [
             chunk
             for chunk in payload["chunks"]
-            if chunk.get("source_path") not in stale_sources
+            if canonical_source_id(str(chunk.get("source_path") or "")) not in stale_sources
             if _metadata_matches_filter(chunk.get("metadata", {}), metadata_filter)
         ]
         scored: list[tuple[Document, float]] = []
@@ -124,7 +136,7 @@ class LexicalIndexService:
         for chunk in chunks:
             score = bm25_like_score(
                 query_terms,
-                chunk_terms=list(chunk.get("terms") or []),
+                term_frequencies=_record_term_frequencies(chunk),
                 document_frequency=document_frequency,
                 document_count=doc_count,
                 avg_len=avg_len,
@@ -149,6 +161,7 @@ class LexicalIndexService:
         metadata = dict(document.metadata or {})
         content = str(document.page_content or "")
         metadata.setdefault("_source", source_path)
+        metadata.setdefault("_source_id", canonical_source_id(source_path))
         metadata.setdefault("_chunk_id", f"{Path(source_path).name}#{rank:04d}")
         metadata.setdefault("_file_name", Path(source_path).name)
         return {
@@ -156,8 +169,30 @@ class LexicalIndexService:
             "chunk_id": metadata.get("_chunk_id"),
             "content": content,
             "metadata": metadata,
-            "terms": sorted(extract_lexical_terms(_searchable_text(content, metadata))),
+            "terms": lexical_terms(_searchable_text(content, metadata)),
         }
+
+    def _replace_source_in_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        source_path: str,
+        source_id: str,
+        documents: list[Document],
+        clear_stale: bool,
+    ) -> None:
+        chunks = [
+            self._document_to_record(document, source_path=source_path, rank=rank)
+            for rank, document in enumerate(documents, 1)
+        ]
+        payload["chunks"] = [
+            chunk
+            for chunk in payload["chunks"]
+            if canonical_source_id(str(chunk.get("source_path") or "")) != source_id
+        ]
+        payload["chunks"].extend(chunks)
+        if clear_stale:
+            payload["stale_sources"].pop(source_id, None)
 
     def _locked_payload(self) -> _CombinedLock:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,10 +210,16 @@ class LexicalIndexService:
             return {"version": 1, "chunks": [], "stale_sources": {}}
         chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
         stale_sources = payload.get("stale_sources", {}) if isinstance(payload, dict) else {}
+        normalized_stale_sources = {}
+        if isinstance(stale_sources, dict):
+            normalized_stale_sources = {
+                canonical_source_id(str(source_path)): str(reason)
+                for source_path, reason in stale_sources.items()
+            }
         return {
             "version": 1,
             "chunks": chunks if isinstance(chunks, list) else [],
-            "stale_sources": stale_sources if isinstance(stale_sources, dict) else {},
+            "stale_sources": normalized_stale_sources,
         }
 
     def _save_index(self, payload: dict[str, Any]) -> None:
@@ -214,34 +255,38 @@ class _CombinedLock:
             self.thread_lock.release()
 
 
-def extract_lexical_terms(text: str) -> set[str]:
+def lexical_terms(text: str) -> list[str]:
     """Extract ASCII tokens plus Chinese bi/tri-grams for lexical retrieval."""
     lowered = str(text or "").lower()
-    terms = set(re.findall(r"[a-z0-9][a-z0-9_./:-]{1,}", lowered))
+    terms = re.findall(r"[a-z0-9][a-z0-9_./:-]{1,}", lowered)
     cjk_chars = re.findall(r"[\u4e00-\u9fff]", lowered)
-    terms.update("".join(cjk_chars[index : index + 2]) for index in range(len(cjk_chars) - 1))
-    terms.update("".join(cjk_chars[index : index + 3]) for index in range(len(cjk_chars) - 2))
-    return {term for term in terms if term.strip()}
+    terms.extend("".join(cjk_chars[index : index + 2]) for index in range(len(cjk_chars) - 1))
+    terms.extend("".join(cjk_chars[index : index + 3]) for index in range(len(cjk_chars) - 2))
+    return [term for term in terms if term.strip()]
+
+
+def extract_lexical_terms(text: str) -> set[str]:
+    """Extract unique terms for query matching and compatibility callers."""
+    return set(lexical_terms(text))
 
 
 def bm25_like_score(
     query_terms: set[str],
     *,
-    chunk_terms: list[str],
+    term_frequencies: dict[str, int],
     document_frequency: dict[str, int],
     document_count: int,
     avg_len: float,
 ) -> float:
     """Return a compact BM25-like score without external dependencies."""
-    if not query_terms or not chunk_terms:
+    if not query_terms or not term_frequencies:
         return 0.0
     k1 = 1.2
     b = 0.75
-    length = len(chunk_terms)
-    frequencies = {term: chunk_terms.count(term) for term in set(chunk_terms)}
+    length = sum(term_frequencies.values())
     score = 0.0
     for term in query_terms:
-        tf = frequencies.get(term, 0)
+        tf = term_frequencies.get(term, 0)
         if tf <= 0:
             continue
         df = document_frequency.get(term, 0)
@@ -268,6 +313,22 @@ def _document_frequency(chunks: list[dict[str, Any]]) -> dict[str, int]:
     for chunk in chunks:
         for term in set(chunk.get("terms") or []):
             frequencies[term] = frequencies.get(term, 0) + 1
+    return frequencies
+
+
+def _record_term_frequencies(chunk: dict[str, Any]) -> dict[str, int]:
+    terms = chunk.get("terms")
+    frequencies: dict[str, int] = {}
+    if isinstance(terms, list):
+        for term in terms:
+            normalized = str(term or "")
+            if normalized:
+                frequencies[normalized] = frequencies.get(normalized, 0) + 1
+        return frequencies
+    content = str(chunk.get("content") or "")
+    metadata = dict(chunk.get("metadata") or {})
+    for term in lexical_terms(_searchable_text(content, metadata)):
+        frequencies[term] = frequencies.get(term, 0) + 1
     return frequencies
 
 

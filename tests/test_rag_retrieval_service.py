@@ -10,6 +10,8 @@ from app.services.rag_retrieval_service import (
     build_milvus_metadata_expr,
     build_targeted_lexical_queries,
     deduplicate_candidates,
+    disambiguate_citation_sources,
+    enforce_source_coverage,
     infer_retrieval_preferences,
     merge_raw_retrieval_results,
     normalize_metadata_filter,
@@ -39,7 +41,10 @@ class FakePlainVectorStore:
         return self.documents[:k]
 
 
-@pytest.mark.parametrize("query, top_k", [("", 1), ("   ", 1), ("Redis", 0), ("Redis", -1)])
+@pytest.mark.parametrize(
+    "query, top_k",
+    [("", 1), ("   ", 1), ("Redis", 0), ("Redis", -1), ("Redis", 101)],
+)
 def test_structured_retrieval_rejects_invalid_query_or_top_k_without_search(
     query: str,
     top_k: int,
@@ -63,6 +68,16 @@ def test_structured_retrieval_rejects_invalid_distance_without_search() -> None:
 
     assert payload["status"] == "failed"
     assert store.calls == []
+
+
+def test_structured_retrieval_bounds_expanded_candidate_count(monkeypatch) -> None:
+    store = FakeVectorStore([])
+    monkeypatch.setattr(config, "rag_hybrid_candidate_multiplier", 20)
+
+    payload = retrieve_structured_knowledge("Redis", top_k=100, vector_store=store)
+
+    assert payload["candidate_k"] == 500
+    assert store.calls[0]["k"] == 500
 
 
 def test_structured_retrieval_returns_sources_scores_and_rejections() -> None:
@@ -327,14 +342,20 @@ def test_metadata_post_filter_preserves_scalar_types() -> None:
     assert payload["status"] == "no_answer"
 
 
-def test_hybrid_rerank_can_promote_lexically_strong_candidate() -> None:
+def test_hybrid_rerank_uses_observed_lexical_signal_to_promote_candidate() -> None:
     weak_vector = Document(
         page_content="普通服务说明，没有具体故障处理词。",
         metadata={"_file_name": "generic.md", "_chunk_id": "generic.md#0001"},
     )
     strong_lexical = Document(
         page_content="Redis maxclients 耗尽会导致 connection timeout，需要检查连接数。",
-        metadata={"_file_name": "redis.md", "_chunk_id": "redis.md#0001"},
+        metadata={
+            "_file_name": "redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_lexical_score": 4.0,
+            "_lexical_rank": 1,
+            "_retrieval_source": "hybrid",
+        },
     )
 
     payload = retrieve_structured_knowledge(
@@ -490,6 +511,106 @@ def test_duplicate_candidates_keep_the_best_distance() -> None:
     assert deduped[0]["score"] == 0.2
 
 
+def test_duplicate_stable_identity_with_different_content_is_rejected() -> None:
+    candidates = [
+        {
+            "doc_id": "old-path",
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+            "score": 0.2,
+            "content": "old maxclients guidance",
+            "metadata": {},
+        },
+        {
+            "doc_id": "new-path",
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+            "score": 0.1,
+            "content": "new maxclients guidance",
+            "metadata": {},
+        },
+    ]
+
+    deduped = deduplicate_candidates(candidates)
+
+    assert len(deduped) == 1
+    assert deduped[0]["identity_conflict"] is True
+    assert (
+        rag_retrieval_service.is_trusted_retrieval_chunk(
+            deduped[0],
+            max_distance=1.0,
+            min_lexical_score=0.1,
+        )
+        is False
+    )
+
+
+def test_required_source_coverage_fails_closed() -> None:
+    candidates = [{"source_file": "official_redis_clients.md", "chunk_id": "official#1"}]
+
+    selected, missing = enforce_source_coverage(
+        candidates,
+        required_sources={"official_redis_clients.md", "redis_postmortem.pdf"},
+    )
+
+    assert selected == []
+    assert missing == {"redis_postmortem.pdf"}
+
+
+def test_required_source_selection_is_deterministic_and_reserves_final_budget() -> None:
+    candidates = [
+        {
+            "doc_id": "official",
+            "source_file": "official_redis_clients.md",
+            "chunk_id": "official#1",
+            "rerank_score": 10.0,
+        },
+        {
+            "doc_id": "official",
+            "source_file": "official_redis_clients.md",
+            "chunk_id": "official#2",
+            "rerank_score": 9.0,
+        },
+        {
+            "doc_id": "postmortem",
+            "source_file": "redis_postmortem.pdf",
+            "chunk_id": "postmortem#1",
+            "rerank_score": 1.0,
+        },
+    ]
+
+    selected = rag_retrieval_service.select_required_sources(
+        candidates,
+        required_sources={"redis_postmortem.pdf", "official_redis_clients.md"},
+        top_k=2,
+    )[:2]
+
+    assert [item["source_file"] for item in selected] == [
+        "official_redis_clients.md",
+        "redis_postmortem.pdf",
+    ]
+
+
+def test_required_source_count_larger_than_top_k_cannot_claim_coverage() -> None:
+    candidates = [
+        {"source_file": "one.md", "chunk_id": "one#1"},
+        {"source_file": "two.md", "chunk_id": "two#1"},
+    ]
+
+    selected = rag_retrieval_service.select_required_sources(
+        candidates,
+        required_sources={"one.md", "two.md"},
+        top_k=1,
+    )[:1]
+    gated, missing = enforce_source_coverage(
+        selected,
+        required_sources={"one.md", "two.md"},
+    )
+
+    assert gated == []
+    assert len(missing) == 1
+
+
 def test_multi_source_intent_prefers_distinct_sources() -> None:
     candidates = [
         {
@@ -582,6 +703,81 @@ def test_merge_does_not_mark_conflicting_same_identity_as_hybrid() -> None:
     assert merged[0][0].page_content == "current content"
     assert merged[0][0].metadata["_retrieval_source"] == "vector"
     assert "_lexical_score" not in merged[0][0].metadata
+
+
+def test_merge_uses_canonical_source_id_across_deployment_roots() -> None:
+    vector = Document(
+        page_content="same content",
+        metadata={
+            "_source": "C:/repo/docs/knowledge-base/redis.md",
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_doc_id": "C:/repo/docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+    lexical = Document(
+        page_content="same content",
+        metadata={
+            "_source": "/srv/app/docs/knowledge-base/redis.md",
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_doc_id": "/srv/app/docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+
+    merged = merge_raw_retrieval_results([(vector, 0.1)], [(lexical, 2.0)])
+
+    assert len(merged) == 1
+    assert merged[0][0].metadata["_retrieval_source"] == "hybrid"
+
+
+def test_duplicate_public_citations_are_disambiguated_by_source_identity() -> None:
+    candidates = [
+        {
+            "doc_id": "docs/knowledge-base/team-a/runbook.md",
+            "source_id": "docs/knowledge-base/team-a/runbook.md",
+            "source_file": "runbook.md",
+            "chunk_id": "runbook.md#0001",
+        },
+        {
+            "doc_id": "docs/knowledge-base/team-b/runbook.md",
+            "source_id": "docs/knowledge-base/team-b/runbook.md",
+            "source_file": "runbook.md",
+            "chunk_id": "runbook.md#0001",
+        },
+    ]
+
+    result = disambiguate_citation_sources(candidates)
+
+    assert {item["source_file"] for item in result} == {
+        "docs/knowledge-base/team-a/runbook.md",
+        "docs/knowledge-base/team-b/runbook.md",
+    }
+
+
+def test_vector_only_candidate_does_not_receive_synthetic_lexical_score() -> None:
+    ranked = rerank_retrieval_candidates(
+        "Redis maxclients",
+        [
+            {
+                "doc_id": "redis",
+                "source_file": "redis.md",
+                "chunk_id": "redis#1",
+                "score": 0.2,
+                "content": "Redis maxclients",
+                "metadata": {"_retrieval_source": "vector", "_vector_rank": 1},
+            }
+        ],
+        top_k=1,
+        hybrid_search_enabled=True,
+        rerank_enabled=True,
+    )
+
+    assert ranked[0]["lexical_score"] == 0.0
+
+
+def test_invalid_vector_score_has_zero_normalized_relevance() -> None:
+    assert rag_retrieval_service.normalize_vector_distance("invalid") == 0.0
 
 
 def test_targeted_lexical_results_respect_list_source_filter(monkeypatch) -> None:

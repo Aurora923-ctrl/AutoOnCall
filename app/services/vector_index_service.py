@@ -250,10 +250,9 @@ class VectorIndexService:
             for file_path in files:
                 try:
                     file_result = self.index_single_file(str(file_path))
-                    if (
-                        isinstance(file_result, SingleFileIndexingResult)
-                        and file_result.status == "empty"
-                    ):
+                    if not isinstance(file_result, SingleFileIndexingResult):
+                        raise RuntimeError("单文件索引服务未返回有效结果")
+                    if file_result.status == "empty":
                         result.increment_empty_count()
                         result.add_empty_file(
                             str(file_path), file_result.message or "文件未产生可检索分片"
@@ -263,28 +262,23 @@ class VectorIndexService:
                             file_result.cleaning_report,
                         )
                         logger.warning(f"⚠ 文件未产生可检索分片: {file_path.name}")
-                    else:
-                        chunk_count = (
-                            file_result.chunk_count
-                            if isinstance(file_result, SingleFileIndexingResult)
-                            else 0
-                        )
+                    elif file_result.status == "success" and file_result.chunk_count > 0:
                         result.increment_success_count()
                         result.add_success_file(
                             str(file_path),
-                            chunk_count,
-                            (
-                                file_result.message
-                                if isinstance(file_result, SingleFileIndexingResult)
-                                else None
-                            ),
+                            file_result.chunk_count,
+                            file_result.message,
                         )
-                        if isinstance(file_result, SingleFileIndexingResult):
-                            result.add_cleaning_report(
-                                str(file_path),
-                                file_result.cleaning_report,
-                            )
+                        result.add_cleaning_report(
+                            str(file_path),
+                            file_result.cleaning_report,
+                        )
                         logger.info(f"✓ 文件索引成功: {file_path.name}")
+                    else:
+                        raise RuntimeError(
+                            "单文件索引结果无效: "
+                            f"status={file_result.status}, chunk_count={file_result.chunk_count}"
+                        )
                 except Exception as e:
                     result.increment_fail_count()
                     result.add_failed_file(str(file_path), str(e))
@@ -380,27 +374,13 @@ class VectorIndexService:
 
         if documents:
             vector_ids = vector_store_manager.add_documents(documents)
-            try:
-                lexical_index_service.upsert_source(
-                    normalized_path,
-                    documents,
-                    clear_stale=False,
-                )
-                vector_store_manager.delete_by_source_except_ids(
-                    normalized_path,
-                    vector_ids,
-                    raise_on_error=True,
-                )
-                lexical_index_service.clear_source_stale(normalized_path)
-            except Exception:
-                try:
-                    vector_store_manager.delete_by_ids(vector_ids, raise_on_error=True)
-                except Exception as rollback_exc:
-                    logger.error(
-                        f"双索引提交失败且向量补偿失败: source={normalized_path}, "
-                        f"rollback_error={rollback_exc}"
-                    )
-                raise
+            self._replace_lexical_source_keep_stale(normalized_path, documents)
+            vector_store_manager.delete_by_source_except_ids(
+                normalized_path,
+                vector_ids,
+                raise_on_error=True,
+            )
+            lexical_index_service.clear_source_stale(normalized_path)
             logger.info(f"文件索引完成: {path}, 共 {len(documents)} 个分片")
             return SingleFileIndexingResult(
                 file_path=normalized_path,
@@ -438,6 +418,13 @@ class VectorIndexService:
         marker = getattr(lexical_index_service, "mark_source_stale", None)
         if callable(marker):
             marker(source_path, reason)
+
+    @staticmethod
+    def _replace_lexical_source_keep_stale(
+        source_path: str,
+        documents: list[Any],
+    ) -> None:
+        lexical_index_service.upsert_source(source_path, documents, clear_stale=False)
 
     def _ensure_directory_allowed(self, dir_path: Path) -> None:
         """Ensure batch indexing cannot read arbitrary local directories."""

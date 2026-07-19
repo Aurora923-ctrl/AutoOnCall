@@ -11,7 +11,13 @@ from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.sse import sse_message
-from app.core.auth import CHAT_WRITE_SCOPE, READ_SCOPE, require_scope
+from app.core.auth import (
+    CHAT_WRITE_SCOPE,
+    READ_SCOPE,
+    AuthPrincipal,
+    require_scope,
+    scoped_session_id,
+)
 from app.models.request import SESSION_ID_MAX_LENGTH, ChatRequest, ClearRequest
 from app.models.response import ApiResponse, ChatApiResponse, SessionInfoResponse
 from app.services.rag_agent_service import rag_agent_service
@@ -26,9 +32,11 @@ PUBLIC_SESSION_ERROR_MESSAGE = "会话服务暂时不可用，请稍后重试"
 @router.post(
     "/chat",
     response_model=ChatApiResponse,
-    dependencies=[Depends(require_scope(CHAT_WRITE_SCOPE))],
 )
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    principal: AuthPrincipal = Depends(require_scope(CHAT_WRITE_SCOPE)),
+):
     """快速对话接口
     {
         "code": 200,
@@ -55,7 +63,7 @@ async def chat(request: ChatRequest):
 
         chat_payload = await rag_agent_service.query_with_retrieval(
             request.question,
-            session_id=request.id,
+            session_id=scoped_session_id(principal, request.id),
             metadata_filter=request.metadata_filter,
         )
 
@@ -92,8 +100,11 @@ async def chat(request: ChatRequest):
         )
 
 
-@router.post("/chat_stream", dependencies=[Depends(require_scope(CHAT_WRITE_SCOPE))])
-async def chat_stream(request: ChatRequest):
+@router.post("/chat_stream")
+async def chat_stream(
+    request: ChatRequest,
+    principal: AuthPrincipal = Depends(require_scope(CHAT_WRITE_SCOPE)),
+):
     """流式对话接口（基于 RAG Agent，SSE）
 
     返回 SSE 格式，data 字段为 JSON：
@@ -127,7 +138,7 @@ async def chat_stream(request: ChatRequest):
         try:
             async for chunk in rag_agent_service.query_stream_with_retrieval(
                 request.question,
-                session_id=request.id,
+                session_id=scoped_session_id(principal, request.id),
                 metadata_filter=request.metadata_filter,
             ):
                 chunk_type = chunk.get("type", "unknown")
@@ -148,6 +159,8 @@ async def chat_stream(request: ChatRequest):
                     yield sse_message({"type": "search_results", "data": chunk_data})
                 elif chunk_type == "content":
                     yield sse_message({"type": "content", "data": chunk_data})
+                elif chunk_type == "replace_content":
+                    yield sse_message({"type": "replace_content", "data": chunk_data})
                 elif chunk_type == "complete":
                     yield sse_message({"type": "done", "data": chunk_data})
                     terminal_sent = True
@@ -176,9 +189,11 @@ async def chat_stream(request: ChatRequest):
 @router.post(
     "/chat/clear",
     response_model=ApiResponse,
-    dependencies=[Depends(require_scope(CHAT_WRITE_SCOPE))],
 )
-async def clear_session(request: ClearRequest):
+async def clear_session(
+    request: ClearRequest,
+    principal: AuthPrincipal = Depends(require_scope(CHAT_WRITE_SCOPE)),
+):
     """清空会话历史
 
     Args:
@@ -188,15 +203,21 @@ async def clear_session(request: ClearRequest):
         操作结果
     """
     try:
-        success = await rag_agent_service.clear_session(request.session_id)
+        success = await rag_agent_service.clear_session(
+            scoped_session_id(principal, request.session_id)
+        )
         logger.info(f"清空会话: {sanitize_log_value(request.session_id)}, 结果: {success}")
 
+        if not success:
+            raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE)
         return ApiResponse(
-            status="success" if success else "error",
-            message="会话已清空" if success else "清空会话失败",
+            status="success",
+            message="会话已清空",
             data=None,
         )
 
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("清空会话错误: error_type={}", type(exc).__name__)
         raise HTTPException(status_code=500, detail=PUBLIC_SESSION_ERROR_MESSAGE) from exc
@@ -205,10 +226,10 @@ async def clear_session(request: ClearRequest):
 @router.get(
     "/chat/session/{session_id}",
     response_model=SessionInfoResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def get_session_info(
     session_id: str = Path(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> SessionInfoResponse:
     """查询会话历史
 
@@ -219,7 +240,9 @@ async def get_session_info(
         会话信息
     """
     try:
-        history = await rag_agent_service.get_session_history(session_id)
+        history = await rag_agent_service.get_session_history(
+            scoped_session_id(principal, session_id)
+        )
 
         return SessionInfoResponse(
             session_id=session_id, message_count=len(history), history=history

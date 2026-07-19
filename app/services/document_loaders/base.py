@@ -121,9 +121,7 @@ def filter_loaded_documents(
             report.record_drop("low_information", warning=f"unit {index} too short")
             continue
         deduplication_content = normalize_text(
-            unit.deduplication_content
-            if unit.deduplication_content is not None
-            else content
+            unit.deduplication_content if unit.deduplication_content is not None else content
         )
         digest = hashlib.sha256(deduplication_content.encode("utf-8")).hexdigest()
         if digest in seen_hashes:

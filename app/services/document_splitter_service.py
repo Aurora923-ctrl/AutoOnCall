@@ -68,7 +68,7 @@ class DocumentSplitterService:
                 doc.metadata["_extension"] = Path(file_path).suffix.lower()
                 doc.metadata["_file_name"] = Path(file_path).name
                 doc.metadata["_doc_id"] = file_path
-                doc.metadata["_source_id"] = _build_source_id(file_path)
+                doc.metadata["_source_id"] = canonical_source_id(file_path)
                 doc.metadata["_chunk_id"] = _build_chunk_id(file_path, index)
                 doc.metadata.update(build_version_metadata(file_path, content, doc.page_content))
 
@@ -104,7 +104,7 @@ class DocumentSplitterService:
                             "_extension": Path(file_path).suffix.lower(),
                             "_file_name": Path(file_path).name,
                             "_doc_id": file_path,
-                            "_source_id": _build_source_id(file_path),
+                            "_source_id": canonical_source_id(file_path),
                         }
                     ],
                 )
@@ -174,7 +174,7 @@ class DocumentSplitterService:
             metadata.setdefault("_extension", extension)
             metadata.setdefault("_file_name", Path(file_path).name)
             metadata.setdefault("_doc_id", file_path)
-            metadata.setdefault("_source_id", _build_source_id(file_path))
+            metadata.setdefault("_source_id", canonical_source_id(file_path))
             metadata["_chunk_id"] = _build_chunk_id(file_path, index)
             metadata.update(build_version_metadata(file_path, full_content, doc.page_content))
             doc.metadata = metadata
@@ -238,7 +238,7 @@ def _build_chunk_id(file_path: str, index: int) -> str:
     return f"{file_name}#{index:04d}"
 
 
-def _build_source_id(file_path: str) -> str:
+def canonical_source_id(file_path: str) -> str:
     """Build a stable source identity independent of the deployment root."""
     normalized = str(file_path or "").replace("\\", "/").rstrip("/")
     lowered = normalized.lower()
@@ -246,7 +246,16 @@ def _build_source_id(file_path: str) -> str:
         position = lowered.rfind(marker)
         if position >= 0:
             return normalized[position + 1 :]
-    return Path(normalized).name or "document"
+    legacy_marker = "/aiops-docs/"
+    legacy_position = lowered.rfind(legacy_marker)
+    if legacy_position >= 0:
+        return f"docs/knowledge-base/{normalized[legacy_position + len(legacy_marker) :]}"
+    return normalized or "document"
+
+
+def _build_source_id(file_path: str) -> str:
+    """Compatibility wrapper for callers that still import the former private helper."""
+    return canonical_source_id(file_path)
 
 
 def _same_markdown_heading(left: Document, right: Document) -> bool:

@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+from contextlib import nullcontext
 from threading import RLock
 from typing import Any, cast
 
@@ -11,10 +12,12 @@ from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.services.document_splitter_service import canonical_source_id
 from app.services.vector_embedding_service import vector_embedding_service
 from app.utils.log_safety import summarize_text_for_log
 
 COLLECTION_NAME = "biz"
+MAX_SIMILARITY_SEARCH_K = 500
 
 
 class VectorStoreManager:
@@ -111,6 +114,7 @@ class VectorStoreManager:
                     batch_size=len(documents),
                     timeout=config.milvus_timeout / 1000,
                 )
+                self._flush(vector_store)
             except Exception:
                 self._delete_vector_ids_with_store(
                     vector_store,
@@ -119,8 +123,6 @@ class VectorStoreManager:
                 )
                 raise
             result_ids = ids
-
-            self._flush(vector_store)
 
             elapsed = time.time() - start_time
             logger.info(
@@ -200,13 +202,10 @@ class VectorStoreManager:
             int: 删除的文档数量
         """
         try:
-            _ = milvus_manager.connect()
-            collection = milvus_manager.get_collection()
-
-            expr = f'metadata["_source"] == {_quote_expr_value(file_path)}'
-
-            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
-            collection.flush(timeout=config.milvus_timeout / 1000)
+            with self._collection_session() as collection:
+                expr = _source_match_expr(file_path)
+                result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+                collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(f"删除文件旧数据: {file_path}, 删除数量: {deleted_count}")
@@ -229,16 +228,13 @@ class VectorStoreManager:
         if not document_version:
             return self.delete_by_source(file_path, raise_on_error=raise_on_error)
         try:
-            _ = milvus_manager.connect()
-            collection = milvus_manager.get_collection()
-
-            expr = (
-                f'metadata["_source"] == {_quote_expr_value(file_path)} '
-                f'and metadata["_document_version"] != {_quote_expr_value(document_version)}'
-            )
-
-            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
-            collection.flush(timeout=config.milvus_timeout / 1000)
+            with self._collection_session() as collection:
+                expr = (
+                    f"({_source_match_expr(file_path)}) "
+                    f'and metadata["_document_version"] != {_quote_expr_value(document_version)}'
+                )
+                result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+                collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(
@@ -263,18 +259,13 @@ class VectorStoreManager:
         """Delete chunks for one source that are not part of the latest indexed batch."""
         unique_ids = sorted({str(item) for item in vector_ids if str(item)})
         if not unique_ids:
-            return self.delete_by_source(file_path)
+            return self.delete_by_source(file_path, raise_on_error=raise_on_error)
         try:
-            _ = milvus_manager.connect()
-            collection = milvus_manager.get_collection()
-
-            id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
-            expr = (
-                f'metadata["_source"] == {_quote_expr_value(file_path)} and id not in [{id_list}]'
-            )
-
-            result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
-            collection.flush(timeout=config.milvus_timeout / 1000)
+            with self._collection_session() as collection:
+                id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
+                expr = f"({_source_match_expr(file_path)}) and id not in [{id_list}]"
+                result = collection.delete(expr, timeout=config.milvus_timeout / 1000)
+                collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
             logger.info(
@@ -295,14 +286,13 @@ class VectorStoreManager:
         if not unique_ids:
             return 0
         try:
-            _ = milvus_manager.connect()
-            collection = milvus_manager.get_collection()
-            id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
-            result = collection.delete(
-                f"id in [{id_list}]",
-                timeout=config.milvus_timeout / 1000,
-            )
-            collection.flush(timeout=config.milvus_timeout / 1000)
+            with self._collection_session() as collection:
+                id_list = ", ".join(_quote_expr_value(vector_id) for vector_id in unique_ids)
+                result = collection.delete(
+                    f"id in [{id_list}]",
+                    timeout=config.milvus_timeout / 1000,
+                )
+                collection.flush(timeout=config.milvus_timeout / 1000)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
             logger.info(f"补偿删除向量批次完成: ids={len(unique_ids)}, deleted={deleted_count}")
             return deleted_count
@@ -338,16 +328,7 @@ class VectorStoreManager:
         Returns:
             List[Document]: 相关文档列表
         """
-        safe_query = str(query or "").strip()
-        if not safe_query:
-            raise ValueError("query 不能为空")
-        if len(safe_query) > 8000:
-            raise ValueError("query 长度不能超过 8000")
-        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
-            raise ValueError("k 必须是正整数")
-        if expr is not None and not isinstance(expr, str):
-            raise TypeError("expr 必须是字符串或 None")
-        safe_expr = expr.strip() if expr else None
+        safe_query, safe_expr = _validate_search_inputs(query, k=k, expr=expr)
         try:
             vector_store = cast(Any, self._ensure_vector_store())
             docs = (
@@ -366,6 +347,38 @@ class VectorStoreManager:
                 "相似度搜索失败: {}, error_type={}",
                 summarize_text_for_log(safe_query, label="query"),
                 type(e).__name__,
+            )
+            raise
+
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int = 3,
+        *,
+        expr: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Run scored similarity search through the same validated manager boundary."""
+        safe_query, safe_expr = _validate_search_inputs(query, k=k, expr=expr)
+        try:
+            vector_store = cast(Any, self._ensure_vector_store())
+            if not hasattr(vector_store, "similarity_search_with_score"):
+                raise RuntimeError("VectorStore 不支持带分数的相似度检索")
+            results = (
+                vector_store.similarity_search_with_score(safe_query, k=k, expr=safe_expr)
+                if safe_expr
+                else vector_store.similarity_search_with_score(safe_query, k=k)
+            )
+            logger.debug(
+                "带分数相似度搜索完成: {}, 结果数: {}",
+                summarize_text_for_log(safe_query, label="query"),
+                len(results),
+            )
+            return cast(list[tuple[Document, float]], results)
+        except Exception as exc:
+            logger.error(
+                "带分数相似度搜索失败: {}, error_type={}",
+                summarize_text_for_log(safe_query, label="query"),
+                type(exc).__name__,
             )
             raise
 
@@ -405,6 +418,14 @@ class VectorStoreManager:
             self.vector_store = None
         return vector_store
 
+    def _collection_session(self) -> Any:
+        """Use the manager lifecycle lock when available, while preserving test doubles."""
+        session = getattr(milvus_manager, "collection_session", None)
+        if callable(session):
+            return session()
+        _ = milvus_manager.connect()
+        return nullcontext(milvus_manager.get_collection())
+
 
 vector_store_manager = VectorStoreManager()
 
@@ -417,6 +438,36 @@ def _quote_expr_value(value: Any) -> str:
         return str(value)
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _validate_search_inputs(
+    query: Any,
+    *,
+    k: Any,
+    expr: Any,
+) -> tuple[str, str | None]:
+    safe_query = str(query or "").strip()
+    if not safe_query:
+        raise ValueError("query 不能为空")
+    if len(safe_query) > 8000:
+        raise ValueError("query 长度不能超过 8000")
+    if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+        raise ValueError("k 必须是正整数")
+    if k > MAX_SIMILARITY_SEARCH_K:
+        raise ValueError(f"k 不能超过 {MAX_SIMILARITY_SEARCH_K}")
+    if expr is not None and not isinstance(expr, str):
+        raise TypeError("expr 必须是字符串或 None")
+    return safe_query, expr.strip() if expr else None
+
+
+def _source_match_expr(file_path: str) -> str:
+    """Match a source by canonical identity with an exact-path fallback for legacy rows."""
+    source_path = str(file_path or "")
+    source_id = canonical_source_id(source_path)
+    return (
+        f'metadata["_source_id"] == {_quote_expr_value(source_id)} '
+        f'or metadata["_source"] == {_quote_expr_value(source_path)}'
+    )
 
 
 def build_vector_document_id(document: Document, index: int = 1) -> str:
@@ -436,12 +487,5 @@ def _canonical_source_id(metadata: dict[str, Any]) -> str:
     explicit = str(metadata.get("_source_id") or "").strip()
     if explicit:
         return explicit
-    source = str(
-        metadata.get("_source") or metadata.get("source") or metadata.get("_doc_id") or ""
-    ).replace("\\", "/")
-    lowered = source.lower()
-    for marker in ("/docs/knowledge-base/", "/uploads/"):
-        position = lowered.rfind(marker)
-        if position >= 0:
-            return source[position + 1 :]
-    return source.rsplit("/", 1)[-1]
+    source = str(metadata.get("_source") or metadata.get("source") or metadata.get("_doc_id") or "")
+    return canonical_source_id(source)

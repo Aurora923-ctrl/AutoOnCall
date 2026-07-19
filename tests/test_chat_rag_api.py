@@ -5,6 +5,7 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from app.api import chat as chat_api
+from app.config import config
 from app.main import app
 from app.models.request import ChatRequest, ClearRequest
 
@@ -395,6 +396,109 @@ async def test_clear_session_awaits_async_service_cleanup(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_session_returns_http_500_when_service_cleanup_fails(monkeypatch) -> None:
+    async def fake_clear_session(_session_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr("app.api.chat.rag_agent_service.clear_session", fake_clear_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/chat/clear", json={"sessionId": "clear-me"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == chat_api.PUBLIC_SESSION_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_authenticated_chat_sessions_are_isolated_by_presented_token(monkeypatch) -> None:
+    seen_session_ids: list[str] = []
+    monkeypatch.setattr(config, "api_auth_enabled", True)
+    monkeypatch.setattr(config, "api_auth_tokens", "")
+    monkeypatch.setattr(config, "api_read_token", "")
+    monkeypatch.setattr(config, "api_operator_token", "operator-secret-token")
+    monkeypatch.setattr(config, "api_approver_token", "")
+    monkeypatch.setattr(config, "api_change_token", "")
+    monkeypatch.setattr(config, "api_admin_token", "admin-secret-token")
+
+    async def fake_query_with_retrieval(
+        question: str,
+        session_id: str,
+        metadata_filter: dict | None = None,
+    ) -> dict:
+        seen_session_ids.append(session_id)
+        return {
+            "success": True,
+            "answer": question,
+            "citations": [],
+            "retrieval": {"status": "no_answer"},
+            "no_answer": True,
+            "answer_policy": "refuse_without_trusted_source",
+        }
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.query_with_retrieval",
+        fake_query_with_retrieval,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for token in ("operator-secret-token", "admin-secret-token"):
+            response = await client.post(
+                "/api/chat",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"Id": "shared-session", "Question": "hello"},
+            )
+            assert response.status_code == 200
+
+    assert len(seen_session_ids) == 2
+    assert seen_session_ids[0] != seen_session_ids[1]
+    assert all(item.endswith(":shared-session") for item in seen_session_ids)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_history_and_clear_share_private_namespace(monkeypatch) -> None:
+    history_calls: list[str] = []
+    clear_calls: list[str] = []
+    monkeypatch.setattr(config, "api_auth_enabled", True)
+    monkeypatch.setattr(config, "api_auth_tokens", "")
+    monkeypatch.setattr(config, "api_read_token", "")
+    monkeypatch.setattr(config, "api_operator_token", "operator-secret-token")
+    monkeypatch.setattr(config, "api_approver_token", "")
+    monkeypatch.setattr(config, "api_change_token", "")
+    monkeypatch.setattr(config, "api_admin_token", "")
+
+    async def fake_get_session_history(session_id: str) -> list[dict]:
+        history_calls.append(session_id)
+        return []
+
+    async def fake_clear_session(session_id: str) -> bool:
+        clear_calls.append(session_id)
+        return True
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.get_session_history",
+        fake_get_session_history,
+    )
+    monkeypatch.setattr("app.api.chat.rag_agent_service.clear_session", fake_clear_session)
+
+    headers = {"Authorization": "Bearer operator-secret-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        history_response = await client.get(
+            "/api/chat/session/private-session",
+            headers=headers,
+        )
+        clear_response = await client.post(
+            "/api/chat/clear",
+            headers=headers,
+            json={"sessionId": "private-session"},
+        )
+
+    assert history_response.status_code == 200
+    assert clear_response.status_code == 200
+    assert history_calls == clear_calls
+    assert history_calls[0].endswith(":private-session")
+
+
+@pytest.mark.asyncio
 async def test_get_session_info_awaits_async_history_read(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -437,3 +541,33 @@ async def test_get_session_info_returns_http_500_when_history_read_fails(monkeyp
     assert response.status_code == 500
     assert response.json()["detail"] == chat_api.PUBLIC_SESSION_ERROR_MESSAGE
     assert "checkpoint unavailable" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_get_session_info_preserves_rag_metadata(monkeypatch) -> None:
+    async def fake_get_session_history(_session_id: str) -> list[dict]:
+        return [
+            {
+                "role": "assistant",
+                "content": "检查连接数。[redis.md | redis.md#0001]",
+                "timestamp": "2026-07-18T12:00:00",
+                "metadata": {
+                    "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+                    "retrieval": {"status": "success"},
+                    "noAnswer": False,
+                    "answerPolicy": "answer_with_citations",
+                },
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.get_session_history",
+        fake_get_session_history,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/chat/session/history-session")
+
+    metadata = response.json()["history"][0]["metadata"]
+    assert metadata["citations"][0]["chunk_id"] == "redis.md#0001"
+    assert metadata["answerPolicy"] == "answer_with_citations"

@@ -1,7 +1,10 @@
 """Milvus 客户端工厂模块"""
 
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import RLock
+from typing import Any
 
 from loguru import logger
 from pymilvus import (
@@ -27,8 +30,19 @@ class MilvusClientManager:
     ID_MAX_LENGTH: int = 100
 
     CONTENT_MAX_LENGTH: int = 8000
+    REQUIRED_METADATA_FIELDS: tuple[str, ...] = (
+        "_source",
+        "_source_id",
+        "_chunk_id",
+        "_document_hash",
+        "_chunk_hash",
+        "_vector_id",
+    )
 
     DEFAULT_SHARD_NUMBER: int = 2
+    VECTOR_INDEX_TYPE: str = "IVF_FLAT"
+    VECTOR_METRIC_TYPE: str = "L2"
+    VECTOR_INDEX_NLIST: int = 128
 
     def __init__(self) -> None:
         """初始化 Milvus 客户端管理器"""
@@ -96,6 +110,7 @@ class MilvusClientManager:
                             logger.info(f"向量维度匹配: {self.vector_dim}")
 
                     self._validate_collection_schema(schema)
+                    self._ensure_collection_index()
 
                 self._load_collection()
 
@@ -222,6 +237,93 @@ class MilvusClientManager:
                 f"collection '{self.COLLECTION_NAME}' schema 不兼容: dynamic field 已启用"
             )
 
+    def _validate_collection_description(self, description: dict[str, Any]) -> None:
+        """Validate schema data returned by the lightweight MilvusClient API."""
+        fields = {
+            str(field.get("name") or ""): field
+            for field in description.get("fields", [])
+            if isinstance(field, dict)
+        }
+        required_types = {
+            "id": int(DataType.VARCHAR),
+            "vector": int(DataType.FLOAT_VECTOR),
+            "content": int(DataType.VARCHAR),
+            "metadata": int(DataType.JSON),
+        }
+        for name, expected_type in required_types.items():
+            field = fields.get(name)
+            actual_type = field.get("type") if field else None
+            if field is None or int(actual_type or -1) != expected_type:
+                raise RuntimeError(
+                    f"collection '{self.COLLECTION_NAME}' schema 不兼容: "
+                    f"field={name}, expected={expected_type}, actual={actual_type}"
+                )
+        if not bool(fields["id"].get("is_primary")):
+            raise RuntimeError(f"collection '{self.COLLECTION_NAME}' schema 不兼容: id 不是主键")
+        if bool(description.get("auto_id")):
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: id 不应启用 auto_id"
+            )
+        if bool(description.get("enable_dynamic_field")):
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: dynamic field 已启用"
+            )
+        self._validate_description_varchar_length(fields["id"], self.ID_MAX_LENGTH)
+        self._validate_description_varchar_length(fields["content"], self.CONTENT_MAX_LENGTH)
+        vector_dim = int((fields["vector"].get("params") or {}).get("dim") or 0)
+        if vector_dim != self.vector_dim:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' 向量维度不兼容: "
+                f"expected={self.vector_dim}, actual={vector_dim}"
+            )
+
+    def _validate_collection_runtime_state(
+        self,
+        *,
+        load_state: dict[str, Any],
+        index_description: dict[str, Any],
+    ) -> None:
+        """Reject a collection that exists but is not ready to serve indexed searches."""
+        state = load_state.get("state")
+        state_name = str(getattr(state, "name", state) or "").lower()
+        if state_name != "loaded":
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' 未加载: actual={state_name or 'unknown'}"
+            )
+
+        index_state = str(index_description.get("state") or "").lower()
+        if index_state and index_state not in {"finished", "finishedstate"}:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' vector 索引未完成: "
+                f"actual={index_description.get('state')}"
+            )
+        pending_rows = int(index_description.get("pending_index_rows") or 0)
+        if pending_rows > 0:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' vector 索引仍有待处理数据: "
+                f"pending_index_rows={pending_rows}"
+            )
+
+    def _validate_collection_sample_metadata(self, records: list[dict[str, Any]]) -> None:
+        """Reject a non-empty collection whose sampled rows violate the metadata contract."""
+        for record in records:
+            metadata = record.get("metadata")
+            if not isinstance(metadata, dict):
+                raise RuntimeError(
+                    f"collection '{self.COLLECTION_NAME}' metadata 不兼容: metadata 不是对象"
+                )
+            missing = [name for name in self.REQUIRED_METADATA_FIELDS if not metadata.get(name)]
+            if missing:
+                raise RuntimeError(
+                    f"collection '{self.COLLECTION_NAME}' metadata 不兼容: "
+                    f"id={record.get('id')}, missing={','.join(missing)}"
+                )
+            if str(metadata.get("_vector_id")) != str(record.get("id")):
+                raise RuntimeError(
+                    f"collection '{self.COLLECTION_NAME}' metadata 不兼容: "
+                    f"id={record.get('id')}, _vector_id={metadata.get('_vector_id')}"
+                )
+
     def _validate_varchar_length(self, field: FieldSchema, expected: int) -> None:
         """Reject VARCHAR fields whose declared limits differ from the application contract."""
         actual = int(getattr(field, "params", {}).get("max_length") or 0)
@@ -229,6 +331,18 @@ class MilvusClientManager:
             raise RuntimeError(
                 f"collection '{self.COLLECTION_NAME}' schema 不兼容: "
                 f"field={field.name}, expected_max_length={expected}, actual={actual}"
+            )
+
+    def _validate_description_varchar_length(
+        self,
+        field: dict[str, Any],
+        expected: int,
+    ) -> None:
+        actual = int((field.get("params") or {}).get("max_length") or 0)
+        if actual != expected:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' schema 不兼容: "
+                f"field={field.get('name')}, expected_max_length={expected}, actual={actual}"
             )
 
     def _create_collection(self) -> None:
@@ -277,9 +391,9 @@ class MilvusClientManager:
             raise RuntimeError("Collection 未初始化")
 
         index_params = {
-            "metric_type": "L2",  # 欧氏距离
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 128},
+            "metric_type": self.VECTOR_METRIC_TYPE,
+            "index_type": self.VECTOR_INDEX_TYPE,
+            "params": {"nlist": self.VECTOR_INDEX_NLIST},
         }
 
         _ = self._collection.create_index(
@@ -288,6 +402,41 @@ class MilvusClientManager:
         )
 
         logger.info("成功为 vector 字段创建索引")
+
+    def _ensure_collection_index(self) -> None:
+        """Create a missing vector index or reject an incompatible existing index."""
+        if self._collection is None:
+            raise RuntimeError("Collection 未初始化")
+        indexes = list(self._collection.indexes)
+        vector_indexes = [index for index in indexes if index.field_name == "vector"]
+        if not vector_indexes:
+            self._create_index()
+            return
+        if len(vector_indexes) != 1:
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' vector 索引数量不兼容: "
+                f"actual={len(vector_indexes)}"
+            )
+        self._validate_index_description(dict(vector_indexes[0].params or {}))
+
+    def _validate_index_description(self, description: dict[str, Any]) -> None:
+        """Reject index settings that do not match retrieval score semantics."""
+        metric_type = str(description.get("metric_type") or "").upper()
+        index_type = str(description.get("index_type") or "").upper()
+        params = description.get("params")
+        index_params = params if isinstance(params, dict) else {}
+        nlist = int(index_params.get("nlist") or 0)
+        if (
+            metric_type != self.VECTOR_METRIC_TYPE
+            or index_type != self.VECTOR_INDEX_TYPE
+            or nlist != self.VECTOR_INDEX_NLIST
+        ):
+            raise RuntimeError(
+                f"collection '{self.COLLECTION_NAME}' vector 索引不兼容: "
+                f"expected={self.VECTOR_INDEX_TYPE}/{self.VECTOR_METRIC_TYPE}/"
+                f"nlist={self.VECTOR_INDEX_NLIST}, "
+                f"actual={index_type}/{metric_type}/nlist={nlist}"
+            )
 
     def _load_collection(self) -> None:
         """加载 collection 到内存"""
@@ -336,6 +485,13 @@ class MilvusClientManager:
             raise RuntimeError("Collection 未初始化，请先调用 connect()")
         return self._collection
 
+    @contextmanager
+    def collection_session(self) -> Iterator[Collection]:
+        """Keep the shared ORM connection alive for one complete collection operation."""
+        with self._lock:
+            _ = self.connect()
+            yield self.get_collection()
+
     def health_check(self) -> bool:
         """
         健康检查
@@ -374,20 +530,49 @@ class MilvusClientManager:
             return False
 
     def readiness_check(self) -> bool:
-        """Probe Milvus and the required collection without creating or loading data."""
-        if self.health_check():
-            return True
-
+        """Validate the live collection contract without creating, loading, or writing data."""
         client: MilvusClient | None = None
         try:
             uri = f"http://{config.milvus_host}:{config.milvus_port}"
             client = MilvusClient(uri=uri, timeout=config.milvus_timeout / 1000)
-            return bool(
+            if not bool(
                 client.has_collection(
                     collection_name=self.COLLECTION_NAME,
                     timeout=config.milvus_timeout / 1000,
                 )
+            ):
+                return False
+            description = client.describe_collection(
+                collection_name=self.COLLECTION_NAME,
+                timeout=config.milvus_timeout / 1000,
             )
+            self._validate_collection_description(description)
+            indexes = client.list_indexes(collection_name=self.COLLECTION_NAME)
+            if "vector" not in indexes:
+                return False
+            index_description = client.describe_index(
+                collection_name=self.COLLECTION_NAME,
+                index_name="vector",
+                timeout=config.milvus_timeout / 1000,
+            )
+            self._validate_index_description(index_description)
+            load_state = client.get_load_state(
+                collection_name=self.COLLECTION_NAME,
+                timeout=config.milvus_timeout / 1000,
+            )
+            self._validate_collection_runtime_state(
+                load_state=load_state,
+                index_description=index_description,
+            )
+            sample_records = client.query(
+                collection_name=self.COLLECTION_NAME,
+                filter="",
+                output_fields=["id", "metadata"],
+                limit=20,
+                timeout=config.milvus_timeout / 1000,
+            )
+            self._validate_collection_sample_metadata(sample_records)
+            return True
         except Exception as exc:
             logger.warning("Milvus readiness probe failed: error_type={}", type(exc).__name__)
             return False

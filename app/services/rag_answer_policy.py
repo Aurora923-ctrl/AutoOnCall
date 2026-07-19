@@ -22,6 +22,8 @@ def build_grounded_question(question: str, retrieval_payload: dict[str, Any]) ->
         f"{context}\n\n"
         f"用户问题: {question}\n\n"
         "回答要求:\n"
+        "0. 在适用时按“已知上下文事实 / 当前事故仍需查询的证据 / "
+        "允许的处置建议与安全边界 / 不确定项”组织答案；不要为了凑齐栏目而扩写。\n"
         "1. 按用户问题中的子问题逐项回答，最多写 4 条要点；不要遗漏明确询问的取证、"
         "判断或处置边界。\n"
         "2. 不复述整份 Runbook，不补充用户未询问的步骤、通用建议或常识。\n"
@@ -53,6 +55,13 @@ def build_grounded_question(question: str, retrieval_payload: dict[str, Any]) ->
 def build_grounded_system_prompt() -> str:
     """Return the strict system prompt used for tool-free grounded generation."""
     return (
+        "回答在适用时固定分为四部分：已知上下文事实、当前事故仍需查询的证据、"
+        "允许的处置建议与安全边界、不确定项。"
+        "每个事实或操作 claim 末尾必须绑定且仅绑定一个允许列表内的 "
+        "[source_file | chunk_id] 引用。"
+        "Runbook 中的指标、阈值、示例值和历史观测只能表述为静态文档信息，"
+        "不得写成当前事故的现场观测。"
+        "上下文只能支持有限回答时，给出有限回答和明确缺失的证据，禁止依靠通用知识扩写。"
         "你是知识库问答助手。你不能调用工具，也不能补充知识库之外的事实。"
         "只能复述或紧密归纳当前检索片段已明确提供的信息。"
         "不得引入检索片段中未出现的命令、工具名、监控方法、参数或处置动作。"
@@ -98,10 +107,26 @@ def build_generation_evidence(
     if not isinstance(results, list) or not results:
         return []
 
+    allowlist = {
+        (
+            str(item.get("source_file") or "").strip(),
+            str(item.get("chunk_id") or "").strip(),
+        )
+        for item in retrieval_payload.get("generation_allowlist", []) or []
+        if isinstance(item, dict)
+        and str(item.get("source_file") or "").strip()
+        and str(item.get("chunk_id") or "").strip()
+    }
     evidence: list[dict[str, Any]] = []
     seen_content: list[str] = []
     for item in results:
         if not isinstance(item, dict):
+            continue
+        identity = (
+            str(item.get("source_file") or "").strip(),
+            str(item.get("chunk_id") or "").strip(),
+        )
+        if allowlist and identity not in allowlist:
             continue
         content = str(item.get("content") or item.get("content_preview") or "").strip()
         normalized = normalize_evidence_text(content)
@@ -126,9 +151,47 @@ def build_generation_evidence(
 
     active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
     max_chars = active_budgeter.limit(limit)
+    required_sources = {
+        str(source).strip().lower()
+        for source in retrieval_payload.get("required_sources", []) or []
+        if str(source).strip()
+    }
+    ordered_evidence = list(evidence)
+    if required_sources:
+        reserved: list[dict[str, Any]] = []
+        reserved_ids: set[tuple[str, str]] = set()
+        for source in sorted(required_sources):
+            candidate = next(
+                (
+                    item
+                    for item in ordered_evidence
+                    if str(item.get("source_file") or "").strip().lower() == source
+                ),
+                None,
+            )
+            if candidate is None:
+                return []
+            identity = (
+                str(candidate.get("source_file") or "").strip(),
+                str(candidate.get("chunk_id") or "").strip(),
+            )
+            if identity not in reserved_ids:
+                reserved.append(candidate)
+                reserved_ids.add(identity)
+        ordered_evidence = reserved + [
+            item
+            for item in ordered_evidence
+            if (
+                str(item.get("source_file") or "").strip(),
+                str(item.get("chunk_id") or "").strip(),
+            )
+            not in reserved_ids
+        ]
+
     selected: list[dict[str, Any]] = []
     used_chars = 0
-    for item in evidence:
+    selected_sources: set[str] = set()
+    for item in ordered_evidence:
         source_file = str(item.get("source_file") or "未知来源").strip()
         chunk_id = str(item.get("chunk_id") or "unknown").strip()
         content = str(item.get("content") or item.get("content_preview") or "").strip()
@@ -144,22 +207,35 @@ def build_generation_evidence(
             break
         if len(header) + len(content) <= remaining:
             selected.append(dict(item))
+            selected_sources.add(str(item.get("source_file") or "").strip().lower())
             used_chars += separator_chars + len(header) + len(content)
             continue
+        if (
+            required_sources
+            and str(item.get("source_file") or "").strip().lower() in required_sources
+        ):
+            return []
         if selected:
             break
         marker = active_budgeter.budget.truncation_marker
         available_content = remaining - len(header)
         if available_content <= len(marker):
             break
-        truncated = f"{content[: available_content - len(marker)]}{marker}"
+        truncated = active_budgeter.text(
+            content,
+            limit=available_content,
+            preserve_tail=True,
+        )
         trimmed_item = dict(item)
         if item.get("content"):
             trimmed_item["content"] = truncated
         else:
             trimmed_item["content_preview"] = truncated
         selected.append(trimmed_item)
+        selected_sources.add(str(trimmed_item.get("source_file") or "").strip().lower())
         break
+    if required_sources and not required_sources.issubset(selected_sources):
+        return []
     return selected
 
 
@@ -187,7 +263,7 @@ def _format_evidence_block(
     chunk_id: str,
     content: str,
 ) -> str:
-    return f"[证据 {index}: source_file={source_file}; chunk_id={chunk_id}]\n" f"{content}"
+    return f"[证据 {index}: source_file={source_file}; chunk_id={chunk_id}]\n{content}"
 
 
 def select_supporting_citations(
@@ -205,6 +281,8 @@ def select_supporting_citations(
     cited_pairs = extract_citation_pairs(answer)
     if not cited_pairs or any(pair not in allowed for pair in cited_pairs):
         return []
+    if not answer_claims_are_cited(answer, allowed_pairs=set(allowed)):
+        return []
 
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -214,6 +292,77 @@ def select_supporting_citations(
         seen.add(pair)
         unique.append(allowed[pair])
     return unique
+
+
+def answer_claims_are_cited(
+    answer: str,
+    *,
+    allowed_pairs: set[tuple[str, str]],
+) -> bool:
+    """Require every substantive answer line to bind exactly one allowlisted chunk."""
+    text = str(answer or "")
+    content = text.split("引用来源：", 1)[0]
+    section_titles = {
+        "已知上下文事实",
+        "当前事故仍需查询的证据",
+        "允许的处置建议与安全边界",
+        "不确定项",
+    }
+    claim_lines = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        normalized_title = line.strip("#*-:： ").strip()
+        if normalized_title in section_titles:
+            continue
+        claim_lines.append(line)
+    if not claim_lines:
+        return False
+    for line in claim_lines:
+        pairs = extract_citation_pairs(line)
+        if not pairs or len(set(pairs)) != 1 or pairs[0] not in allowed_pairs:
+            return False
+    return True
+
+
+def validated_citation_prefix(
+    answer: str,
+    citations: list[dict[str, Any]],
+) -> str:
+    """Return the longest complete prefix whose citation references are allowlisted."""
+    text = str(answer or "")
+    boundary = 0
+    for match in re.finditer(r"\[[^\[\]\r\n]+\]", text):
+        candidate = text[: match.end()]
+        if _prefix_has_allowlisted_citations(candidate, citations):
+            boundary = match.end()
+    return text[:boundary]
+
+
+def _prefix_has_allowlisted_citations(
+    text: str,
+    citations: list[dict[str, Any]],
+) -> bool:
+    """Validate complete citation-bearing lines without requiring final answer shape."""
+    allowed = {
+        (
+            str(item.get("source_file") or "").strip(),
+            str(item.get("chunk_id") or "").strip(),
+        )
+        for item in citations
+        if isinstance(item, dict)
+    }
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    if not lines or not allowed:
+        return False
+    for line in lines:
+        pairs = extract_citation_pairs(line)
+        if pairs and len(pairs) == 1 and pairs[0] in allowed:
+            continue
+        if line.endswith(("。", ".", "!", "！", "?", "？", ":", "：")):
+            return False
+    return True
 
 
 def extract_citation_pairs(answer: str) -> list[tuple[str, str]]:
