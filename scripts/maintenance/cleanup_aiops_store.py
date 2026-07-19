@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--keep-days", type=int, default=config.log_retention_days)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete eligible records. Without this flag the command is a dry run.",
+    )
     return parser.parse_args()
 
 
@@ -32,7 +37,8 @@ def main() -> int:
     """CLI entry point."""
     args = parse_args()
     store = create_aiops_store(args.database)
-    result = store.cleanup_older_than(keep_days=args.keep_days, dry_run=args.dry_run)
+    dry_run = bool(args.dry_run or not args.execute)
+    result = store.cleanup_older_than(keep_days=args.keep_days, dry_run=dry_run)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

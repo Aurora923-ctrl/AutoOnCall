@@ -1705,12 +1705,22 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Upsert the four demo incidents without clearing existing runtime records.",
     )
+    parser.add_argument(
+        "--confirm-reset",
+        action="store_true",
+        help="Required when the command is allowed to clear existing runtime records.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Do not print the human summary.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if not args.no_reset and not args.confirm_reset:
+        raise SystemExit(
+            "Refusing to clear runtime data without --confirm-reset; "
+            "use --no-reset for a non-destructive upsert."
+        )
     result = seed_demo_data(
         database_path=args.database,
         backend=args.backend,

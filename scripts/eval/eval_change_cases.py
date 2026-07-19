@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -29,7 +30,11 @@ from app.services.change_execution_service import ChangeExecutionService
 from app.services.change_plan_builder import build_change_plan
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
-from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
+from scripts.eval.eval_environment import (
+    collect_dataset_provenance,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "change_cases.yaml"
 DEFAULT_SUMMARY_JSON_PATH = REPO_ROOT / "logs" / "change_eval_summary.json"
@@ -76,6 +81,7 @@ def load_cases(path: str | Path = DEFAULT_CASES_PATH) -> list[dict[str, Any]]:
 async def evaluate_cases(cases_path: str | Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
     """Evaluate all cases against isolated deterministic services."""
     started_at = datetime.now(UTC)
+    evaluation_run_id = f"eval-change-{uuid4().hex}"
     started_timer = time.perf_counter()
     cases = load_cases(cases_path)
     with TemporaryDirectory(prefix="autooncall-change-eval-") as temp_dir:
@@ -94,8 +100,21 @@ async def evaluate_cases(cases_path: str | Path = DEFAULT_CASES_PATH) -> dict[st
                 "adapter is used"
             ),
             "cases_path": str(Path(cases_path)),
+            "dataset": collect_dataset_provenance(cases_path, case_count=len(cases)),
             "case_ids": [str(case["id"]) for case in cases],
-            "environment": collect_eval_environment(suite="safe_change"),
+            "environment": collect_eval_environment(
+                suite="safe_change",
+                run_id=evaluation_run_id,
+                execution_identity={
+                    "actual_model": "deterministic-safe-change-fixture",
+                    "actual_embedding_model": "not_used",
+                    "provider": "local",
+                    "execution_path": "deterministic_fixture",
+                    "fallback_used": False,
+                    "model_calls": [],
+                },
+            ),
+            "run_id": evaluation_run_id,
         },
         "summary": build_summary(results),
         "cases": results,
@@ -215,7 +234,7 @@ async def _evaluate_safe_change_case(
             execution.change_execution_id,
             ManualExecutionResultRequest(
                 status=str(manual_result.get("status") or "failed"),  # type: ignore[arg-type]
-                operator="change-eval",
+                operator="change-eval-executor",
                 notes=str(manual_result.get("notes") or ""),
                 observed_metrics=dict(manual_result.get("observed_metrics") or {}),
             ),

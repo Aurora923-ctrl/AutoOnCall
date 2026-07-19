@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.agent.aiops import create_initial_aiops_state
 from app.agent.aiops.replanner import ReplanDecision
+from app.agent.aiops.state import normalize_plan_state_update
 from app.models.evidence import (
     Evidence,
     build_confidence_reason,
@@ -31,7 +32,11 @@ from app.models.evidence import (
 from app.models.incident import Incident
 from app.models.plan import PlanStep
 from app.tools.base import ToolExecutionResult
-from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
+from scripts.eval.eval_environment import (
+    collect_dataset_provenance,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 
 replanner_module = importlib.import_module("app.agent.aiops.replanner")
 
@@ -140,6 +145,7 @@ async def evaluate_cases(cases_path: str | Path = DEFAULT_CASES_PATH) -> dict[st
                 "services are in-memory fakes and no production systems are called"
             ),
             "cases_path": str(Path(cases_path)),
+            "dataset": collect_dataset_provenance(cases_path, case_count=len(cases)),
             "case_ids": [str(case.get("id", "")) for case in cases],
             "environment": collect_eval_environment(suite="replanner"),
         },
@@ -373,6 +379,11 @@ def _case_state(case: dict[str, Any]) -> dict[str, Any]:
         for item in case.get("tool_call_records", [])
         if isinstance(item, dict)
     ]
+    current_plan = [
+        PlanStep(**dict(item)) for item in case.get("current_plan", []) if isinstance(item, dict)
+    ]
+    if current_plan:
+        state.update(normalize_plan_state_update(current_plan))
     return state
 
 

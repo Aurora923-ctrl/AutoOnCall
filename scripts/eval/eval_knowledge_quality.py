@@ -773,11 +773,7 @@ def main(argv: list[str] | None = None) -> int:
             f"chunks={summary['chunk_count']}; "
             f"milvus={summary['milvus_status']}"
         )
-    return (
-        0
-        if payload["summary"]["status"] in {"passed", "passed_without_milvus"}
-        else 1
-    )
+    return 0 if payload["summary"]["status"] in {"passed", "passed_without_milvus"} else 1
 
 
 def asset_modified_at(path: Path, *, fallback_mtime: float) -> tuple[datetime, str]:

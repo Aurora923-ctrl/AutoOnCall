@@ -42,6 +42,7 @@ poetry.lock
 
 # CodeBuddy
 .codebuddy/
+.codex/
 
 # Environment
 .env

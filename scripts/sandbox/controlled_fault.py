@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -19,14 +20,17 @@ from urllib.request import urlopen
 ALLOWED_ENVIRONMENTS = {"local", "sandbox"}
 FORBIDDEN_TARGET_MARKERS = {"prod", "production", "prd"}
 ALLOWED_CONTAINERS = {
-    "redis_capacity": {"autooncall-redis"},
-    "mysql_slow_query": {"autooncall-mysql"},
+    "redis_capacity": {
+        "autooncall-redis": ("autooncall", "redis"),
+    },
+    "mysql_slow_query": {
+        "autooncall-mysql": ("autooncall", "mysql"),
+    },
     "evidence_backend_outage": {
-        "autooncall-prometheus",
-        "autooncall-loki",
+        "autooncall-prometheus": ("autooncall", "prometheus"),
+        "autooncall-loki": ("autooncall", "loki"),
     },
 }
-ALLOWED_COMPOSE_PROJECT = "autooncall"
 FAULT_TYPES = {
     "redis_capacity",
     "mysql_slow_query",
@@ -212,8 +216,8 @@ class ControlledFaultRunner:
                 raise BlockedExperiment(f"non_loopback_target_rejected:{spec.target}")
             return {"name": "environment_guard", "status": "passed", "target": spec.target}
 
-        allowed = ALLOWED_CONTAINERS[spec.fault_type]
-        if spec.target not in allowed:
+        expected_identity = ALLOWED_CONTAINERS[spec.fault_type].get(spec.target)
+        if expected_identity is None:
             raise BlockedExperiment(f"container_not_allowlisted:{spec.target}")
         docker = self.commands.run(["docker", "info", "--format", "{{.ServerVersion}}"])
         if docker.returncode != 0:
@@ -223,11 +227,15 @@ class ControlledFaultRunner:
                 "docker",
                 "inspect",
                 "--format",
-                '{{index .Config.Labels "com.docker.compose.project"}}',
+                '{{index .Config.Labels "com.docker.compose.project"}}|'
+                '{{index .Config.Labels "com.docker.compose.service"}}|'
+                "{{.State.Running}}",
                 spec.target,
             ]
         )
-        if inspect.returncode != 0 or inspect.stdout.strip() != ALLOWED_COMPOSE_PROJECT:
+        project, service = expected_identity
+        expected_output = f"{project}|{service}|true"
+        if inspect.returncode != 0 or inspect.stdout.strip() != expected_output:
             raise BlockedExperiment(
                 f"sandbox_container_identity_failed:{inspect.stderr or inspect.stdout}"
             )
@@ -235,7 +243,8 @@ class ControlledFaultRunner:
             "name": "environment_guard",
             "status": "passed",
             "target": spec.target,
-            "compose_project": inspect.stdout.strip(),
+            "compose_project": project,
+            "compose_service": service,
         }
 
     def _inject(self, spec: ExperimentSpec) -> FaultContext:
@@ -319,18 +328,20 @@ class ControlledFaultRunner:
     def _inject_mysql(self, spec: ExperimentSpec) -> FaultContext:
         seconds = float(spec.parameters["sleep_seconds"])
         concurrency = int(spec.parameters["concurrency"])
+        mysql_user = os.getenv("AUTOONCALL_MYSQL_USER", "autooncall")
+        mysql_password = os.getenv("AUTOONCALL_MYSQL_PASSWORD", "autooncall123")
         query = f"SELECT SLEEP({seconds:.3f}) AS controlled_fault_sleep;"
         before = self._docker_exec(
             spec.target,
             [
                 "mysql",
-                "-uautooncall",
-                "-pautooncall123",
+                f"-u{mysql_user}",
+                f"-p{mysql_password}",
                 "-e",
                 "SHOW STATUS LIKE 'Threads_connected';",
             ],
         )
-        command_args = ["mysql", "-uautooncall", "-pautooncall123", "-e", query]
+        command_args = ["mysql", f"-u{mysql_user}", f"-p{mysql_password}", "-e", query]
         executor = ThreadPoolExecutor(max_workers=concurrency)
         started = time.perf_counter()
         futures = [
@@ -350,7 +361,8 @@ class ControlledFaultRunner:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
             failed = [result for result in injected_results if result.returncode != 0]
             ping = self._docker_exec(
-                spec.target, ["mysqladmin", "-uautooncall", "-pautooncall123", "ping"]
+                spec.target,
+                ["mysqladmin", f"-u{mysql_user}", f"-p{mysql_password}", "ping"],
             )
             return [
                 {

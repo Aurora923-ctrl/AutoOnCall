@@ -6,6 +6,12 @@ import pytest
 
 from app import main as main_module
 from app.config import Settings
+from app.services.sqlite_store import AIOpsSQLiteStore
+from scripts.maintenance import (
+    cleanup_aiops_store,
+    migrate_aiops_sqlite_to_mysql,
+    reset_demo_data,
+)
 from scripts.maintenance.hygiene_check import find_hygiene_issues, main as hygiene_main
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,15 +28,18 @@ def test_makefile_separates_liveness_from_readiness_checks() -> None:
 
 def test_windows_start_script_checks_live_before_ready_upload() -> None:
     script = (ROOT / "scripts" / "dev" / "start-windows.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(encoding="utf-8")
 
-    live_index = script.index("http://localhost:9900/health/live")
-    ready_index = script.index("http://localhost:9900/health/ready")
+    live_index = launcher.index("LIVE_URL")
+    ready_index = launcher.index("READY_URL")
 
     assert live_index < ready_index
-    assert "FastAPI 进程可能还未启动" in script
-    assert "依赖尚未就绪，跳过文档上传" in script
-    assert 'curl -s -o nul -w "%%{http_code}"' in script
-    assert 'if not "!HTTP_CODE!"=="200"' in script
+    assert "pycharm_one_click_start.py %*" in script
+    assert "wait_for_http(LIVE_URL" in launcher
+    assert "wait_for_http(" in launcher
+    assert "READY_URL, timeout_seconds=args.ready_timeout" in launcher
+    assert '"curl",' in launcher
+    assert '"--fail-with-body"' in launcher
 
 
 def test_makefile_upload_fails_when_any_document_indexing_fails() -> None:
@@ -50,6 +59,98 @@ def test_production_docs_use_current_maintenance_script_paths() -> None:
     assert r"scripts\maintenance\migrate_aiops_sqlite_to_mysql.py" in production
     assert r"scripts\cleanup_aiops_store.py" not in production
     assert r"scripts\migrate_aiops_sqlite_to_mysql.py" not in production
+    assert (
+        "cleanup_aiops_store.py --database data\\aiops_state.db --keep-days 14 --execute"
+        in production
+    )
+    assert "migrate_aiops_sqlite_to_mysql.py --sqlite data\\aiops_state.db --execute" in production
+
+
+def test_mysql_init_provisions_writable_aiops_runtime_schema() -> None:
+    runtime_schema = (
+        ROOT / "deploy" / "adapters" / "mysql-init" / "002_aiops_runtime_store.sql"
+    ).read_text(encoding="utf-8")
+
+    for table in [
+        "alert_events",
+        "trace_events",
+        "approval_requests",
+        "change_executions",
+        "aiops_sessions",
+        "incident_states",
+        "diagnosis_reports",
+    ]:
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in runtime_schema
+
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX" in runtime_schema
+    assert "ON autooncall.* TO 'autooncall'@'%'" in runtime_schema
+
+
+def test_destructive_maintenance_scripts_require_explicit_confirmation(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    class FakeStore:
+        def cleanup_older_than(self, *, keep_days: int, dry_run: bool):
+            return {"keep_days": keep_days, "dry_run": dry_run}
+
+    monkeypatch.setattr(cleanup_aiops_store, "create_aiops_store", lambda _database: FakeStore())
+    monkeypatch.setattr(
+        cleanup_aiops_store,
+        "parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {"database": None, "keep_days": 14, "dry_run": False, "execute": False},
+        )(),
+    )
+    assert cleanup_aiops_store.main() == 0
+    assert '"dry_run": true' in capsys.readouterr().out.lower()
+
+    monkeypatch.setattr(
+        reset_demo_data,
+        "parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {
+                "database": tmp_path / "reset.db",
+                "backend": "sqlite",
+                "quiet": True,
+                "confirm_reset": False,
+            },
+        )(),
+    )
+    with pytest.raises(SystemExit, match="--confirm-reset"):
+        reset_demo_data.main()
+
+
+def test_migration_defaults_to_dry_run_without_execute(monkeypatch, tmp_path, capsys) -> None:
+    database = tmp_path / "source.db"
+    AIOpsSQLiteStore(database)
+    monkeypatch.setattr(
+        migrate_aiops_sqlite_to_mysql,
+        "parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {
+                "sqlite": str(database),
+                "mysql_dsn": "mysql+pymysql://user:password@localhost:3306/autooncall",
+                "dry_run": False,
+                "execute": False,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        migrate_aiops_sqlite_to_mysql,
+        "AIOpsMySQLStore",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect in dry run")),
+    )
+
+    assert migrate_aiops_sqlite_to_mysql.main() == 0
+    assert '"dry_run": true' in capsys.readouterr().out.lower()
 
 
 def test_production_docs_state_security_boundaries() -> None:
@@ -71,7 +172,7 @@ def test_container_delivery_files_exclude_local_runtime_artifacts() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     production = (ROOT / "deploy" / "production.md").read_text(encoding="utf-8")
 
-    assert "FROM python:3.11-slim" in dockerfile
+    assert "FROM python:3.11.15-slim" in dockerfile
     assert "python -m pip install ." in dockerfile
     assert "http://127.0.0.1:${PORT}/health/live" in dockerfile
     assert "COPY app ./app" in dockerfile
@@ -138,6 +239,45 @@ def test_makefile_exposes_demo_reports_target() -> None:
     assert "scripts/demo/generate_demo_reports.py" in makefile
 
 
+def test_seed_and_launcher_resets_require_explicit_confirmation() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    seed_script = (ROOT / "scripts" / "data" / "seed_demo_data.py").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(encoding="utf-8")
+
+    assert "scripts/data/seed_demo_data.py --no-reset" in makefile
+    assert "--confirm-reset" in seed_script
+    assert "--reset-demo-data" in launcher
+    assert "--skip-demo-reset" not in launcher
+    assert '"--confirm-reset"' in launcher
+
+
+def test_pycharm_process_cleanup_uses_owned_pid_files() -> None:
+    start_script = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(
+        encoding="utf-8"
+    )
+    stop_script = (ROOT / "scripts" / "dev" / "pycharm_one_click_stop.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pid_path.write_text(str(process.pid)" in start_script
+    assert "stop_managed_process" in start_script
+    assert "stop_processes_matching" not in start_script
+    assert "MANAGED_PROCESSES" in stop_script
+    assert "PROCESS_TOKENS" not in stop_script
+
+
+def test_windows_wrappers_delegate_to_owned_pid_launchers() -> None:
+    start_script = (ROOT / "scripts" / "dev" / "start-windows.bat").read_text(encoding="utf-8")
+    stop_script = (ROOT / "scripts" / "dev" / "stop-windows.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(encoding="utf-8")
+
+    assert "pycharm_one_click_start.py %*" in start_script
+    assert "pycharm_one_click_stop.py %*" in stop_script
+    assert "taskkill /FI" not in stop_script
+    assert 'ROOT / ".venv" / "Scripts" / "python.exe"' in launcher
+    assert "subprocess.CREATE_NO_WINDOW" in launcher
+
+
 def test_knowledge_base_lives_under_docs() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
@@ -153,7 +293,7 @@ def test_makefile_exposes_api_contract_verifier_in_verify_gate() -> None:
 
     assert "api-contract-verify:" in makefile
     assert "reset-demo-data:" in makefile
-    assert "scripts/maintenance/reset_demo_data.py" in makefile
+    assert "scripts/maintenance/reset_demo_data.py --confirm-reset" in makefile
     assert "scripts/eval/verify_api_contracts.py" in makefile
 
     verify = makefile.split("verify:  ## 运行只验证门禁（不修改源码）", maxsplit=1)[1]
@@ -185,10 +325,24 @@ def test_makefile_verify_runs_quality_gate_targets() -> None:
     assert "@$(MAKE) type-check" in verify
     assert "@$(MAKE) security" in verify
     assert "@$(MAKE) test-quick" in verify
-    assert "@$(MAKE) eval-ragas" in verify
+    assert "@$(MAKE) eval-rag" in verify
+    assert "@$(MAKE) eval-ragas" not in verify
     assert "@$(MAKE) api-contract-verify" in verify
     assert "@$(MAKE) reference-check" in verify
     assert "@$(MAKE) hygiene-check" in verify
+
+
+def test_makefile_uses_stable_rag_contract_and_explicit_candidate_promotion() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    eval_rag = makefile.split("eval-rag:  ##", maxsplit=1)[1].split(
+        "eval-ragas:",
+        maxsplit=1,
+    )[0]
+    assert "--cases eval/rag_cases.yaml" in eval_rag
+    assert "--cases eval/rag_relevance_cases.yaml" not in eval_rag
+    assert "candidate-baseline:" in makefile
+    assert "run_benchmark_baseline.py --candidate" in makefile
 
 
 def test_makefile_check_all_is_verify_alias() -> None:
@@ -233,12 +387,14 @@ def test_hygiene_check_passes_clean_repository_tree(tmp_path) -> None:
 
 def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "debug", True)
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
     monkeypatch.setattr(main_module.config, "aiops_mock_fallback_enabled", True)
 
     warnings = main_module.production_exposure_warnings()
 
+    assert "debug mode is enabled while binding to a non-local host" in warnings
     assert "API auth is disabled while binding to a non-local host" in warnings
     assert "CORS allows all origins while binding to a non-local host" in warnings
     assert "AIOps mock fallback is enabled while binding to a non-local host" in warnings
@@ -246,6 +402,7 @@ def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> Non
 
 def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "debug", False)
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
     monkeypatch.setattr(main_module.config, "production_exposure_strict", True)
@@ -256,6 +413,7 @@ def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
 
 def test_production_exposure_rejects_enabled_auth_without_usable_tokens(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "debug", False)
     monkeypatch.setattr(main_module.config, "api_auth_enabled", True)
     monkeypatch.setattr(main_module.config, "api_read_token", "replace-with-read-token")
     monkeypatch.setattr(main_module.config, "api_operator_token", "")
@@ -271,6 +429,7 @@ def test_production_exposure_rejects_enabled_auth_without_usable_tokens(monkeypa
 
 def test_production_exposure_warnings_ignore_local_bind(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "127.0.0.1")
+    monkeypatch.setattr(main_module.config, "debug", True)
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
     monkeypatch.setattr(main_module.config, "aiops_mock_fallback_enabled", True)
@@ -321,6 +480,24 @@ def test_embedding_batch_size_normalizes_legacy_values_to_provider_limit() -> No
     assert "DASHSCOPE_EMBEDDING_BATCH_SIZE=10" in env_example
 
 
+def test_env_example_matches_local_adapter_ports_and_has_unique_settings() -> None:
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    setting_names = [
+        line.split("=", 1)[0]
+        for line in env_example.splitlines()
+        if line and not line.startswith("#") and "=" in line
+    ]
+
+    assert "REDIS_PORT=16379" in env_example
+    assert "redis://127.0.0.1:16379/0" in env_example
+    assert "MYSQL_PORT=13306" in env_example
+    assert "@127.0.0.1:13306/autooncall" in env_example
+    assert len(setting_names) == len(set(setting_names))
+    assert setting_names.count("TICKET_API_URL") == 1
+    assert setting_names.count("TICKET_API_BEARER_TOKEN") == 1
+    assert setting_names.count("TICKET_API_TIMEOUT_SECONDS") == 1
+
+
 def test_static_assets_are_resolved_from_the_repository_root() -> None:
     assert main_module.STATIC_DIR == ROOT / "static"
     assert (main_module.STATIC_DIR / "index.html").exists()
@@ -357,5 +534,27 @@ async def test_lifespan_closes_milvus_when_application_body_fails(monkeypatch) -
     with pytest.raises(RuntimeError, match="lifespan body failed"):
         async with main_module.lifespan(main_module.app):
             raise RuntimeError("lifespan body failed")
+
+    assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_core_milvus_when_vector_store_close_fails(monkeypatch) -> None:
+    closed = False
+
+    async def fail_vector_store_close() -> None:
+        raise RuntimeError("vector store close failed")
+
+    def close() -> None:
+        nonlocal closed
+        closed = True
+
+    monkeypatch.setattr(main_module, "enforce_production_exposure_policy", lambda: None)
+    monkeypatch.setattr(main_module.vector_store_manager, "aclose", fail_vector_store_close)
+    monkeypatch.setattr(main_module.milvus_manager, "close", close)
+
+    with pytest.raises(RuntimeError, match="vector store close failed"):
+        async with main_module.lifespan(main_module.app):
+            pass
 
     assert closed is True

@@ -159,10 +159,13 @@ def marker_defs() -> str:
         "arrow-purple": "#7c3aed",
         "arrow-slate": "#64748b",
     }
-    return "\n".join(f"""
+    return "\n".join(
+        f"""
 <marker id="{name}" markerWidth="14" markerHeight="14" refX="10" refY="5" orient="auto" markerUnits="strokeWidth">
   <path d="M 0 0 L 10 5 L 0 10 z" fill="{color}"/>
-</marker>""" for name, color in markers.items())
+</marker>"""
+        for name, color in markers.items()
+    )
 
 
 def build_svg() -> str:

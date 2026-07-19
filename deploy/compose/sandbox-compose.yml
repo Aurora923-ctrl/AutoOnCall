@@ -1,6 +1,6 @@
 services:
   sandbox-redis:
-    image: redis:7-alpine
+    image: redis:7.4.9-alpine
     container_name: autooncall-sandbox-redis
     command:
       - redis-server
@@ -11,7 +11,7 @@ services:
       - --slowlog-max-len
       - "128"
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -19,7 +19,7 @@ services:
       retries: 20
 
   sandbox-mysql:
-    image: mysql:8.0
+    image: mysql:8.0.46
     container_name: autooncall-sandbox-mysql
     command:
       - --default-authentication-plugin=mysql_native_password
@@ -27,26 +27,26 @@ services:
       - --long-query-time=10
       - --performance-schema=ON
     environment:
-      MYSQL_ROOT_PASSWORD: "123456"
-      MYSQL_DATABASE: autooncall
-      MYSQL_USER: autooncall
-      MYSQL_PASSWORD: autooncall123
+      MYSQL_ROOT_PASSWORD: ${AUTOONCALL_MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: ${AUTOONCALL_MYSQL_DATABASE:-autooncall}
+      MYSQL_USER: ${AUTOONCALL_MYSQL_USER:-autooncall}
+      MYSQL_PASSWORD: ${AUTOONCALL_MYSQL_PASSWORD:-autooncall123}
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ../adapters/mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uautooncall", "-pautooncall123"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
 
   sandbox-metrics-exporter:
-    image: python:3.11-alpine
+    image: python:3.11.15-alpine
     container_name: autooncall-sandbox-metrics-exporter
     command: ["python", "/app/metrics_exporter.py"]
     ports:
-      - "9109:9108"
+      - "127.0.0.1:9109:9108"
     volumes:
       - ../adapters/metrics_exporter.py:/app/metrics_exporter.py:ro
     healthcheck:
@@ -66,7 +66,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=2h
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     volumes:
       - ../adapters/sandbox-prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:

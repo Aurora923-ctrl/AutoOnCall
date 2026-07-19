@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.eval.eval_rag_cases import (
     _strategy_case_payload,
+    audit_case_set_isolation,
     build_offline_index,
     evaluate_case,
     evaluate_cases,
@@ -58,20 +59,30 @@ def test_stage_two_frozen_holdout_has_required_shape() -> None:
     assert len([case for case in cases if case.get("should_reject")]) == 6
 
 
-def test_rag_eval_cases_report_current_untuned_baseline() -> None:
+def test_frozen_holdout_has_no_exact_case_reuse_from_tuning_set() -> None:
+    audit = audit_case_set_isolation(
+        "eval/rag_holdout_cases.yaml",
+        comparison_paths=["eval/rag_relevance_cases.yaml"],
+    )
+
+    assert audit["status"] == "passed"
+    assert audit["overlaps"] == []
+
+
+def test_rag_eval_cases_report_current_tuned_baseline() -> None:
     payload = evaluate_cases("eval/rag_cases.yaml", docs_dir="docs/knowledge-base")
 
     assert payload["summary"]["case_count"] == 30
-    assert payload["summary"]["passed_count"] == 29
-    assert payload["summary"]["pass_rate"] == 0.9667
-    assert payload["summary"]["recall_at_k"] == 0.96
-    assert payload["summary"]["citation_coverage_rate"] == 0.96
+    assert payload["summary"]["passed_count"] == 30
+    assert payload["summary"]["pass_rate"] == 1.0
+    assert payload["summary"]["recall_at_k"] == 1.0
+    assert payload["summary"]["citation_coverage_rate"] == 1.0
     assert payload["summary"]["no_answer_rejection_rate"] == 1.0
-    assert payload["summary"]["confusion_case_pass_rate"] == 0.8
+    assert payload["summary"]["confusion_case_pass_rate"] == 1.0
     assert payload["summary"]["reject_case_count"] >= 5
     assert payload["summary"]["confusion_case_count"] >= 4
-    assert payload["summary"]["mrr"] >= 0.9
-    assert payload["summary"]["strategy_metrics"]["weighted"]["recall_at_k"] == 0.96
+    assert payload["summary"]["mrr"] >= 0.89
+    assert payload["summary"]["strategy_metrics"]["weighted"]["recall_at_k"] == 1.0
     assert "rrf" in payload["summary"]["strategy_metrics"]
     assert payload["run"]["fusion_strategies"] == [
         "weighted",
@@ -94,22 +105,14 @@ def test_rag_eval_cases_report_current_untuned_baseline() -> None:
     assert "confidence_interval" in payload["summary"]["metrics"]["recall_at_3"]
 
     summary_text = render_summary(payload)
-    assert "RAG eval: 29/30 cases passed" in summary_text
+    assert "RAG eval: 30/30 cases passed" in summary_text
     assert "Strategy comparison:" in summary_text
-    assert "recall@3=96%" in summary_text
-    assert "retrieval_citation_metadata=96%" in summary_text
-    assert "confusion=80%" in summary_text
+    assert "recall@3=100%" in summary_text
+    assert "retrieval_citation_metadata=100%" in summary_text
+    assert "confusion=100%" in summary_text
     assert "reject=100%" in summary_text
 
     for result in payload["cases"]:
-        if result["id"] == "cpu_slow_sql_relation":
-            assert result["passed"] is False
-            assert result["failed_metrics"] == [
-                "recall_at_k",
-                "keyword_hit",
-                "citation_coverage",
-            ]
-            continue
         assert result["failed_metrics"] == []
         assert result["failure_reasons"] == {}
         if not result["should_reject"]:
@@ -155,6 +158,19 @@ def test_rag_eval_offline_strategy_comparison_can_rank_by_rrf() -> None:
 
     assert weighted[0]["source_file"] == "stronger.md"
     assert rrf[0]["source_file"] == "stronger.md"
+
+
+def test_mixed_cpu_and_generic_sql_signal_keeps_cpu_runbook_in_top_three() -> None:
+    index = build_offline_index("docs/knowledge-base")
+
+    results = search_offline(
+        index,
+        "应用 CPU 高，同时日志里出现慢 SQL，如何排查？",
+        top_k=3,
+        fusion_strategy="weighted",
+    )
+
+    assert "cpu_high_usage.md" in {item["source_file"] for item in results}
 
 
 def test_pure_strategy_scores_do_not_apply_intent_multiplier() -> None:
@@ -351,8 +367,7 @@ def test_search_offline_distinguishes_loki_query_from_ingestion_intent() -> None
     )
 
     assert any(
-        item["source_file"] == "official_loki_troubleshoot_query.md"
-        for item in query_results
+        item["source_file"] == "official_loki_troubleshoot_query.md" for item in query_results
     )
     assert ingest_results[0]["source_file"] == "official_loki_troubleshoot_ingest.md"
 

@@ -37,8 +37,18 @@ LIVE_URL = f"{API_URL}/health/live"
 READY_URL = f"{API_URL}/health/ready"
 
 MCP_PROCESSES = [
-    ("CLS MCP", ROOT / "mcp_servers" / "cls_server.py", ROOT / "mcp_cls.log"),
-    ("Monitor MCP", ROOT / "mcp_servers" / "monitor_server.py", ROOT / "mcp_monitor.log"),
+    (
+        "CLS MCP",
+        ROOT / "mcp_servers" / "cls_server.py",
+        ROOT / "mcp_cls.log",
+        ROOT / "mcp_cls.pid",
+    ),
+    (
+        "Monitor MCP",
+        ROOT / "mcp_servers" / "monitor_server.py",
+        ROOT / "mcp_monitor.log",
+        ROOT / "mcp_monitor.pid",
+    ),
 ]
 
 
@@ -62,7 +72,7 @@ def main() -> int:
             ROOT / "deploy" / "compose" / "interview-stack.yml",
         )
 
-    if not args.skip_demo_reset:
+    if args.reset_demo_data:
         reset_demo_data(python_cmd)
 
     start_mcp_servers(python_cmd, restart=args.restart_processes)
@@ -105,9 +115,9 @@ def parse_args() -> argparse.Namespace:
         "--restart-processes", action="store_true", help="Restart MCP/API if already running."
     )
     parser.add_argument(
-        "--skip-demo-reset",
+        "--reset-demo-data",
         action="store_true",
-        help="Keep current AIOps runtime records instead of restoring the interview dataset.",
+        help="Clear current AIOps runtime records and restore the interview dataset.",
     )
     parser.add_argument(
         "--upload-docs",
@@ -150,6 +160,7 @@ def resolve_python(explicit: str) -> str:
     if is_project_venv_python(sys.executable):
         return sys.executable
     candidates = [
+        ROOT / ".venv" / "Scripts" / "python.exe",
         ROOT / "venv" / "Scripts" / "python.exe",
     ]
     for candidate in candidates:
@@ -191,47 +202,61 @@ def compose_up(label: str, compose_file: Path) -> None:
 def reset_demo_data(python_cmd: str) -> None:
     print("[RUN] Resetting AIOps runtime data to the curated interview dataset")
     run(
-        [python_cmd, str(ROOT / "scripts" / "maintenance" / "reset_demo_data.py"), "--quiet"],
+        [
+            python_cmd,
+            str(ROOT / "scripts" / "maintenance" / "reset_demo_data.py"),
+            "--quiet",
+            "--confirm-reset",
+        ],
         label="reset demo data",
         env=runtime_env(),
     )
 
 
 def start_mcp_servers(python_cmd: str, *, restart: bool) -> None:
-    for name, script_path, log_path in MCP_PROCESSES:
-        if is_process_running(script_path.name):
+    for name, script_path, log_path, pid_path in MCP_PROCESSES:
+        command = [python_cmd, str(script_path)]
+        if is_managed_process_running(pid_path, command):
             if not restart:
                 print(f"[OK] {name} already running")
                 continue
-            stop_processes_matching(script_path.name)
+            stop_managed_process(pid_path, command)
         start_background_process(
             name=name,
-            command=[python_cmd, str(script_path)],
+            command=command,
             log_path=log_path,
+            pid_path=pid_path,
             env=runtime_env(),
         )
 
 
 def start_api(python_cmd: str, *, restart: bool) -> None:
+    command = [
+        python_cmd,
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9900",
+    ]
+    pid_path = ROOT / "server.pid"
     if http_ok(LIVE_URL):
         if not restart:
             print("[OK] FastAPI already running")
             return
-        stop_processes_matching("uvicorn")
+        if not is_managed_process_running(pid_path, command):
+            raise SystemExit(
+                "Port 9900 is served by a process not owned by this launcher; refusing to stop it."
+            )
+        stop_managed_process(pid_path, command)
 
     start_background_process(
         name="AutoOnCall API",
-        command=[
-            python_cmd,
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "9900",
-        ],
+        command=command,
         log_path=ROOT / "server.log",
+        pid_path=pid_path,
         env=runtime_env(),
     )
 
@@ -248,18 +273,20 @@ def start_background_process(
     name: str,
     command: list[str],
     log_path: Path,
+    pid_path: Path,
     env: dict[str, str],
 ) -> None:
     print(f"[RUN] Starting {name}; log={relative(log_path)}")
     log_file = log_path.open("a", encoding="utf-8")
-    subprocess.Popen(
+    process = subprocess.Popen(
         command,
         cwd=ROOT,
         env=env,
         stdout=log_file,
         stderr=subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
+    pid_path.write_text(str(process.pid), encoding="ascii")
     time.sleep(2)
 
 
@@ -304,19 +331,20 @@ def upload_docs() -> None:
         print("[WARN] No supported docs/knowledge-base files found.")
         return
     print(f"[RUN] Uploading {len(docs)} docs/knowledge-base files")
+    upload_token = str(os.environ.get("AUTOONCALL_UPLOAD_TOKEN") or "").strip()
     for path in docs:
-        run(
-            [
-                "curl",
-                "-s",
-                "-X",
-                "POST",
-                f"{API_URL}/api/upload",
-                "-F",
-                f"file=@{path}",
-            ],
-            label=f"upload {path.name}",
-        )
+        command = [
+            "curl",
+            "--fail-with-body",
+            "-sS",
+            "-X",
+            "POST",
+            f"{API_URL}/api/upload",
+        ]
+        if upload_token:
+            command.extend(["-H", f"Authorization: Bearer {upload_token}"])
+        command.extend(["-F", f"file=@{path}"])
+        run(command, label=f"upload {path.name}")
 
 
 def run(
@@ -344,8 +372,10 @@ def run(
 def is_project_venv_python(python_cmd: str) -> bool:
     try:
         python_path = Path(python_cmd).resolve()
-        venv_path = (ROOT / "venv").resolve()
-        return python_path.is_relative_to(venv_path)
+        return any(
+            python_path.is_relative_to((ROOT / directory).resolve())
+            for directory in (".venv", "venv")
+        )
     except (OSError, ValueError):
         return False
 
@@ -372,36 +402,43 @@ def command_available(command: str) -> bool:
     return completed.returncode == 0
 
 
-def is_process_running(token: str) -> bool:
-    if os.name != "nt":
+def is_managed_process_running(pid_path: Path, command: list[str]) -> bool:
+    pid = read_pid(pid_path)
+    if pid is None:
         return False
+    expected_tokens = [str(Path(command[0]).resolve()), *command[1:]]
+    token_checks = " ".join(
+        "if ($line -notlike '*" + token.replace("'", "''") + "*') { exit 1 };"
+        for token in expected_tokens
+    )
     ps_command = (
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.Name -eq 'python.exe' -and "
-        "$_.CommandLine -like '*" + token + "*' } | "
-        "Select-Object -First 1 -ExpandProperty ProcessId"
+        f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+        "if ($null -eq $p) { exit 1 }; "
+        "$line = [string]$p.CommandLine; " + token_checks + " exit 0"
     )
     completed = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
-        capture_output=True,
-        text=True,
         check=False,
     )
-    return bool((completed.stdout or "").strip())
+    return completed.returncode == 0
 
 
-def stop_processes_matching(token: str) -> None:
-    if os.name != "nt":
+def stop_managed_process(pid_path: Path, command: list[str]) -> None:
+    pid = read_pid(pid_path)
+    if pid is None:
         return
-    ps_command = (
-        "Get-CimInstance Win32_Process | "
-        f"Where-Object {{ $_.CommandLine -like '*{token}*' }} | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
-        check=False,
-    )
+    if not is_managed_process_running(pid_path, command):
+        pid_path.unlink(missing_ok=True)
+        return
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
+    pid_path.unlink(missing_ok=True)
+
+
+def read_pid(pid_path: Path) -> int | None:
+    try:
+        return int(pid_path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def relative(path: Path) -> str:

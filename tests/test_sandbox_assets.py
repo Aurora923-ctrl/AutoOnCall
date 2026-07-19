@@ -173,6 +173,8 @@ def test_mysql_redis_golden_seed_uses_live_sources() -> None:
 
     assert "live-redis-seed" in seed_script
     assert "autooncall:incident:order-service:redis-maxclients" in seed_script
+    assert "--acknowledge-local-only" in seed_script
+    assert "verify_local_compose_target" in seed_script
     assert "$(SANDBOX_SEED_ARGS)" in (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "$(SANDBOX_VERIFY_ARGS)" in (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "live-mysql-seed" in mysql_seed
@@ -180,6 +182,34 @@ def test_mysql_redis_golden_seed_uses_live_sources() -> None:
     assert "demo-seed" not in mysql_seed
     assert "autooncall-seed" not in mysql_seed
     assert "incident_demo_cases" not in mysql_seed
+
+
+def test_compose_examples_bind_locally_and_pin_runtime_versions() -> None:
+    compose_paths = [
+        ROOT / "deploy" / "compose" / "full-stack-compose.yml",
+        ROOT / "deploy" / "compose" / "interview-stack.yml",
+        ROOT / "deploy" / "compose" / "sandbox-compose.yml",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in compose_paths)
+
+    assert "mysql:8.0.46" in combined
+    assert "redis:7.4.9-alpine" in combined
+    assert "python:3.11.15-alpine" in combined
+    assert '"6380:6379"' not in combined
+    assert '"3307:3306"' not in combined
+    assert '"9109:9108"' not in combined
+    assert '"9091:9090"' not in combined
+    assert "condition: service_healthy" in combined
+    assert "/tmp/autooncall-loki-emitter.ready" in combined
+
+
+def test_milvus_compose_stays_in_autooncall_project_with_healthy_dependencies() -> None:
+    compose = (ROOT / "deploy" / "compose" / "vector-database.yml").read_text(encoding="utf-8")
+
+    assert "name: autooncall" in compose
+    assert "name: autooncall-milvus-net" in compose
+    assert "etcd:\n        condition: service_healthy" in compose
+    assert "minio:\n        condition: service_healthy" in compose
 
 
 def test_sandbox_business_http_mocks_are_removed() -> None:

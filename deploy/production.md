@@ -33,9 +33,10 @@ This file is not required for the 10-minute interview demo. Use it as a producti
 - `API_AUTH_ENABLED=false` keeps local demos open.
 - `API_READ_TOKEN`: read-only token for incident, alert, trace, report, approval list, upload config, session history, and tool contract views.
 - `API_OPERATOR_TOKEN`: read + chat + diagnosis + knowledge indexing + alert ingestion + eval token.
-- `API_APPROVER_TOKEN`: read + approval decision + safe-change resume/manual-result token.
+- `API_APPROVER_TOKEN`: read + approval decision token.
+- `API_CHANGE_TOKEN`: read + safe-change resume/manual-result token. Use a different identity from the approver.
 - `API_ADMIN_TOKEN`: all scopes.
-- `API_AUTH_TOKENS`: optional JSON map for multiple tokens, for example `{"ops-token":["operator"],"sre-token":["approver"]}`.
+- `API_AUTH_TOKENS`: optional JSON map for multiple tokens, for example `{"ops-token":["operator"],"approver-token":["approver"],"change-token":["change_operator"]}`.
 
 Clients can send either `Authorization: Bearer <token>` or `X-AutoOnCall-Token: <token>`. If auth is enabled but no token is configured, protected APIs return 503 so the service fails closed.
 Obvious placeholder tokens and tokens shorter than 16 characters are ignored, so production
@@ -43,7 +44,7 @@ startup also fails closed when strict exposure protection is enabled with unusab
 
 ## Exposure Guard
 
-`PRODUCTION_EXPOSURE_STRICT=true` turns startup exposure warnings into a hard failure when the app is configured to bind to a non-local host while API auth is disabled, CORS allows all origins, or mock fallback is enabled. The Docker image enables this guard by default. For a trusted local-only demo, set `HOST=127.0.0.1` or explicitly set `PRODUCTION_EXPOSURE_STRICT=false`.
+`PRODUCTION_EXPOSURE_STRICT=true` turns startup exposure warnings into a hard failure when the app is configured to bind to a non-local host while debug mode is enabled, API auth is disabled, CORS allows all origins, or mock fallback is enabled. The Docker image enables this guard by default. For a trusted local-only demo, set `HOST=127.0.0.1` or explicitly set `PRODUCTION_EXPOSURE_STRICT=false`.
 
 ## External Adapters
 
@@ -76,7 +77,7 @@ SQLite stores runtime state by default; MySQL can be enabled with `AIOPS_STORAGE
 
 ```powershell
 .\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14 --dry-run
-.\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14
+.\venv\Scripts\python.exe scripts\maintenance\cleanup_aiops_store.py --database data\aiops_state.db --keep-days 14 --execute
 ```
 
 For the configured backend, omit `--database`:
@@ -91,7 +92,7 @@ SQLite-to-MySQL migration:
 
 ```powershell
 .\venv\Scripts\python.exe scripts\maintenance\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db --dry-run
-.\venv\Scripts\python.exe scripts\maintenance\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db
+.\venv\Scripts\python.exe scripts\maintenance\migrate_aiops_sqlite_to_mysql.py --sqlite data\aiops_state.db --execute
 ```
 
 ## Container Image
@@ -115,6 +116,10 @@ The image runs as the unprivileged `autooncall` user and honors the configured
 `HOST` and `PORT` values at runtime.
 The `.dockerignore` file excludes local virtual environments, logs, uploads,
 SQLite databases, coverage reports, and `.env` files from the image context.
+The Compose examples bind service ports to loopback, pin concrete image tags,
+and expose host persistence roots through `.env.example`. Their built-in
+passwords are local-demo fallbacks only; shared environments must override all
+`AUTOONCALL_MYSQL_*` and `MILVUS_MINIO_*` values through secret management.
 
 ## Minimal Health Gate
 

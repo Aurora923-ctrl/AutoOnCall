@@ -12,7 +12,7 @@ from scripts.sandbox.controlled_fault import (
     load_specs,
     write_run_artifacts,
 )
-from scripts.sandbox.controlled_fault_e2e import build_specs
+from scripts.sandbox.controlled_fault_e2e import build_specs, parse_args as parse_e2e_args
 from scripts.sandbox.controlled_fault_runner import parse_args
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -213,3 +213,13 @@ def test_e2e_specs_are_bounded_and_use_original_containers() -> None:
     ]
     assert specs[1].parameters["sleep_seconds"] == 3.0
     assert specs[1].parameters["concurrency"] == 8
+
+
+def test_e2e_cli_requires_explicit_execution_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["controlled_fault_e2e.py"])
+    args = parse_e2e_args()
+
+    assert args.execute is False
+    assert args.acknowledge_local_only is False

@@ -8,8 +8,10 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -28,6 +30,16 @@ from app.models.trace import TraceEvent
 from app.services.mysql_store import AIOpsMySQLStore
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+RUNTIME_TABLES = (
+    "alert_events",
+    "trace_events",
+    "approval_requests",
+    "change_executions",
+    "aiops_sessions",
+    "incident_states",
+    "diagnosis_reports",
+)
+RUNTIME_MODEL_TABLES = frozenset(RUNTIME_TABLES) - {"approval_requests"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sqlite", default=config.aiops_sqlite_path)
     parser.add_argument("--mysql-dsn", default=config.resolved_mysql_dsn)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually import records. Without this flag the command is a dry run.",
+    )
     return parser.parse_args()
 
 
@@ -50,18 +67,21 @@ def main() -> int:
     if not args.mysql_dsn:
         raise SystemExit("MySQL DSN is required via --mysql-dsn, MYSQL_DSN, or MYSQL_HOST fields")
 
-    alert_events = _read_models(sqlite_path, "alert_events", AlertEvent)
-    traces = _read_models(sqlite_path, "trace_events", TraceEvent)
-    approvals = _read_models(sqlite_path, "approval_requests", ApprovalRequest)
-    change_executions = _read_models(sqlite_path, "change_executions", ChangeExecution)
-    aiops_sessions = _read_models(sqlite_path, "aiops_sessions", AIOpsSessionSnapshot)
-    incident_states = _read_models(sqlite_path, "incident_states", IncidentState)
-    reports = _read_models(sqlite_path, "diagnosis_reports", DiagnosisReport)
+    with _open_readonly_snapshot(sqlite_path) as source:
+        _require_runtime_tables(source)
+        alert_events = _read_models(source, "alert_events", AlertEvent)
+        traces = _read_models(source, "trace_events", TraceEvent)
+        approvals = _read_approval_models(source)
+        change_executions = _read_models(source, "change_executions", ChangeExecution)
+        aiops_sessions = _read_models(source, "aiops_sessions", AIOpsSessionSnapshot)
+        incident_states = _read_models(source, "incident_states", IncidentState)
+        reports = _read_models(source, "diagnosis_reports", DiagnosisReport)
 
-    summary = {
+    dry_run = bool(args.dry_run or not args.execute)
+    summary: dict[str, Any] = {
         "sqlite": str(sqlite_path),
         "mysql": _redact_dsn(args.mysql_dsn),
-        "dry_run": args.dry_run,
+        "dry_run": dry_run,
         "counts": {
             "alert_events": len(alert_events),
             "trace_events": len(traces),
@@ -73,42 +93,130 @@ def main() -> int:
         },
     }
 
-    if not args.dry_run:
+    if not dry_run:
         store = AIOpsMySQLStore(args.mysql_dsn)
-        for alert_event in alert_events:
-            store.save_alert_event(alert_event)
-        for trace_event in traces:
-            store.save_trace_event(trace_event)
-        for approval in approvals:
-            store.save_approval_request(approval)
-        for execution in change_executions:
-            store.save_change_execution(execution)
-        for snapshot in aiops_sessions:
-            store.save_aiops_session_snapshot(snapshot)
-        for state in incident_states:
-            store.save_incident_state(state)
-        for report in reports:
-            store.save_report(report)
+        imported = store.import_runtime_state(
+            alert_events=alert_events,
+            trace_events=traces,
+            approval_requests=approvals,
+            change_executions=change_executions,
+            aiops_sessions=aiops_sessions,
+            incident_states=incident_states,
+            diagnosis_reports=reports,
+        )
+        conflicts = imported.pop("conflicts", {})
+        summary["imported"] = imported
+        summary["skipped_existing"] = {
+            table: summary["counts"][table] - imported[table] for table in summary["counts"]
+        }
+        summary["conflicts"] = conflicts
+        if any(int(count or 0) for count in conflicts.values()):
+            raise RuntimeError(
+                "Migration found existing MySQL rows with different payloads; "
+                "no rows were imported. Resolve conflicts before retrying."
+            )
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
-def _read_models(sqlite_path: Path, table: str, model_type: type[ModelT]) -> list[ModelT]:
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        try:
-            rows = connection.execute(f"SELECT payload FROM {table} ORDER BY rowid ASC").fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc):
-                return []
-            raise
+@contextmanager
+def _open_readonly_snapshot(sqlite_path: Path) -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(f"{sqlite_path.resolve().as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN")
+        yield connection
+    finally:
+        connection.close()
+
+
+def _read_models(
+    connection: sqlite3.Connection,
+    table: str,
+    model_type: type[ModelT],
+) -> list[ModelT]:
+    table_name = _runtime_table_name(table, allowed=RUNTIME_MODEL_TABLES)
+    rows = connection.execute(
+        # SQLite cannot bind identifiers; table_name is returned only from the
+        # module-owned runtime table whitelist.
+        f"SELECT rowid AS source_rowid, payload FROM {table_name} ORDER BY rowid ASC"  # nosec B608
+    ).fetchall()
     models: list[ModelT] = []
     for row in rows:
-        payload = json.loads(str(row["payload"]))
-        if isinstance(payload, dict):
+        source_rowid = int(row["source_rowid"])
+        try:
+            payload = json.loads(str(row["payload"]))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be a JSON object")
             models.append(model_type.model_validate(payload))
+        except Exception as exc:
+            raise RuntimeError(f"Invalid SQLite payload in {table} rowid={source_rowid}") from exc
     return models
+
+
+def _runtime_table_name(table: str, *, allowed: frozenset[str]) -> str:
+    """Return a runtime table identifier only when it belongs to an explicit whitelist."""
+    if table not in allowed:
+        raise ValueError(f"Unsupported AIOps runtime table: {table}")
+    return table
+
+
+def _require_runtime_tables(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    available = {str(row["name"]) for row in rows}
+    missing = sorted(set(RUNTIME_TABLES) - available)
+    if missing:
+        raise RuntimeError(
+            "SQLite runtime schema is incomplete; missing tables: " + ", ".join(missing)
+        )
+
+
+def _read_approval_models(
+    connection: sqlite3.Connection,
+) -> list[tuple[ApprovalRequest, str | None]]:
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(approval_requests)").fetchall()
+    }
+    idempotency_column = (
+        _approval_idempotency_projection(columns)
+        if "idempotency_key" in columns
+        else "NULL AS idempotency_key"
+    )
+    rows = connection.execute(
+        # The projection is selected from a fixed schema-derived whitelist and
+        # never contains user-controlled text.
+        f"""
+        SELECT rowid AS source_rowid, payload, {idempotency_column}
+        FROM approval_requests
+        ORDER BY rowid ASC
+        """  # nosec B608
+    ).fetchall()
+    approvals: list[tuple[ApprovalRequest, str | None]] = []
+    for row in rows:
+        source_rowid = int(row["source_rowid"])
+        try:
+            payload = json.loads(str(row["payload"]))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be a JSON object")
+            request = ApprovalRequest.model_validate(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid SQLite payload in approval_requests rowid={source_rowid}"
+            ) from exc
+        idempotency_key = str(row["idempotency_key"] or "").strip() or None
+        if idempotency_key is None:
+            idempotency_key = str(request.metadata.get("idempotency_key") or "").strip() or None
+        approvals.append((request, idempotency_key))
+    return approvals
+
+
+def _approval_idempotency_projection(columns: set[str]) -> str:
+    """Return the optional approval projection from the known SQLite schema."""
+    if "idempotency_key" not in columns:
+        raise ValueError("approval_requests.idempotency_key is not available")
+    return "idempotency_key AS idempotency_key"
 
 
 def _redact_dsn(dsn: str) -> str:

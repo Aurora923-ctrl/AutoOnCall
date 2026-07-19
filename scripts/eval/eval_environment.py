@@ -12,6 +12,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from app.config import config
 
@@ -46,6 +47,8 @@ def collect_eval_environment(
     *,
     suite: str,
     evidence_level: str = "offline_fixture",
+    run_id: str | None = None,
+    execution_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return non-secret runtime metadata attached to every eval artifact."""
     if evidence_level not in EVIDENCE_LEVELS:
@@ -69,8 +72,11 @@ def collect_eval_environment(
         dependency_manifest_sha256=dependency_manifest["manifest_sha256"],
         prompt_manifest_sha256=prompt_manifest["manifest_sha256"],
     )
+    resolved_run_id = str(run_id or f"eval-{uuid4().hex}")
+    identity = dict(execution_identity or {})
     return {
         "suite": suite,
+        "run_id": resolved_run_id,
         "evidence_level": evidence_level,
         "evidence_levels_supported": sorted(EVIDENCE_LEVELS),
         "git_commit": git_commit,
@@ -93,7 +99,9 @@ def collect_eval_environment(
         "baseline_ineligible_reasons": (
             []
             if git_commit and not git_dirty
-            else ["dirty_worktree"] if git_dirty else ["missing_git"]
+            else ["dirty_worktree"]
+            if git_dirty
+            else ["missing_git"]
         ),
         "app_version": config.app_version,
         "rag_model": config.effective_rag_model,
@@ -112,6 +120,31 @@ def collect_eval_environment(
         "config_summary": config_summary["values"],
         "config_sha256": config_summary["config_sha256"],
         "evaluation_fingerprint": fingerprint,
+        "execution_identity": {
+            "configured_model": config.effective_rag_model,
+            "configured_embedding_model": config.dashscope_embedding_model,
+            "actual_model": str(identity.get("actual_model") or config.effective_rag_model),
+            "actual_embedding_model": str(
+                identity.get("actual_embedding_model") or config.dashscope_embedding_model
+            ),
+            "provider": str(identity.get("provider") or ""),
+            "execution_path": str(identity.get("execution_path") or "deterministic"),
+            "fallback_used": bool(identity.get("fallback_used", False)),
+            "model_calls": identity.get("model_calls", []),
+            **{
+                key: value
+                for key, value in identity.items()
+                if key
+                not in {
+                    "actual_model",
+                    "actual_embedding_model",
+                    "provider",
+                    "execution_path",
+                    "fallback_used",
+                    "model_calls",
+                }
+            },
+        },
         "artifact_status": {
             "stale": False,
             "reasons": [],
@@ -255,6 +288,28 @@ def collect_asset_manifest(root: Path = KNOWLEDGE_BASE_DIR) -> dict[str, Any]:
         "file_count": len(files),
         "files": files,
         "manifest_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+
+def collect_dataset_provenance(path: str | Path, *, case_count: int) -> dict[str, Any]:
+    """Return immutable identity fields for one evaluation case file."""
+    dataset_path = Path(path)
+    if not dataset_path.exists() or not dataset_path.is_file():
+        return {
+            "path": str(dataset_path),
+            "sha256": "",
+            "size_bytes": 0,
+            "modified_at_ns": 0,
+            "case_count": case_count,
+        }
+    content = dataset_path.read_bytes()
+    stat = dataset_path.stat()
+    return {
+        "path": str(dataset_path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+        "modified_at_ns": stat.st_mtime_ns,
+        "case_count": case_count,
     }
 
 

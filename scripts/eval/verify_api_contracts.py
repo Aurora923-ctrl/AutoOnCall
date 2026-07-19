@@ -56,6 +56,13 @@ INCIDENT_ID = "inc-contract-001"
 TRACE_ID = "trace-contract-001"
 APPROVAL_ID = "apr-contract-001"
 CHANGE_PLAN_ID = "chg-contract-001"
+OPERATOR_TOKEN = "contract-operator-token"
+APPROVER_TOKEN = "contract-approver-token"
+CHANGE_TOKEN = "contract-change-token"
+
+OPERATOR_HEADERS = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
+APPROVER_HEADERS = {"Authorization": f"Bearer {APPROVER_TOKEN}"}
+CHANGE_HEADERS = {"Authorization": f"Bearer {CHANGE_TOKEN}"}
 
 REQUIRED_PROGRESS_FIELDS = {
     "phase",
@@ -387,6 +394,23 @@ class FakeAIOpsService:
             "progress_cursor": progress["cursor"],
         }
 
+    def resolve_resume_session_id(
+        self,
+        *,
+        incident_id: str,
+        approval: ApprovalRequest,
+        requested_session_id: str | None,
+    ) -> str:
+        """Apply the production resume identity contract to the fixture."""
+        approval_session_id = str(approval.metadata.get("session_id") or "")
+        if approval.incident_id != incident_id:
+            raise ValueError("approval does not belong to the requested incident")
+        if requested_session_id and requested_session_id != approval_session_id:
+            raise ValueError("requested session does not match approval session")
+        if not approval_session_id:
+            raise LookupError("approval is missing its diagnosis session")
+        return approval_session_id
+
     def get_session_snapshot(self, session_id: str) -> AIOpsSessionSnapshot | None:
         return self.snapshot if session_id == self.snapshot.session_id else None
 
@@ -626,6 +650,7 @@ async def verify_api_contracts() -> dict[str, Any]:
     checks: list[CheckResult] = []
     with tempfile.TemporaryDirectory(prefix="autooncall-api-contract-") as temp_dir:
         temp_path = Path(temp_dir)
+        _configure_contract_auth(patches)
         eval_summary_path, eval_backlog_path, ragas_summary_path = _write_eval_contract_fixtures(
             temp_path
         )
@@ -723,7 +748,6 @@ def _build_contract_app(
     fake_change = FakeChangeExecutionService()
     fake_state = FakeIncidentStateStore()
 
-    patches.set(config, "api_auth_enabled", False)
     patches.set(chat, "rag_agent_service", FakeRagAgentService())
     patches.set(aiops, "aiops_service", fake_aiops)
     patches.set(aiops, "get_approval_service", lambda: fake_approval)
@@ -747,6 +771,17 @@ def _build_contract_app(
     app.include_router(incidents.router, prefix="/api")
     app.include_router(evaluations.router, prefix="/api")
     return app
+
+
+def _configure_contract_auth(patches: PatchSet) -> None:
+    """Install deterministic scoped credentials before fixtures capture provenance."""
+    patches.set(config, "api_auth_enabled", True)
+    patches.set(config, "api_auth_tokens", "")
+    patches.set(config, "api_read_token", "")
+    patches.set(config, "api_operator_token", OPERATOR_TOKEN)
+    patches.set(config, "api_approver_token", APPROVER_TOKEN)
+    patches.set(config, "api_change_token", CHANGE_TOKEN)
+    patches.set(config, "api_admin_token", "")
 
 
 async def _capture(
@@ -781,6 +816,7 @@ async def _capture(
 async def _check_chat(client: httpx.AsyncClient) -> dict[str, Any]:
     response = await client.post(
         "/api/chat",
+        headers=OPERATOR_HEADERS,
         json={"Id": "contract-rag", "Question": "How to diagnose Redis maxclients?"},
     )
     _require(response.status_code == 200, f"expected 200, got {response.status_code}")
@@ -803,6 +839,7 @@ async def _check_chat(client: httpx.AsyncClient) -> dict[str, Any]:
 async def _check_chat_stream(client: httpx.AsyncClient) -> dict[str, Any]:
     response = await client.post(
         "/api/chat_stream",
+        headers=OPERATOR_HEADERS,
         json={
             "Id": "contract-rag-stream",
             "Question": "Stream Redis diagnosis",
@@ -829,6 +866,7 @@ async def _check_chat_stream(client: httpx.AsyncClient) -> dict[str, Any]:
 async def _check_aiops_stream(client: httpx.AsyncClient) -> dict[str, Any]:
     response = await client.post(
         "/api/aiops",
+        headers=OPERATOR_HEADERS,
         json={
             "session_id": SESSION_ID,
             "incident": {
@@ -874,7 +912,10 @@ async def _check_aiops_stream(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def _check_aiops_run_status(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get(f"/api/aiops/runs/{SESSION_ID}")
+    response = await client.get(
+        f"/api/aiops/runs/{SESSION_ID}",
+        headers=OPERATOR_HEADERS,
+    )
     _require(response.status_code == 200, f"expected 200, got {response.status_code}")
     payload = response.json()
     _require(payload.get("session_id") == SESSION_ID, "session_id mismatch")
@@ -894,7 +935,7 @@ async def _check_aiops_run_status(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def _check_tool_contracts(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get("/api/aiops/tools/contracts")
+    response = await client.get("/api/aiops/tools/contracts", headers=OPERATOR_HEADERS)
     _require(response.status_code == 200, f"expected 200, got {response.status_code}")
     payload = response.json()
     items = payload.get("items")
@@ -917,7 +958,10 @@ async def _check_tool_contracts(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def _check_incident_report(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get(f"/api/incidents/{INCIDENT_ID}/report")
+    response = await client.get(
+        f"/api/incidents/{INCIDENT_ID}/report",
+        headers=OPERATOR_HEADERS,
+    )
     _require(response.status_code == 200, f"expected 200, got {response.status_code}")
     payload = response.json()
     report = _require_dict(payload.get("report"), "report")
@@ -937,6 +981,7 @@ async def _check_incident_report(client: httpx.AsyncClient) -> dict[str, Any]:
 async def _check_approval_and_resume(client: httpx.AsyncClient) -> dict[str, Any]:
     decision_response = await client.post(
         f"/api/incidents/{INCIDENT_ID}/approval",
+        headers=APPROVER_HEADERS,
         json={
             "approval_id": APPROVAL_ID,
             "decision": "approve",
@@ -954,6 +999,7 @@ async def _check_approval_and_resume(client: httpx.AsyncClient) -> dict[str, Any
 
     resume_response = await client.post(
         f"/api/incidents/{INCIDENT_ID}/diagnosis/resume",
+        headers=OPERATOR_HEADERS,
         json={"session_id": SESSION_ID, "approval_id": APPROVAL_ID},
     )
     _require(
@@ -980,6 +1026,7 @@ async def _check_approval_and_resume(client: httpx.AsyncClient) -> dict[str, Any
 async def _check_safe_change_resume(client: httpx.AsyncClient) -> dict[str, Any]:
     response = await client.post(
         f"/api/incidents/{INCIDENT_ID}/changes/{CHANGE_PLAN_ID}/resume",
+        headers=CHANGE_HEADERS,
         json={
             "approval_id": APPROVAL_ID,
             "mode": "dry_run_only",
@@ -1006,7 +1053,7 @@ async def _check_safe_change_resume(client: httpx.AsyncClient) -> dict[str, Any]
 
 
 async def _check_eval_contracts(client: httpx.AsyncClient) -> dict[str, Any]:
-    summary_response = await client.get("/api/eval/summary")
+    summary_response = await client.get("/api/eval/summary", headers=OPERATOR_HEADERS)
     _require(summary_response.status_code == 200, "eval summary must return 200")
     summary_payload = summary_response.json()
     _require(summary_payload.get("available") is True, "eval summary must be available")
@@ -1014,7 +1061,7 @@ async def _check_eval_contracts(client: httpx.AsyncClient) -> dict[str, Any]:
     _require_dict(backlog.get("summary"), "eval_backlog.summary")
     _require(isinstance(backlog.get("items"), list), "eval_backlog.items must be list")
 
-    backlog_response = await client.get("/api/eval/backlog")
+    backlog_response = await client.get("/api/eval/backlog", headers=OPERATOR_HEADERS)
     _require(backlog_response.status_code == 200, "eval backlog must return 200")
     backlog_payload = backlog_response.json()
     _require(backlog_payload.get("available") is True, "eval backlog must be available")
@@ -1027,7 +1074,7 @@ async def _check_eval_contracts(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def _check_ragas_contract(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get("/api/eval/ragas")
+    response = await client.get("/api/eval/ragas", headers=OPERATOR_HEADERS)
     _require(response.status_code == 200, "RAGAS summary must return 200")
     payload = response.json()
     _require(payload.get("available") is True, "RAGAS summary must be available")
@@ -1175,6 +1222,14 @@ def _write_eval_contract_fixtures(temp_path: Path) -> tuple[Path, Path, Path]:
     eval_summary_path = temp_path / "eval_summary.json"
     eval_backlog_path = temp_path / "eval_backlog_drafts.json"
     ragas_summary_path = temp_path / "ragas_eval_summary.json"
+    eval_environment = collect_eval_environment(
+        suite="api_contract_fixture",
+        evidence_level="offline_fixture",
+    )
+    ragas_environment = collect_eval_environment(
+        suite="api_contract_ragas_fixture",
+        evidence_level="offline_fixture",
+    )
     backlog_item = {
         "backlog_id": "ebl-contract-001",
         "feedback_id": "fbk-contract-001",
@@ -1197,6 +1252,7 @@ def _write_eval_contract_fixtures(temp_path: Path) -> tuple[Path, Path, Path]:
                 "run": {
                     "started_at": "2026-07-08T00:00:00Z",
                     "evaluation_scope": "api_contract_fixture",
+                    "environment": eval_environment,
                 },
                 "summary": {
                     "overall_case_count": 1,
@@ -1235,6 +1291,7 @@ def _write_eval_contract_fixtures(temp_path: Path) -> tuple[Path, Path, Path]:
                 "run": {
                     "ended_at": "2026-07-08T00:00:00Z",
                     "evaluation_scope": "api_contract_ragas_fixture",
+                    "environment": ragas_environment,
                     "cases_path": "eval/rag_cases.yaml",
                     "docs_dir": "docs/knowledge-base",
                     "answer_source": "reference-fixture",

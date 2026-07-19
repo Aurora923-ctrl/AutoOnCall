@@ -9,13 +9,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-PROCESS_TOKENS = [
-    "uvicorn",
-    "app.main:app",
-    "mcp_servers\\cls_server.py",
-    "mcp_servers/cls_server.py",
-    "mcp_servers\\monitor_server.py",
-    "mcp_servers/monitor_server.py",
+MANAGED_PROCESSES = [
+    ("AutoOnCall API", ROOT / "server.pid", ("uvicorn", "app.main:app", "--port", "9900")),
+    ("CLS MCP", ROOT / "mcp_cls.pid", ("mcp_servers", "cls_server.py")),
+    ("Monitor MCP", ROOT / "mcp_monitor.pid", ("mcp_servers", "monitor_server.py")),
 ]
 
 
@@ -47,20 +44,33 @@ def stop_app_processes() -> None:
     if os.name != "nt":
         print("[WARN] Non-Windows process cleanup is not implemented in this helper.")
         return
-    for token in PROCESS_TOKENS:
+    for name, pid_path, expected_tokens in MANAGED_PROCESSES:
+        try:
+            pid = int(pid_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            print(f"[INFO] {name} has no valid launcher PID file")
+            continue
         ps_command = (
-            "Get-CimInstance Win32_Process | "
-            f"Where-Object {{ $_.CommandLine -like '*{token}*' }} | "
-            "ForEach-Object { "
-            "Write-Host ('Stopping PID ' + $_.ProcessId + ' ' + $_.CommandLine); "
-            "Stop-Process -Id $_.ProcessId -Force "
-            "}"
+            f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+            "if ($null -eq $p) { exit 2 }; "
+            "$line = [string]$p.CommandLine; "
+            + " ".join(
+                f"if ($line -notlike '*{token}*') {{ exit 3 }};" for token in expected_tokens
+            )
+            + "Stop-Process -Id $p.ProcessId -Force; exit 0"
         )
-        subprocess.run(
+        completed = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
             cwd=ROOT,
             check=False,
         )
+        if completed.returncode == 0:
+            print(f"[OK] Stopped {name} PID {pid}")
+        elif completed.returncode == 3:
+            print(f"[WARN] PID {pid} no longer matches {name}; refusing to stop it")
+        else:
+            print(f"[INFO] {name} PID {pid} is not running")
+        pid_path.unlink(missing_ok=True)
 
 
 def compose_down(compose_file: Path) -> None:

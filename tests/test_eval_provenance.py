@@ -2,6 +2,7 @@
 
 from scripts.eval.eval_environment import (
     assess_eval_artifact_staleness,
+    collect_dataset_provenance,
     collect_eval_environment,
     collect_worktree_state,
 )
@@ -24,6 +25,45 @@ def test_eval_environment_contains_reproducibility_metadata() -> None:
     assert environment["config_sha256"]
     assert environment["evaluation_fingerprint"]
     assert environment["artifact_status"]["stale"] is False
+
+
+def test_eval_environment_preserves_actual_execution_identity() -> None:
+    environment = collect_eval_environment(
+        suite="test",
+        run_id="run-actual",
+        execution_identity={
+            "actual_model": "provider/model-v2",
+            "actual_embedding_model": "provider/embed-v1",
+            "provider": "provider",
+            "execution_path": "runtime_generation",
+            "fallback_used": True,
+            "model_calls": [{"model": "provider/model-v2", "status": "success"}],
+        },
+    )
+
+    identity = environment["execution_identity"]
+    assert environment["run_id"] == "run-actual"
+    assert identity["actual_model"] == "provider/model-v2"
+    assert identity["actual_embedding_model"] == "provider/embed-v1"
+    assert identity["fallback_used"] is True
+    assert identity["model_calls"][0]["model"] == "provider/model-v2"
+
+
+def test_eval_environment_preserves_suite_specific_execution_identity() -> None:
+    environment = collect_eval_environment(
+        suite="ragas",
+        execution_identity={
+            "actual_model": "answer-model",
+            "judge_model": "judge-model",
+            "judge_embedding_model": "judge-embedding",
+            "judge_status": "ready",
+        },
+    )
+
+    identity = environment["execution_identity"]
+    assert identity["judge_model"] == "judge-model"
+    assert identity["judge_embedding_model"] == "judge-embedding"
+    assert identity["judge_status"] == "ready"
 
 
 def test_current_eval_environment_is_not_stale() -> None:
@@ -76,3 +116,17 @@ def test_worktree_hash_changes_when_untracked_content_changes(tmp_path) -> None:
     second = collect_worktree_state(tmp_path)
 
     assert first["worktree_sha256"] != second["worktree_sha256"]
+
+
+def test_dataset_provenance_binds_case_file_content(tmp_path) -> None:
+    path = tmp_path / "cases.yaml"
+    path.write_text("cases:\n  - id: one\n", encoding="utf-8")
+
+    first = collect_dataset_provenance(path, case_count=1)
+    path.write_text("cases:\n  - id: two\n", encoding="utf-8")
+    second = collect_dataset_provenance(path, case_count=1)
+
+    assert first["path"] == str(path)
+    assert first["case_count"] == 1
+    assert first["sha256"]
+    assert first["sha256"] != second["sha256"]

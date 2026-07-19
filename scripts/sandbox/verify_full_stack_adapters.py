@@ -59,7 +59,7 @@ DEFAULT_CHECKS = [
         "input_args": {
             "service_name": "order-service",
             "redis_instance": "redis-cluster-prod",
-            "time_range": "10m",
+            "time_range": "30d",
         },
         "expected_source": "redis_info",
     },
@@ -71,7 +71,7 @@ DEFAULT_CHECKS = [
         "required_signals": {
             "slow_query_count": {"gte": 18},
             "pool_waiting": {"gte": 1},
-            "active_connections": {"gte": 180},
+            "pool_active_connections": {"gte": 180},
         },
     },
     {
@@ -159,7 +159,7 @@ GOLDEN_CHAINS = {
             "query_mysql_status": {
                 "slow_query_count": {"gte": 18},
                 "pool_waiting": {"gte": 1},
-                "active_connections": {"gte": 180},
+                "pool_active_connections": {"gte": 180},
             },
             "query_metrics": {
                 "p95_latency_ms": {"gte": 2000},

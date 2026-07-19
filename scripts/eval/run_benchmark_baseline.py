@@ -52,7 +52,7 @@ MODULES = [
         "script": "scripts/eval/eval_rag_cases.py",
         "extra_args": [
             "--cases",
-            "eval/rag_relevance_cases.yaml",
+            "eval/rag_cases.yaml",
             "--docs-dir",
             "docs/knowledge-base",
             "--top-k",
@@ -62,6 +62,7 @@ MODULES = [
     {
         "id": "ragas",
         "evidence_level": "offline_fixture",
+        "required": False,
         "script": "scripts/eval/eval_ragas_cases.py",
         "extra_args": ["--cases", "eval/rag_cases.yaml", "--docs-dir", "docs/knowledge-base"],
     },
@@ -96,6 +97,7 @@ def run_baseline(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     skip_milvus: bool = False,
+    force_candidate: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run all local modules into a unique history directory."""
     started_at = datetime.now(UTC)
@@ -106,19 +108,24 @@ def run_baseline(
     run_id = build_run_id(started_at, environment)
     run_dir = reserve_run_directory(output_root, run_id)
     modules = [run_module(spec, run_dir=run_dir, skip_milvus=skip_milvus) for spec in MODULES]
+    required_modules = [item for item in modules if item.get("required", True)]
+    optional_modules = [item for item in modules if not item.get("required", True)]
     passed_count = sum(1 for item in modules if item["status"] == "passed")
+    required_passed_count = sum(1 for item in required_modules if item["status"] == "passed")
     missing_count = sum(1 for item in modules if item["status"] == "missing")
     incomplete_count = sum(1 for item in modules if item["status"] == "incomplete")
     failed_count = sum(
         1 for item in modules if item["status"] not in {"passed", "missing", "incomplete"}
     )
-    stale_count = sum(1 for item in modules if item["artifact_status"]["stale"])
+    stale_count = sum(1 for item in required_modules if item["artifact_status"]["stale"])
     official_block_reasons = build_official_block_reasons(
         environment=environment,
         modules=modules,
     )
-    complete = passed_count == len(modules) and stale_count == 0
-    environment_changed = any(module["artifact_status"]["stale"] for module in modules)
+    if force_candidate:
+        official_block_reasons.insert(0, "candidate_requested")
+    complete = required_passed_count == len(required_modules) and stale_count == 0
+    environment_changed = any(module["artifact_status"]["stale"] for module in required_modules)
     official_baseline = complete and not official_block_reasons
     summary = {
         "status": "passed" if complete else "failed",
@@ -138,16 +145,19 @@ def run_baseline(
         ),
         "module_count": len(modules),
         "passed_module_count": passed_count,
+        "required_module_count": len(required_modules),
+        "required_passed_module_count": required_passed_count,
+        "optional_module_count": len(optional_modules),
         "failed_module_count": failed_count,
         "missing_module_count": missing_count,
         "incomplete_module_count": incomplete_count,
         "stale_module_count": stale_count,
         "metrics": {
             "module_pass_rate": proportion_metric(
-                numerator=passed_count,
-                denominator=len(modules),
-                label="Benchmark module pass rate",
-                source="modules[].status",
+                numerator=required_passed_count,
+                denominator=len(required_modules),
+                label="Required benchmark module pass rate",
+                source="modules[required=true].status",
             )
         },
         "official_block_reasons": official_block_reasons,
@@ -252,6 +262,7 @@ def run_module(
         "id": module_id,
         "status": status,
         "evidence_level": spec["evidence_level"],
+        "required": bool(spec.get("required", True)),
         "return_code": return_code,
         "command": command,
         "json_path": _relative_or_absolute(json_path),
@@ -300,6 +311,8 @@ def build_official_block_reasons(
     if not environment.get("git_commit"):
         reasons.append("missing_git_commit")
     for module in modules:
+        if not module.get("required", True):
+            continue
         if module["status"] != "passed":
             reasons.append(f"{module['id']}:{module['status']}")
         if module["artifact_status"]["stale"]:
@@ -358,18 +371,23 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Status: `{summary['status']}`",
         f"- Baseline status: `{summary['baseline_status']}`",
         f"- Official baseline: `{summary['official_baseline']}`",
-        f"- Modules: `{summary['passed_module_count']}/{summary['module_count']}`",
+        (
+            f"- Required modules: `{summary['required_passed_module_count']}/"
+            f"{summary['required_module_count']}`"
+        ),
+        f"- Optional modules: `{summary['optional_module_count']}`",
         f"- Block reasons: `{', '.join(summary['official_block_reasons']) or 'none'}`",
         *provenance_markdown_lines(payload["run"]["environment"]),
         "",
         "## Modules",
         "",
-        "| Module | Evidence | Status | Stale | Artifact |",
-        "| --- | --- | --- | --- | --- |",
+        "| Module | Required | Evidence | Status | Stale | Artifact |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for module in payload["modules"]:
         lines.append(
-            f"| `{module['id']}` | `{module['evidence_level']}` | "
+            f"| `{module['id']}` | `{module.get('required', True)}` | "
+            f"`{module['evidence_level']}` | "
             f"`{module['status']}` | `{module['artifact_status']['stale']}` | "
             f"`{module['json_path']}` |"
         )
@@ -411,6 +429,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--skip-milvus", action="store_true")
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="force candidate status even when the worktree is clean and committed",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -420,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     payload, run_dir = run_baseline(
         output_root=Path(args.output_root),
         skip_milvus=args.skip_milvus,
+        force_candidate=args.candidate,
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))

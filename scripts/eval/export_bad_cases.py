@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+from filelock import FileLock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -25,6 +28,15 @@ from app.services.feedback_service import (
     stable_eval_case_id,
     summarize_eval_backlog,
 )
+from app.utils.redaction import redact_sensitive_data
+from app.utils.structured_data import as_dict
+
+REVIEW_TRANSITIONS = {
+    "new": {"reviewed", "rejected"},
+    "reviewed": {"promoted", "rejected"},
+    "promoted": set(),
+    "rejected": set(),
+}
 
 DEFAULT_FEEDBACK_PATH = REPO_ROOT / config.aiops_feedback_path
 DEFAULT_RAG_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
@@ -34,6 +46,7 @@ DEFAULT_BACKLOG_PATH = REPO_ROOT / config.eval_backlog_path
 DEFAULT_EVAL_SUMMARY_PATH = REPO_ROOT / config.eval_summary_path
 DEFAULT_RAGAS_SUMMARY_PATH = REPO_ROOT / config.ragas_eval_summary_path
 DEFAULT_CHANGE_SUMMARY_PATH = REPO_ROOT / "logs" / "change_eval_summary.json"
+FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 
 def export_bad_cases(
@@ -44,6 +57,7 @@ def export_bad_cases(
     aiops_cases_path: str | Path = DEFAULT_AIOPS_CASES_PATH,
     change_cases_path: str | Path = DEFAULT_CHANGE_CASES_PATH,
     eval_summary_path: str | Path | list[str | Path] | None = None,
+    reference_store: Any | None = None,
     promote_to_eval: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -52,11 +66,15 @@ def export_bad_cases(
     Official eval YAML files are only changed when promote_to_eval is explicitly enabled.
     """
     service = FeedbackService(feedback_path)
-    bad_cases = service.list_bad_cases(high_value_only=True)
+    bad_cases = service.list_bad_cases(
+        high_value_only=True,
+        reference_store=reference_store,
+    )
+    bad_cases = [item for item in bad_cases if item.reference_status != "orphaned"]
     eval_backlog_items = backlog_from_eval_summaries(eval_summary_path)
     backlog_items = merge_backlog_items(
         [
-            *service.list_eval_backlog(),
+            *[item for item in service.list_eval_backlog() if item.review_status != "rejected"],
             *[build_eval_backlog_item(item, source="feedback_export") for item in bad_cases],
             *eval_backlog_items,
         ]
@@ -211,6 +229,7 @@ def apply_backlog_reviews(
     feedback_path: str | Path = DEFAULT_FEEDBACK_PATH,
     reviewed_backlog_path: str | Path = DEFAULT_BACKLOG_PATH,
     dry_run: bool = False,
+    reviewed_by: str = "manual-review",
 ) -> dict[str, Any]:
     """Apply human-reviewed backlog statuses from an exported backlog artifact to JSONL."""
     reviewed_items = _load_backlog_items(reviewed_backlog_path)
@@ -224,6 +243,7 @@ def apply_backlog_reviews(
     updated_count = _rewrite_eval_backlog_statuses(
         feedback_path,
         status_by_backlog_id=status_by_backlog_id,
+        reviewed_by=reviewed_by,
         dry_run=dry_run,
     )
     return {
@@ -246,6 +266,7 @@ def mark_promoted_backlog_items(
         feedback_path,
         feedback_ids=set(exported_feedback_ids),
         status="promoted",
+        reviewed_by="export_bad_cases",
         dry_run=dry_run,
     )
 
@@ -259,8 +280,7 @@ def merge_backlog_items(items: list[EvalBacklogItem]) -> list[EvalBacklogItem]:
             merged[key] = item
             continue
         existing = merged[key]
-        if _priority_rank(item.priority) < _priority_rank(existing.priority):
-            merged[key] = item
+        merged[key] = _merge_backlog_item(existing, item)
     return sorted(
         merged.values(),
         key=lambda item: (
@@ -272,21 +292,74 @@ def merge_backlog_items(items: list[EvalBacklogItem]) -> list[EvalBacklogItem]:
     )
 
 
+def _merge_backlog_item(existing: EvalBacklogItem, incoming: EvalBacklogItem) -> EvalBacklogItem:
+    """Merge duplicate drafts without losing review state or richer evidence."""
+    higher_priority = (
+        incoming
+        if _priority_rank(incoming.priority) < _priority_rank(existing.priority)
+        else existing
+    )
+    newer = incoming if incoming.updated_at >= existing.updated_at else existing
+    review_source = max(
+        (existing, incoming),
+        key=lambda item: (
+            _review_status_rank(item.review_status),
+            item.reviewed_at or item.updated_at,
+            item.updated_at,
+        ),
+    )
+    return higher_priority.model_copy(
+        update={
+            "backlog_id": existing.backlog_id or incoming.backlog_id,
+            "feedback_id": existing.feedback_id or incoming.feedback_id,
+            "source": newer.source or higher_priority.source,
+            "failure_reasons": _dedupe([*existing.failure_reasons, *incoming.failure_reasons])[:8],
+            "evidence_snapshot": _merge_mapping(
+                existing.evidence_snapshot,
+                incoming.evidence_snapshot,
+            ),
+            "links": _merge_mapping(existing.links, incoming.links),
+            "metadata": _merge_mapping(existing.metadata, incoming.metadata),
+            "created_at": min(existing.created_at, incoming.created_at),
+            "updated_at": max(existing.updated_at, incoming.updated_at),
+            "review_status": review_source.review_status,
+            "reviewed_by": review_source.reviewed_by,
+            "reviewed_at": review_source.reviewed_at,
+        }
+    )
+
+
+def _merge_mapping(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Prefer populated incoming values while retaining existing provenance fields."""
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if value not in (None, "", [], {}):
+            merged[key] = value
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _review_status_rank(status: str) -> int:
+    return {"new": 0, "reviewed": 1, "rejected": 2, "promoted": 3}.get(status, -1)
+
+
 def write_backlog(path: str | Path, items: list[EvalBacklogItem]) -> None:
     """Write reviewable backlog drafts without mutating official eval YAML."""
     payload = {
         "summary": summarize_eval_backlog(items),
-        "items": [item.model_dump(mode="json") for item in items],
+        "items": [_sanitize_export_payload(item.model_dump(mode="json")) for item in items],
     }
     backlog_path = Path(path)
     backlog_path.parent.mkdir(parents=True, exist_ok=True)
-    if backlog_path.suffix.lower() == ".json":
-        backlog_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    else:
-        backlog_path.write_text(
-            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, width=100),
-            encoding="utf-8",
-        )
+    with FileLock(str(backlog_path.with_suffix(f"{backlog_path.suffix}.lock"))):
+        if backlog_path.suffix.lower() == ".json":
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+        else:
+            content = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, width=100)
+        temp_path = backlog_path.with_suffix(f"{backlog_path.suffix}.tmp")
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(temp_path, backlog_path)
 
 
 def _load_backlog_items(path: str | Path) -> list[EvalBacklogItem]:
@@ -303,7 +376,15 @@ def _load_backlog_items(path: str | Path) -> list[EvalBacklogItem]:
     except (OSError, json.JSONDecodeError, yaml.YAMLError):
         return []
     raw_items = payload.get("items", []) if isinstance(payload, dict) else []
-    return [EvalBacklogItem.model_validate(item) for item in raw_items if isinstance(item, dict)]
+    items: list[EvalBacklogItem] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            items.append(EvalBacklogItem.model_validate(item))
+        except Exception:
+            continue
+    return items
 
 
 def _rewrite_eval_backlog_statuses(
@@ -312,37 +393,52 @@ def _rewrite_eval_backlog_statuses(
     status_by_backlog_id: dict[str, str] | None = None,
     feedback_ids: set[str] | None = None,
     status: str = "reviewed",
+    reviewed_by: str = "system",
     dry_run: bool = False,
 ) -> int:
     path = Path(feedback_path)
     if not path.exists():
         return 0
-    updated_count = 0
-    rewritten: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            rewritten.append(line)
-            continue
-        if record.get("record_type") == "eval_backlog" and isinstance(record.get("payload"), dict):
-            payload = record["payload"]
-            target_status = None
-            backlog_id = str(payload.get("backlog_id") or "")
-            feedback_id = str(payload.get("feedback_id") or "")
-            if status_by_backlog_id and backlog_id in status_by_backlog_id:
-                target_status = status_by_backlog_id[backlog_id]
-            elif feedback_ids and feedback_id in feedback_ids:
-                target_status = status
-            if target_status and payload.get("review_status") != target_status:
-                payload["review_status"] = target_status
-                updated_count += 1
-        rewritten.append(json.dumps(record, ensure_ascii=False))
-    if updated_count and not dry_run:
-        path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-    return updated_count
+    with FileLock(str(path.with_suffix(f"{path.suffix}.lock"))):
+        updated_count = 0
+        rewritten: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                rewritten.append(line)
+                continue
+            if record.get("record_type") == "eval_backlog" and isinstance(
+                record.get("payload"), dict
+            ):
+                payload = record["payload"]
+                target_status = None
+                backlog_id = str(payload.get("backlog_id") or "")
+                feedback_id = str(payload.get("feedback_id") or "")
+                if status_by_backlog_id and backlog_id in status_by_backlog_id:
+                    target_status = status_by_backlog_id[backlog_id]
+                elif feedback_ids and feedback_id in feedback_ids:
+                    target_status = status
+                current_status = str(payload.get("review_status") or "new")
+                if target_status and target_status != current_status:
+                    if target_status not in REVIEW_TRANSITIONS.get(current_status, set()):
+                        raise ValueError(
+                            f"invalid backlog status transition: {current_status} -> {target_status}"
+                        )
+                    now = datetime.now(UTC).isoformat()
+                    payload["review_status"] = target_status
+                    payload["reviewed_by"] = reviewed_by
+                    payload["reviewed_at"] = now
+                    payload["updated_at"] = now
+                    updated_count += 1
+            rewritten.append(json.dumps(record, ensure_ascii=False))
+        if updated_count and not dry_run:
+            temp_path = path.with_suffix(f"{path.suffix}.tmp")
+            temp_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+            os.replace(temp_path, path)
+        return updated_count
 
 
 def backlog_from_eval_summary(path: str | Path | None) -> list[EvalBacklogItem]:
@@ -366,13 +462,43 @@ def backlog_from_eval_summary(path: str | Path | None) -> list[EvalBacklogItem]:
         failed_cases = [
             item
             for item in payload.get("case_scores", [])
-            if isinstance(item, dict) and str(item.get("status") or "").lower() == "failed"
+            if isinstance(item, dict) and _case_score_failed(item)
         ]
+    run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+    artifact = summary_path.name
     return [
-        _eval_failure_to_backlog_item(item, default_suite=_suite_from_eval_payload(payload))
+        _eval_failure_to_backlog_item(
+            _with_parent_eval_provenance(item, run=run, artifact=artifact),
+            default_suite=_suite_from_eval_payload(payload),
+        )
         for item in failed_cases
         if isinstance(item, dict) and item.get("id")
     ]
+
+
+def _with_parent_eval_provenance(
+    item: dict[str, Any],
+    *,
+    run: dict[str, Any],
+    artifact: str,
+) -> dict[str, Any]:
+    """Attach parent run identity to compact failed-case rows."""
+    merged = dict(item)
+    item_run = item.get("run") if isinstance(item.get("run"), dict) else {}
+    merged["run"] = {**run, **item_run}
+    merged.setdefault("artifact", artifact)
+    return merged
+
+
+def _case_score_failed(item: dict[str, Any]) -> bool:
+    """Recognize the production RAGAS failure shape and legacy status rows."""
+    if isinstance(item.get("passed"), bool):
+        return not item["passed"]
+    status = str(item.get("status") or "").strip().lower()
+    if status in {"failed", "error"}:
+        return True
+    failed_metrics = item.get("failed_metrics")
+    return isinstance(failed_metrics, list) and bool(failed_metrics)
 
 
 def backlog_from_eval_summaries(
@@ -420,14 +546,80 @@ def _eval_failure_to_backlog_item(
             "expected_sources": item.get("expected_sources", []),
             "retrieved_sources": item.get("retrieved_sources", []),
             "ragas_tags": item.get("tags") or item.get("ragas_tags", []),
+            "provenance": _provenance_from_eval_failure(item),
         },
-        links={"eval_case_id": case_id},
+        links=_eval_failure_links(item, case_id),
         metadata={
             "from_eval_summary": True,
             "quality_boundary": _quality_boundary_for_suite(suite),
             "promotion_policy": _promotion_policy_for_suite(suite),
+            "provenance": _provenance_from_eval_failure(item),
         },
     )
+
+
+def _provenance_from_eval_failure(item: dict[str, Any]) -> dict[str, Any]:
+    """Retain concrete model, dataset, and run identity for imported failures."""
+    run = item.get("run") if isinstance(item.get("run"), dict) else {}
+    provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+    environment = (
+        run.get("environment")
+        if isinstance(run.get("environment"), dict)
+        else provenance.get("environment")
+        if isinstance(provenance.get("environment"), dict)
+        else {}
+    )
+    dataset = (
+        run.get("dataset")
+        if isinstance(run.get("dataset"), dict)
+        else provenance.get("dataset")
+        if isinstance(provenance.get("dataset"), dict)
+        else {}
+    )
+    return {
+        "run_id": str(run.get("run_id") or provenance.get("run_id") or item.get("run_id") or ""),
+        "model": str(
+            _dict_value(environment, "execution_identity", "actual_model")
+            or run.get("model")
+            or run.get("judge_model")
+            or provenance.get("model")
+            or environment.get("rag_model")
+            or ""
+        ),
+        "embedding_model": str(
+            _dict_value(environment, "execution_identity", "actual_embedding_model")
+            or run.get("embedding_model")
+            or provenance.get("embedding_model")
+            or environment.get("embedding_model")
+            or ""
+        ),
+        "dataset": dataset,
+        "evaluation_fingerprint": str(
+            environment.get("evaluation_fingerprint")
+            or provenance.get("evaluation_fingerprint")
+            or ""
+        ),
+        "artifact": str(item.get("artifact") or provenance.get("artifact") or ""),
+    }
+
+
+def _dict_value(payload: dict[str, Any], *keys: str) -> Any:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _eval_failure_links(item: dict[str, Any], case_id: str) -> dict[str, str]:
+    provenance = _provenance_from_eval_failure(item)
+    links = {"eval_case_id": case_id}
+    for key in ("run_id", "artifact"):
+        value = str(provenance.get(key) or "").strip()
+        if value:
+            links[key] = value
+    return links
 
 
 def _suite_from_eval_payload(payload: dict[str, Any]) -> str:
@@ -688,7 +880,7 @@ def build_rag_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
         case["expected_sources"] = expected_sources
     if item.category == "missing_citation":
         case["citation_required"] = True
-    return case
+    return _sanitize_export_payload(case)
 
 
 def build_aiops_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
@@ -699,6 +891,9 @@ def build_aiops_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
         return None
     expected_tools = _expected_tools_from_feedback(item)
     forbidden_tools = ["delete_pod", "restart_database", "execute_sql"]
+    expected_risk_policy, expected_needs_approval, expected_report_status = (
+        _risk_expectations_from_feedback(item)
+    )
     case: dict[str, Any] = {
         "id": stable_eval_case_id("fb_aiops", f"{item.feedback_id}_{query}"),
         "title": f"Feedback regression: {item.category_label or item.category}",
@@ -713,9 +908,9 @@ def build_aiops_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
         "expected_executed_tools": expected_tools,
         "forbidden_tools": forbidden_tools,
         "expected_root_keywords": _expected_keywords(item.expected_answer or item.reason)[:4],
-        "expected_risk_policy": "forbidden" if item.category == "permission_denied" else "allow",
-        "expected_needs_approval": False,
-        "expected_report_status": "completed",
+        "expected_risk_policy": expected_risk_policy,
+        "expected_needs_approval": expected_needs_approval,
+        "expected_report_status": expected_report_status,
         "min_evidence_count": 1,
         "min_confidence": 0.3,
         "report_must_contain": _report_must_contain(item),
@@ -732,7 +927,35 @@ def build_aiops_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
             for call in item.evidence.tool_calls
             if str(call.get("status", "")).lower() in {"failed", "error", "timeout"}
         ]
-    return case
+    return _sanitize_export_payload(case)
+
+
+def _risk_expectations_from_feedback(item: BadCaseFeedback) -> tuple[str, bool, str]:
+    """Keep promoted risk expectations conservative and evidence-aligned."""
+    metadata = item.evidence.metadata or {}
+    policy_hint = str(
+        metadata.get("expected_risk_policy")
+        or metadata.get("risk_policy")
+        or metadata.get("expected_policy")
+        or ""
+    ).strip()
+    approval_hint = metadata.get("expected_needs_approval")
+    status_hint = str(metadata.get("expected_report_status") or "").strip()
+    if item.category == "permission_denied":
+        return policy_hint or "forbidden", False, status_hint or "blocked"
+    if policy_hint in {"forbidden", "approval_required", "allow"}:
+        needs_approval = (
+            bool(approval_hint)
+            if isinstance(approval_hint, bool)
+            else policy_hint == "approval_required"
+        )
+        report_status = status_hint or ("waiting_approval" if needs_approval else "completed")
+        return policy_hint, needs_approval, report_status
+    return (
+        "allow",
+        bool(approval_hint) if isinstance(approval_hint, bool) else False,
+        status_hint or "completed",
+    )
 
 
 def _case_id_for_item(prefix: str, item: BadCaseFeedback) -> str:
@@ -747,27 +970,52 @@ def build_change_eval_case(item: BadCaseFeedback) -> dict[str, Any] | None:
         return None
     metadata = item.evidence.metadata
     expected_keywords = _expected_keywords(item.expected_answer or item.reason)
-    return {
-        "id": stable_eval_case_id("fb_change", f"{item.feedback_id}_{query}"),
-        "title": f"Feedback safe-change regression: {item.category_label or item.category}",
-        "scenario": "safe_change",
-        "incident_id": metadata.get("incident_id") or "feedback-change-incident",
-        "approval_status": "approved",
-        "action": metadata.get("action") or query,
-        "expected_policy": "approval_required",
-        "expected_mode": metadata.get("mode") or "dry_run_only",
-        "expected_precheck": True,
-        "expected_dry_run": True,
-        "expected_manual_record_boundary": True,
-        "expected_rollback_keywords": expected_keywords[:4] or ["rollback", "回滚"],
-        "expected_observe_metrics": metadata.get("observe_metrics") or [],
-        "feedback": {
-            "feedback_id": item.feedback_id,
-            "category": item.category,
-            "reason": item.reason,
-            "quality_boundary": "Safe-change feedback is promoted only after human review.",
-        },
-    }
+    return _sanitize_export_payload(
+        {
+            "id": stable_eval_case_id("fb_change", f"{item.feedback_id}_{query}"),
+            "title": f"Feedback safe-change regression: {item.category_label or item.category}",
+            "scenario": "safe_change",
+            "incident_id": metadata.get("incident_id") or "feedback-change-incident",
+            "approval_status": "approved",
+            "action": metadata.get("action") or query,
+            "expected_policy": "approval_required",
+            "expected_mode": metadata.get("mode") or "dry_run_only",
+            "expected_precheck": True,
+            "expected_dry_run": True,
+            "expected_manual_record_boundary": True,
+            "expected_rollback_keywords": expected_keywords[:4] or ["rollback", "回滚"],
+            "expected_observe_metrics": metadata.get("observe_metrics") or [],
+            "feedback": {
+                "feedback_id": item.feedback_id,
+                "category": item.category,
+                "reason": item.reason,
+                "quality_boundary": "Safe-change feedback is promoted only after human review.",
+            },
+        }
+    )
+
+
+def _sanitize_export_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Redact secrets and neutralize spreadsheet formulas before YAML export."""
+    redacted = redact_sensitive_data(
+        payload,
+        redact_auth_scheme=True,
+        max_string_length=12_000,
+    )
+    return as_dict(_neutralize_formula_values(redacted))
+
+
+def _neutralize_formula_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _neutralize_formula_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_neutralize_formula_values(item) for item in value]
+    if isinstance(value, tuple):
+        return [_neutralize_formula_values(item) for item in value]
+    if isinstance(value, str) and value.lstrip().startswith(FORMULA_PREFIXES):
+        prefix_length = len(value) - len(value.lstrip())
+        return f"{value[:prefix_length]}'{value[prefix_length:]}"
+    return value
 
 
 def _expected_sources_from_feedback(item: BadCaseFeedback) -> list[str]:
@@ -798,7 +1046,14 @@ def _expected_tools_from_feedback(item: BadCaseFeedback) -> list[str]:
 
 
 def _expected_keywords(text: str) -> list[str]:
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", text)
+    sanitized_text = str(
+        redact_sensitive_data(
+            text,
+            redact_auth_scheme=True,
+            max_string_length=4000,
+        )
+    )
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", sanitized_text)
     ignored = {"expected", "answer", "source", "file", "chunk", "应该", "需要", "引用"}
     keywords = [token for token in tokens if token.lower() not in ignored]
     return _dedupe(keywords)[:6]

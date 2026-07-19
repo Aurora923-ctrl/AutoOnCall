@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -11,9 +12,18 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SQL_PATH = ROOT / "deploy" / "adapters" / "mysql-init" / "001_init.sql"
 DEFAULT_REDIS_CONTAINER = "autooncall-full-redis"
 DEFAULT_MYSQL_CONTAINER = "autooncall-full-mysql"
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "123456"
-MYSQL_DATABASE = "autooncall"
+EXPECTED_TARGETS = {
+    DEFAULT_REDIS_CONTAINER: ("autooncall-full", "redis"),
+    DEFAULT_MYSQL_CONTAINER: ("autooncall-full", "mysql"),
+}
+
+
+def mysql_credentials() -> tuple[str, str, str]:
+    return (
+        os.getenv("AUTOONCALL_MYSQL_SEED_USER", "root"),
+        os.getenv("AUTOONCALL_MYSQL_ROOT_PASSWORD", "123456"),
+        os.getenv("AUTOONCALL_MYSQL_DATABASE", "autooncall"),
+    )
 
 
 def run_command(args: list[str], *, input_text: str | None = None) -> str:
@@ -65,6 +75,7 @@ def wait_for_redis(container: str) -> None:
 
 
 def wait_for_mysql(container: str) -> None:
+    mysql_user, mysql_password, _mysql_database = mysql_credentials()
     wait_for_command(
         [
             "docker",
@@ -74,15 +85,39 @@ def wait_for_mysql(container: str) -> None:
             "ping",
             "-h",
             "127.0.0.1",
-            f"-u{MYSQL_USER}",
-            f"-p{MYSQL_PASSWORD}",
+            f"-u{mysql_user}",
+            f"-p{mysql_password}",
         ],
         expected_text="mysqld is alive",
         timeout_seconds=120,
     )
 
 
+def verify_local_compose_target(container: str) -> None:
+    expected = EXPECTED_TARGETS.get(container)
+    if expected is None:
+        raise RuntimeError(f"Container is not an allowlisted local seed target: {container}")
+    project, service = expected
+    actual = run_command(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "com.docker.compose.project"}}|'
+            '{{index .Config.Labels "com.docker.compose.service"}}|'
+            "{{.State.Running}}",
+            container,
+        ]
+    )
+    if actual.strip() != f"{project}|{service}|true":
+        raise RuntimeError(
+            f"Container identity check failed for {container}: expected "
+            f"{project}|{service}|true, got {actual!r}"
+        )
+
+
 def seed_redis(container: str) -> None:
+    verify_local_compose_target(container)
     wait_for_redis(container)
     run_command(
         [
@@ -139,7 +174,9 @@ def seed_redis(container: str) -> None:
 
 
 def seed_mysql(container: str, sql_path: Path) -> None:
+    verify_local_compose_target(container)
     wait_for_mysql(container)
+    mysql_user, mysql_password, mysql_database = mysql_credentials()
     sql = sql_path.read_text(encoding="utf-8")
     run_command(
         [
@@ -148,9 +185,9 @@ def seed_mysql(container: str, sql_path: Path) -> None:
             "-i",
             container,
             "mysql",
-            f"-u{MYSQL_USER}",
-            f"-p{MYSQL_PASSWORD}",
-            MYSQL_DATABASE,
+            f"-u{mysql_user}",
+            f"-p{mysql_password}",
+            mysql_database,
         ],
         input_text=sql,
     )
@@ -160,9 +197,9 @@ def seed_mysql(container: str, sql_path: Path) -> None:
             "exec",
             container,
             "mysql",
-            f"-u{MYSQL_USER}",
-            f"-p{MYSQL_PASSWORD}",
-            MYSQL_DATABASE,
+            f"-u{mysql_user}",
+            f"-p{mysql_password}",
+            mysql_database,
             "-e",
             (
                 "UPDATE aiops_dependency_snapshots "
@@ -185,11 +222,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sql", default=str(DEFAULT_SQL_PATH))
     parser.add_argument("--skip-redis", action="store_true")
     parser.add_argument("--skip-mysql", action="store_true")
+    parser.add_argument(
+        "--acknowledge-local-only",
+        action="store_true",
+        help="Required confirmation for writes to the allowlisted local Compose containers.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if not args.acknowledge_local_only:
+        raise SystemExit("Refusing to seed containers without --acknowledge-local-only")
     if not args.skip_redis:
         seed_redis(args.redis_container)
     if not args.skip_mysql:

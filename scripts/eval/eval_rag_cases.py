@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import re
@@ -30,9 +29,14 @@ from app.services.rag_retrieval_service import (
     document_to_retrieval_chunk,
     infer_retrieval_preferences,
     retrieval_intent_multiplier,
+    select_required_sources,
 )
 from scripts.eval.benchmark_metrics import proportion_metric
-from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
+from scripts.eval.eval_environment import (
+    collect_dataset_provenance,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
 DEFAULT_DOCS_DIR = REPO_ROOT / "docs" / "knowledge-base"
@@ -100,6 +104,46 @@ def load_cases(path: str | Path = DEFAULT_CASES_PATH) -> list[dict[str, Any]]:
             expanded.append(_normalize_case(item))
     _validate_cases(expanded)
     return expanded
+
+
+def audit_case_set_isolation(
+    target_path: str | Path,
+    *,
+    comparison_paths: Iterable[str | Path],
+) -> dict[str, Any]:
+    """Detect exact case-id/query reuse across independently claimed datasets."""
+    target = load_cases(target_path)
+    target_ids = {str(case["id"]) for case in target}
+    target_queries = {
+        normalize_query_identity(str(case.get("query") or "")): str(case["id"]) for case in target
+    }
+    overlaps = []
+    for comparison_path in comparison_paths:
+        path = Path(comparison_path)
+        if path.resolve() == Path(target_path).resolve() or not path.exists():
+            continue
+        for case in load_cases(path):
+            case_id = str(case["id"])
+            query_identity = normalize_query_identity(str(case.get("query") or ""))
+            if case_id in target_ids or query_identity in target_queries:
+                overlaps.append(
+                    {
+                        "comparison_path": str(path),
+                        "target_case_id": target_queries.get(query_identity, case_id),
+                        "comparison_case_id": case_id,
+                        "match": "case_id" if case_id in target_ids else "exact_query",
+                    }
+                )
+    return {
+        "status": "passed" if not overlaps else "failed",
+        "target_path": str(Path(target_path)),
+        "comparison_paths": [str(Path(path)) for path in comparison_paths],
+        "overlaps": overlaps,
+    }
+
+
+def normalize_query_identity(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
 
 
 def _validate_cases(cases: list[dict[str, Any]]) -> None:
@@ -198,7 +242,7 @@ def evaluate_cases(
                 "vector-only is an offline term-vector surrogate, not a live embedding service"
             ),
             "cases_path": str(cases_file),
-            "dataset": _dataset_provenance(cases_file, cases),
+            "dataset": collect_dataset_provenance(cases_file, case_count=len(cases)),
             "docs_dir": str(Path(docs_dir)),
             "top_k": top_k,
             "cutoffs": list(EVAL_CUTOFFS),
@@ -209,19 +253,6 @@ def evaluate_cases(
         },
         "summary": summary,
         "cases": results,
-    }
-
-
-def _dataset_provenance(path: Path, cases: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return immutable dataset identity fields for run-to-file traceability."""
-    content = path.read_bytes()
-    stat = path.stat()
-    return {
-        "path": str(path),
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "size_bytes": len(content),
-        "modified_at_ns": stat.st_mtime_ns,
-        "case_count": len(cases),
     }
 
 
@@ -920,6 +951,13 @@ def search_offline(
     eligible.sort(key=lambda item: (-item["offline_score"], item["source_file"], item["chunk_id"]))
     for item in eligible:
         item.pop("_gate_score", None)
+    required_sources = preferences.get("required_sources")
+    if fusion_strategy == "weighted" and isinstance(required_sources, set) and required_sources:
+        eligible = select_required_sources(
+            eligible,
+            required_sources=required_sources,
+            top_k=top_k,
+        )
     if fusion_strategy == "weighted" and bool(preferences.get("require_source_diversity")):
         return _select_diverse_sources(eligible, top_k=top_k)
     return eligible[:top_k]

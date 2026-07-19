@@ -7,10 +7,12 @@ import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 LOKI_PUSH_URL = os.getenv("LOKI_PUSH_URL", "http://loki:3100/loki/api/v1/push")
 PUSH_INTERVAL_SECONDS = int(os.getenv("LOKI_PUSH_INTERVAL_SECONDS", "30"))
+READY_FILE = Path("/tmp/autooncall-loki-emitter.ready")
 
 LOG_TEMPLATES = [
     {
@@ -40,7 +42,7 @@ LOG_TEMPLATES = [
         "endpoint": "POST /api/payments",
         "incident_id": "INC-MYSQL-001",
         "message": (
-            "WARN payment-service slow query digest=9f3a-pay-report avg_ms=2280 "
+            "ERROR payment-service slow query timeout digest=9f3a-pay-report avg_ms=2280 "
             "pool_waiting=6 active_connections=188/200 feature_flag=PAYMENT_REPORT_ENABLED "
             "endpoint=POST /api/payments"
         ),
@@ -104,9 +106,11 @@ def main() -> None:
     while True:
         try:
             push_once()
+            READY_FILE.touch()
             print("pushed business log fixtures to Loki", flush=True)
             time.sleep(PUSH_INTERVAL_SECONDS)
         except (OSError, urllib.error.URLError, RuntimeError) as exc:
+            READY_FILE.unlink(missing_ok=True)
             print(f"Loki log push failed: {exc}", flush=True)
             time.sleep(5)
 

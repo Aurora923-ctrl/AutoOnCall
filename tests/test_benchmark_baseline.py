@@ -3,6 +3,7 @@
 import json
 
 from scripts.eval.run_benchmark_baseline import (
+    MODULES,
     artifact_status,
     build_official_block_reasons,
     reserve_run_directory,
@@ -56,6 +57,19 @@ def test_local_knowledge_checks_without_milvus_are_incomplete_baseline_evidence(
     assert artifact_status({"summary": {"status": "passed_without_milvus"}}) == "incomplete"
 
 
+def test_benchmark_uses_the_stable_rag_delivery_contract() -> None:
+    rag = next(module for module in MODULES if module["id"] == "rag")
+
+    assert "eval/rag_cases.yaml" in rag["extra_args"]
+    assert "eval/rag_relevance_cases.yaml" not in rag["extra_args"]
+
+
+def test_ragas_is_optional_benchmark_evidence() -> None:
+    ragas = next(module for module in MODULES if module["id"] == "ragas")
+
+    assert ragas["required"] is False
+
+
 def test_benchmark_writes_scorecard_into_same_run_directory(tmp_path) -> None:
     run_dir = tmp_path / "run-001"
     run_dir.mkdir()
@@ -70,6 +84,9 @@ def test_benchmark_writes_scorecard_into_same_run_directory(tmp_path) -> None:
             "baseline_status": "candidate_dirty_worktree",
             "official_baseline": False,
             "module_count": 0,
+            "required_module_count": 0,
+            "required_passed_module_count": 0,
+            "optional_module_count": 0,
             "failed_module_count": 0,
             "metrics": {},
             "official_block_reasons": ["dirty_worktree"],

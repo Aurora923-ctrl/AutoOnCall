@@ -2,7 +2,7 @@ name: autooncall-full
 
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:8.0.46
     container_name: autooncall-full-mysql
     command:
       - --character-set-server=utf8mb4
@@ -12,25 +12,25 @@ services:
       - --long-query-time=10
       - --performance-schema=ON
     environment:
-      MYSQL_ROOT_PASSWORD: "123456"
-      MYSQL_DATABASE: autooncall
-      MYSQL_USER: autooncall
-      MYSQL_PASSWORD: autooncall123
+      MYSQL_ROOT_PASSWORD: ${AUTOONCALL_MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: ${AUTOONCALL_MYSQL_DATABASE:-autooncall}
+      MYSQL_USER: ${AUTOONCALL_MYSQL_USER:-autooncall}
+      MYSQL_PASSWORD: ${AUTOONCALL_MYSQL_PASSWORD:-autooncall123}
     ports:
       - "127.0.0.1:13306:3306"
     volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/mysql8/data:/var/lib/mysql
+      - ${AUTOONCALL_INTERVIEW_DATA_ROOT:-D:/AppDataStorage/DockerData/autooncall-full}/mysql8/data:/var/lib/mysql
       - ../adapters/mysql-init:/docker-entrypoint-initdb.d:ro
     networks:
       - autooncall-full-net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p123456"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
       interval: 10s
       timeout: 5s
       retries: 30
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.9-alpine
     container_name: autooncall-full-redis
     command:
       - redis-server
@@ -45,7 +45,7 @@ services:
     ports:
       - "127.0.0.1:16379:6379"
     volumes:
-      - D:/AppDataStorage/DockerData/autooncall-full/redis7/data:/data
+      - ${AUTOONCALL_INTERVIEW_DATA_ROOT:-D:/AppDataStorage/DockerData/autooncall-full}/redis7/data:/data
     networks:
       - autooncall-full-net
     healthcheck:
@@ -55,7 +55,7 @@ services:
       retries: 30
 
   metrics-exporter:
-    image: python:3.11-alpine
+    image: python:3.11.15-alpine
     container_name: autooncall-full-metrics-exporter
     command: ["python", "/app/metrics_exporter.py"]
     ports:
@@ -87,7 +87,7 @@ services:
     volumes:
       - ${PROMETHEUS_CONFIG_FILE:-../adapters/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
       - ../adapters/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/prometheus:/prometheus
+      - ${AUTOONCALL_INTERVIEW_DATA_ROOT:-D:/AppDataStorage/DockerData/autooncall-full}/prometheus:/prometheus
     depends_on:
       metrics-exporter:
         condition: service_healthy
@@ -111,12 +111,17 @@ services:
       - "127.0.0.1:13100:3100"
     volumes:
       - ../adapters/loki-config.yml:/etc/loki/local-config.yml:ro
-      - D:/AppDataStorage/DockerData/autooncall-full/loki:/loki
+      - ${AUTOONCALL_INTERVIEW_DATA_ROOT:-D:/AppDataStorage/DockerData/autooncall-full}/loki:/loki
     networks:
       - autooncall-full-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
 
   loki-log-emitter:
-    image: python:3.11-alpine
+    image: python:3.11.15-alpine
     container_name: autooncall-full-loki-log-emitter
     command: ["python", "/app/loki_log_emitter.py"]
     environment:
@@ -125,9 +130,15 @@ services:
     volumes:
       - ../adapters/loki_log_emitter.py:/app/loki_log_emitter.py:ro
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
     networks:
       - autooncall-full-net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/autooncall-loki-emitter.ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
 
 networks:
   autooncall-full-net:

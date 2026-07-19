@@ -84,11 +84,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually inject the bounded Redis and MySQL faults.",
+    )
+    parser.add_argument(
+        "--acknowledge-local-only",
+        action="store_true",
+        help="Required with --execute; confirms the allowlisted local Compose targets.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if not args.execute or not args.acknowledge_local_only:
+        raise SystemExit("Refusing to inject faults without --execute --acknowledge-local-only")
     load_env_file(args.env_file)
     run_id = args.run_id or datetime.now(UTC).strftime("controlled-fault-e2e-%Y%m%dT%H%M%SZ")
     runner = ControlledFaultRunner(

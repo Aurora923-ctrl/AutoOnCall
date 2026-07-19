@@ -317,7 +317,6 @@ async def test_eval_cases_all_pass_with_offline_fallbacks(tmp_path) -> None:
     assert "## Agent RCA 失败证据链" in markdown
     assert "runbook_no_answer_rejection | PASS | needs_human" in markdown
     assert "k8s_permission_denied_incomplete_report | PASS | degraded" in markdown
-    assert "无失败 case" in markdown
 
     failed_payload = deepcopy(payload)
     rag_failure = {

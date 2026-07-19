@@ -80,9 +80,7 @@ def evaluate_performance(
         if sample["request_kind"] != "unknown"
     )
     failed_request_counts = Counter(
-        sample["request_kind"]
-        for sample in failed_requests
-        if sample["request_kind"] != "unknown"
+        sample["request_kind"] for sample in failed_requests if sample["request_kind"] != "unknown"
     )
     observed_levels = sorted(
         {

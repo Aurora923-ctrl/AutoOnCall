@@ -4,9 +4,11 @@ import asyncio
 
 import pytest
 
+from scripts.performance import run_real_model_acceptance
 from scripts.performance.run_real_model_acceptance import (
     _parse_sse_event,
     _request_summary,
+    acceptance_execution_identity,
     acceptance_run_status,
     load_rag_acceptance_cases,
     run_acceptance,
@@ -30,12 +32,29 @@ def test_request_summary_reports_stage6_acceptance_and_latency() -> None:
     assert payload["failed"] == 1
     assert payload["latency_ms"]["p50"] == 100.0
     assert payload["latency_ms"]["p95"] == 200.0
+    assert payload["latency_ms"]["count"] == 3
+    assert payload["accepted_latency_ms"]["count"] == 2
 
 
 def test_request_summary_does_not_treat_zero_required_as_met() -> None:
     payload = _request_summary([], required=0)
 
     assert payload["acceptance_status"] == "not_run"
+
+
+def test_real_model_acceptance_execution_identity_uses_response_model() -> None:
+    identity = acceptance_execution_identity(
+        [
+            {
+                "request_id": "request-1",
+                "request_kind": "rag",
+                "details": {"runtime_model": "qwen-max"},
+            }
+        ]
+    )
+
+    assert identity["actual_model"] == "qwen-max"
+    assert identity["actual_embedding_model"] == "not_observed"
 
 
 def test_real_model_rag_acceptance_requires_semantic_contract(tmp_path) -> None:
@@ -54,21 +73,24 @@ cases:
     )
     case = load_rag_acceptance_cases(cases_path)[0]
 
-    assert validate_rag_response(
-        {
-            "success": True,
-            "answer": "Check maxclients.",
-            "noAnswer": False,
-            "answerPolicy": "answer_with_citations",
-            "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
-            "retrieval": {
-                "status": "success",
-                "retrieval_mode": "hybrid_rrf_rerank",
+    assert (
+        validate_rag_response(
+            {
+                "success": True,
+                "answer": "Check maxclients.",
+                "noAnswer": False,
+                "answerPolicy": "answer_with_citations",
+                "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+                "retrieval": {
+                    "status": "success",
+                    "retrieval_mode": "hybrid_rrf_rerank",
+                },
+                "observability": {"runtime": {"llm_model": "qwen-max"}},
             },
-            "observability": {"runtime": {"llm_model": "qwen-max"}},
-        },
-        case,
-    ) == []
+            case,
+        )
+        == []
+    )
     assert validate_rag_response(
         {
             "success": True,
@@ -137,6 +159,7 @@ def test_real_model_refusal_rejects_citations() -> None:
             "answerPolicy": "refuse_without_trusted_source",
             "citations": [{"source_file": "unrelated.md", "chunk_id": "unrelated.md#1"}],
             "retrieval": {"status": "no_answer", "retrieval_mode": "hybrid_rrf_rerank"},
+            "observability": {"runtime": {"llm_model": "qwen-max"}},
         },
         case,
     ) == ["refusal returned citations"]
@@ -158,9 +181,34 @@ def test_real_model_refusal_requires_runtime_retrieval_evidence() -> None:
             "answerPolicy": "refuse_without_trusted_source",
             "citations": [],
             "retrieval": {"status": "no_answer", "retrieval_mode": "offline_fixture"},
+            "observability": {"runtime": {"llm_model": "qwen-max"}},
         },
         case,
     ) == ["retrieval mode does not prove a runtime retrieval"]
+
+
+def test_real_model_refusal_requires_runtime_model_evidence() -> None:
+    case = {
+        "should_reject": True,
+        "answer_policy": "refuse_without_trusted_source",
+        "citations_must_be_empty": True,
+        "required_sources": [],
+        "approved_chunk_ids": [],
+    }
+
+    assert (
+        validate_rag_response(
+            {
+                "answer": "No trusted source.",
+                "noAnswer": True,
+                "answerPolicy": "refuse_without_trusted_source",
+                "citations": [],
+                "retrieval": {"status": "no_answer", "retrieval_mode": "hybrid_rrf_rerank"},
+            },
+            case,
+        )
+        == []
+    )
 
 
 def test_real_model_acceptance_requires_approved_chunk_per_required_source() -> None:
@@ -211,11 +259,29 @@ def test_real_model_acceptance_does_not_pass_without_requests(tmp_path) -> None:
 
 
 def test_real_model_acceptance_marks_successful_partial_workload_incomplete() -> None:
-    assert acceptance_run_status(
-        [{"passed": True, "request_kind": "aiops"}],
-        rag_requests=0,
-        aiops_requests=1,
-    ) == "incomplete"
+    assert (
+        acceptance_run_status(
+            [{"passed": True, "request_kind": "aiops"}],
+            rag_requests=0,
+            aiops_requests=1,
+        )
+        == "incomplete"
+    )
+
+
+def test_real_model_acceptance_requires_dataset_case_coverage() -> None:
+    assert (
+        acceptance_run_status(
+            [
+                {"passed": True, "request_kind": "rag"},
+                {"passed": True, "request_kind": "aiops"},
+            ],
+            rag_requests=1,
+            aiops_requests=1,
+            rag_case_coverage_met=False,
+        )
+        == "incomplete"
+    )
 
 
 def test_real_model_acceptance_rejects_empty_positive_contract(tmp_path) -> None:
@@ -257,12 +323,84 @@ cases:
     cases = load_rag_acceptance_cases(cases_path)
 
     assert cases[0]["required_claims"] == ["Keep production changes behind approval."]
-    assert acceptance_run_status(
-        [
-            {"passed": True, "request_kind": "rag"},
-            {"passed": True, "request_kind": "aiops"},
-        ],
-        rag_requests=1,
-        aiops_requests=1,
-        semantic_claims_unverified=True,
-    ) == "incomplete"
+    assert (
+        acceptance_run_status(
+            [
+                {"passed": True, "request_kind": "rag"},
+                {"passed": True, "request_kind": "aiops"},
+            ],
+            rag_requests=1,
+            aiops_requests=1,
+            semantic_claims_unverified=True,
+        )
+        == "incomplete"
+    )
+
+
+def test_real_model_acceptance_accepts_safe_degraded_aiops_terminal_state() -> None:
+    request = {
+        "passed": True,
+        "request_kind": "aiops",
+        "latency_ms": 1.0,
+        "details": {
+            "terminal_status": "degraded",
+            "degradation_analysis": {
+                "category": "evidence_insufficient",
+                "safe_terminal": True,
+                "needs_human": True,
+            },
+        },
+    }
+
+    summary = _request_summary([request], required=1)
+
+    assert summary["acceptance_status"] == "met"
+    assert summary["completed"] == 0
+    assert summary["degraded"] == 1
+    assert (
+        acceptance_run_status(
+            [
+                request,
+                {"passed": True, "request_kind": "rag", "details": {}},
+            ],
+            rag_requests=1,
+            aiops_requests=1,
+        )
+        == "passed_with_degraded"
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_model_acceptance_rejects_unsafe_degraded_aiops_terminal_state() -> None:
+    class FakeStream:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"type":"complete","status":"degraded",'
+                '"structured_report":{"status":"degraded","degradation_analysis":'
+                '{"category":"dependency_timeout","safe_terminal":false,'
+                '"needs_human":true}}}'
+            )
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+    result = await run_real_model_acceptance._run_aiops(
+        FakeClient(),
+        base_url="http://testserver",
+        run_id="run-unsafe",
+        index=1,
+    )
+
+    assert result["passed"] is False
+    assert result["details"]["acceptance_class"] == "unsafe_degraded"
+    assert result["details"]["degradation_analysis"]["category"] == "dependency_timeout"
+    assert result["error"] == "degraded AIOps terminal state is not classified as safe"

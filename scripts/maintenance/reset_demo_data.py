@@ -32,11 +32,18 @@ def parse_args() -> argparse.Namespace:
         help="Configured backend used when --database is omitted.",
     )
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--confirm-reset",
+        action="store_true",
+        help="Required confirmation because reset deletes all current AIOps runtime data.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if not args.confirm_reset:
+        raise SystemExit("Refusing to reset runtime data without --confirm-reset")
     result = seed_demo_data(
         database_path=args.database,
         backend=args.backend,

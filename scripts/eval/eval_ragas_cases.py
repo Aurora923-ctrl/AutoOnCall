@@ -14,11 +14,12 @@ import statistics
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -31,7 +32,11 @@ from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
 )
-from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
+from scripts.eval.eval_environment import (
+    collect_dataset_provenance,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 from scripts.eval.eval_rag_cases import (
     DEFAULT_DOCS_DIR,
     DEFAULT_MIN_SCORE,
@@ -119,6 +124,9 @@ class RagasCaseSample:
     no_answer: bool
     citations: list[dict[str, Any]]
     retrieval: dict[str, Any]
+    observability: dict[str, Any] = field(default_factory=dict)
+    input_valid: bool = True
+    input_invalid_reasons: list[str] = field(default_factory=list)
 
 
 async def evaluate_cases(
@@ -153,6 +161,7 @@ async def evaluate_cases(
         raise ValueError("repeat_count must be greater than zero")
 
     started_at = datetime.now(UTC)
+    evaluation_run_id = f"eval-ragas-{uuid4().hex}"
     timer = time.perf_counter()
     cases = _select_cases(load_cases(cases_path), max_cases=max_cases)
     judge_status = judge_execution_status(metric_profile)
@@ -196,7 +205,14 @@ async def evaluate_cases(
         ]
         if repeat_index == 1:
             first_samples = samples
-        quality_samples_for_run = [sample for sample in samples if not is_refusal_case(sample.case)]
+        record_sample_execution_identity(
+            samples,
+            runner_context,
+            repeat_index=repeat_index,
+        )
+        quality_samples_for_run = [
+            sample for sample in samples if not is_refusal_case(sample.case) and sample.input_valid
+        ]
         try:
             metric_scores = (
                 metric_runner(quality_samples_for_run, runner_context)
@@ -245,6 +261,16 @@ async def evaluate_cases(
     )
     summary["deterministic_status"] = summary["status"]
     summary["judge_status"] = judge_status["status"]
+    id_metric_execution = runner_context.get("id_metric_execution", {})
+    if metric_profile == "id-smoke" and str(id_metric_execution.get("status") or "") in {
+        "fallback",
+        "failed",
+    }:
+        summary["deterministic_status"] = "failed"
+        summary["status"] = "failed"
+        summary["id_metric_failure_reason"] = str(
+            id_metric_execution.get("reason") or "RAGAS ID metrics were unavailable"
+        )
     if not generation_executed:
         summary["status"] = "not_run"
         summary["not_run_reason"] = (
@@ -289,6 +315,7 @@ async def evaluate_cases(
                 "not a production accuracy claim"
             ),
             "cases_path": str(Path(cases_path)),
+            "dataset": collect_dataset_provenance(cases_path, case_count=len(cases)),
             "docs_dir": str(Path(docs_dir)),
             "mode": mode,
             "answer_source": answer_source,
@@ -341,7 +368,16 @@ async def evaluate_cases(
             "judge_model": config.effective_ragas_eval_model,
             "embedding_model": config.effective_ragas_eval_embedding_model,
             "temperature": 0,
-            "environment": collect_eval_environment(suite="ragas"),
+            "environment": collect_eval_environment(
+                suite="ragas",
+                run_id=evaluation_run_id,
+                execution_identity=_ragas_execution_identity(
+                    runner_context,
+                    judge_status=judge_status,
+                    generation_executed=generation_executed,
+                ),
+            ),
+            "run_id": evaluation_run_id,
         },
         "thresholds": ragas_thresholds(),
         "summary": summary,
@@ -421,13 +457,17 @@ async def build_case_sample(
         return RagasCaseSample(
             case=case,
             retrieved_contexts=contexts_from_retrieval(retrieval_payload),
-            retrieved_context_ids=context_ids_from_retrieval(retrieval_payload),
+            retrieved_context_ids=context_ids_from_retrieval(
+                retrieval_payload,
+                reference_ids=reference_context_ids(case),
+            ),
             reference_context_ids=reference_context_ids(case),
             answer=answer,
             answer_policy=str(retrieval_payload.get("answer_policy") or "answer_with_citations"),
             no_answer=False,
             citations=citations,
             retrieval=compact_retrieval_payload(retrieval_payload),
+            observability={},
         )
 
 
@@ -463,6 +503,16 @@ def offline_retrieval_payload(
         "rejected_results": [],
         "answer_policy": "answer_with_citations" if retrieved else "refuse_without_trusted_source",
         "no_answer_rejected": not bool(retrieved),
+        "required_sources": expected_sources(case),
+        "missing_required_sources": [],
+        "generation_allowlist": [
+            {
+                "source_file": str(item.get("source_file") or ""),
+                "chunk_id": str(item.get("chunk_id") or ""),
+            }
+            for item in retrieved
+            if item.get("source_file") and item.get("chunk_id")
+        ],
         "summary": f"offline fixture retrieved {len(retrieved)} chunks",
         "content": format_offline_context(retrieved),
     }
@@ -496,8 +546,7 @@ async def query_product_behavior(
         history_question: str | None = None,
     ) -> str:
         allowed_chunk_ids = {
-            match.strip()
-            for match in re.findall(r"chunk_id=([^\]\s;]+)", grounded_question)
+            match.strip() for match in re.findall(r"chunk_id=([^\]\s;]+)", grounded_question)
         }
         citations = [
             {
@@ -533,14 +582,57 @@ async def query_product_behavior(
         if answer_source == "product-offline":
             agent.query_grounded = fixture_query_grounded  # type: ignore[method-assign]
             agent.query_grounded_observed = fixture_query_grounded_observed  # type: ignore[method-assign]
-        return await agent.query_with_retrieval(
+        chat_payload = await agent.query_with_retrieval(
             query,
             session_id=f"ragas-{answer_source}-{case.get('id', 'case')}",
         )
+        if answer_source == "product-offline":
+            # The product response intentionally compacts retrieval chunks for API safety.
+            # Restore the deterministic fixture content only inside the evaluator so RAGAS
+            # receives semantic contexts while citations still come from the public contract.
+            chat_payload = {
+                **chat_payload,
+                "retrieval": merge_eval_retrieval_context(
+                    chat_payload.get("retrieval"),
+                    retrieval_payload,
+                ),
+            }
+        return chat_payload
     finally:
         rag_agent_module.retrieve_structured_knowledge = original_retrieve
         agent.query_grounded = original_query_grounded  # type: ignore[method-assign]
         agent.query_grounded_observed = original_query_grounded_observed  # type: ignore[method-assign]
+
+
+def merge_eval_retrieval_context(
+    public_retrieval: Any,
+    fixture_retrieval: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach fixture text to matching public retrieval rows for offline scoring only."""
+    public_payload = dict(public_retrieval) if isinstance(public_retrieval, dict) else {}
+    fixture_results = [
+        item
+        for item in fixture_retrieval.get("retrieval_results", []) or []
+        if isinstance(item, dict)
+    ]
+    fixture_by_chunk = {
+        str(item.get("chunk_id") or "").strip(): item
+        for item in fixture_results
+        if str(item.get("chunk_id") or "").strip()
+    }
+    merged_results: list[dict[str, Any]] = []
+    for item in public_payload.get("retrieval_results", []) or []:
+        if not isinstance(item, dict):
+            continue
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        fixture = fixture_by_chunk.get(chunk_id, {})
+        merged = dict(item)
+        content = str(fixture.get("content") or fixture.get("content_preview") or "").strip()
+        if content:
+            merged["content"] = content
+        merged_results.append(merged)
+    public_payload["retrieval_results"] = merged_results
+    return public_payload
 
 
 def sample_from_chat_payload(
@@ -555,14 +647,26 @@ def sample_from_chat_payload(
     citations = chat_payload.get("citations")
     citation_items = citations if isinstance(citations, list) else []
     normalized_citations = [item for item in citation_items if isinstance(item, dict)]
+    reference_ids = reference_context_ids(case)
+    retrieved_ids = context_ids_from_retrieval(
+        retrieval_payload,
+        reference_ids=reference_ids,
+    )
+    retrieved_contexts = contexts_for_citations(
+        retrieval_payload,
+        normalized_citations,
+    )
+    invalid_reasons = validate_ragas_input(
+        case,
+        retrieval_payload,
+        retrieved_ids=retrieved_ids,
+        contexts=retrieved_contexts,
+    )
     return RagasCaseSample(
         case=case,
-        retrieved_contexts=contexts_for_citations(
-            retrieval_payload,
-            normalized_citations,
-        ),
-        retrieved_context_ids=context_ids_from_retrieval(retrieval_payload),
-        reference_context_ids=reference_context_ids(case),
+        retrieved_contexts=retrieved_contexts,
+        retrieved_context_ids=retrieved_ids,
+        reference_context_ids=reference_ids,
         answer=str(chat_payload.get("answer") or ""),
         answer_policy=str(
             chat_payload.get("answer_policy") or retrieval_payload.get("answer_policy") or ""
@@ -570,7 +674,37 @@ def sample_from_chat_payload(
         no_answer=bool(chat_payload.get("no_answer")),
         citations=normalized_citations,
         retrieval=retrieval_payload,
+        observability=(
+            chat_payload.get("observability")
+            if isinstance(chat_payload.get("observability"), dict)
+            else {}
+        ),
+        input_valid=not invalid_reasons,
+        input_invalid_reasons=invalid_reasons,
     )
+
+
+def validate_ragas_input(
+    case: dict[str, Any],
+    retrieval_payload: dict[str, Any],
+    *,
+    retrieved_ids: list[str],
+    contexts: list[str],
+) -> list[str]:
+    """Fail closed before RAGAS when the sample lacks judge inputs."""
+    if not retrieval_payload or not isinstance(retrieval_payload, dict):
+        return ["retrieval_payload_missing"]
+    reasons: list[str] = []
+    if not contexts:
+        reasons.append("retrieved_contexts_missing")
+    expected_ids = reference_context_ids(case) or [
+        str(item).strip() for item in case.get("required_sources", []) if str(item).strip()
+    ]
+    if expected_ids and not retrieved_ids:
+        reasons.append("retrieved_context_ids_missing")
+    if not is_refusal_case(case) and retrieval_payload.get("status") != "success":
+        reasons.append("retrieval_not_success")
+    return reasons
 
 
 def build_reference_fixture_answer(
@@ -582,23 +716,32 @@ def build_reference_fixture_answer(
     answer = str(case.get("reference_answer") or "").strip()
     if not answer:
         answer = build_fallback_reference_answer(case, retrieval_payload)
-    answer = "\n\n".join(
-        [
-            answer,
-            (
-                "OnCall decision: check metric/log evidence in the incident-window, "
-                "confirm the retrieved source_file/chunk_id, and keep approval boundaries "
-                "before rollback, scale, limit, or degradation actions."
-            ),
-        ]
+    inline_citation = next(
+        (
+            f"[{item.get('source_file', '')} | {item.get('chunk_id', '')}]"
+            for item in citations
+            if item.get("source_file") and item.get("chunk_id")
+        ),
+        "",
     )
-    inline_citations = " ".join(
+    lines = [
+        answer,
+        (
+            "OnCall decision: check metric/log evidence in the incident-window, "
+            "confirm the retrieved source_file/chunk_id, and keep approval boundaries "
+            "before rollback, scale, limit, or degradation actions."
+        ),
+    ]
+    if inline_citation:
+        lines = [f"{line} {inline_citation}" for line in lines]
+    answer = "\n\n".join(lines)
+    citation_references = " ".join(
         f"[{item.get('source_file', '')} | {item.get('chunk_id', '')}]"
         for item in citations
         if item.get("source_file") and item.get("chunk_id")
     )
-    if inline_citations:
-        answer = f"{answer}\n\n{inline_citations}"
+    if citation_references and not inline_citation:
+        answer = f"{answer}\n\n{citation_references}"
     return ensure_citation_block(answer, citations)
 
 
@@ -616,9 +759,7 @@ def answer_for_judge(answer: str) -> str:
     content = lines if citation_start is None else lines[:citation_start]
     while content and not content[-1].strip():
         content.pop()
-    if content and (
-        "source" in content[-1].lower() or content[-1].strip().startswith("引用来源")
-    ):
+    if content and ("source" in content[-1].lower() or content[-1].strip().startswith("引用来源")):
         content.pop()
     semantic_answer = "\n".join(content).strip()
     return re.sub(
@@ -665,6 +806,7 @@ def refusal_fixture_sample(
         no_answer=True,
         citations=[],
         retrieval=compact_retrieval_payload(retrieval_payload),
+        observability={},
     )
 
 
@@ -748,10 +890,23 @@ def run_ragas_metrics(
     }
     scores = {str(sample.case.get("id")): {} for sample in samples}
     diagnostics = runner_context.setdefault("judge_diagnostics", [])
+    model_calls = runner_context.setdefault("model_calls", [])
     repeat_index = int(runner_context.get("repeat_index") or 1)
 
     for metric_name, metric_factory in metric_factories.items():
         started_at = time.perf_counter()
+        call_record = {
+            "call_type": "ragas_judge",
+            "repeat_index": repeat_index,
+            "metric": metric_name,
+            "model": str(runner_context.get("judge_model") or ""),
+            "embedding_model": (
+                str(runner_context.get("embedding_model") or "")
+                if metric_name == "answer_relevancy"
+                else ""
+            ),
+            "provider": "dashscope_openai_compatible",
+        }
         try:
             result = evaluate(
                 dataset,
@@ -782,8 +937,23 @@ def run_ragas_metrics(
                         duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
                     )
                 )
+            model_calls.append(
+                {
+                    **call_record,
+                    "status": "success",
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                }
+            )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
+            model_calls.append(
+                {
+                    **call_record,
+                    "status": "failed",
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error_type": type(exc).__name__,
+                }
+            )
             for sample in samples:
                 case_id = str(sample.case.get("id"))
                 scores[case_id][metric_name] = None
@@ -850,10 +1020,9 @@ def run_ragas_id_smoke_metrics(
 ) -> dict[str, dict[str, float]]:
     """Run RAGAS ID metrics without an external judge model.
 
-    This keeps the interview/demo path reproducible: the same fixed cases can
-    prove retrieval grounding and business gates even when no judge API key is
-    configured. If the RAGAS API changes, the deterministic fallback keeps the
-    CI signal available while still reporting the installed RAGAS version.
+    This keeps the interview/demo path reproducible without a judge API key.
+    If RAGAS itself cannot execute, deterministic values remain available for
+    diagnostics, but the run is failed rather than accepted as a RAGAS result.
     """
     if not samples:
         return {}
@@ -898,14 +1067,23 @@ def run_ragas_id_smoke_metrics(
             "status": "executed",
             "ragas_version": safe_package_version("ragas"),
         }
-        return {
-            str(sample.case.get("id")): {
-                metric: safe_float(row.get(metric))
-                for metric in RAGAS_ID_METRICS
-                if row.get(metric) is not None
+        scores: dict[str, dict[str, float | None]] = {}
+        unavailable: dict[str, list[str]] = {}
+        for sample, row in zip(samples, rows, strict=False):
+            case_id = str(sample.case.get("id"))
+            case_scores = {
+                metric: optional_metric_float(row.get(metric)) for metric in RAGAS_ID_METRICS
             }
-            for sample, row in zip(samples, rows, strict=False)
-        }
+            scores[case_id] = case_scores
+            missing = [metric for metric, value in case_scores.items() if value is None]
+            if missing:
+                unavailable[case_id] = missing
+        if unavailable:
+            runner_context["id_metric_execution"]["status"] = "failed"
+            runner_context["id_metric_execution"]["reason"] = (
+                f"RAGAS ID metrics returned unavailable values: {unavailable}"
+            )
+        return scores
     except Exception as exc:
         runner_context["id_metric_execution"] = {
             "engine": "deterministic_fallback",
@@ -966,6 +1144,7 @@ def build_not_run_payload(
     judge_status: dict[str, str],
 ) -> dict[str, Any]:
     """Return an honest artifact when a requested full judge run cannot execute."""
+    evaluation_run_id = f"eval-ragas-not-run-{uuid4().hex}"
     summary = {
         "status": "not_run",
         "case_count": len(cases),
@@ -1005,6 +1184,7 @@ def build_not_run_payload(
             "duration_ms": round((time.perf_counter() - timer) * 1000, 2),
             "evaluation_scope": "full RAGAS judge evaluation was requested but not executed",
             "cases_path": str(Path(cases_path)),
+            "dataset": collect_dataset_provenance(cases_path, case_count=len(cases)),
             "docs_dir": str(Path(docs_dir)),
             "mode": mode,
             "answer_source": answer_source,
@@ -1027,7 +1207,18 @@ def build_not_run_payload(
             "judge_model": config.effective_ragas_eval_model,
             "embedding_model": config.effective_ragas_eval_embedding_model,
             "temperature": 0,
-            "environment": collect_eval_environment(suite="ragas"),
+            "environment": collect_eval_environment(
+                suite="ragas",
+                run_id=evaluation_run_id,
+                execution_identity={
+                    "actual_model": "not_run",
+                    "actual_embedding_model": "not_run",
+                    "provider": "none",
+                    "execution_path": "not_run",
+                    "fallback_used": False,
+                    "model_calls": [],
+                },
+            ),
         },
         "thresholds": ragas_thresholds(),
         "summary": summary,
@@ -1171,7 +1362,9 @@ def load_human_reviews(path: str | Path | None) -> HumanReviewCollection:
     return HumanReviewCollection(
         reviews,
         source_run=payload.get("source_run") if isinstance(payload, dict) else {},
-        evidence_level=str(payload.get("evidence_level") or "") if isinstance(payload, dict) else "",
+        evidence_level=str(payload.get("evidence_level") or "")
+        if isinstance(payload, dict)
+        else "",
         validity_boundary=(
             str(payload.get("validity_boundary") or "") if isinstance(payload, dict) else ""
         ),
@@ -1197,8 +1390,7 @@ def compare_human_reviews(
             "reviewed_case_count": 0,
             "reviewed_unique_case_count": 0,
             "available_review_count": sum(
-                len(items) if isinstance(items, list) else 1
-                for items in human_reviews.values()
+                len(items) if isinstance(items, list) else 1 for items in human_reviews.values()
             ),
             "reviewer_count": 0,
             "automatic_agreement_rate": None,
@@ -1312,9 +1504,7 @@ def human_review_binding(
             "status": "invalid",
             "reason": f"Human review source_run is missing binding fields: {missing}",
         }
-    mismatches = [
-        key for key in required if source_run.get(key) != expected_source_run.get(key)
-    ]
+    mismatches = [key for key in required if source_run.get(key) != expected_source_run.get(key)]
     if mismatches:
         return {
             "status": "invalid",
@@ -1332,6 +1522,11 @@ def human_review_pass(review: dict[str, Any]) -> bool | None:
         return False
     scores = review.get("rubric_scores")
     if not isinstance(scores, dict) or not scores:
+        return None
+    required_dimensions = set(HUMAN_REVIEW_DIMENSIONS)
+    if set(scores) != required_dimensions or any(
+        scores.get(key) is None for key in required_dimensions
+    ):
         return None
     numeric = [
         float(value)
@@ -1396,9 +1591,7 @@ def build_human_review_template(
                 "judge_prompt_version", JUDGE_PROMPT_VERSION
             ),
             "case_set_sha256": payload.get("run", {}).get("case_set_sha256"),
-            "review_item_set_sha256": review_item_set_sha256(
-                payload.get("case_scores", [])
-            ),
+            "review_item_set_sha256": review_item_set_sha256(payload.get("case_scores", [])),
         },
         "rubric": {
             "scale": "0-2",
@@ -1449,6 +1642,34 @@ def build_case_result(
     """Build one case score record and apply AutoOnCall gates."""
     case = sample.case
     case_id = str(case.get("id") or "unknown")
+    if not sample.input_valid and not is_refusal_case(case):
+        return {
+            "id": case_id,
+            "query": str(case.get("query") or ""),
+            "case_type": str(case.get("case_type") or "positive"),
+            "tags": ragas_tags(case),
+            "core_case": is_core_case(case),
+            "should_reject": False,
+            "passed": False,
+            "input_status": "invalid_input",
+            "input_invalid_reasons": sample.input_invalid_reasons,
+            "metrics": {},
+            "failed_metrics": ["invalid_input"],
+            "failure_reasons": {
+                "invalid_input": "RAGAS judge input is incomplete; the case was not scored."
+            },
+            "answer_policy": sample.answer_policy,
+            "answer": sample.answer,
+            "retrieved_contexts": sample.retrieved_contexts,
+            "citations": sample.citations,
+            "prompt_version": JUDGE_PROMPT_VERSION,
+            "retrieved_context_ids": sample.retrieved_context_ids,
+            "reference_context_ids": sample.reference_context_ids,
+            "retrieved_sources": retrieved_sources(sample),
+            "expected_sources": expected_sources(case),
+            "suggested_backlog_category": "retrieval_quality",
+            "judge_diagnostics": judge_diagnostics or [],
+        }
     if is_refusal_case(case):
         refusal_hit = refusal_boundary_hit(sample)
         failed_metrics = [] if refusal_hit else ["refusal_boundary"]
@@ -2231,8 +2452,8 @@ def ragas_execution_markdown_lines(
                 "",
                 "## Metric Coverage",
                 "",
-                "| Metric | Available | Expected | Missing cases |",
-                "| --- | ---: | ---: | --- |",
+                "| Metric | Numerator | Denominator | Available | Missing cases |",
+                "| --- | ---: | ---: | ---: | --- |",
             ]
         )
         for metric, item in coverage.items():
@@ -2240,8 +2461,9 @@ def ragas_execution_markdown_lines(
                 continue
             missing = ", ".join(item.get("missing_case_ids", [])) or "-"
             lines.append(
-                f"| `{metric}` | {item.get('available_count', 0)} | "
-                f"{item.get('expected_count', 0)} | {missing} |"
+                f"| `{metric}` | {item.get('numerator', 0)} | "
+                f"{item.get('denominator', item.get('expected_count', 0))} | "
+                f"{item.get('available_count', 0)} | {missing} |"
             )
     return lines
 
@@ -2326,7 +2548,96 @@ def build_runner_context(
         "api_base": config.dashscope_api_base,
         "temperature": 0,
         "judge_diagnostics": [],
+        "model_calls": [],
+        "actual_model": "",
+        "provider": "",
+        "fallback_used": False,
     }
+
+
+def _ragas_execution_identity(
+    runner_context: dict[str, Any],
+    *,
+    judge_status: dict[str, str],
+    generation_executed: bool,
+) -> dict[str, Any]:
+    """Record actual execution identity instead of only configured model names."""
+    answer_source = str(runner_context.get("answer_source") or "")
+    if generation_executed:
+        actual_model = str(runner_context.get("actual_model") or "not_observed")
+        provider = str(runner_context.get("provider") or "not_observed")
+        execution_path = "runtime_generation"
+    elif answer_source == "product-offline":
+        actual_model = "reference-fixture"
+        provider = "local"
+        execution_path = "reference_fixture"
+    else:
+        actual_model = "not_run"
+        provider = "none"
+        execution_path = "fixture_or_retrieval_only"
+    return {
+        "actual_model": actual_model,
+        "actual_embedding_model": str(
+            runner_context.get("actual_embedding_model") or "not_observed"
+        ),
+        "provider": provider,
+        "execution_path": execution_path,
+        "fallback_used": bool(runner_context.get("fallback_used", False)),
+        "model_calls": list(runner_context.get("model_calls") or []),
+        "judge_model": str(runner_context.get("judge_model") or ""),
+        "judge_embedding_model": str(runner_context.get("embedding_model") or ""),
+        "judge_status": str(judge_status.get("status") or ""),
+    }
+
+
+def record_sample_execution_identity(
+    samples: list[RagasCaseSample],
+    runner_context: dict[str, Any],
+    *,
+    repeat_index: int,
+) -> None:
+    """Collect the model identity actually returned by the product path."""
+    calls = runner_context.setdefault("model_calls", [])
+    observed_models: set[str] = set()
+    observed_embeddings: set[str] = set()
+    for sample in samples:
+        runtime = sample.observability.get("runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        model = str(runtime.get("llm_model") or "").strip()
+        embedding = str(runtime.get("embedding_model") or "").strip()
+        if model:
+            observed_models.add(model)
+        if embedding:
+            observed_embeddings.add(embedding)
+        if model or embedding:
+            calls.append(
+                {
+                    "case_id": str(sample.case.get("id") or ""),
+                    "repeat_index": repeat_index,
+                    "model": model,
+                    "embedding_model": embedding,
+                    "status": "observed",
+                }
+            )
+    all_models = {str(item.get("model") or "") for item in calls if str(item.get("model") or "")}
+    all_embeddings = {
+        str(item.get("embedding_model") or "")
+        for item in calls
+        if str(item.get("embedding_model") or "")
+    }
+    if all_models:
+        runner_context["actual_model"] = (
+            next(iter(all_models))
+            if len(all_models) == 1
+            else "mixed:" + ",".join(sorted(all_models))
+        )
+        runner_context["provider"] = "dashscope_openai_compatible"
+    if all_embeddings:
+        runner_context["actual_embedding_model"] = (
+            next(iter(all_embeddings))
+            if len(all_embeddings) == 1
+            else "mixed:" + ",".join(sorted(all_embeddings))
+        )
 
 
 def answer_generation_mode(answer_source: str) -> str:
@@ -2451,35 +2762,55 @@ def contexts_for_citations(
     return contexts or contexts_from_retrieval(retrieval_payload)
 
 
-def context_ids_from_retrieval(payload: dict[str, Any]) -> list[str]:
-    """Extract stable file-level ids for ID-based RAGAS metrics.
-
-    The existing eval cases mostly define expected sources at source-file granularity.
-    Keeping RAGAS ID metrics at the same granularity avoids fake misses such as
-    ``cpu.md#cpu.md#0001`` versus ``cpu.md``.
-    """
+def context_ids_from_retrieval(
+    payload: dict[str, Any],
+    *,
+    reference_ids: list[str] | None = None,
+) -> list[str]:
+    """Use chunk ids when the case has chunk labels, otherwise file-level ids."""
+    chunk_granularity = any("#" in str(item) for item in reference_ids or [])
     ids = []
     for item in payload.get("retrieval_results", []) or []:
         if not isinstance(item, dict):
             continue
-        source_file = context_id_from_chunk(item)
-        if source_file and source_file not in ids:
-            ids.append(source_file)
+        context_id = (
+            context_id_from_chunk(item)
+            if chunk_granularity
+            else normalize_context_id(
+                item.get("source_file") or item.get("source_path") or item.get("chunk_id")
+            )
+        )
+        if context_id and not chunk_granularity:
+            context_id = Path(context_id).name
+        if context_id and context_id not in ids:
+            ids.append(context_id)
     return ids
 
 
 def context_id_from_chunk(item: dict[str, Any]) -> str:
-    """Extract a file-level context id from one retrieval chunk."""
+    """Extract the most specific stable context id from one retrieval chunk."""
+    chunk_id = str(item.get("chunk_id") or "").strip()
+    if chunk_id:
+        return chunk_id
     for key in ("source_file", "source_path"):
         normalized = normalize_context_id(item.get(key))
         if normalized:
             return Path(normalized).name
-    chunk_id = normalize_context_id(item.get("chunk_id"))
-    return Path(chunk_id).name if chunk_id else ""
+    return ""
 
 
 def reference_context_ids(case: dict[str, Any]) -> list[str]:
     """Return reference context ids from explicit case metadata or expected sources."""
+    relevant_chunks = case.get("relevant_chunks")
+    if isinstance(relevant_chunks, list):
+        chunk_ids = [
+            str(item.get("chunk_id") or item.get("id") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in relevant_chunks
+        ]
+        if any(chunk_ids):
+            return _unique_context_ids(chunk_ids, preserve_chunks=True)
     explicit = case.get("reference_context_ids")
     if isinstance(explicit, list) and explicit:
         return _unique_context_ids(explicit)
@@ -2504,10 +2835,11 @@ def normalize_context_id(value: Any) -> str:
     return text.split("#", 1)[0].strip()
 
 
-def _unique_context_ids(values: list[Any]) -> list[str]:
+def _unique_context_ids(values: list[Any], *, preserve_chunks: bool = False) -> list[str]:
     ids: list[str] = []
     for value in values:
-        normalized = normalize_context_id(value)
+        text = str(value or "").strip()
+        normalized = text if preserve_chunks and "#" in text else normalize_context_id(text)
         if normalized and normalized not in ids:
             ids.append(normalized)
     return ids
@@ -3037,15 +3369,20 @@ def average_optional_metric(results: list[dict[str, Any]], metric: str) -> float
 
 def metric_coverage(results: list[dict[str, Any]], metric: str) -> dict[str, Any]:
     """Expose the exact denominator used by aggregate metric averages."""
+    available_values = [
+        result.get("metrics", {}).get(metric)
+        for result in results
+        if optional_metric_float(result.get("metrics", {}).get(metric)) is not None
+    ]
     return {
-        "available_count": sum(
-            result.get("metrics", {}).get(metric) is not None for result in results
-        ),
+        "available_count": len(available_values),
         "expected_count": len(results),
+        "numerator": round(sum(safe_float(value) for value in available_values), 4),
+        "denominator": len(results),
         "missing_case_ids": [
             str(result.get("id") or "")
             for result in results
-            if result.get("metrics", {}).get(metric) is None
+            if optional_metric_float(result.get("metrics", {}).get(metric)) is None
         ],
     }
 
@@ -3250,7 +3587,18 @@ def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, 
             "judge_model": config.effective_ragas_eval_model,
             "embedding_model": config.effective_ragas_eval_embedding_model,
             "temperature": 0,
-            "environment": collect_eval_environment(suite="ragas"),
+            "environment": collect_eval_environment(
+                suite="ragas",
+                run_id=f"eval-ragas-failed-{uuid4().hex}",
+                execution_identity={
+                    "actual_model": "not_run",
+                    "actual_embedding_model": "not_run",
+                    "provider": "none",
+                    "execution_path": "failed_before_execution",
+                    "fallback_used": False,
+                    "model_calls": [],
+                },
+            ),
         },
         "thresholds": ragas_thresholds(),
         "summary": {

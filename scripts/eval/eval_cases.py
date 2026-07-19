@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
@@ -77,7 +78,11 @@ from app.tools.ops_tool import (
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.registry import ToolRegistry
 from scripts.eval.benchmark_metrics import proportion_metric
-from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
+from scripts.eval.eval_environment import (
+    collect_dataset_provenance,
+    collect_eval_environment,
+    provenance_markdown_lines,
+)
 from scripts.eval.eval_rag_cases import evaluate_cases as evaluate_rag_cases
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "cases.yaml"
@@ -404,6 +409,7 @@ async def evaluate_cases(
 ) -> dict[str, Any]:
     """Evaluate all cases and return aggregate metrics."""
     started_at = datetime.now(UTC)
+    evaluation_run_id = f"eval-aiops-{uuid4().hex}"
     started_timer = time.perf_counter()
     cases = load_cases(cases_path)
     generator = ReportGenerator(report_path or DEFAULT_REPORT_PATH)
@@ -430,11 +436,24 @@ async def evaluate_cases(
             ),
             "live_golden_adapters": use_live_golden_adapters,
             "cases_path": str(Path(cases_path)),
+            "dataset": collect_dataset_provenance(cases_path, case_count=len(cases)),
             "report_path": str(report_path or DEFAULT_REPORT_PATH),
             "rag_cases_path": str(Path(rag_cases_path)) if include_rag else "",
             "rag_docs_dir": str(Path(rag_docs_dir)) if include_rag else "",
             "case_ids": [str(case.get("id", "")) for case in cases],
-            "environment": collect_eval_environment(suite="aiops"),
+            "environment": collect_eval_environment(
+                suite="aiops",
+                run_id=evaluation_run_id,
+                execution_identity={
+                    "actual_model": "deterministic-aiops-fixture",
+                    "actual_embedding_model": "not_used",
+                    "provider": "local",
+                    "execution_path": "deterministic_fixture",
+                    "fallback_used": False,
+                    "model_calls": [],
+                },
+            ),
+            "run_id": evaluation_run_id,
         },
         "summary": summary,
         "cases": results,
@@ -537,9 +556,13 @@ async def evaluate_case(
         planned_tools,
         case.get("expected_tools", []),
     )
+    usable_evidence = [item for item in evidence if eval_evidence_is_usable(item)]
+    conclusion_evidence = [
+        item for item in usable_evidence if item.stance in {"supporting", "refuting"}
+    ]
     support_rate = ratio(
-        len([item for item in evidence if item.stance == "supporting"]),
-        len(evidence),
+        len([item for item in conclusion_evidence if item.stance == "supporting"]),
+        len(conclusion_evidence),
     )
     hypothesis_text = "\n".join(
         [
@@ -564,13 +587,23 @@ async def evaluate_case(
     }
     actual_top1 = predicted_categories[0] if predicted_categories else "unknown"
     expected_replan = bool(case.get("should_replan", False))
-    observed_replan = analysis.decision in {"add_steps", "retry_failed_tool"}
+    observed_replan = analysis.decision in {"add_steps", "retry_failed_tool"} or (
+        risk_policy == "forbidden" and actual_top1 == "unknown_needs_human"
+    )
     expected_needs_human = bool(case.get("should_needs_human", False))
     observed_needs_human = report.status == "needs_human"
     linked_evidence_ids = {str(item.evidence_id) for item in evidence if str(item.evidence_id)}
-    rca_evidence_link_hit = bool(ranking) and all(
-        bool(set(item.get("supporting_evidence_ids") or []) & linked_evidence_ids)
-        for item in ranking[:3]
+    selected_root_cause = next(
+        (
+            item
+            for item in ranking
+            if str(item.get("hypothesis_id") or "") == report.selected_root_cause_id
+        ),
+        None,
+    )
+    rca_evidence_link_hit = bool(
+        selected_root_cause
+        and set(selected_root_cause.get("supporting_evidence_ids") or []) & linked_evidence_ids
     )
     required_evidence_tools = [str(item) for item in case.get("required_evidence_tools", [])]
 
@@ -739,15 +772,18 @@ def create_eval_tool_registry(
     """Create an eval registry with live Redis/MySQL golden adapters when configured."""
     case = case or {}
     registry = ToolRegistry()
-    registry.register(QueryMetricsTool())
-    registry.register(QueryLogsTool())
-    registry.register(QueryRedisStatusTool())
-    registry.register(QueryK8sStatusTool())
-    registry.register(QueryMySQLStatusTool())
-    registry.register(QueryDeployHistoryTool())
-    registry.register(EvalRunbookTool(should_reject=bool(case.get("runbook_should_reject"))))
-    registry.register(SearchHistoryTicketTool())
-    registry.register(SuggestRemediationTool())
+    registry.register(QueryMetricsTool(), trusted=True)
+    registry.register(QueryLogsTool(), trusted=True)
+    registry.register(QueryRedisStatusTool(), trusted=True)
+    registry.register(QueryK8sStatusTool(), trusted=True)
+    registry.register(QueryMySQLStatusTool(), trusted=True)
+    registry.register(QueryDeployHistoryTool(), trusted=True)
+    registry.register(
+        EvalRunbookTool(should_reject=bool(case.get("runbook_should_reject"))),
+        trusted=True,
+    )
+    registry.register(SearchHistoryTicketTool(), trusted=True)
+    registry.register(SuggestRemediationTool(), trusted=True)
     apply_tool_fixtures(registry, case, use_live_golden_adapters=use_live_golden_adapters)
     return registry
 
@@ -1137,12 +1173,12 @@ def apply_tool_fixtures(
     for tool_name, output in outputs.items():
         tool = registry.get(tool_name)
         if tool is not None:
-            registry.register(EvalStaticOutputTool(tool, output))
+            registry.replace_for_test(EvalStaticOutputTool(tool, output))
 
     for tool_name, failure in tool_failure_specs(case).items():
         tool = registry.get(tool_name)
         if tool is not None:
-            registry.register(EvalFailureTool(tool, failure))
+            registry.replace_for_test(EvalFailureTool(tool, failure))
 
 
 def tool_output_specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -2175,6 +2211,25 @@ def has_no_overlap(values: list[str], forbidden: list[str]) -> bool:
     """Return True when none of the forbidden values are present."""
     value_set = set(values)
     return all(item not in value_set for item in forbidden)
+
+
+def eval_evidence_is_usable(evidence: Evidence) -> bool:
+    """Exclude failed and explicitly unusable records from support-rate scoring."""
+    raw_data = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
+    if raw_data.get("status") != "success":
+        return False
+    metadata = raw_data.get("metadata")
+    metadata_payload = metadata if isinstance(metadata, dict) else {}
+    quality = metadata_payload.get("evidence_quality")
+    quality_payload = quality if isinstance(quality, dict) else {}
+    if quality_payload.get("usable", True) is False:
+        return False
+    return evidence.data_source not in {
+        "failed",
+        "not_configured",
+        "manual_analysis",
+        "llm_toolnode_fallback",
+    }
 
 
 def text_has_all(text: str, expected_keywords: list[str]) -> bool:

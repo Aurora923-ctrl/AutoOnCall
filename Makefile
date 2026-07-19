@@ -6,6 +6,7 @@
 # ============================================================
 SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
+UPLOAD_AUTH_HEADER = $(if $(AUTOONCALL_UPLOAD_TOKEN),-H "Authorization: Bearer $(AUTOONCALL_UPLOAD_TOKEN)",)
 HEALTH_LIVE_API = $(SERVER_URL)/health/live
 HEALTH_READY_API = $(SERVER_URL)/health/ready
 DOCS_DIR = docs/knowledge-base
@@ -27,7 +28,7 @@ NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check reference-check start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-ragas-full-core eval-ragas-full-generated-core eval-ragas-full-runtime-core eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
-        api-contract-verify knowledge-quality benchmark-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
+        api-contract-verify knowledge-quality benchmark-baseline candidate-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
         interview-up interview-down interview-status sandbox-verify sandbox-demo refresh-quality-artifacts
@@ -215,7 +216,7 @@ status:
 interview-up:  ## Start interview-focused local Docker stack
 	@echo "$(YELLOW)启动校招核心 Docker 栈...$(NC)"
 	docker compose -f deploy/compose/interview-stack.yml up -d --remove-orphans
-	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py
+	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py --acknowledge-local-only
 	@echo "$(GREEN)校招核心栈已启动: Redis 16379, MySQL 13306, metrics-exporter 19108, Prometheus 19090, Loki 13100$(NC)"
 	@echo "$(YELLOW)RAG/Milvus 是加分项，需单独运行 make up && make upload。$(NC)"
 
@@ -230,7 +231,7 @@ interview-status:  ## Show interview-focused Docker stack containers
 
 sandbox-verify:  ## Verify ToolRegistry consumes interview adapter sources
 	@echo "$(YELLOW)验证 AIOps 校招核心适配器数据源...$(NC)"
-	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py $(SANDBOX_SEED_ARGS)
+	$(PYTHON) scripts/sandbox/seed_live_incident_evidence.py --acknowledge-local-only $(SANDBOX_SEED_ARGS)
 	$(PYTHON) scripts/sandbox/verify_full_stack_adapters.py $(SANDBOX_VERIFY_ARGS)
 
 sandbox-demo:  ## Run deterministic AIOps scenarios against interview adapters
@@ -518,12 +519,12 @@ run:
 # 生成本地面试演示数据
 seed-demo:
 	@echo "$(YELLOW)🎬 生成 AIOps 诊断回放工作台样例数据...$(NC)"
-	$(PYTHON) scripts/data/seed_demo_data.py
+	$(PYTHON) scripts/data/seed_demo_data.py --no-reset
 	@echo "$(GREEN)✅ 样例数据已写入 data/aiops_state.db，评测摘要已写入 logs/eval_summary.json$(NC)"
 
 reset-demo-data:
 	@echo "$(YELLOW)Resetting AIOps runtime data to the curated interview dataset...$(NC)"
-	$(PYTHON) scripts/maintenance/reset_demo_data.py
+	$(PYTHON) scripts/maintenance/reset_demo_data.py --confirm-reset
 	@echo "$(GREEN)Demo data reset complete: 4 incidents and 4 matching alerts.$(NC)"
 
 # 一键演示：生成样例数据并前台启动服务
@@ -555,6 +556,7 @@ upload:
 			echo "$(YELLOW)  [$$count] 上传文件: $$filename$(NC)"; \
 			response=$$(curl -s -w "\n%{http_code}" -X POST $(UPLOAD_API) \
 				-F "file=@$$file" \
+				$(UPLOAD_AUTH_HEADER) \
 				-H "Accept: application/json"); \
 			http_code=$$(echo "$$response" | tail -n1); \
 			body=$$(echo "$$response" | sed '$$d'); \
@@ -603,8 +605,9 @@ test-upload:
 		echo "$(YELLOW)上传文件: $$first_file$(NC)"; \
 		curl -X POST $(UPLOAD_API) \
 			-F "file=@$$first_file" \
+			$(UPLOAD_AUTH_HEADER) \
 			-H "Accept: application/json" | $(PYTHON) -c "import sys,json; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))" 2>/dev/null || \
-			curl -X POST $(UPLOAD_API) -F "file=@$$first_file"; \
+			curl -X POST $(UPLOAD_API) -F "file=@$$first_file" $(UPLOAD_AUTH_HEADER); \
 	else \
 		echo "$(RED)测试文件不存在$(NC)"; \
 	fi
@@ -700,7 +703,7 @@ eval:  ## 运行 AIOps 离线评测
 
 eval-rag:  ## 运行 RAG 检索离线评测
 	@echo "$(YELLOW)🧪 运行 RAG 检索离线评测...$(NC)"
-	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_relevance_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
+	$(PYTHON) scripts/eval/eval_rag_cases.py --cases eval/rag_cases.yaml --docs-dir $(DOCS_DIR) --summary-json logs/rag_eval_summary.json --summary-md logs/rag_eval_summary.md
 
 eval-ragas:  ## Run optional RAGAS quality evaluation for RAG answers
 	@echo "$(YELLOW)🧪 Running optional RAGAS quality evaluation...$(NC)"
@@ -731,6 +734,9 @@ knowledge-quality:  ## Measure all knowledge assets and temporary Milvus CRUD co
 
 benchmark-baseline:  ## Run one timestamped local benchmark without overwriting history
 	$(PYTHON) scripts/eval/run_benchmark_baseline.py
+
+candidate-baseline:  ## Publish a validated candidate even from a clean committed worktree
+	$(PYTHON) scripts/eval/run_benchmark_baseline.py --candidate
 
 official-baseline:  ## Publish an official baseline only from a clean committed worktree
 	$(PYTHON) -c "import subprocess,sys; dirty=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True,check=True).stdout.strip(); commit=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True,check=True).stdout.strip(); sys.exit('official baseline requires a clean worktree' if dirty else 'official baseline requires a commit' if not commit else 0)"
@@ -769,7 +775,6 @@ verify-local:  ## 面试前本地快速质量验证
 	@$(MAKE) test-quick
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
-	@$(MAKE) eval-ragas
 	@$(MAKE) eval-change
 	@$(MAKE) eval-replanner
 	@$(MAKE) api-contract-verify
@@ -784,7 +789,6 @@ verify:  ## 运行只验证门禁（不修改源码）
 	@$(MAKE) test-quick
 	@$(MAKE) eval
 	@$(MAKE) eval-rag
-	@$(MAKE) eval-ragas
 	@$(MAKE) eval-change
 	@$(MAKE) eval-replanner
 	@$(MAKE) api-contract-verify

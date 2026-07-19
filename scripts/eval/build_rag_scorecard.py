@@ -80,15 +80,67 @@ def layer_status(
     if any(item["stale"] for item in validations):
         return "stale"
     accepted = accepted_statuses or {"passed"}
-    return (
-        "passed"
-        if all(item["summary_status"] in accepted for item in validations)
-        else "failed"
-    )
+    return "passed" if all(item["summary_status"] in accepted for item in validations) else "failed"
 
 
 def provenance_signature(validation: dict[str, Any]) -> str:
     return json.dumps(validation.get("provenance", {}), sort_keys=True, separators=(",", ":"))
+
+
+def dataset_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact case-set identity carried by one evaluation artifact."""
+    run = payload.get("run")
+    run = run if isinstance(run, dict) else {}
+    dataset = run.get("dataset")
+    dataset = dataset if isinstance(dataset, dict) else {}
+    case_ids = run.get("selected_case_ids", run.get("case_ids", []))
+    return {
+        "cases_path": str(run.get("cases_path") or dataset.get("path") or ""),
+        "sha256": str(run.get("case_set_sha256") or dataset.get("sha256") or ""),
+        "case_ids": sorted(str(item) for item in case_ids) if isinstance(case_ids, list) else [],
+    }
+
+
+def validate_dataset_binding(
+    payloads: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate expected case-set relationships without requiring every layer to share one file."""
+    identities = {name: dataset_identity(payload) for name, payload in payloads.items()}
+    missing = [
+        name
+        for name in (
+            "offline_retrieval",
+            "runtime_retrieval",
+            "fixed_context_generation",
+            "runtime_id_smoke",
+            "runtime_demo",
+            "demo_chain",
+        )
+        if not identities[name]["sha256"]
+    ]
+    mismatches = []
+    fixed_sha = identities["fixed_context_generation"]["sha256"]
+    runtime_sha = identities["runtime_id_smoke"]["sha256"]
+    if fixed_sha and runtime_sha and fixed_sha != runtime_sha:
+        mismatches.append("fixed_context_generation_vs_runtime_id_smoke")
+    fixed_ids = identities["fixed_context_generation"]["case_ids"]
+    runtime_ids = identities["runtime_id_smoke"]["case_ids"]
+    if fixed_ids and runtime_ids and fixed_ids != runtime_ids:
+        mismatches.append("fixed_context_generation_vs_runtime_id_smoke_case_ids")
+    demo_sha = identities["runtime_demo"]["sha256"]
+    chain_sha = identities["demo_chain"]["sha256"]
+    if demo_sha and chain_sha and demo_sha != chain_sha:
+        mismatches.append("runtime_demo_vs_demo_chain")
+    demo_ids = identities["runtime_demo"]["case_ids"]
+    chain_ids = identities["demo_chain"]["case_ids"]
+    if demo_ids and chain_ids and demo_ids != chain_ids:
+        mismatches.append("runtime_demo_vs_demo_chain_case_ids")
+    return {
+        "valid": not missing and not mismatches,
+        "missing_identity": missing,
+        "mismatches": mismatches,
+        "identities": identities,
+    }
 
 
 def failed_case_ids(payload: dict[str, Any]) -> list[str]:
@@ -114,10 +166,9 @@ def build_scorecard() -> dict[str, Any]:
         )
         for name, payload in payloads.items()
     }
-    provenance_signatures = {
-        provenance_signature(item) for item in validations.values()
-    }
+    provenance_signatures = {provenance_signature(item) for item in validations.values()}
     mixed_provenance = len(provenance_signatures) != 1
+    dataset_binding = validate_dataset_binding(payloads)
     offline = payloads["offline_retrieval"]
     retrieval = payloads["runtime_retrieval"]
     fixed = payloads["fixed_context_generation"]
@@ -153,6 +204,8 @@ def build_scorecard() -> dict[str, Any]:
     blockers = []
     if mixed_provenance:
         blockers.append("mixed_artifact_provenance")
+    if not dataset_binding["valid"]:
+        blockers.append("invalid_dataset_binding")
     if any(item["stale"] for item in validations.values()):
         blockers.append("stale_artifacts")
     if any(status != "passed" for status in (deterministic_status, fixed_status, runtime_status)):
@@ -253,6 +306,7 @@ def build_scorecard() -> dict[str, Any]:
         },
         "artifacts": {name: artifact_ref(path) for name, path in ARTIFACTS.items()},
         "artifact_validation": validations,
+        "dataset_binding": dataset_binding,
         "single_provenance_valid": not mixed_provenance,
     }
 
@@ -280,14 +334,16 @@ def render_markdown(payload: dict[str, Any]) -> str:
         ),
         (
             f"| Fixed-context generation | {fixed['status'].upper()} | "
-            f"`{fixed['cases']}` contract pass, Faithfulness `{fixed['faithfulness']:.4f}`, "
-            f"Relevancy `{fixed['response_relevancy']:.4f}`, "
-            f"ID recall `{fixed['id_context_recall']:.4f}` |"
+            f"`{fixed['cases']}` contract pass, Faithfulness "
+            f"`{format_optional_score(fixed['faithfulness'])}`, "
+            f"Relevancy `{format_optional_score(fixed['response_relevancy'])}`, "
+            f"ID recall `{format_optional_score(fixed['id_context_recall'])}` |"
         ),
         (
             f"| Runtime end-to-end | {runtime['status'].upper()} | "
             f"id-smoke `{runtime['id_smoke_cases']}`, ID recall "
-            f"`{runtime['id_context_recall']:.4f}`, OOD `{runtime['refusal_boundary']:.0%}`; "
+            f"`{format_optional_score(runtime['id_context_recall'])}`, OOD "
+            f"`{format_optional_percent(runtime['refusal_boundary'])}`; "
             f"frozen demo `{runtime['frozen_demo_cases']}` |"
         ),
         "",
@@ -320,6 +376,20 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"| `{item['path']}` | `{item['sha256']}` |")
     lines.append("")
     return "\n".join(lines)
+
+
+def format_optional_score(value: Any) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "not_run"
+
+
+def format_optional_percent(value: Any) -> str:
+    try:
+        return f"{float(value):.0%}"
+    except (TypeError, ValueError):
+        return "not_run"
 
 
 def parse_args() -> argparse.Namespace:

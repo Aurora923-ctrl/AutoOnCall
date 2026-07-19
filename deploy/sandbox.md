@@ -23,7 +23,7 @@ D:\AppDataStorage\DockerData\autooncall-full
 | Loki | `autooncall-full-loki` | `13100` | Queryable incident logs for Redis/MySQL scenarios |
 | Loki log emitter | `autooncall-full-loki-log-emitter` | - | Periodically pushes deterministic incident logs into Loki |
 
-Seed data is not kept as a long-running or one-shot Compose service in the default interview stack. `make interview-up` starts only the six core services above, then runs `scripts/sandbox/seed_live_incident_evidence.py` to idempotently write service catalog, deployment history, historical tickets, and incident-window evidence into the real MySQL and Redis containers.
+Seed data is not kept as a long-running or one-shot Compose service in the default interview stack. `make interview-up` starts only the six core services above, then runs `scripts/sandbox/seed_live_incident_evidence.py --acknowledge-local-only` to idempotently write service catalog, deployment history, historical tickets, and incident-window evidence into allowlisted local MySQL and Redis containers.
 
 ## Quick Start
 

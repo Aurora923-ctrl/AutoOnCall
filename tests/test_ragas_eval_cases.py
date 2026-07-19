@@ -34,7 +34,9 @@ from scripts.eval.eval_ragas_cases import (
     ragas_execution_markdown_lines,
     reference_context_ids,
     review_item_set_sha256,
+    run_ragas_id_smoke_metrics,
     safe_float,
+    validate_ragas_input,
     write_eval_artifacts,
 )
 
@@ -87,7 +89,28 @@ def test_ragas_report_exposes_metric_engine_and_exact_coverage() -> None:
     text = "\n".join(lines)
     assert "deterministic_fallback/fallback" in text
     assert "ImportError: incompatible RAGAS" in text
-    assert "| `faithfulness` | 1 | 2 | case-b |" in text
+    assert "| `faithfulness` | 0 | 2 | 1 | case-b |" in text
+
+
+def test_ragas_context_ids_use_chunk_granularity_when_relevance_labels_are_chunks() -> None:
+    payload = {
+        "retrieval_results": [
+            {"source_file": "cpu_high_usage.md", "chunk_id": "cpu_high_usage.md#0001"},
+            {"source_file": "cpu_high_usage.md", "chunk_id": "cpu_high_usage.md#0002"},
+        ]
+    }
+    case = {
+        "relevant_chunks": [
+            {"chunk_id": "cpu_high_usage.md#0002", "relevance": 3},
+        ]
+    }
+    references = reference_context_ids(case)
+
+    assert references == ["cpu_high_usage.md#0002"]
+    assert context_ids_from_retrieval(payload, reference_ids=references) == [
+        "cpu_high_usage.md#0001",
+        "cpu_high_usage.md#0002",
+    ]
 
 
 def test_answer_for_judge_removes_inline_and_footer_citation_metadata() -> None:
@@ -197,6 +220,15 @@ def test_ragas_context_ids_fallback_to_source_path_and_chunk_id() -> None:
     assert context_ids_from_retrieval(payload) == ["redis_postmortem.pdf", "payment_wiki.html"]
 
 
+def test_ragas_input_gate_reports_missing_runtime_context() -> None:
+    assert validate_ragas_input(
+        {"required_sources": ["redis.md"]},
+        {"status": "success", "retrieval_results": []},
+        retrieved_ids=[],
+        contexts=[],
+    ) == ["retrieved_contexts_missing", "retrieved_context_ids_missing"]
+
+
 def test_business_rubric_token_extraction_supports_chinese_terms() -> None:
     tokens = extract_business_tokens("包含慢 SQL 或连接池等待证据定位")
 
@@ -232,6 +264,53 @@ def test_ragas_nan_metric_fails_instead_of_passing() -> None:
     assert result["passed"] is False
     assert result["metrics"]["faithfulness"] is None
     assert "faithfulness_unavailable" in result["failed_metrics"]
+
+
+def test_ragas_id_metric_nan_is_reported_unavailable(monkeypatch) -> None:
+    sample = RagasCaseSample(
+        case={"id": "nan-id"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md"],
+        reference_context_ids=["redis.md"],
+        answer="answer",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[],
+        retrieval={},
+    )
+    runner_context = {}
+
+    class Result:
+        def to_pandas(self):
+            class Frame:
+                @staticmethod
+                def to_dict(*, orient):
+                    assert orient == "records"
+                    return [
+                        {
+                            "id_based_context_precision": math.nan,
+                            "id_based_context_recall": 1.0,
+                        }
+                    ]
+
+            return Frame()
+
+    monkeypatch.setattr(
+        "scripts.eval.eval_ragas_cases.load_ragas_metric_classes",
+        lambda: {
+            "AspectCritic": object,
+            "Faithfulness": object,
+            "IDBasedContextPrecision": type("Precision", (), {}),
+            "IDBasedContextRecall": type("Recall", (), {}),
+            "ResponseRelevancy": object,
+        },
+    )
+    monkeypatch.setattr("ragas.evaluate", lambda *args, **kwargs: Result())
+
+    scores = run_ragas_id_smoke_metrics([sample], runner_context)
+
+    assert scores["nan-id"]["id_based_context_precision"] is None
+    assert runner_context["id_metric_execution"]["status"] == "failed"
 
 
 def test_full_profile_marks_missing_judge_metric_as_unavailable() -> None:

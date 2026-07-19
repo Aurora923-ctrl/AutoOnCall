@@ -103,12 +103,12 @@ class Settings(BaseSettings):
     milvus_recreate_on_dimension_mismatch: bool = False
 
     # ---- RAG 检索与索引配置 ---------------------------------------------------
-    rag_top_k: int = Field(default=3, ge=1)
+    rag_top_k: int = Field(default=3, ge=1, le=100)
     rag_model: str = ""  # 为空时复用 DASHSCOPE_MODEL，避免两个模型配置互相漂移
     rag_max_l2_distance: float = Field(default=2.0, ge=0)
     rag_content_preview_chars: int = Field(default=240, ge=1)
     rag_hybrid_search_enabled: bool = True
-    rag_hybrid_candidate_multiplier: int = Field(default=4, ge=1)
+    rag_hybrid_candidate_multiplier: int = Field(default=4, ge=1, le=20)
     rag_rerank_enabled: bool = True
     rag_retrieval_fusion_strategy: str = "weighted"
     rag_min_lexical_trust_score: float = Field(default=0.20, ge=0)
@@ -128,6 +128,7 @@ class Settings(BaseSettings):
     # 时使用 MYSQL_DSN / MYSQL_HOST 等配置。
     aiops_storage_backend: str = "sqlite"
     aiops_sqlite_path: str = "data/aiops_state.db"
+    alert_auto_diagnosis_timeout_seconds: float = Field(default=900.0, gt=0)
     aiops_feedback_path: str = "data/aiops_feedback.jsonl"
     aiops_mock_fallback_enabled: bool = False
     aiops_replanner_llm_enabled: bool = False
@@ -157,6 +158,7 @@ class Settings(BaseSettings):
     api_read_token: str = ""
     api_operator_token: str = ""
     api_approver_token: str = ""
+    api_change_token: str = ""
     api_admin_token: str = ""
 
     # ---- Prometheus 适配器配置 ------------------------------------------------
@@ -222,6 +224,7 @@ class Settings(BaseSettings):
     mysql_database: str = ""
     mysql_instances: str = ""
     mysql_timeout_seconds: float = Field(default=5.0, gt=0)
+    mysql_include_processlist: bool = False
     aiops_store_raw_external_payload: bool = False
 
     # ---- 工单系统适配器配置 ---------------------------------------------------
@@ -244,6 +247,7 @@ class Settings(BaseSettings):
     mcp_cls_url: str = "http://localhost:8003/mcp"
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://localhost:8004/mcp"
+    mcp_discovery_timeout_seconds: float = Field(default=5.0, gt=0)
 
     @property
     def mcp_servers(self) -> dict[str, dict[str, Any]]:
