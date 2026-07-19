@@ -321,12 +321,24 @@ def select_supporting_citations(
     return unique
 
 
+def remove_generic_uncertainty_boilerplate(answer: str) -> str:
+    """Drop the unsupported catch-all gap sentence before citation validation."""
+    kept_lines = []
+    for line in str(answer or "").splitlines():
+        normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])?\s*", "", line).strip()
+        normalized = re.sub(r"^不确定项\s*[:：]\s*", "", normalized).strip()
+        if normalized == "当前片段未提供其余问题的依据。":
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip()
+
+
 def answer_claims_are_cited(
     answer: str,
     *,
     allowed_pairs: set[tuple[str, str]],
 ) -> bool:
-    """Require every substantive answer line to bind exactly one allowlisted chunk."""
+    """Require every substantive answer line to bind only allowlisted chunks."""
     text = str(answer or "")
     content = text.split("引用来源：", 1)[0]
     section_titles = {
@@ -348,7 +360,7 @@ def answer_claims_are_cited(
         return False
     for line in claim_lines:
         pairs = extract_citation_pairs(line)
-        if not pairs or len(set(pairs)) != 1 or pairs[0] not in allowed_pairs:
+        if not pairs or any(pair not in allowed_pairs for pair in pairs):
             return False
     return True
 

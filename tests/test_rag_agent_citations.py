@@ -20,6 +20,7 @@ from app.services.rag_answer_policy import (
     build_generation_evidence,
     build_grounded_question,
     is_explicit_knowledge_refusal,
+    remove_generic_uncertainty_boilerplate,
     select_supporting_citations,
     validated_citation_prefix,
 )
@@ -357,6 +358,20 @@ def test_every_substantive_claim_requires_one_allowlisted_citation() -> None:
     )
 
 
+def test_one_claim_can_bind_multiple_allowlisted_citations() -> None:
+    allowed = {
+        ("payment_wiki.html", "payment_wiki.html#0001"),
+        ("mysql_postmortem.pdf", "mysql_postmortem.pdf#0001"),
+    }
+
+    assert answer_claims_are_cited(
+        "- 变更需要审批和窗口。"
+        "[payment_wiki.html | payment_wiki.html#0001]"
+        "[mysql_postmortem.pdf | mysql_postmortem.pdf#0001]",
+        allowed_pairs=allowed,
+    )
+
+
 def test_validated_citation_prefix_only_releases_complete_allowlisted_claims() -> None:
     citations = [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}]
 
@@ -377,6 +392,20 @@ def test_select_supporting_citations_does_not_fallback_to_all_top_k() -> None:
     ]
 
     assert select_supporting_citations("只给出结论但没有 claim 引用。", citations) == []
+
+
+def test_generic_uncertainty_boilerplate_is_removed_before_citation_validation() -> None:
+    answer = (
+        "- 检查 active_connections。"
+        "[payment_wiki.html | payment_wiki.html#0001]\n"
+        "- 不确定项：当前片段未提供其余问题的依据。\n"
+        "4. 当前片段未提供其余问题的依据。"
+    )
+
+    cleaned = remove_generic_uncertainty_boilerplate(answer)
+
+    assert "不确定项" not in cleaned
+    assert cleaned.endswith("[payment_wiki.html | payment_wiki.html#0001]")
 
 
 def test_select_supporting_citations_does_not_accept_prefix_or_wrong_source() -> None:

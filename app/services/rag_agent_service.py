@@ -38,6 +38,7 @@ from app.services.rag_answer_policy import (
     has_valid_citations,
     is_explicit_knowledge_refusal,
     message_content_to_text,
+    remove_generic_uncertainty_boilerplate,
     select_supporting_citations,
     validated_citation_prefix,
 )
@@ -389,6 +390,7 @@ class RagAgentService:
             session_id,
             history_question=question,
         )
+        answer = remove_generic_uncertainty_boilerplate(answer)
         if is_explicit_knowledge_refusal(answer):
             answer = build_no_answer_message(
                 {
@@ -788,6 +790,7 @@ class RagAgentService:
             else:
                 yield chunk
 
+        full_answer = remove_generic_uncertainty_boilerplate(full_answer)
         if is_explicit_knowledge_refusal(full_answer):
             answer = build_no_answer_message(
                 {
