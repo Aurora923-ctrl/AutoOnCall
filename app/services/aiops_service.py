@@ -117,10 +117,12 @@ __all__ = [
 
 
 class AIOpsService:
-    """通用 Plan-Execute-RePlan 服务"""
+    """Plan-Execute-Replan service with durable business snapshots as the source of truth."""
 
     def __init__(self):
         """初始化服务"""
+        # LangGraph checkpoints only cache state while this process executes the graph.
+        # Durable recovery and API read models always use state_store snapshots.
         self.checkpointer = MemorySaver()
         self.state_store = create_aiops_store()
         self._active_run_lock = Lock()
@@ -258,6 +260,7 @@ class AIOpsService:
             yield start_payload
 
             config_dict = {"configurable": {"thread_id": session_id}}
+            runtime_state = dict(initial_state)
 
             async for event in self.graph.astream(
                 input=initial_state, config=config_dict, stream_mode="updates"
@@ -295,12 +298,12 @@ class AIOpsService:
                         )
                     except Exception as trace_exc:
                         logger.warning(f"记录 AIOps 节点 Trace 失败: {trace_exc}")
-                    snapshot_state = self.get_checkpoint_values(session_id)
                     if isinstance(node_output, dict):
-                        snapshot_state = _merge_checkpoint_with_node_output(
-                            snapshot_state,
+                        runtime_state = _merge_checkpoint_with_node_output(
+                            runtime_state,
                             node_output,
                         )
+                    snapshot_state = dict(runtime_state)
                     progress = build_progress_from_event(
                         event_payload,
                         snapshot_state,
@@ -621,8 +624,8 @@ class AIOpsService:
             else:
                 yield event
 
-    def get_checkpoint_values(self, session_id: str) -> dict[str, Any]:
-        """Return the current in-memory graph checkpoint values for a session."""
+    def get_runtime_checkpoint_values(self, session_id: str) -> dict[str, Any]:
+        """Inspect the process-local graph cache without using it for durable recovery."""
         config_dict = {"configurable": {"thread_id": session_id}}
         snapshot = self.graph.get_state(config_dict)
         if not snapshot or not snapshot.values:
@@ -732,12 +735,6 @@ class AIOpsService:
                 raise ValueError("session_id does not belong to the approved diagnosis run")
         candidate_session_id = requested_session_id or approval_session_id
         if candidate_session_id:
-            checkpoint = self.get_checkpoint_values(candidate_session_id)
-            if checkpoint:
-                if _extract_incident_id(checkpoint) != incident_id:
-                    raise ValueError("session_id does not belong to the requested incident")
-                self._validate_resume_state(checkpoint, approval)
-                return candidate_session_id
             snapshot = self._load_resume_session_snapshot(
                 session_id=candidate_session_id,
                 incident_id=incident_id,
@@ -750,8 +747,7 @@ class AIOpsService:
                 self._validate_resume_report(persisted_report, approval)
                 return candidate_session_id
             raise LookupError(
-                "No paused checkpoint, session snapshot, or persisted report "
-                f"for incident {incident_id}"
+                f"No durable session snapshot or persisted report for incident {incident_id}"
             )
 
         offset = 0
@@ -782,8 +778,7 @@ class AIOpsService:
             self._validate_resume_report(persisted_report, approval)
         else:
             raise LookupError(
-                "No paused checkpoint, session snapshot, or persisted report "
-                f"for incident {incident_id}"
+                f"No durable session snapshot or persisted report for incident {incident_id}"
             )
         return f"resume-{approval.approval_id}"
 
@@ -835,7 +830,7 @@ class AIOpsService:
 
         The approval confirms the human change plan, but this endpoint does not execute
         production mutations. It resumes the diagnostic lifecycle by persisting a fresh
-        post-approval report and trace event from the paused checkpoint.
+        post-approval report and trace event from durable business state.
         """
         if approval.incident_id != incident_id:
             raise ValueError("approval_id does not belong to the requested incident")
@@ -847,41 +842,30 @@ class AIOpsService:
         if approval_session_id and approval_session_id != session_id:
             raise ValueError("session_id does not belong to the approved diagnosis run")
 
-        values = self.get_checkpoint_values(session_id)
-        resume_source = "checkpoint"
+        values: dict[str, Any] = {}
+        resume_source = "session_snapshot"
         persisted_report: DiagnosisReport | None = None
-        if values:
-            checkpoint_incident_id = _extract_incident_id(values)
-            if checkpoint_incident_id != incident_id:
-                raise ValueError("session_id does not belong to the requested incident")
+        snapshot = self._load_resume_session_snapshot(
+            session_id=session_id,
+            incident_id=incident_id,
+        )
+        if snapshot is not None:
+            values = snapshot.to_state()
             self._validate_resume_state(values, approval)
-            trace_id = str(
-                values.get("trace_id") or approval.metadata.get("trace_id") or "trace-unknown"
+            trace_id = snapshot.trace_id or str(
+                approval.metadata.get("trace_id") or "trace-unknown"
             )
         else:
-            snapshot = self._load_resume_session_snapshot(
-                session_id=session_id,
-                incident_id=incident_id,
+            persisted_report = report_generator.get_report(incident_id)
+            if persisted_report is None:
+                raise LookupError(
+                    f"No durable session snapshot or persisted report for incident {incident_id}"
+                )
+            self._validate_resume_report(persisted_report, approval)
+            trace_id = persisted_report.trace_id or str(
+                approval.metadata.get("trace_id") or "trace-unknown"
             )
-            if snapshot is not None:
-                values = snapshot.to_state()
-                self._validate_resume_state(values, approval)
-                trace_id = snapshot.trace_id or str(
-                    approval.metadata.get("trace_id") or "trace-unknown"
-                )
-                resume_source = "session_snapshot"
-            else:
-                persisted_report = report_generator.get_report(incident_id)
-                if persisted_report is None:
-                    raise LookupError(
-                        "No paused checkpoint, session snapshot, or persisted report "
-                        f"for incident {incident_id}"
-                    )
-                self._validate_resume_report(persisted_report, approval)
-                trace_id = persisted_report.trace_id or str(
-                    approval.metadata.get("trace_id") or "trace-unknown"
-                )
-                resume_source = "report_fallback"
+            resume_source = "report_fallback"
 
         progress_index = 0
 
@@ -992,11 +976,6 @@ class AIOpsService:
                 status="approval_resumed",
             )
 
-            if resume_source == "checkpoint":
-                self._best_effort_update_checkpoint_after_resume(
-                    session_id=session_id,
-                    report=report.model_dump(mode="json"),
-                )
             resumed_state = dict(values)
             resumed_state["pending_approval"] = None
             resumed_state["risk_assessment"] = risk_summary
@@ -1176,27 +1155,6 @@ class AIOpsService:
             )
         yield complete_progress_payload
         yield attach_progress(complete_payload, complete_progress)
-
-    def _best_effort_update_checkpoint_after_resume(
-        self,
-        *,
-        session_id: str,
-        report: dict[str, Any],
-    ) -> None:
-        """Update in-memory checkpoint state after resume without failing the API."""
-        config_dict = {"configurable": {"thread_id": session_id}}
-        try:
-            self.graph.update_state(
-                config_dict,
-                {
-                    "pending_approval": None,
-                    "response": report.get("markdown", ""),
-                    "report": report,
-                },
-                as_node=NODE_REPLANNER,
-            )
-        except Exception as exc:
-            logger.warning(f"更新 resume checkpoint 失败，将以持久化报告为准: {exc}")
 
     def _mark_resume_failed(
         self,

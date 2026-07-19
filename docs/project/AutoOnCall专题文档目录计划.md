@@ -445,7 +445,7 @@ project/
   - Trace 脱敏、工具输出 Artifact、摘要、哈希和指针。
   - `AIOpsStateStore` Protocol 及 SQLite/MySQL 实现。
   - LangGraph MemorySaver 与 latest Session Snapshot 的职责区别。
-  - 审批恢复的 checkpoint、Snapshot、Report fallback。
+  - 审批恢复的 Snapshot、Report fallback，以及 MemorySaver 不参与恢复决策。
   - Incident overview、run status 和 Replay 派生读模型。
   - Replay 中 Trace、审批、变更、报告和评测信息的聚合及启发式关联限制。
   - Snapshot 保存较完整状态，当前缺少统一的全局脱敏和体积上限；本地工具 Artifact 也尚未纳入数据库 retention 清理。

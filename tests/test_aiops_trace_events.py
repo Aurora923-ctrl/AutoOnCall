@@ -477,8 +477,66 @@ def test_resolve_resume_session_id_requires_matching_paused_snapshot(tmp_path) -
         )
     )
 
-    with pytest.raises(LookupError, match="No paused checkpoint"):
+    with pytest.raises(LookupError, match="No durable session snapshot"):
         service.resolve_resume_session_id(incident_id=incident_id, approval=approval)
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_process_local_checkpoint_when_durable_snapshot_exists(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    incident_id = "inc-durable-authority"
+    session_id = "session-durable-authority"
+    trace_id = "trace-durable-authority"
+    database_path = tmp_path / "durable-authority.db"
+    trace_store = TraceService(database_path)
+    report_store = ReportGenerator(database_path)
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(database_path)
+    approval = ApprovalRequest(
+        incident_id=incident_id,
+        action="manual mitigation",
+        risk_level="high",
+        status="approved",
+        metadata={"trace_id": trace_id, "session_id": session_id},
+    )
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id=session_id,
+            status="waiting_approval",
+            state={
+                "trace_id": trace_id,
+                "incident": {
+                    "incident_id": incident_id,
+                    "service_name": "order-service",
+                },
+                "pending_approval": approval.model_dump(mode="json"),
+                "final_diagnosis": "Durable Redis saturation diagnosis",
+            },
+        )
+    )
+
+    def fail_if_checkpoint_is_read(_session_id: str) -> dict:
+        raise AssertionError("process-local checkpoint must not participate in recovery")
+
+    monkeypatch.setattr(service, "get_runtime_checkpoint_values", fail_if_checkpoint_is_read)
+    monkeypatch.setattr(aiops_service_module, "trace_service", trace_store)
+    monkeypatch.setattr(aiops_service_module, "report_generator", report_store)
+
+    events = [
+        event
+        async for event in service.resume_after_approval(
+            session_id=session_id,
+            incident_id=incident_id,
+            approval=approval,
+        )
+    ]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["resume_source"] == "session_snapshot"
+    assert events[-1]["structured_report"]["incident_id"] == incident_id
+    assert service.get_session_snapshot(session_id).status == "approval_resumed"
 
 
 def test_report_fallback_rejects_unrelated_approval() -> None:
