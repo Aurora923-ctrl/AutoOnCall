@@ -399,7 +399,7 @@ def test_generic_uncertainty_boilerplate_is_removed_before_citation_validation()
         "- 检查 active_connections。"
         "[payment_wiki.html | payment_wiki.html#0001]\n"
         "- 不确定项：当前片段未提供其余问题的依据。\n"
-        "4. 当前片段未提供其余问题的依据。"
+        "4. 当前片段未提供其余问题的依据：缺少具体命令。"
     )
 
     cleaned = remove_generic_uncertainty_boilerplate(answer)

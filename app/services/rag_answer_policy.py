@@ -326,8 +326,8 @@ def remove_generic_uncertainty_boilerplate(answer: str) -> str:
     kept_lines = []
     for line in str(answer or "").splitlines():
         normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])?\s*", "", line).strip()
-        normalized = re.sub(r"^不确定项\s*[:：]\s*", "", normalized).strip()
-        if normalized == "当前片段未提供其余问题的依据。":
+        normalized_gap = re.sub(r"^不确定项\s*[:：]\s*", "", normalized).strip()
+        if not extract_citation_pairs(line) and normalized_gap.startswith("当前片段未提供"):
             continue
         kept_lines.append(line)
     return "\n".join(kept_lines).strip()
