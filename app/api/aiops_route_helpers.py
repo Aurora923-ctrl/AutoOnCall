@@ -463,8 +463,8 @@ async def safe_change_event_stream(
     approval_id: str,
     mode: str,
     operator: str,
-    operator_principal_id: str,
-    observe_window_seconds: int,
+    operator_principal_id: str = "",
+    observe_window_seconds: int = 300,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield SSE messages for safe change workflow resume."""
     terminal_emitted = False

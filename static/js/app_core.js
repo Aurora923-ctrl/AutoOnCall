@@ -16,7 +16,8 @@ class AutoOnCallApp {
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
         this.workbenchStorageKey = 'autooncallWorkbenchState';
         const savedWorkbench = this.loadWorkbenchState();
-        this.currentWorkbenchView = savedWorkbench.view || 'incidents';
+        this.currentWorkbenchView = 'incidents';
+        this.currentWorkbenchView = savedWorkbench.view || this.currentWorkbenchView;
         this.currentIncidentTab = savedWorkbench.incidentTab || 'overview';
         this.apiTokenStorageKey = 'autooncallApiToken';
         this.selectedIncidentId = savedWorkbench.incidentId || '';

@@ -211,7 +211,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 return false;
             }
             const data = dataLines.join('\n');
+            const parsedLine = { done: data === '[DONE]' };
             const event = { event: eventName || 'message', id: eventId, data };
+            if (parsedLine.done) event.data = '[DONE]';
             dataLines = [];
             eventName = '';
             return onEvent(event) === true;
@@ -219,6 +221,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
 
         const processLine = (rawLine) => {
             const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+            const lineEnding = line.endsWith('\r');
             if (line === '') return dispatch();
             if (line.startsWith(':')) return false;
             const separator = line.indexOf(':');

@@ -14,7 +14,6 @@ from app.services.rag_retrieval.candidates import (
     _coerce_score,
     citation_source_basename,
     extract_retrieval_terms,
-    normalize_vector_distance,
 )
 from app.services.rag_retrieval.intent import query_has_oncall_scope
 

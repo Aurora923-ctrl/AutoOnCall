@@ -7,8 +7,8 @@ from scripts.eval.run_benchmark_baseline import (
     artifact_status,
     build_official_block_reasons,
     reserve_run_directory,
-    write_interview_scorecard,
     write_failed_pointer,
+    write_interview_scorecard,
 )
 
 

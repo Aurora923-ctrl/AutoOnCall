@@ -78,6 +78,8 @@ def scoped_session_id(principal: AuthPrincipal, session_id: str) -> str:
         return session_id
     if not principal.enabled:
         return session_id
+    if principal.has_scope(ADMIN_SCOPE) and session_id.startswith("principal:"):
+        return session_id
     prefix = principal_session_prefix(principal)
     if session_id.startswith(prefix):
         return session_id
@@ -255,7 +257,10 @@ def _add_role_token(
     registry[token_name] = {
         "token": token_text,
         "token_name": token_name,
-        "principal_id": _safe_principal_id(principal_id, fallback=token_name),
+        "principal_id": _safe_principal_id(
+            principal_id,
+            fallback=sha256(token_text.encode("utf-8")).hexdigest()[:16],
+        ),
         "scopes": set(ROLE_SCOPES[role]),
     }
 

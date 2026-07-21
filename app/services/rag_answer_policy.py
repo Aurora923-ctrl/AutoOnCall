@@ -7,7 +7,6 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from app.services.rag_retrieval.candidates import extract_retrieval_terms
 from app.services.rag_generation_context import (
     build_generation_context,
     build_generation_evidence,
@@ -16,6 +15,7 @@ from app.services.rag_generation_context import (
     select_generation_excerpt,
 )
 from app.services.rag_read_models import format_score
+from app.services.rag_retrieval.candidates import extract_retrieval_terms
 from app.services.rag_retrieval.service import NO_TRUSTED_KNOWLEDGE
 
 __all__ = [

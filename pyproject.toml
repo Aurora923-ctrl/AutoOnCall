@@ -72,7 +72,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["app*", "scripts*", "mcp_servers*"]
 
 
 
@@ -130,6 +130,7 @@ skip = ["venv", "__pycache__", "logs"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
+pythonpath = ["."]
 addopts = [
     "-ra",
     "-q",

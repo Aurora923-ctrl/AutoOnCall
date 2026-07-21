@@ -22,7 +22,6 @@ from app.services.rag_retrieval.selection import (
 )
 from app.services.rag_retrieval.validation import (
     normalize_fusion_strategy,
-    validate_retrieval_k,
 )
 
 

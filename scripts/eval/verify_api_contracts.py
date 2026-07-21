@@ -460,6 +460,7 @@ class FakeApprovalService:
         decision: str,
         decided_by: str = "operator",
         reason: str = "",
+        decided_by_principal_id: str | None = None,
     ) -> ApprovalRequest:
         approval = self.get_request(approval_id)
         status = "approved" if decision == "approve" else "rejected"
@@ -551,7 +552,8 @@ class FakeChangeExecutionService:
         approval_id: str,
         mode: str,
         operator: str,
-        observe_window_seconds: int,
+        operator_principal_id: str = "",
+        observe_window_seconds: int = 300,
     ):
         execution = ChangeExecution(
             change_execution_id="chgexec-contract-001",

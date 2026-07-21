@@ -226,7 +226,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     const { done, value } = await reader.read();
                     
                     if (done) {
-                        if (parser.push(decoder.decode()) || parser.finish()) {
+                        const trailingChunk = decoder.decode();
+                        buffer += decoder.decode();
+                        if (parser.push(trailingChunk) || parser.finish()) {
                             return;
                         }
                         if (!terminalReceived) {
