@@ -10,7 +10,6 @@ from sse_starlette.sse import EventSourceResponse
 from app.api.aiops_route_helpers import (
     build_aiops_run_status_payload,
     build_aiops_runs_payload,
-    build_change_execution_payload,
     build_demo_incident_payload,
     build_incident_changes_payload,
     build_manual_change_result_payload,
@@ -21,18 +20,29 @@ from app.api.aiops_route_helpers import (
     safe_change_event_stream,
 )
 from app.core.auth import (
+    ADMIN_SCOPE,
     CHANGE_SCOPE,
     DIAGNOSE_SCOPE,
     READ_SCOPE,
     AuthPrincipal,
     audit_actor,
+    can_access_session,
+    principal_session_prefix,
     require_scope,
+    scoped_session_id,
+)
+from app.core.ownership import (
+    owns_approval,
+    owns_change_execution,
+    owns_incident_or_approval,
 )
 from app.models.aiops import AIOPS_SESSION_ID_MAX_LENGTH, AIOpsRequest, AIOpsResumeRequest
 from app.models.approval import ApprovalRequest
 from app.models.change_execution import ChangeResumeRequest, ManualExecutionResultRequest
 from app.services.aiops_service import aiops_service
+from app.services.aiops_store import create_aiops_store
 from app.services.approval_service import ApprovalService, approval_service
+from app.services.change_execution_read_models import build_change_execution_read_model
 from app.services.change_execution_service import ChangeExecutionService, change_execution_service
 from app.services.demo_incidents import (
     canonical_demo_case_id,
@@ -69,6 +79,11 @@ def get_change_execution_service() -> ChangeExecutionService:
     return change_execution_service
 
 
+def get_change_approval_service(change_service: ChangeExecutionService) -> ApprovalService:
+    """Return the approval authority used by a change service."""
+    return getattr(change_service, "_approval_service", get_approval_service())
+
+
 @router.get("/aiops/tools/contracts", dependencies=[Depends(require_scope(READ_SCOPE))])
 async def list_aiops_tool_contracts() -> dict:
     """Return read-only AIOps tool contracts without invoking external systems."""
@@ -94,12 +109,13 @@ async def get_aiops_status_catalog() -> dict:
     return {"count": len(items), "items": items}
 
 
-@router.get("/aiops/runs", dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.get("/aiops/runs")
 async def list_aiops_runs(
     incident_id: str | None = Query(default=None, min_length=1, max_length=RESOURCE_ID_MAX_LENGTH),
-    status: str | None = Query(default=None),
-    service_name: str | None = Query(default=None),
+    status: str | None = Query(default=None, min_length=1, max_length=64),
+    service_name: str | None = Query(default=None, min_length=1, max_length=120),
     limit: int = Query(default=20, ge=1, le=100),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """Return recent durable diagnosis runs for history views."""
     return build_aiops_runs_payload(
@@ -110,14 +126,23 @@ async def list_aiops_runs(
         status=status,
         service_name=service_name,
         limit=limit,
+        session_id_prefix=(
+            ""
+            if not principal.enabled or principal.has_scope(ADMIN_SCOPE)
+            else principal_session_prefix(principal)
+        ),
     )
 
 
-@router.get("/aiops/runs/{session_id}", dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.get("/aiops/runs/{session_id}")
 async def get_aiops_run_status(
     session_id: str = Path(..., min_length=1, max_length=AIOPS_SESSION_ID_MAX_LENGTH),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """Return the latest durable state for one diagnosis run."""
+    session_id = scoped_session_id(principal, session_id)
+    if not can_access_session(principal, session_id):
+        raise HTTPException(status_code=404, detail="AIOps diagnosis run not found")
     return build_aiops_run_status_payload(
         aiops_service=aiops_service,
         trace_service=get_trace_service(),
@@ -127,10 +152,16 @@ async def get_aiops_run_status(
     )
 
 
-@router.post("/aiops", dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))])
-async def diagnose_stream(request: AIOpsRequest):
+@router.post("/aiops")
+async def diagnose_stream(
+    request: AIOpsRequest,
+    principal: AuthPrincipal = Depends(require_scope(DIAGNOSE_SCOPE)),
+):
     """Run the Plan-Execute-Replan AIOps diagnosis workflow as an SSE stream."""
-    session_id = request.session_id or f"session-{uuid4().hex}"
+    session_id = scoped_session_id(
+        principal,
+        request.session_id or f"session-{uuid4().hex}",
+    )
 
     logger.info(f"[会话 {sanitize_log_value(session_id)}] 收到 AIOps 诊断请求（流式）")
     return EventSourceResponse(
@@ -152,39 +183,57 @@ async def get_demo_incident(
 
 @router.post(
     "/aiops/demo/incidents/{case_id}/run",
-    dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))],
 )
-async def run_demo_incident(case_id: ResourceId, request: AIOpsRequest | None = None):
+async def run_demo_incident(
+    case_id: ResourceId,
+    request: AIOpsRequest | None = None,
+    principal: AuthPrincipal = Depends(require_scope(DIAGNOSE_SCOPE)),
+):
     """Run a fixed demo incident through the normal AIOps SSE workflow."""
     canonical_id = canonical_demo_case_id(case_id)
     incident = _resolve_demo_incident(case_id)
     request_session_id = request.session_id if request and request.session_id else None
-    session_id = request_session_id or f"demo-{canonical_id}-{uuid4().hex}"
+    session_id = scoped_session_id(
+        principal,
+        request_session_id or f"demo-{canonical_id}-{uuid4().hex}",
+    )
     if request and request.incident:
         incident = request.incident
-    return await diagnose_stream(AIOpsRequest(session_id=session_id, incident=incident))
+    return EventSourceResponse(
+        diagnosis_event_stream(
+            aiops_service=aiops_service,
+            session_id=session_id,
+            incident=incident,
+        )
+    )
 
 
 @router.post(
     "/incidents/{incident_id}/diagnosis/resume",
-    dependencies=[Depends(require_scope(DIAGNOSE_SCOPE))],
 )
 async def resume_diagnosis_stream(
     incident_id: ResourceId,
     request: AIOpsResumeRequest,
+    principal: AuthPrincipal = Depends(require_scope(DIAGNOSE_SCOPE)),
 ):
     """Record an approved human decision and close the paused diagnosis loop."""
     approval = _resolve_resume_approval(incident_id, request.approval_id)
+    if not owns_approval(principal, approval):
+        raise HTTPException(status_code=404, detail="approval not found")
     try:
         session_id = aiops_service.resolve_resume_session_id(
             incident_id=incident_id,
             approval=approval,
-            requested_session_id=request.session_id,
+            requested_session_id=(
+                scoped_session_id(principal, request.session_id) if request.session_id else None
+            ),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not can_access_session(principal, session_id):
+        raise HTTPException(status_code=404, detail="AIOps diagnosis run not found")
 
     logger.info(
         f"[会话 {sanitize_log_value(session_id)}] 收到 AIOps resume 请求: "
@@ -211,15 +260,26 @@ async def resume_safe_change_stream(
     principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ):
     """Start the safe change workflow after an approval decision."""
+    change_service = get_change_execution_service()
+    try:
+        if hasattr(change_service, "get_approval_request"):
+            approval = change_service.get_approval_request(request.approval_id)
+        else:
+            approval = get_approval_service().get_request(request.approval_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="approval not found") from exc
+    if approval.incident_id != incident_id or not owns_approval(principal, approval):
+        raise HTTPException(status_code=404, detail="approval not found")
     operator = audit_actor(principal, request.operator)
     return EventSourceResponse(
         safe_change_event_stream(
-            change_service=get_change_execution_service(),
+            change_service=change_service,
             incident_id=incident_id,
             change_plan_id=change_plan_id,
             approval_id=request.approval_id,
             mode=request.mode,
             operator=operator,
+            operator_principal_id=principal.principal_id,
             observe_window_seconds=request.observe_window_seconds,
         )
     )
@@ -227,21 +287,38 @@ async def resume_safe_change_stream(
 
 @router.get(
     "/incidents/{incident_id}/changes",
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def list_incident_changes(
     incident_id: ResourceId,
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """List safe change executions for one incident."""
-    return build_incident_changes_payload(get_change_execution_service(), incident_id)
+    change_service = get_change_execution_service()
+    if not owns_incident_or_approval(
+        principal,
+        create_aiops_store(),
+        get_change_approval_service(change_service),
+        incident_id,
+    ):
+        raise HTTPException(status_code=404, detail="incident not found")
+    return build_incident_changes_payload(change_service, incident_id)
 
 
-@router.get("/changes/{change_execution_id}", dependencies=[Depends(require_scope(READ_SCOPE))])
+@router.get("/changes/{change_execution_id}")
 async def get_change_execution(
     change_execution_id: ResourceId,
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """Return one safe change execution."""
-    return build_change_execution_payload(get_change_execution_service(), change_execution_id)
+    change_service = get_change_execution_service()
+    execution = change_service.get_execution(change_execution_id)
+    if not owns_change_execution(
+        principal,
+        get_change_approval_service(change_service),
+        execution,
+    ):
+        raise HTTPException(status_code=404, detail="change execution not found")
+    return {"change_execution": build_change_execution_read_model(execution)}
 
 
 @router.post(
@@ -253,11 +330,17 @@ async def submit_manual_change_result(
     principal: AuthPrincipal = Depends(require_scope(CHANGE_SCOPE)),
 ) -> dict:
     """Record a manual execution result for a waiting safe change workflow."""
+    change_service = get_change_execution_service()
+    execution = change_service.get_execution(change_execution_id)
+    approval_service = get_change_approval_service(change_service)
+    if not owns_change_execution(principal, approval_service, execution):
+        raise HTTPException(status_code=404, detail="change execution not found")
     request = request.model_copy(update={"operator": audit_actor(principal, request.operator)})
     return build_manual_change_result_payload(
         change_service=get_change_execution_service(),
         change_execution_id=change_execution_id,
         request=request,
+        operator_principal_id=principal.principal_id,
     )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -29,430 +29,22 @@ from app.services.incident_lifecycle import (
     merge_incident_state,
 )
 from app.services.incident_state_builder import build_incident_state_from_alert
-from app.services.schema_migrations import SchemaMigration, apply_mysql_migrations
-from app.services.sql_safety import bind_markers, trusted_identifier, trusted_table_statement
+from app.services.mysql_runtime_import import import_mysql_runtime_state
+from app.services.sql_safety import bind_markers
+from app.services.store_maintenance import (
+    cleanup_mysql_runtime_data,
+    reset_mysql_runtime_data,
+)
+from app.services.store_schema import (
+    ensure_mysql_approval_idempotency_columns as _ensure_mysql_approval_columns,
+    ensure_mysql_change_execution_scope_unique_index as _ensure_mysql_change_scope,
+    ensure_mysql_runtime_column_capacities as _ensure_mysql_column_capacities,
+    initialize_mysql_store,
+    require_mysql_transactional_runtime_tables as _require_mysql_transactional_tables,
+)
 
 _MYSQL_POOLS: dict[tuple[tuple[str, Any], ...], Any] = {}
 _MYSQL_POOLS_LOCK = Lock()
-
-_RETENTION_SQL: dict[str, tuple[str, str]] = {
-    "alert_events": (
-        """
-        SELECT COUNT(*) AS count FROM alert_events AS target
-        WHERE target.updated_at < %s AND target.status = 'resolved'
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved', 'change_validated',
-                    'waiting_manual_execution', 'observing', 'partial_success',
-                    'recovery_pending', 'rollback_recommended'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE target FROM alert_events AS target
-        WHERE target.updated_at < %s AND target.status = 'resolved'
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved', 'change_validated',
-                    'waiting_manual_execution', 'observing', 'partial_success',
-                    'recovery_pending', 'rollback_recommended'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "trace_events": (
-        """
-        SELECT COUNT(*) AS count FROM trace_events AS target
-        WHERE target.created_at < %s
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE target FROM trace_events AS target
-        WHERE target.created_at < %s
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "approval_requests": (
-        """
-        SELECT COUNT(*) AS count FROM approval_requests AS target
-        WHERE target.updated_at < %s AND target.status != 'pending'
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.approval_id = target.approval_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE target FROM approval_requests AS target
-        WHERE target.updated_at < %s AND target.status != 'pending'
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.approval_id = target.approval_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "diagnosis_reports": (
-        """
-        SELECT COUNT(*) AS count FROM diagnosis_reports AS target
-        WHERE target.updated_at < %s
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE target FROM diagnosis_reports AS target
-        WHERE target.updated_at < %s
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "change_executions": (
-        """
-        SELECT COUNT(*) AS count FROM change_executions
-        WHERE updated_at < %s
-          AND status IN (
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed',
-              'closed', 'escalated'
-          )
-        """,
-        """
-        DELETE FROM change_executions
-        WHERE updated_at < %s
-          AND status IN (
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed',
-              'closed', 'escalated'
-          )
-        """,
-    ),
-    "aiops_sessions": (
-        """
-        SELECT COUNT(*) AS count FROM aiops_sessions
-        WHERE updated_at < %s
-          AND status NOT IN (
-              'running', 'planning', 'executing', 'resume_running',
-              'waiting_approval', 'approval_approved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = aiops_sessions.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM aiops_sessions
-        WHERE updated_at < %s
-          AND status NOT IN (
-              'running', 'planning', 'executing', 'resume_running',
-              'waiting_approval', 'approval_approved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = aiops_sessions.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "incident_states": (
-        """
-        SELECT COUNT(*) AS count FROM incident_states
-        WHERE updated_at < %s
-          AND status IN (
-              'completed', 'incomplete', 'degraded', 'needs_human',
-              'approval_rejected', 'approval_cancelled', 'approval_resumed',
-              'blocked', 'failed', 'escalated', 'resolved', 'closed',
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = incident_states.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM incident_states
-        WHERE updated_at < %s
-          AND status IN (
-              'completed', 'incomplete', 'degraded', 'needs_human',
-              'approval_rejected', 'approval_cancelled', 'approval_resumed',
-              'blocked', 'failed', 'escalated', 'resolved', 'closed',
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = incident_states.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-}
-_RUNTIME_RESET_SQL = (
-    (
-        "change_executions",
-        "SELECT COUNT(*) AS count FROM change_executions",
-        "DELETE FROM change_executions",
-    ),
-    (
-        "approval_requests",
-        "SELECT COUNT(*) AS count FROM approval_requests",
-        "DELETE FROM approval_requests",
-    ),
-    (
-        "diagnosis_reports",
-        "SELECT COUNT(*) AS count FROM diagnosis_reports",
-        "DELETE FROM diagnosis_reports",
-    ),
-    ("trace_events", "SELECT COUNT(*) AS count FROM trace_events", "DELETE FROM trace_events"),
-    (
-        "aiops_sessions",
-        "SELECT COUNT(*) AS count FROM aiops_sessions",
-        "DELETE FROM aiops_sessions",
-    ),
-    ("a2a_tasks", "SELECT COUNT(*) AS count FROM a2a_tasks", "DELETE FROM a2a_tasks"),
-    (
-        "incident_states",
-        "SELECT COUNT(*) AS count FROM incident_states",
-        "DELETE FROM incident_states",
-    ),
-    ("alert_events", "SELECT COUNT(*) AS count FROM alert_events", "DELETE FROM alert_events"),
-)
-_CHANGE_EXECUTION_TERMINAL_STATUSES = (
-    "precheck_failed",
-    "dry_run_failed",
-    "sandbox_validated",
-    "rolled_back",
-    "rollback_failed",
-    "closed",
-    "escalated",
-)
-
 
 class AIOpsMySQLStore:
     """Small PyMySQL-backed repository for trace, approval, and report state."""
@@ -464,7 +56,7 @@ class AIOpsMySQLStore:
         self.connection_settings = _parse_mysql_dsn(self.dsn)
         self.storage_path = _redact_mysql_dsn(self.dsn)
         self.migration_warnings: list[str] = []
-        self._initialize()
+        initialize_mysql_store(self._connect)
 
     def save_alert_event(self, event: AlertEvent) -> None:
         """Persist the latest state of one normalized alert event."""
@@ -921,36 +513,61 @@ class AIOpsMySQLStore:
         """Persist the latest state of one safe change workflow."""
         payload = _dump_model(execution)
         with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO change_executions (
-                        change_execution_id, change_plan_id, approval_id, incident_id,
-                        status, mode, created_at, updated_at, payload
+            connection.begin()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT change_execution_id FROM change_executions "
+                        "WHERE change_execution_id = %s FOR UPDATE",
+                        (execution.change_execution_id,),
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                        change_plan_id = VALUES(change_plan_id),
-                        approval_id = VALUES(approval_id),
-                        incident_id = VALUES(incident_id),
-                        status = VALUES(status),
-                        mode = VALUES(mode),
-                        created_at = VALUES(created_at),
-                        updated_at = VALUES(updated_at),
-                        payload = VALUES(payload)
-                    """,
-                    (
-                        execution.change_execution_id,
-                        execution.change_plan_id,
-                        execution.approval_id,
-                        execution.incident_id,
-                        execution.status,
-                        execution.mode,
-                        execution.created_at.isoformat(),
-                        execution.updated_at.isoformat(),
-                        payload,
-                    ),
-                )
+                    existing = cursor.fetchone()
+                    if existing is None:
+                        cursor.execute(
+                            """
+                            INSERT INTO change_executions (
+                                change_execution_id, change_plan_id, approval_id, incident_id,
+                                status, mode, created_at, updated_at, payload
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                execution.change_execution_id,
+                                execution.change_plan_id,
+                                execution.approval_id,
+                                execution.incident_id,
+                                execution.status,
+                                execution.mode,
+                                execution.created_at.isoformat(),
+                                execution.updated_at.isoformat(),
+                                payload,
+                            ),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE change_executions
+                            SET change_plan_id = %s, approval_id = %s, incident_id = %s,
+                                status = %s, mode = %s, created_at = %s,
+                                updated_at = %s, payload = %s
+                            WHERE change_execution_id = %s
+                            """,
+                            (
+                                execution.change_plan_id,
+                                execution.approval_id,
+                                execution.incident_id,
+                                execution.status,
+                                execution.mode,
+                                execution.created_at.isoformat(),
+                                execution.updated_at.isoformat(),
+                                payload,
+                                execution.change_execution_id,
+                            ),
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def save_change_execution_if_status(
         self,
@@ -1493,16 +1110,17 @@ class AIOpsMySQLStore:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT IGNORE INTO a2a_tasks (
-                        task_id, message_id, request_fingerprint, skill, incident_id,
-                        state, created_at, updated_at, payload
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT IGNORE INTO a2a_tasks (
+                    task_id, message_id, request_fingerprint, owner_id, skill, incident_id,
+                    state, created_at, updated_at, payload
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         record.task_id,
                         record.message_id,
                         record.request_fingerprint,
+                        record.owner_id,
                         record.skill,
                         record.incident_id,
                         record.state,
@@ -1531,19 +1149,21 @@ class AIOpsMySQLStore:
                         if (
                             existing.message_id != record.message_id
                             or existing.request_fingerprint != record.request_fingerprint
+                            or existing.owner_id != record.owner_id
                         ):
                             raise ValueError("A2A task ownership mismatch")
                         record.created_at = existing.created_at
                     cursor.execute(
                         """
                         INSERT INTO a2a_tasks (
-                            task_id, message_id, request_fingerprint, skill, incident_id,
+                            task_id, message_id, request_fingerprint, owner_id, skill, incident_id,
                             state, created_at, updated_at, payload
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE
                             message_id = VALUES(message_id),
                             request_fingerprint = VALUES(request_fingerprint),
+                            owner_id = VALUES(owner_id),
                             skill = VALUES(skill),
                             incident_id = VALUES(incident_id),
                             state = VALUES(state),
@@ -1554,6 +1174,7 @@ class AIOpsMySQLStore:
                             record.task_id,
                             record.message_id,
                             record.request_fingerprint,
+                            record.owner_id,
                             record.skill,
                             record.incident_id,
                             record.state,
@@ -1598,7 +1219,7 @@ class AIOpsMySQLStore:
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC, id DESC LIMIT %s"
-        params.append(limit)
+        params.append(max(1, min(int(limit or 20), 100)))
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
@@ -1837,353 +1458,22 @@ class AIOpsMySQLStore:
         approval_requests: Sequence[ApprovalRequest | tuple[ApprovalRequest, str | None]],
         change_executions: list[ChangeExecution],
         aiops_sessions: list[AIOpsSessionSnapshot],
+        a2a_tasks: list[A2ATaskRecord],
         incident_states: list[IncidentState],
         diagnosis_reports: list[DiagnosisReport],
     ) -> dict[str, Any]:
         """Atomically import SQLite runtime rows without overwriting MySQL state."""
-        imported = {
-            "alert_events": 0,
-            "trace_events": 0,
-            "approval_requests": 0,
-            "change_executions": 0,
-            "aiops_sessions": 0,
-            "incident_states": 0,
-            "diagnosis_reports": 0,
-        }
-        with self._connect() as connection:
-            connection.begin()
-            try:
-                with connection.cursor() as cursor:
-                    conflicts = self._find_runtime_import_conflicts(
-                        cursor,
-                        alert_events=alert_events,
-                        trace_events=trace_events,
-                        approval_requests=approval_requests,
-                        change_executions=change_executions,
-                        aiops_sessions=aiops_sessions,
-                        incident_states=incident_states,
-                        diagnosis_reports=diagnosis_reports,
-                    )
-                    if any(conflicts.values()):
-                        connection.rollback()
-                        return {**imported, "conflicts": conflicts}
-                    for alert_event in alert_events:
-                        imported["alert_events"] += self._insert_alert_event_for_import(
-                            cursor, alert_event
-                        )
-                    for trace_event in trace_events:
-                        imported["trace_events"] += self._insert_trace_event_for_import(
-                            cursor, trace_event
-                        )
-                    for approval_record in approval_requests:
-                        imported["approval_requests"] += self._insert_approval_request_for_import(
-                            cursor, approval_record
-                        )
-                    for execution in change_executions:
-                        imported["change_executions"] += self._insert_change_execution_for_import(
-                            cursor, execution
-                        )
-                    for snapshot in aiops_sessions:
-                        imported["aiops_sessions"] += self._insert_aiops_session_for_import(
-                            cursor, snapshot
-                        )
-                    for state in incident_states:
-                        imported["incident_states"] += self._insert_incident_state_for_import(
-                            cursor, state
-                        )
-                    for report in diagnosis_reports:
-                        imported["diagnosis_reports"] += self._insert_report_for_import(
-                            cursor, report
-                        )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return {**imported, "conflicts": dict.fromkeys(imported, 0)}
-
-    def _find_runtime_import_conflicts(
-        self,
-        cursor: Any,
-        *,
-        alert_events: list[AlertEvent],
-        trace_events: list[TraceEvent],
-        approval_requests: Sequence[ApprovalRequest | tuple[ApprovalRequest, str | None]],
-        change_executions: list[ChangeExecution],
-        aiops_sessions: list[AIOpsSessionSnapshot],
-        incident_states: list[IncidentState],
-        diagnosis_reports: list[DiagnosisReport],
-    ) -> dict[str, int]:
-        """Count target rows that share an identity but contain different state."""
-        conflicts = {
-            "alert_events": 0,
-            "trace_events": 0,
-            "approval_requests": 0,
-            "change_executions": 0,
-            "aiops_sessions": 0,
-            "incident_states": 0,
-            "diagnosis_reports": 0,
-        }
-        for table, key_column, records in (
-            ("alert_events", "fingerprint", alert_events),
-            ("trace_events", "event_id", trace_events),
-            ("aiops_sessions", "session_id", aiops_sessions),
-            ("incident_states", "incident_id", incident_states),
-            ("diagnosis_reports", "report_id", diagnosis_reports),
-        ):
-            table = trusted_identifier(table, allowed=conflicts)
-            key_column = trusted_identifier(
-                key_column,
-                allowed={
-                    "fingerprint",
-                    "event_id",
-                    "session_id",
-                    "incident_id",
-                    "report_id",
-                },
-            )
-            for record in records:
-                key = getattr(record, key_column)
-                cursor.execute(
-                    f"SELECT payload FROM {table} WHERE {key_column} = %s",  # nosec B608
-                    (key,),
-                )
-                row = cursor.fetchone()
-                if row is not None and _load_payload(row) != record.model_dump(mode="json"):
-                    conflicts[table] += 1
-
-        for approval_record in approval_requests:
-            request, idempotency_key = _approval_import_record(approval_record)
-            cursor.execute(
-                """
-                SELECT payload, idempotency_key
-                FROM approval_requests
-                WHERE approval_id = %s
-                   OR (
-                       %s IS NOT NULL
-                       AND pending_idempotency_key = %s
-                   )
-                """,
-                (request.approval_id, idempotency_key, idempotency_key),
-            )
-            rows = cursor.fetchall()
-            if any(
-                _load_payload(row) != request.model_dump(mode="json")
-                or str(row.get("idempotency_key") or "") != str(idempotency_key or "")
-                for row in rows
-            ):
-                conflicts["approval_requests"] += 1
-
-        for execution in change_executions:
-            cursor.execute(
-                """
-                SELECT payload FROM change_executions
-                WHERE change_execution_id = %s
-                   OR (
-                       incident_id = %s
-                       AND change_plan_id = %s
-                       AND approval_id = %s
-                   )
-                """,
-                (
-                    execution.change_execution_id,
-                    execution.incident_id,
-                    execution.change_plan_id,
-                    execution.approval_id,
-                ),
-            )
-            rows = cursor.fetchall()
-            if any(_load_payload(row) != execution.model_dump(mode="json") for row in rows):
-                conflicts["change_executions"] += 1
-        return conflicts
-
-    @staticmethod
-    def _insert_alert_event_for_import(cursor: Any, event: AlertEvent) -> int:
-        cursor.execute(
-            """
-            INSERT INTO alert_events (
-                fingerprint, incident_id, source, status, service_name,
-                severity, environment, starts_at, updated_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE fingerprint = VALUES(fingerprint)
-            """,
-            (
-                event.fingerprint,
-                event.incident_id,
-                event.source,
-                event.status,
-                event.service_name,
-                event.severity,
-                event.environment,
-                event.starts_at.isoformat() if event.starts_at else None,
-                event.updated_at.isoformat(),
-                _dump_model(event),
-            ),
+        return import_mysql_runtime_state(
+            self._connect,
+            alert_events=alert_events,
+            trace_events=trace_events,
+            approval_requests=approval_requests,
+            change_executions=change_executions,
+            aiops_sessions=aiops_sessions,
+            a2a_tasks=a2a_tasks,
+            incident_states=incident_states,
+            diagnosis_reports=diagnosis_reports,
         )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_trace_event_for_import(cursor: Any, event: TraceEvent) -> int:
-        cursor.execute(
-            """
-            INSERT INTO trace_events (
-                event_id, trace_id, incident_id, event_type, node_name,
-                step_id, tool_name, status, created_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE event_id = VALUES(event_id)
-            """,
-            (
-                event.event_id,
-                event.trace_id,
-                event.incident_id,
-                event.event_type,
-                event.node_name,
-                event.step_id,
-                event.tool_name,
-                event.status,
-                event.created_at.isoformat(),
-                _dump_model(event),
-            ),
-        )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_approval_request_for_import(
-        cursor: Any,
-        approval_record: ApprovalRequest | tuple[ApprovalRequest, str | None],
-    ) -> int:
-        request, idempotency_key = _approval_import_record(approval_record)
-        updated_at = (request.decided_at or request.created_at).isoformat()
-        cursor.execute(
-            """
-            INSERT INTO approval_requests (
-                approval_id, incident_id, status, risk_level, action,
-                idempotency_key, created_at, updated_at, decided_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE approval_id = VALUES(approval_id)
-            """,
-            (
-                request.approval_id,
-                request.incident_id,
-                request.status,
-                request.risk_level,
-                request.action,
-                idempotency_key,
-                request.created_at.isoformat(),
-                updated_at,
-                request.decided_at.isoformat() if request.decided_at else None,
-                _dump_model(request),
-            ),
-        )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_change_execution_for_import(
-        cursor: Any,
-        execution: ChangeExecution,
-    ) -> int:
-        cursor.execute(
-            """
-            INSERT INTO change_executions (
-                change_execution_id, change_plan_id, approval_id, incident_id,
-                status, mode, created_at, updated_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE change_execution_id = change_execution_id
-            """,
-            (
-                execution.change_execution_id,
-                execution.change_plan_id,
-                execution.approval_id,
-                execution.incident_id,
-                execution.status,
-                execution.mode,
-                execution.created_at.isoformat(),
-                execution.updated_at.isoformat(),
-                _dump_model(execution),
-            ),
-        )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_aiops_session_for_import(
-        cursor: Any,
-        snapshot: AIOpsSessionSnapshot,
-    ) -> int:
-        cursor.execute(
-            """
-            INSERT INTO aiops_sessions (
-                session_id, incident_id, trace_id, status, node_name,
-                created_at, updated_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE session_id = VALUES(session_id)
-            """,
-            (
-                snapshot.session_id,
-                snapshot.incident_id,
-                snapshot.trace_id,
-                snapshot.status,
-                snapshot.node_name,
-                snapshot.created_at.isoformat(),
-                snapshot.updated_at.isoformat(),
-                _dump_model(snapshot),
-            ),
-        )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_incident_state_for_import(
-        cursor: Any,
-        state: IncidentState,
-    ) -> int:
-        cursor.execute(
-            """
-            INSERT INTO incident_states (
-                incident_id, status, service_name, severity, environment,
-                trace_id, session_id, approval_status, created_at, updated_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE incident_id = VALUES(incident_id)
-            """,
-            (
-                state.incident_id,
-                state.status,
-                state.service_name,
-                state.severity,
-                state.environment,
-                state.trace_id,
-                state.session_id,
-                state.approval_status,
-                state.created_at.isoformat(),
-                state.updated_at.isoformat(),
-                _dump_model(state),
-            ),
-        )
-        return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def _insert_report_for_import(cursor: Any, report: DiagnosisReport) -> int:
-        cursor.execute(
-            """
-            INSERT INTO diagnosis_reports (
-                report_id, incident_id, trace_id, created_at, updated_at, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE report_id = VALUES(report_id)
-            """,
-            (
-                report.report_id,
-                report.incident_id,
-                report.trace_id,
-                report.created_at.isoformat(),
-                report.created_at.isoformat(),
-                _dump_model(report),
-            ),
-        )
-        return int(cursor.rowcount or 0)
 
     def get_report(self, report_id: str) -> DiagnosisReport | None:
         """Return one report by its stable identifier."""
@@ -2243,562 +1533,34 @@ class AIOpsMySQLStore:
 
     def reset_runtime_data(self) -> dict[str, int]:
         """Delete all AIOps runtime records while preserving the database schema."""
-        deleted: dict[str, int] = {}
-        with self._connect() as connection:
-            connection.begin()
-            try:
-                with connection.cursor() as cursor:
-                    for table, count_sql, delete_sql in _RUNTIME_RESET_SQL:
-                        cursor.execute(count_sql)
-                        deleted[table] = int(cursor.fetchone()["count"])
-                        cursor.execute(delete_sql)
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return deleted
+        return reset_mysql_runtime_data(self._connect)
 
     def cleanup_older_than(self, *, keep_days: int, dry_run: bool = False) -> dict[str, Any]:
         """Delete runtime records older than the retention window."""
-        if keep_days < 1:
-            raise ValueError("keep_days must be >= 1")
-
-        cutoff = datetime.now(UTC) - timedelta(days=keep_days)
-        cutoff_text = cutoff.isoformat()
-        deleted: dict[str, int] = {}
-
-        with self._connect() as connection:
-            try:
-                if not dry_run:
-                    connection.begin()
-                with connection.cursor() as cursor:
-                    eligible_incidents = self._select_retention_eligible_incidents(
-                        cursor,
-                        cutoff_text=cutoff_text,
-                    )
-                    if dry_run:
-                        deleted = self._count_retention_incidents(cursor, eligible_incidents)
-                    else:
-                        deleted = self._delete_retention_incidents(cursor, eligible_incidents)
-                if not dry_run:
-                    connection.commit()
-            except Exception:
-                if not dry_run:
-                    connection.rollback()
-                raise
-
-        return {
-            "backend": "mysql",
-            "database": self.storage_path,
-            "keep_days": keep_days,
-            "cutoff": cutoff_text,
-            "dry_run": dry_run,
-            "deleted": deleted,
-        }
-
-    @staticmethod
-    def _select_retention_eligible_incidents(
-        cursor: Any,
-        *,
-        cutoff_text: str,
-    ) -> list[str]:
-        terminal_placeholders = bind_markers(
-            len(_CHANGE_EXECUTION_TERMINAL_STATUSES),
-            "%s",
+        return cleanup_mysql_runtime_data(
+            self._connect,
+            storage_path=self.storage_path,
+            keep_days=keep_days,
+            dry_run=dry_run,
         )
-        cursor.execute(
-            f"""
-            SELECT incident_id
-            FROM (
-                SELECT incident_id FROM alert_events
-                UNION SELECT incident_id FROM trace_events
-                UNION SELECT incident_id FROM approval_requests
-                UNION SELECT incident_id FROM change_executions
-                UNION SELECT incident_id FROM aiops_sessions
-                UNION SELECT incident_id FROM incident_states
-                UNION SELECT incident_id FROM diagnosis_reports
-            ) AS incidents
-            WHERE NOT EXISTS (
-                SELECT 1 FROM alert_events AS alert
-                WHERE alert.incident_id = incidents.incident_id
-                  AND (alert.status != 'resolved' OR alert.updated_at >= %s)
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM trace_events AS trace
-                WHERE trace.incident_id = incidents.incident_id
-                  AND trace.created_at >= %s
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM approval_requests AS approval
-                WHERE approval.incident_id = incidents.incident_id
-                  AND (approval.status = 'pending' OR approval.updated_at >= %s)
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM change_executions AS execution
-                WHERE execution.incident_id = incidents.incident_id
-                  AND (
-                      execution.status NOT IN ({terminal_placeholders})
-                      OR execution.updated_at >= %s
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM aiops_sessions AS session
-                WHERE session.incident_id = incidents.incident_id
-                  AND (
-                      session.status IN (
-                          'running', 'planning', 'executing', 'resume_running',
-                          'waiting_approval', 'approval_approved', 'change_validated',
-                          'waiting_manual_execution', 'observing', 'partial_success',
-                          'recovery_pending', 'rollback_recommended'
-                      )
-                      OR session.updated_at >= %s
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM incident_states AS state
-                WHERE state.incident_id = incidents.incident_id
-                  AND (
-                      state.status NOT IN (
-                          'completed', 'incomplete', 'degraded', 'needs_human',
-                          'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                          'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                          'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                          'rolled_back', 'rollback_failed'
-                      )
-                      OR state.updated_at >= %s
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM diagnosis_reports AS report
-                WHERE report.incident_id = incidents.incident_id
-                  AND report.updated_at >= %s
-            )
-            ORDER BY incident_id
-            """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
-            (
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-                *_CHANGE_EXECUTION_TERMINAL_STATUSES,
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-            ),
-        )
-        return [str(row["incident_id"]) for row in cursor.fetchall()]
-
-    @staticmethod
-    def _count_retention_incidents(cursor: Any, incident_ids: list[str]) -> dict[str, int]:
-        counts = dict.fromkeys(_RETENTION_SQL, 0)
-        if not incident_ids:
-            return counts
-        for table in _RETENTION_SQL:
-            cursor.execute(
-                trusted_table_statement(
-                    "SELECT_COUNT",
-                    table=table,
-                    allowed_tables=_RETENTION_SQL,
-                    value_count=len(incident_ids),
-                    marker="%s",
-                ),
-                incident_ids,
-            )
-            counts[table] = int(cursor.fetchone()["count"])
-        return counts
-
-    @staticmethod
-    def _delete_retention_incidents(cursor: Any, incident_ids: list[str]) -> dict[str, int]:
-        deleted = dict.fromkeys(_RETENTION_SQL, 0)
-        if not incident_ids:
-            return deleted
-        deletion_order = (
-            "change_executions",
-            "approval_requests",
-            "diagnosis_reports",
-            "trace_events",
-            "aiops_sessions",
-            "incident_states",
-            "alert_events",
-        )
-        for table in deletion_order:
-            cursor.execute(
-                trusted_table_statement(
-                    "DELETE",
-                    table=table,
-                    allowed_tables=deletion_order,
-                    value_count=len(incident_ids),
-                    marker="%s",
-                ),
-                incident_ids,
-            )
-            deleted[table] = int(cursor.rowcount or 0)
-        return deleted
-
-    def _initialize(self) -> None:
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS alert_events (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        fingerprint VARCHAR(128) NOT NULL UNIQUE,
-                        incident_id VARCHAR(128) NOT NULL,
-                        source VARCHAR(64) NOT NULL,
-                        status VARCHAR(32) NOT NULL,
-                        service_name VARCHAR(128) NOT NULL,
-                        severity VARCHAR(32) NOT NULL,
-                        environment VARCHAR(64) NOT NULL,
-                        starts_at VARCHAR(64),
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_alert_events_incident (incident_id, updated_at),
-                        INDEX idx_alert_events_status (status, updated_at),
-                        INDEX idx_alert_events_service (service_name, updated_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS trace_events (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        event_id VARCHAR(128) NOT NULL UNIQUE,
-                        trace_id VARCHAR(128) NOT NULL,
-                        incident_id VARCHAR(128) NOT NULL,
-                        event_type VARCHAR(64) NOT NULL,
-                        node_name VARCHAR(128) NOT NULL,
-                        step_id VARCHAR(128),
-                        tool_name VARCHAR(128),
-                        status VARCHAR(32) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_trace_events_incident (incident_id, created_at),
-                        INDEX idx_trace_events_trace (trace_id, created_at),
-                        INDEX idx_trace_events_type (event_type, created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS approval_requests (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        approval_id VARCHAR(128) NOT NULL UNIQUE,
-                        incident_id VARCHAR(128) NOT NULL,
-                        status VARCHAR(32) NOT NULL,
-                        risk_level VARCHAR(32) NOT NULL,
-                        action VARCHAR(1000) NOT NULL,
-                        idempotency_key VARCHAR(128),
-                        pending_idempotency_key VARCHAR(128)
-                            GENERATED ALWAYS AS (
-                                CASE WHEN status = 'pending' THEN idempotency_key ELSE NULL END
-                            ) STORED,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        decided_at VARCHAR(64),
-                        payload LONGTEXT NOT NULL,
-                        UNIQUE KEY uniq_pending_approval_idempotency (pending_idempotency_key),
-                        INDEX idx_approval_requests_incident (incident_id, created_at),
-                        INDEX idx_approval_requests_status (status, created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS change_executions (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        change_execution_id VARCHAR(128) NOT NULL UNIQUE,
-                        change_plan_id VARCHAR(128) NOT NULL,
-                        approval_id VARCHAR(128) NOT NULL,
-                        incident_id VARCHAR(128) NOT NULL,
-                        status VARCHAR(64) NOT NULL,
-                        mode VARCHAR(32) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        UNIQUE KEY uniq_change_executions_scope (
-                            incident_id, change_plan_id, approval_id
-                        ),
-                        INDEX idx_change_executions_incident (incident_id, created_at),
-                        INDEX idx_change_executions_plan (change_plan_id, created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS aiops_sessions (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        session_id VARCHAR(128) NOT NULL UNIQUE,
-                        incident_id VARCHAR(128) NOT NULL,
-                        trace_id VARCHAR(128) NOT NULL,
-                        status VARCHAR(64) NOT NULL,
-                        node_name VARCHAR(128) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_aiops_sessions_incident (incident_id, updated_at),
-                        INDEX idx_aiops_sessions_trace (trace_id, updated_at),
-                        INDEX idx_aiops_sessions_status (status, updated_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS a2a_tasks (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        task_id VARCHAR(128) NOT NULL UNIQUE,
-                        message_id VARCHAR(256) NOT NULL,
-                        request_fingerprint VARCHAR(64) NOT NULL,
-                        skill VARCHAR(128) NOT NULL,
-                        incident_id VARCHAR(128) NOT NULL,
-                        state VARCHAR(64) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_a2a_tasks_message (message_id, updated_at),
-                        INDEX idx_a2a_tasks_incident (incident_id, updated_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS incident_states (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        incident_id VARCHAR(128) NOT NULL UNIQUE,
-                        status VARCHAR(64) NOT NULL,
-                        service_name VARCHAR(128) NOT NULL,
-                        severity VARCHAR(32) NOT NULL,
-                        environment VARCHAR(80) NOT NULL,
-                        trace_id VARCHAR(128),
-                        session_id VARCHAR(128),
-                        approval_status VARCHAR(64) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_incident_states_status (status, updated_at),
-                        INDEX idx_incident_states_service (service_name, updated_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS diagnosis_reports (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        report_id VARCHAR(128) NOT NULL UNIQUE,
-                        incident_id VARCHAR(128) NOT NULL,
-                        trace_id VARCHAR(128) NOT NULL,
-                        created_at VARCHAR(64) NOT NULL,
-                        updated_at VARCHAR(64) NOT NULL,
-                        payload LONGTEXT NOT NULL,
-                        INDEX idx_diagnosis_reports_incident (incident_id, created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """)
-                self._ensure_retention_timestamp_columns(cursor)
-                self._ensure_runtime_column_capacities(cursor)
-                self._require_transactional_runtime_tables(cursor)
-                apply_mysql_migrations(
-                    cursor,
-                    [
-                        SchemaMigration(1, "runtime_schema_baseline", lambda _cursor: None),
-                        SchemaMigration(
-                            2,
-                            "approval_and_change_idempotency",
-                            self._apply_mysql_approval_and_change_idempotency,
-                        ),
-                    ],
-                )
 
     def _ensure_approval_idempotency_columns(self, cursor: Any) -> None:
-        """Add approval idempotency columns and unique key to older MySQL tables."""
-        try:
-            cursor.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = DATABASE()
-                  AND table_name = 'approval_requests'
-                  AND column_name IN (
-                      'idempotency_key', 'pending_idempotency_key', 'updated_at'
-                  )
-                """)
-            columns = {str(row.get("column_name") or "") for row in cursor.fetchall()}
-            if "idempotency_key" not in columns:
-                cursor.execute(
-                    "ALTER TABLE approval_requests ADD COLUMN idempotency_key VARCHAR(128)"
-                )
-            if "pending_idempotency_key" not in columns:
-                cursor.execute("""
-                    ALTER TABLE approval_requests
-                    ADD COLUMN pending_idempotency_key VARCHAR(128)
-                    GENERATED ALWAYS AS (
-                        CASE WHEN status = 'pending' THEN idempotency_key ELSE NULL END
-                    ) STORED
-                    """)
-            if "updated_at" not in columns:
-                cursor.execute("ALTER TABLE approval_requests ADD COLUMN updated_at VARCHAR(64)")
-                cursor.execute(
-                    "UPDATE approval_requests SET updated_at = "
-                    "COALESCE(decided_at, created_at) WHERE updated_at IS NULL"
-                )
-                cursor.execute(
-                    "ALTER TABLE approval_requests MODIFY updated_at VARCHAR(64) NOT NULL"
-                )
+        _ensure_mysql_approval_columns(cursor)
 
-            cursor.execute("""
-                SELECT COUNT(*) AS index_count
-                FROM information_schema.statistics
-                WHERE table_schema = DATABASE()
-                  AND table_name = 'approval_requests'
-                  AND index_name = 'uniq_pending_approval_idempotency'
-                """)
-            row = cursor.fetchone() or {}
-            if int(row.get("index_count") or 0) == 0:
-                cursor.execute("""
-                    ALTER TABLE approval_requests
-                    ADD UNIQUE KEY uniq_pending_approval_idempotency (
-                        pending_idempotency_key
-                    )
-                    """)
-        except Exception as exc:
-            raise RuntimeError(
-                "MySQL approval schema is incompatible with runtime idempotency requirements"
-            ) from exc
+    @staticmethod
+    def _ensure_runtime_column_capacities(cursor: Any) -> None:
+        _ensure_mysql_column_capacities(cursor)
+
+    @staticmethod
+    def _require_transactional_runtime_tables(cursor: Any) -> None:
+        _require_mysql_transactional_tables(cursor)
+
+    def _ensure_change_execution_scope_unique_index(self, cursor: Any) -> None:
+        _ensure_mysql_change_scope(cursor)
 
     def _apply_mysql_approval_and_change_idempotency(self, cursor: Any) -> None:
         self._ensure_approval_idempotency_columns(cursor)
         self._ensure_change_execution_scope_unique_index(cursor)
-
-    def _ensure_retention_timestamp_columns(self, cursor: Any) -> None:
-        """Backfill timestamps required for retention based on last mutation."""
-        cursor.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = DATABASE()
-              AND table_name = 'diagnosis_reports'
-              AND column_name = 'updated_at'
-            """)
-        if cursor.fetchone() is not None:
-            return
-        cursor.execute("ALTER TABLE diagnosis_reports ADD COLUMN updated_at VARCHAR(64)")
-        cursor.execute(
-            "UPDATE diagnosis_reports SET updated_at = created_at WHERE updated_at IS NULL"
-        )
-        cursor.execute("ALTER TABLE diagnosis_reports MODIFY updated_at VARCHAR(64) NOT NULL")
-
-    @staticmethod
-    def _ensure_runtime_column_capacities(cursor: Any) -> None:
-        """Keep MySQL columns at least as wide as their Pydantic contracts."""
-        required_lengths = {
-            ("approval_requests", "action"): 1000,
-            ("aiops_sessions", "status"): 64,
-            ("incident_states", "status"): 64,
-            ("incident_states", "environment"): 80,
-            ("incident_states", "approval_status"): 64,
-        }
-        cursor.execute("""
-            SELECT table_name, column_name, character_maximum_length
-            FROM information_schema.columns
-            WHERE table_schema = DATABASE()
-              AND (
-                  (table_name = 'approval_requests' AND column_name = 'action')
-                  OR (table_name = 'aiops_sessions' AND column_name = 'status')
-                  OR (
-                      table_name = 'incident_states'
-                      AND column_name IN ('status', 'environment', 'approval_status')
-                  )
-              )
-            """)
-        actual = {
-            (str(row.get("table_name") or ""), str(row.get("column_name") or "")): int(
-                row.get("character_maximum_length") or 0
-            )
-            for row in cursor.fetchall()
-        }
-        missing = sorted(set(required_lengths) - set(actual))
-        if missing:
-            formatted = ", ".join(f"{table}.{column}" for table, column in missing)
-            raise RuntimeError(f"MySQL runtime schema is missing required columns: {formatted}")
-
-        for (table, column), required in required_lengths.items():
-            if actual[(table, column)] >= required:
-                continue
-            table = trusted_identifier(
-                table,
-                allowed={"approval_requests", "aiops_sessions", "incident_states"},
-            )
-            column = trusted_identifier(
-                column,
-                allowed={"action", "status", "environment", "approval_status"},
-            )
-            if required not in {64, 80, 1000}:
-                raise RuntimeError(f"unsupported runtime column capacity: {required}")
-            # Identifiers and capacity are selected from code-owned allowlists above.
-            cursor.execute(  # nosec B608
-                f"ALTER TABLE {table} MODIFY {column} VARCHAR({required}) NOT NULL"
-            )
-
-    @staticmethod
-    def _require_transactional_runtime_tables(cursor: Any) -> None:
-        """Fail closed when runtime tables cannot participate in transactions."""
-        runtime_tables = (
-            "alert_events",
-            "trace_events",
-            "approval_requests",
-            "change_executions",
-            "aiops_sessions",
-            "incident_states",
-            "diagnosis_reports",
-        )
-        placeholders = bind_markers(len(runtime_tables), "%s")
-        cursor.execute(
-            f"""
-            SELECT table_name, engine
-            FROM information_schema.tables
-            WHERE table_schema = DATABASE()
-              AND table_name IN ({placeholders})
-            """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
-            runtime_tables,
-        )
-        engines = {
-            str(row.get("table_name") or ""): str(row.get("engine") or "").upper()
-            for row in cursor.fetchall()
-        }
-        missing = sorted(set(runtime_tables) - set(engines))
-        non_transactional = sorted(table for table, engine in engines.items() if engine != "INNODB")
-        if missing or non_transactional:
-            details = []
-            if missing:
-                details.append("missing=" + ",".join(missing))
-            if non_transactional:
-                details.append("non_innodb=" + ",".join(non_transactional))
-            raise RuntimeError(
-                "MySQL runtime schema cannot guarantee atomic writes: " + "; ".join(details)
-            )
-
-    def _ensure_change_execution_scope_unique_index(self, cursor: Any) -> None:
-        """Require the business idempotency unique key for concurrent creation."""
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) AS index_count
-                FROM information_schema.statistics
-                WHERE table_schema = DATABASE()
-                  AND table_name = 'change_executions'
-                  AND index_name = 'uniq_change_executions_scope'
-                """)
-            row = cursor.fetchone() or {}
-            if int(row.get("index_count") or 0) > 0:
-                return
-
-            cursor.execute("""
-                SELECT COUNT(*) AS duplicate_groups
-                FROM (
-                    SELECT incident_id, change_plan_id, approval_id
-                    FROM change_executions
-                    GROUP BY incident_id, change_plan_id, approval_id
-                    HAVING COUNT(*) > 1
-                ) duplicate_scope
-                """)
-            duplicate_row = cursor.fetchone() or {}
-            duplicate_groups = int(duplicate_row.get("duplicate_groups") or 0)
-            if duplicate_groups > 0:
-                raise RuntimeError(
-                    "MySQL change_executions contains "
-                    f"{duplicate_groups} duplicate business-scope groups"
-                )
-
-            cursor.execute("""
-                ALTER TABLE change_executions
-                ADD UNIQUE KEY uniq_change_executions_scope (
-                    incident_id, change_plan_id, approval_id
-                )
-                """)
-        except Exception as exc:
-            raise RuntimeError(
-                "MySQL change_executions schema cannot enforce business-scope idempotency"
-            ) from exc
 
     def _record_migration_warning(self, message: str) -> None:
         self.migration_warnings.append(message)
@@ -2884,12 +1646,3 @@ def _dump_model(model: Any) -> str:
 def _load_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = json.loads(str(row["payload"]))
     return payload if isinstance(payload, dict) else {}
-
-
-def _approval_import_record(
-    value: ApprovalRequest | tuple[ApprovalRequest, str | None],
-) -> tuple[ApprovalRequest, str | None]:
-    if isinstance(value, tuple):
-        return value
-    key = str(value.metadata.get("idempotency_key") or "").strip() or None
-    return value, key

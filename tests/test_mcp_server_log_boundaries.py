@@ -63,3 +63,31 @@ def test_mcp_tool_call_log_does_not_emit_raw_exception_text(
 
     assert "exception-secret" not in caplog.text
     assert "error_sha256=" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("module", "logger_name"),
+    [
+        (monitor_server, "Monitor_MCP_Server"),
+        (cls_server, "CLS_MCP_Server"),
+    ],
+)
+def test_mcp_tool_call_log_does_not_emit_scalar_result_values(
+    caplog: pytest.LogCaptureFixture,
+    module: object,
+    logger_name: str,
+) -> None:
+    @module.log_tool_call
+    def sample_tool() -> dict[str, object]:
+        return {
+            "status": "success",
+            "source": "mock",
+            "token": "result-secret",
+        }
+
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        result = sample_tool()
+
+    assert result["source_quality"] == "fallback_only"
+    assert result["evidence_origin"] == "mcp_mock:sample_tool"
+    assert "result-secret" not in caplog.text

@@ -538,7 +538,6 @@ def build_vector_document_id(document: Document, index: int = 1) -> str:
     metadata = dict(document.metadata or {})
     identity_parts = [
         _canonical_source_id(metadata),
-        str(metadata.get("_document_hash") or metadata.get("_document_version") or ""),
         str(metadata.get("_chunk_id") or index),
         str(metadata.get("_chunk_hash") or ""),
     ]

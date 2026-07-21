@@ -193,3 +193,21 @@ def test_latest_trace_event_has_deterministic_tie_breaker() -> None:
     newer_id = older_id.model_copy(update={"event_id": "traceevt-b"})
 
     assert latest_trace_event([newer_id, older_id]).event_id == "traceevt-b"
+
+
+def test_replay_timeline_sorts_same_timestamp_events_by_event_id() -> None:
+    from app.services.aiops_read_models.replay_timeline import build_replay_timeline
+
+    created_at = datetime(2026, 7, 17, tzinfo=UTC)
+    first = TraceEvent(
+        event_id="traceevt-a",
+        trace_id="trace-replay-order",
+        incident_id="inc-replay-order",
+        node_name="executor",
+        created_at=created_at,
+    )
+    second = first.model_copy(update={"event_id": "traceevt-b"})
+
+    timeline = build_replay_timeline([second, first])
+
+    assert [item["event_id"] for item in timeline] == ["traceevt-a", "traceevt-b"]

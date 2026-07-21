@@ -359,7 +359,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
 
-            const payload = await response.json();
+            const payload = await this.readJsonResponse(response);
             const runState = this.applyRecoveredAIOpsRunStatus(payload, options.runState, options);
             if (runState?.incidentId) {
                 this.selectedIncidentId = runState.incidentId;
@@ -725,7 +725,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             // 从后端获取会话历史
             const response = await this.apiFetch(`/api/chat/session/${historyId}`);
             if (response.ok) {
-                const data = await response.json();
+                const data = await this.readJsonResponse(response);
                 const backendHistory = data.history || [];
                 
                 // 更新会话ID
@@ -810,7 +810,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 throw new Error('清空会话失败');
             }
 
-            const result = await response.json();
+            const result = await this.readJsonResponse(response);
             
             if (result.status === 'success') {
                 // 从本地存储中删除

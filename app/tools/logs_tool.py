@@ -208,6 +208,8 @@ class QueryLogsTool(AIOpsTool):
             "time_range": time_range,
             "source": "mock" if synthetic else "mcp_cls",
             "synthetic": synthetic,
+            "source_quality": "fallback_only" if synthetic else "live",
+            "evidence_origin": "mcp_mock:cls" if synthetic else "mcp:cls",
             "topic": topic_result,
             "logs": logs_result,
             "summary": f"CLS query completed; topic_id={topic_id}",

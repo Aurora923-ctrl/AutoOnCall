@@ -84,6 +84,23 @@ CREATE TABLE IF NOT EXISTS aiops_sessions (
     INDEX idx_aiops_sessions_status (status, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS a2a_tasks (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    task_id VARCHAR(128) NOT NULL UNIQUE,
+    message_id VARCHAR(256) NOT NULL,
+    request_fingerprint VARCHAR(64) NOT NULL,
+    owner_id VARCHAR(128) NOT NULL DEFAULT '',
+    skill VARCHAR(128) NOT NULL,
+    incident_id VARCHAR(128) NOT NULL,
+    state VARCHAR(64) NOT NULL,
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    payload LONGTEXT NOT NULL,
+    INDEX idx_a2a_tasks_message (message_id, updated_at),
+    INDEX idx_a2a_tasks_incident (incident_id, updated_at),
+    INDEX idx_a2a_tasks_owner (owner_id, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS incident_states (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     incident_id VARCHAR(128) NOT NULL UNIQUE,
@@ -117,10 +134,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     name VARCHAR(255) NOT NULL,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-INSERT IGNORE INTO schema_migrations(version, name) VALUES
-    (1, 'runtime_schema_baseline'),
-    (2, 'approval_and_change_idempotency');
 
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX
 ON autooncall.* TO 'autooncall'@'%';

@@ -16,6 +16,7 @@ def build_change_plan(
     service_name: str = "unknown-service",
     environment: str = "unknown",
     reason: str = "",
+    input_args: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ChangePlan:
     """Create a human-executed change plan draft without running any action."""
@@ -23,6 +24,7 @@ def build_change_plan(
     action_text = action or "人工确认后执行处置动作"
     service_text = service_name or "unknown-service"
     environment_text = environment or "unknown"
+    approved_input_args = dict(input_args or {})
     context_text = _change_context_text(
         action=action_text,
         tool_name=tool_name,
@@ -44,6 +46,7 @@ def build_change_plan(
         target=service_text,
         tool_name=tool_name or "manual_change_record",
         input_args={
+            **approved_input_args,
             "action": action_text,
             "service_name": service_text,
             "environment": environment_text,
@@ -92,11 +95,12 @@ def build_change_plan(
         observe_metrics=observe_metrics,
         blast_radius=f"{environment_text}/{service_text}",
         metadata={
+            **(metadata or {}),
             "tool_name": tool_name,
             "service_name": service_text,
             "environment": environment_text,
             "reason": reason,
-            **(metadata or {}),
+            "approved_input_args": approved_input_args,
         },
     )
 

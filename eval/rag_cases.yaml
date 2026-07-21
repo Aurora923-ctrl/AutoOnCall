@@ -226,8 +226,8 @@ cases:
       - EXPLAIN
 
   - id: table_ticket_loader_row_citation
-    query: INC-REDIS-001 Redis maxclients resolution
-    expected_source: tickets.csv
+    query: INC-REDIS-001 Redis maxclients resolution tickets.xlsx
+    expected_source: tickets.xlsx
     min_score: 1.0
     expected_keywords:
       - Redis
@@ -259,7 +259,7 @@ cases:
 
   - id: redis_ticket_retry_loop_history
     query: INC-REDIS-009 促销查询重试循环 Redis 客户端连接槽位 maxclients
-    expected_source: tickets.csv
+    expected_source: tickets.xlsx
     min_score: 1.0
     expected_keywords:
       - INC-REDIS-009
@@ -272,3 +272,52 @@ cases:
     expected_keywords:
       - rc4
       - approval
+
+  - id: network_timeout_stage_diagnosis
+    query: TCP connect 正常但 first byte 很慢，如何区分网络和应用依赖问题？
+    expected_source: network_timeout_runbook.md
+    expected_keywords:
+      - first byte
+      - 网络
+
+  - id: tls_certificate_expiry
+    query: HTTPS 握手提示 certificate has expired，应采集哪些证书证据？
+    expected_source: tls_certificate_expiry_runbook.md
+    expected_keywords:
+      - notAfter
+      - 证书
+
+  - id: dns_resolution_failure
+    query: Kubernetes Pod 内出现 NXDOMAIN，但权威 DNS 记录正常，如何排查？
+    expected_source: dns_resolution_failure_runbook.md
+    expected_keywords:
+      - CoreDNS
+      - NXDOMAIN
+
+  - id: thread_pool_exhaustion
+    query: active threads 达到上限且任务队列持续增长，是否应该直接扩大线程池？
+    expected_source: thread_pool_exhaustion_runbook.md
+    expected_keywords:
+      - 线程池
+      - 下游容量
+
+  - id: message_queue_backlog
+    query: consumer lag 和 oldest message age 持续增长，如何判断消息队列积压根因？
+    expected_source: message_queue_backlog_runbook.md
+    expected_keywords:
+      - consumer lag
+      - 幂等
+
+  - id: kubernetes_scheduling_failure
+    query: Pod Pending 且事件为 FailedScheduling Insufficient cpu，应检查哪些调度证据？
+    expected_source: kubernetes_scheduling_failure_runbook.md
+    expected_keywords:
+      - requests
+      - FailedScheduling
+
+  - id: mysql_lock_wait
+    query: MySQL lock wait timeout 且 pool waiting 上升，如何定位阻塞事务？
+    expected_source: mysql_lock_wait_runbook.md
+    expected_keywords:
+      - 阻塞事务
+      - lock wait

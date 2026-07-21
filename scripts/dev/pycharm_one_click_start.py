@@ -288,6 +288,12 @@ def start_background_process(
     )
     pid_path.write_text(str(process.pid), encoding="ascii")
     time.sleep(2)
+    return_code = process.poll()
+    if return_code is not None:
+        pid_path.unlink(missing_ok=True)
+        log_file.close()
+        raise SystemExit(f"{name} exited during startup with code {return_code}")
+    log_file.close()
 
 
 def wait_for_http(

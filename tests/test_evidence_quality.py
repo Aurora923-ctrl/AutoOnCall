@@ -174,3 +174,13 @@ def test_stale_success_is_excluded_from_quality_and_sufficiency() -> None:
     assert profile["diagnostic_success_count"] == 0
     assert profile["sufficiency"]["has_primary_domain_evidence"] is False
     assert profile["root_cause_closure"]["has_live_evidence"] is False
+
+
+def test_successful_empty_output_is_not_diagnostic_evidence() -> None:
+    item = _evidence("prometheus", data_source="prometheus", evidence_type="metric")
+    item["raw_data"] = {"status": "success", "output": {"status": "success"}}
+
+    profile = build_evidence_quality_profile([item])
+
+    assert profile["diagnostic_success_count"] == 0
+    assert profile["sufficiency"]["has_symptom_evidence"] is False

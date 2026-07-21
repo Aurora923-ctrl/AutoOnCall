@@ -113,6 +113,11 @@ def build_incident_evidence_graph(
     evidence_by_id = {
         str(item.get("evidence_id")): item for item in evidence if item.get("evidence_id")
     }
+    evidence_by_id = {
+        evidence_id: item
+        for evidence_id, item in evidence_by_id.items()
+        if _evidence_belongs_to_graph(item, incident_id=incident_id, trace_id=trace_id)
+    }
     root_supporting_ids = _root_supporting_evidence_ids(
         selected_root_cause_id=selected_root_cause_id,
         hypothesis_ranking=hypothesis_ranking,
@@ -156,6 +161,8 @@ def build_incident_evidence_graph(
         evidence_id = str(item.get("evidence_id") or "").strip()
         if not evidence_id:
             continue
+        if evidence_id not in evidence_by_id:
+            continue
         evidence_node_id = f"evidence:{evidence_id}"
         layer = evidence_layer(item)
         add_node(
@@ -191,6 +198,8 @@ def build_incident_evidence_graph(
             add_edge(evidence_node_id, citation_node_id, "grounded_in")
 
     for call in tool_calls:
+        if not _tool_call_belongs_to_graph(call, incident_id=incident_id, trace_id=trace_id):
+            continue
         tool_name = str(call.get("tool_name") or "unknown")
         step_id = str(call.get("step_id") or "")
         call_id = str(call.get("call_id") or step_id or tool_name)
@@ -378,6 +387,33 @@ def _is_usable_graph_evidence(evidence: dict[str, Any]) -> bool:
     metadata = as_dict(raw_data.get("metadata"))
     quality = as_dict(metadata.get("evidence_quality"))
     return quality.get("usable", True) is not False
+
+
+def _evidence_belongs_to_graph(
+    evidence: dict[str, Any],
+    *,
+    incident_id: str,
+    trace_id: str,
+) -> bool:
+    raw_data = as_dict(evidence.get("raw_data"))
+    if str(raw_data.get("incident_id") or incident_id) != incident_id:
+        return False
+    raw_trace_id = str(raw_data.get("trace_id") or trace_id)
+    return not trace_id or not raw_trace_id or raw_trace_id == trace_id
+
+
+def _tool_call_belongs_to_graph(
+    call: dict[str, Any],
+    *,
+    incident_id: str,
+    trace_id: str,
+) -> bool:
+    call_incident_id = str(call.get("incident_id") or incident_id)
+    call_trace_id = str(call.get("trace_id") or trace_id)
+    return (
+        call_incident_id == incident_id
+        and (not trace_id or not call_trace_id or call_trace_id == trace_id)
+    )
 
 
 def _valid_linked_evidence_ids(

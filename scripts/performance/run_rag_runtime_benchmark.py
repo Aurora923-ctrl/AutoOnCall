@@ -24,8 +24,10 @@ if str(REPO_ROOT) not in sys.path:
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.rag_agent_service import RagAgentService
+from app.services.rag_answer_policy import citation_source_basename
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
-from scripts.eval.eval_environment import collect_eval_environment
+from scripts.eval.eval_environment import collect_eval_environment, read_utf8_text_strict
+from scripts.eval.rag_index_identity import verify_active_index_identity
 
 DEFAULT_CASES = REPO_ROOT / "eval" / "rag_holdout_cases.yaml"
 DEFAULT_JSON = REPO_ROOT / "logs" / "rag_runtime_benchmark.json"
@@ -34,7 +36,7 @@ DEFAULT_FAILED = REPO_ROOT / "logs" / "rag_runtime_failed_cases.json"
 
 
 def load_benchmark_cases(path: str | Path, limit: int = 0) -> list[dict[str, Any]]:
-    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    payload = yaml.safe_load(read_utf8_text_strict(path))
     cases = payload.get("cases", []) if isinstance(payload, dict) else []
     normalized = []
     for index, case in enumerate(cases, 1):
@@ -73,7 +75,13 @@ def _expected_context_ids(case: dict[str, Any]) -> list[str]:
             item.get("chunk_id") or item.get("id") if isinstance(item, dict) else item
             for item in case["relevant_chunks"]
         ]
-    return list(dict.fromkeys(value.strip() for value in _string_list(raw) if value.strip()))
+    return list(
+        dict.fromkeys(
+            value.strip()
+            for value in _string_list(raw)
+            if value.strip() and "#" in value
+        )
+    )
 
 
 async def run_benchmark(
@@ -169,7 +177,7 @@ async def run_benchmark(
             )
             continue
         retrieved_sources = [
-            str(item.get("source_file") or "")
+            citation_source_basename(item.get("source_file"))
             for item in retrieval.get("retrieval_results", [])
             if isinstance(item, dict)
         ]
@@ -362,6 +370,7 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def runtime_index_identity(cases: list[dict[str, Any]]) -> dict[str, Any]:
     """Verify dataset source/chunk identities against active Milvus rows."""
+    asset_identity = verify_active_index_identity()
     _ = milvus_manager.connect()
     rows = milvus_manager.get_collection().query(
         expr='id != ""',
@@ -398,9 +407,13 @@ def runtime_index_identity(cases: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": (
             "passed"
-            if not missing_sources and not missing_chunks and not missing_metadata
+            if asset_identity["status"] == "passed"
+            and not missing_sources
+            and not missing_chunks
+            and not missing_metadata
             else "failed"
         ),
+        "asset_identity": asset_identity,
         "indexed_sources": sorted(indexed_sources),
         "indexed_chunk_count": len(indexed),
         "rows_missing_source_or_chunk_id": missing_metadata,
@@ -582,15 +595,23 @@ def _has_valid_citation(
 ) -> bool:
     if not isinstance(citations, list):
         return False
-    retrieved = set(retrieved_sources)
+    retrieved = {
+        citation_source_basename(source)
+        for source in retrieved_sources
+        if citation_source_basename(source)
+    }
     cited = {
-        str(item.get("source_file") or "")
+        citation_source_basename(item.get("source_file"))
         for item in citations
         if isinstance(item, dict)
-        and str(item.get("source_file") or "") in retrieved
+        and citation_source_basename(item.get("source_file")) in retrieved
         and bool(str(item.get("chunk_id") or "").strip())
     }
-    required = set(required_sources or [])
+    required = {
+        citation_source_basename(source)
+        for source in required_sources or []
+        if citation_source_basename(source)
+    }
     return bool(required) and required.issubset(cited)
 
 

@@ -19,8 +19,12 @@ from app.services.rag_answer_policy import (
     build_generation_context,
     build_generation_evidence,
     build_grounded_question,
+    citation_pair_map,
+    compress_grounded_answer,
+    extract_citation_pairs,
     is_explicit_knowledge_refusal,
     remove_generic_uncertainty_boilerplate,
+    select_generation_excerpt,
     select_supporting_citations,
     validated_citation_prefix,
 )
@@ -70,7 +74,7 @@ def test_grounded_system_prompt_forbids_out_of_context_commands_and_tools() -> N
     assert "命令" in prompt
     assert "工具名" in prompt
     assert "当前检索片段" in prompt
-    assert "最多 4 条要点" in prompt
+    assert "最多 4 条" in prompt
     assert "独立 claim" in prompt
     assert "部分答案" in prompt
     assert "通配符" in prompt
@@ -280,6 +284,151 @@ def test_generation_evidence_preserves_tail_of_first_oversized_block() -> None:
     assert "...<truncated>" in evidence[0]["content"]
 
 
+def test_generation_excerpt_keeps_query_relevant_and_safety_blocks() -> None:
+    content = "\n\n".join(
+        [
+            "背景说明 " * 80,
+            "### 进程证据\n检查进程 PID 和 CPU 占用。",
+            "### 处置边界\n重启或扩容前必须人工审批并保留 dry-run。",
+            "无关示例 " * 80,
+        ]
+    )
+
+    excerpt = select_generation_excerpt(
+        content,
+        query="如何收集进程证据并给出处置边界？",
+        target_chars=220,
+    )
+
+    assert "进程 PID" in excerpt
+    assert "人工审批" in excerpt
+    assert "无关示例" not in excerpt
+
+
+def test_generation_evidence_uses_query_aware_excerpt_before_budgeting() -> None:
+    evidence = build_generation_evidence(
+        {
+            "query": "如何检查 inode 并确认清理边界？",
+            "retrieval_results": [
+                {
+                    "source_file": "disk.md",
+                    "chunk_id": "disk.md#0001",
+                    "heading_path": "磁盘 > 常用命令",
+                    "content": "\n\n".join(
+                        [
+                            "背景 " * 400,
+                            "运行 df -i 检查 inode 使用率。",
+                            "删除或截断前必须审批并确认影响范围。",
+                        ]
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert "df -i" in evidence[0]["content"]
+    assert "必须审批" in evidence[0]["content"]
+    assert len(evidence[0]["content"]) <= 900
+
+
+def test_compress_grounded_answer_removes_legacy_labels_and_limits_bullets() -> None:
+    answer = "\n".join(
+        [
+            "- 已知上下文事实: 检查进程 CPU。[证据 1]",
+            "- 当前事故仍需查询的证据: 检查线程热点。[证据 2]",
+            "- 允许的处置建议与安全边界: 重启前审批。[证据 3]",
+            "- 不确定项: 当前片段没有实时观测。[证据 3]",
+            "- 多余总结。[证据 1]",
+        ]
+    )
+
+    compact = compress_grounded_answer(answer)
+
+    assert "已知上下文事实" not in compact
+    assert "当前事故仍需查询的证据" not in compact
+    assert len(compact.splitlines()) == 4
+    assert compact.splitlines()[0] == "- 检查进程 CPU。[证据 1]"
+
+
+def test_generation_evidence_fairly_truncates_long_required_sources() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "official.md",
+                "chunk_id": "official.md#0001",
+                "content": ("official-background " * 80) + "OFFICIAL_BOUNDARY",
+            },
+            {
+                "source_file": "postmortem.pdf",
+                "chunk_id": "postmortem.pdf#0001",
+                "content": ("incident-history " * 80) + "INCIDENT_BOUNDARY",
+            },
+            {
+                "source_file": "noise.md",
+                "chunk_id": "noise.md#0001",
+                "content": "optional noise",
+            },
+        ],
+        "required_sources": ["official.md", "postmortem.pdf"],
+    }
+
+    evidence = build_generation_evidence(payload, limit=500)
+    context = build_generation_context(payload, limit=500)
+
+    assert [item["source_file"] for item in evidence] == ["official.md", "postmortem.pdf"]
+    assert all("...<truncated>" in item["content"] for item in evidence)
+    assert "OFFICIAL_BOUNDARY" in evidence[0]["content"]
+    assert "INCIDENT_BOUNDARY" in evidence[1]["content"]
+    assert len(context) <= 500
+
+
+def test_generation_evidence_returns_unused_required_quota_to_long_source() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "short.md",
+                "chunk_id": "short.md#0001",
+                "content": "short evidence",
+            },
+            {
+                "source_file": "long.md",
+                "chunk_id": "long.md#0001",
+                "content": ("long evidence " * 80) + "LONG_TAIL",
+            },
+        ],
+        "required_sources": ["short.md", "long.md"],
+    }
+
+    evidence = build_generation_evidence(payload, limit=320)
+
+    assert len(evidence) == 2
+    short = next(item for item in evidence if item["source_file"] == "short.md")
+    long = next(item for item in evidence if item["source_file"] == "long.md")
+    assert short["content"] == "short evidence"
+    assert "...<truncated>" in long["content"]
+    assert "LONG_TAIL" in long["content"]
+
+
+def test_generation_evidence_fails_when_required_headers_cannot_fit() -> None:
+    payload = {
+        "retrieval_results": [
+            {
+                "source_file": "one.md",
+                "chunk_id": "one.md#0001",
+                "content": "one",
+            },
+            {
+                "source_file": "two.md",
+                "chunk_id": "two.md#0001",
+                "content": "two",
+            },
+        ],
+        "required_sources": ["one.md", "two.md"],
+    }
+
+    assert build_generation_evidence(payload, limit=40) == []
+
+
 def test_grounded_question_requires_claim_level_citation_and_concise_answer() -> None:
     prompt = build_grounded_question(
         "如何处理？",
@@ -294,16 +443,17 @@ def test_grounded_question_requires_claim_level_citation_and_concise_answer() ->
         },
     )
 
-    assert "最多写 4 条要点" in prompt
+    assert "最多 4 条" in prompt
     assert "直接提供" in prompt
-    assert "[source_file | chunk_id]" in prompt
+    assert "[证据 N]" in prompt
+    assert "[证据 1: source_file=runbook.md; chunk_id=runbook.md#0001]" in prompt
     assert "告警名只能作为检查线索" in prompt
-    assert "不要使用“知识库无法回答”" in prompt
+    assert "不要因为缺少另一部分而整体拒答" in prompt
     assert "每个必要来源至少支持一条要点" in prompt
     assert "审批、dry-run、验证、回滚或人工接管边界" in prompt
     assert "不得替换成新的示例值" in prompt
-    assert "只有确实存在未回答子问题时才写这句" in prompt
-    assert "检查项 -> 如何判断 -> 证据边界" in prompt
+    assert "完整回答时禁止追加泛化缺口" in prompt
+    assert "检查什么 -> 如何判断" in prompt
 
 
 def test_select_supporting_citations_keeps_only_chunks_named_by_answer() -> None:
@@ -319,6 +469,50 @@ def test_select_supporting_citations_keeps_only_chunks_named_by_answer() -> None
     )
 
     assert selected == [{"source_file": "redis.md", "chunk_id": "redis.md#0002"}]
+
+
+def test_numbered_citation_maps_to_server_issued_source_and_chunk() -> None:
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+        },
+        {
+            "citation_index": 2,
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0002",
+        },
+    ]
+
+    mapping = citation_pair_map(citations)
+
+    assert extract_citation_pairs("[证据 2]", citation_map=mapping) == [
+        ("redis.md", "redis.md#0002")
+    ]
+    assert select_supporting_citations("检查连接池。[证据 2]", citations) == [citations[1]]
+    assert select_supporting_citations("检查连接池。[证据 3]", citations) == []
+
+
+def test_generation_evidence_assigns_stable_one_based_citation_numbers() -> None:
+    evidence = build_generation_evidence(
+        {
+            "retrieval_results": [
+                {
+                    "source_file": "redis.md",
+                    "chunk_id": "redis.md#0002",
+                    "content": "second",
+                },
+                {
+                    "source_file": "redis.md",
+                    "chunk_id": "redis.md#0001",
+                    "content": "first",
+                },
+            ]
+        }
+    )
+
+    assert [item["citation_index"] for item in evidence] == [1, 2]
 
 
 def test_generation_evidence_respects_explicit_allowlist() -> None:
@@ -638,14 +832,16 @@ async def test_query_with_retrieval_only_allows_budgeted_generation_evidence(
             prompt = str(messages[-1].content)
             assert "one.md#0001" in prompt
             assert "two.md#0001" not in prompt
-            return SimpleNamespace(content="结论。[one.md | one.md#0001]")
+            return SimpleNamespace(
+                content="确认 EVIDENCE_TOKEN。[one.md | one.md#0001]"
+            )
 
     service = rag_module.RagAgentService()
     service.model = FakeGroundedModel()
     first = {
         "source_file": "one.md",
         "chunk_id": "one.md#0001",
-        "content": "A" * 2900,
+        "content": "EVIDENCE_TOKEN " * 200,
     }
     second = {
         "source_file": "two.md",
@@ -953,7 +1149,9 @@ async def test_query_stream_with_retrieval_emits_only_validated_final_answer(
             "node": "citation_guard",
         }
     ]
-    assert events[-1]["data"]["answer"] == content_events[0]["data"]
+    assert events[-2]["type"] == "replace_content"
+    assert events[-2]["data"].startswith("- ")
+    assert events[-1]["data"]["answer"] == events[-2]["data"]
     assert events[-1]["data"]["no_answer"] is False
 
 
@@ -1216,6 +1414,20 @@ async def test_grounded_stream_does_not_retry_after_provider_content(monkeypatch
 
     assert [event.get("data") for event in events] == ["partial"]
     assert attempts == 1
+
+
+def test_session_history_is_bounded() -> None:
+    service = rag_module.RagAgentService()
+    original_limit = rag_module.config.rag_session_history_max_messages
+    rag_module.config.rag_session_history_max_messages = 4
+    try:
+        service._append_grounded_history("bounded", "q1", "a1")
+        service._append_grounded_history("bounded", "q2", "a2")
+        service._append_grounded_history("bounded", "q3", "a3")
+        assert len(service._grounded_history["bounded"]) == 4
+        assert service._grounded_history["bounded"][0]["content"] == "q2"
+    finally:
+        rag_module.config.rag_session_history_max_messages = original_limit
 
 
 @pytest.mark.asyncio

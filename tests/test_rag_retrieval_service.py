@@ -4,21 +4,38 @@ import pytest
 from langchain_core.documents import Document
 
 from app.config import config
-from app.services import rag_retrieval_service
 from app.services.lexical_index_service import LexicalIndexService
-from app.services.rag_retrieval_service import (
-    build_milvus_metadata_expr,
+from app.services.rag_retrieval import backends as retrieval_backends
+from app.services.rag_retrieval.backends import (
     build_targeted_lexical_queries,
-    deduplicate_candidates,
-    disambiguate_citation_sources,
-    enforce_source_coverage,
-    infer_retrieval_preferences,
-    merge_raw_retrieval_results,
-    normalize_metadata_filter,
-    rerank_retrieval_candidates,
-    retrieve_structured_knowledge,
+    exact_entity_lexical_results,
     targeted_lexical_results,
 )
+from app.services.rag_retrieval.candidates import (
+    deduplicate_candidates,
+    disambiguate_citation_sources,
+    format_retrieval_results,
+    is_stale_retrieval_source,
+    merge_raw_retrieval_results,
+    normalize_vector_distance,
+)
+from app.services.rag_retrieval.fusion import rerank_retrieval_candidates
+from app.services.rag_retrieval.intent import (
+    extract_exact_retrieval_entities,
+    infer_retrieval_preferences,
+    query_has_oncall_scope,
+)
+from app.services.rag_retrieval.metadata import (
+    build_milvus_metadata_expr,
+    normalize_metadata_filter,
+)
+from app.services.rag_retrieval.selection import (
+    enforce_source_coverage,
+    is_trusted_retrieval_chunk,
+    query_is_out_of_scope,
+    select_required_sources,
+)
+from app.services.rag_retrieval_service import retrieve_structured_knowledge
 from app.tools import runbook_tool as runbook_module
 from app.tools.runbook_tool import SearchRunbookTool
 
@@ -149,6 +166,62 @@ def test_structured_retrieval_rejects_when_all_scores_exceed_threshold() -> None
     )
 
 
+def test_unclassified_oncall_query_is_not_rejected_when_context_terms_overlap() -> None:
+    assert not query_is_out_of_scope(
+        "服务恢复后如何验证健康检查和错误率？",
+        [
+            {
+                "source_file": "service_unavailable.md",
+                "heading_path": "恢复验证",
+                "content": "服务恢复后验证健康检查、核心功能与错误率。",
+                "score": 0.8,
+                "lexical_score": 2.0,
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "秋招简历里的项目经历应该怎么包装更好？",
+        "公司差旅报销和年假申请流程是什么？",
+        "前端按钮颜色和页面圆角应该怎么设计？",
+        "最近股票和基金应该怎么买，帮我给一个投资组合",
+        "公司会议室预订、团建预算和行政采购流程是什么？",
+    ],
+)
+def test_non_oncall_query_is_rejected_even_when_vector_candidates_exist(query: str) -> None:
+    assert not query_has_oncall_scope(query)
+    assert query_is_out_of_scope(
+        query,
+        [
+            {
+                "source_file": "service_unavailable.md",
+                "content": "服务恢复后验证健康检查。",
+                "score": 0.8,
+                "lexical_score": 1.0,
+            }
+        ],
+    )
+
+
+def test_dependency_outage_requires_service_unavailable_runbook() -> None:
+    preferences = infer_retrieval_preferences("order-service 依赖 Redis 或 MQ 不可用，导致接口失败")
+
+    assert preferences["required_sources"] == {"service_unavailable.md"}
+    assert preferences["dominant_source_terms"] == {"service_unavailable"}
+
+
+def test_generic_slow_endpoint_query_requires_slow_response_runbook() -> None:
+    preferences = infer_retrieval_preferences(
+        "payment-service 接口响应慢，数据库慢查询数量增加，连接池等待"
+    )
+
+    assert "slow_response.md" in preferences["required_sources"]
+    assert "slow_response" in preferences["dominant_source_terms"]
+
+
 def test_structured_retrieval_applies_trust_gate_before_top_k_cutoff() -> None:
     untrusted = Document(
         page_content="Redis maxclients connection timeout",
@@ -171,11 +244,10 @@ def test_structured_retrieval_applies_trust_gate_before_top_k_cutoff() -> None:
     assert [item["source_file"] for item in payload["rejected_results"]] == ["untrusted.md"]
 
 
-def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path) -> None:
+def test_structured_retrieval_excludes_stale_vector_source(tmp_path) -> None:
     index = LexicalIndexService(tmp_path / "lexical.json")
     source = "docs/knowledge-base/redis.md"
     index.mark_source_stale(source, "new upload failed to index")
-    monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
     document = Document(
         page_content="Redis maxclients 耗尽会导致 connection timeout。",
         metadata={
@@ -191,6 +263,7 @@ def test_structured_retrieval_excludes_stale_vector_source(monkeypatch, tmp_path
         top_k=1,
         max_distance=1.0,
         vector_store=FakeVectorStore([(document, 0.1)]),
+        lexical_index=index,
     )
 
     assert payload["status"] == "no_answer"
@@ -489,6 +562,26 @@ def test_boolean_vector_score_is_not_treated_as_numeric_distance() -> None:
     assert payload["status"] == "no_answer"
 
 
+def test_non_string_source_metadata_fails_closed() -> None:
+    document = Document(
+        page_content="Redis maxclients guidance",
+        metadata={
+            "_file_name": {"forged": "redis.md"},
+            "_doc_id": ["redis.md"],
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients",
+        max_distance=1.0,
+        vector_store=FakeVectorStore([(document, 0.1)]),
+    )
+
+    assert payload["status"] == "no_answer"
+    assert payload["retrieval_results"] == []
+
+
 def test_duplicate_candidates_keep_the_best_distance() -> None:
     candidates = [
         {
@@ -509,6 +602,44 @@ def test_duplicate_candidates_keep_the_best_distance() -> None:
 
     assert len(deduped) == 1
     assert deduped[0]["score"] == 0.2
+
+
+def test_duplicate_candidates_keep_best_signal_metadata() -> None:
+    candidates = [
+        {
+            "doc_id": "redis",
+            "source_file": "redis.md",
+            "chunk_id": "redis#1",
+            "score": 0.2,
+            "content": "same",
+            "metadata": {
+                "_retrieval_source": "vector",
+                "_vector_score": 0.2,
+                "_vector_rank": 1,
+            },
+        },
+        {
+            "doc_id": "redis",
+            "source_file": "redis.md",
+            "chunk_id": "redis#1",
+            "score": 0.8,
+            "content": "same",
+            "metadata": {
+                "_retrieval_source": "lexical",
+                "_lexical_score": 0.9,
+                "_lexical_rank": 1,
+            },
+        },
+    ]
+
+    deduped = deduplicate_candidates(candidates)
+
+    metadata = deduped[0]["metadata"]
+    assert metadata["_retrieval_source"] == "hybrid"
+    assert metadata["_vector_score"] == 0.2
+    assert metadata["_lexical_score"] == 0.9
+    assert metadata["_vector_rank"] == 1
+    assert metadata["_lexical_rank"] == 1
 
 
 def test_duplicate_stable_identity_with_different_content_is_rejected() -> None:
@@ -536,7 +667,7 @@ def test_duplicate_stable_identity_with_different_content_is_rejected() -> None:
     assert len(deduped) == 1
     assert deduped[0]["identity_conflict"] is True
     assert (
-        rag_retrieval_service.is_trusted_retrieval_chunk(
+        is_trusted_retrieval_chunk(
             deduped[0],
             max_distance=1.0,
             min_lexical_score=0.1,
@@ -600,7 +731,7 @@ def test_required_source_selection_is_deterministic_and_reserves_final_budget() 
         },
     ]
 
-    selected = rag_retrieval_service.select_required_sources(
+    selected = select_required_sources(
         candidates,
         required_sources={"redis_postmortem.pdf", "official_redis_clients.md"},
         top_k=2,
@@ -628,7 +759,7 @@ def test_required_source_selection_matches_disambiguated_public_paths() -> None:
         },
     ]
 
-    selected = rag_retrieval_service.select_required_sources(
+    selected = select_required_sources(
         candidates,
         required_sources={"redis_postmortem.pdf", "official_redis_clients.md"},
         top_k=2,
@@ -643,7 +774,7 @@ def test_required_source_count_larger_than_top_k_cannot_claim_coverage() -> None
         {"source_file": "two.md", "chunk_id": "two#1"},
     ]
 
-    selected = rag_retrieval_service.select_required_sources(
+    selected = select_required_sources(
         candidates,
         required_sources={"one.md", "two.md"},
         top_k=1,
@@ -715,7 +846,7 @@ def test_non_finite_or_negative_vector_distance_is_not_trusted(score: float) -> 
 
 
 def test_retrieval_result_formatter_keeps_zero_locators_and_unknown_score() -> None:
-    rendered = rag_retrieval_service.format_retrieval_results(
+    rendered = format_retrieval_results(
         [
             {
                 "rank": 1,
@@ -823,7 +954,7 @@ def test_vector_only_candidate_does_not_receive_synthetic_lexical_score() -> Non
 
 
 def test_invalid_vector_score_has_zero_normalized_relevance() -> None:
-    assert rag_retrieval_service.normalize_vector_distance("invalid") == 0.0
+    assert normalize_vector_distance("invalid") == 0.0
 
 
 def test_targeted_lexical_results_respect_list_source_filter(monkeypatch) -> None:
@@ -836,7 +967,7 @@ def test_targeted_lexical_results_respect_list_source_filter(monkeypatch) -> Non
             return []
 
     monkeypatch.setattr(
-        rag_retrieval_service,
+        retrieval_backends,
         "build_targeted_lexical_queries",
         lambda _query: {
             "allowed.md": "allowed query",
@@ -936,6 +1067,100 @@ def test_response_latency_query_prefers_slow_response_sources() -> None:
     preferences = infer_retrieval_preferences("慢 SQL 应参考哪段响应延迟原因分析？")
 
     assert "slow_response" in preferences["dominant_source_terms"]
+
+
+def test_incident_query_prefers_ticket_history_without_requiring_one_format() -> None:
+    preferences = infer_retrieval_preferences("INC-REDIS-001 Redis maxclients resolution")
+
+    assert preferences["required_sources"] == set()
+    assert ".csv" in preferences["preferred_extensions"]
+    assert ".xlsx" in preferences["preferred_extensions"]
+    assert preferences["prefer_ticket_history"] is True
+
+
+def test_explicit_xlsx_incident_query_does_not_require_legacy_csv() -> None:
+    preferences = infer_retrieval_preferences(
+        "INC-REDIS-009 Redis retry history maxclients tickets.xlsx"
+    )
+
+    assert preferences["required_sources"] == {"tickets.xlsx"}
+    assert ".xlsx" in preferences["preferred_extensions"]
+
+
+def test_deploy_history_query_requires_xlsx_ticket_source() -> None:
+    preferences = infer_retrieval_preferences("payment-service deploy_history pool_waiting tickets.xlsx")
+
+    assert "tickets.xlsx" in preferences["required_sources"]
+    assert ".xlsx" in preferences["preferred_extensions"]
+
+
+def test_release_version_entity_requires_xlsx_source() -> None:
+    preferences = infer_retrieval_preferences(
+        "payment-api-2026.07.06-rc4 对应的部署变更是什么？"
+    )
+
+    assert "tickets.xlsx" in preferences["required_sources"]
+
+
+def test_exact_entity_extraction_keeps_full_identifiers() -> None:
+    assert extract_exact_retrieval_entities(
+        "核对 INC-REDIS-009 与 payment-api-2026.07.06-rc4，不要命中 rc3"
+    ) == {
+        "inc-redis-009",
+        "payment-api-2026.07.06-rc4",
+        "rc3",
+    }
+
+
+def test_exact_entity_lexical_recall_does_not_confuse_neighboring_ids(tmp_path) -> None:
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    index.upsert_source(
+        "docs/knowledge-base/tickets.csv",
+        [
+            Document(
+                page_content="ticket_id: INC-REDIS-001",
+                metadata={
+                    "_file_name": "tickets.csv",
+                    "_chunk_id": "tickets.csv#0001",
+                    "primary_key": "ticket_id=INC-REDIS-001",
+                },
+            ),
+            Document(
+                page_content="ticket_id: INC-REDIS-009",
+                metadata={
+                    "_file_name": "tickets.csv",
+                    "_chunk_id": "tickets.csv#0002",
+                    "primary_key": "ticket_id=INC-REDIS-009",
+                },
+            ),
+        ],
+    )
+
+    results = exact_entity_lexical_results(
+        index,
+        "查询 INC-REDIS-009",
+        top_k=3,
+    )
+
+    assert [item.metadata["_chunk_id"] for item, _score in results] == ["tickets.csv#0002"]
+
+
+def test_source_aware_preferences_cover_capacity_wiki_and_mysql_postmortem() -> None:
+    redis = infer_retrieval_preferences(
+        "Redis maxclients 有哪些官方文档和容量 Wiki 可以交叉验证？"
+    )
+    mysql = infer_retrieval_preferences(
+        "MySQL 慢查询如何联合支付 Runbook 与事故复盘取证？"
+    )
+
+    assert redis["required_sources"] == {
+        "official_redis_clients.md",
+        "redis_capacity_wiki.html",
+    }
+    assert mysql["required_sources"] == {
+        "payment_wiki.html",
+        "mysql_slow_query_postmortem.pdf",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1160,13 +1385,12 @@ def test_hybrid_search_can_recall_lexical_only_candidate(monkeypatch, tmp_path) 
         },
     )
     index.upsert_source("docs/knowledge-base/redis.md", [document])
-    monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
-
     payload = retrieve_structured_knowledge(
         "Redis maxclients connection timeout",
         top_k=1,
         max_distance=1.0,
         vector_store=FakeVectorStore([]),
+        lexical_index=index,
     )
 
     assert payload["status"] == "success"
@@ -1284,13 +1508,13 @@ def test_lexical_only_candidate_must_pass_lexical_trust_threshold(
         },
     )
     index.upsert_source("docs/knowledge-base/redis.md", [document])
-    monkeypatch.setattr("app.services.rag_retrieval_service.lexical_index_service", index)
     monkeypatch.setattr(config, "rag_min_lexical_trust_score", 1.1)
 
     payload = retrieve_structured_knowledge(
         "Redis maxclients connection timeout",
         top_k=1,
         vector_store=FakeVectorStore([]),
+        lexical_index=index,
     )
 
     assert payload["status"] == "no_answer"
@@ -1380,15 +1604,15 @@ async def test_search_runbook_tool_hides_vector_error_detail(monkeypatch) -> Non
     assert "milvus.internal" not in str(result.output)
 
 
-def test_stale_registry_read_failure_filters_vector_candidate(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.services.rag_retrieval_service.lexical_index_service.is_source_stale",
-        lambda _source: (_ for _ in ()).throw(OSError("corrupt index")),
-    )
+def test_stale_registry_read_failure_filters_vector_candidate() -> None:
+    class BrokenIndex:
+        def is_source_stale(self, _source: str) -> bool:
+            raise OSError("corrupt index")
 
     assert (
-        rag_retrieval_service.is_stale_retrieval_source(
-            {"source_path": "docs/knowledge-base/redis.md"}
+        is_stale_retrieval_source(
+            {"source_path": "docs/knowledge-base/redis.md"},
+            lexical_index=BrokenIndex(),
         )
         is True
     )

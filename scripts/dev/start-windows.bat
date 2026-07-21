@@ -15,9 +15,9 @@ if exist ".venv\Scripts\python.exe" (
 "%PYTHON%" scripts\dev\pycharm_one_click_start.py %*
 if errorlevel 1 (
     echo.
-    echo [ERROR] AutoOnCall 启动失败，请查看上面的错误信息。
+    echo [ERROR] AutoOnCall start failed. Check the error details above.
     exit /b 1
 )
 
 echo.
-echo [OK] AutoOnCall 启动完成。
+echo [OK] AutoOnCall start completed.

@@ -13,6 +13,8 @@ from app.models.plan import PlanStep
 
 from .plan_fallback import render_plan_step
 
+MAX_AGENT_EXECUTED_STEPS = 8
+
 
 class PlanExecuteState(TypedDict, total=False):
     """Plan-Execute-Replan 状态"""

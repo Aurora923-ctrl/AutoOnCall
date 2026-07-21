@@ -72,8 +72,9 @@ def plan_migration(records: list[dict[str, Any]]) -> dict[str, Any]:
         ):
             raise ValueError(f"stable vector id collision: {stable_id}")
         migrated_by_id[stable_id] = migrated
-        if current_id == stable_id and dict(record.get("metadata") or {}) == migrated["metadata"]:
-            unchanged += 1
+        if current_id == stable_id:
+            if dict(record.get("metadata") or {}) == migrated["metadata"]:
+                unchanged += 1
         elif current_id:
             legacy_ids.append(current_id)
     return {
@@ -142,13 +143,32 @@ def apply_migration(
             f"migration verification count mismatch: expected={len(stable_ids)}, actual={verified}"
         )
 
-    legacy_ids = list(plan["legacy_ids"])
+    stable_id_set = set(stable_ids)
+    legacy_ids = [
+        str(legacy_id)
+        for legacy_id in plan["legacy_ids"]
+        if str(legacy_id) and str(legacy_id) not in stable_id_set
+    ]
     for start in range(0, len(legacy_ids), batch_size):
         client.delete(
             collection_name=collection,
             ids=legacy_ids[start : start + batch_size],
         )
     client.flush(collection_name=collection)
+
+    verified_after_delete = 0
+    for start in range(0, len(stable_ids), batch_size):
+        rows = client.query(
+            collection_name=collection,
+            ids=stable_ids[start : start + batch_size],
+            output_fields=["id", "metadata"],
+        )
+        verified_after_delete += len(rows)
+    if verified_after_delete != len(stable_ids):
+        raise RuntimeError(
+            "post-delete migration verification count mismatch: "
+            f"expected={len(stable_ids)}, actual={verified_after_delete}"
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

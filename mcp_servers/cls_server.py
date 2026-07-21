@@ -46,6 +46,9 @@ def log_tool_call(func):
         # 执行方法
         try:
             result = func(*args, **kwargs)
+            if isinstance(result, dict) and str(result.get("source") or "").lower() == "mock":
+                result.setdefault("source_quality", "fallback_only")
+                result.setdefault("evidence_origin", f"mcp_mock:{method_name}")
 
             # 记录返回状态
             logger.info("返回状态: SUCCESS")
@@ -53,14 +56,16 @@ def log_tool_call(func):
             # 记录返回结果摘要（避免日志过长）
             if isinstance(result, dict):
                 summary = {
-                    k: v
-                    if not isinstance(v, (list, dict))
-                    else f"<{type(v).__name__} with {len(v)} items>"
+                    k: (
+                        f"<{type(v).__name__} with {len(v)} items>"
+                        if isinstance(v, (list, dict))
+                        else f"<{type(v).__name__}>"
+                    )
                     for k, v in list(result.items())[:5]
                 }
                 logger.info(f"返回结果摘要: {json.dumps(summary, ensure_ascii=False)}")
             else:
-                logger.info(f"返回结果: {result}")
+                logger.info("tool_result_type=%s", type(result).__name__)
 
             logger.info("=" * 80)
             return result

@@ -370,6 +370,14 @@ class A2AFacade:
         incident_id = str(envelope.data.get("incident_id") or envelope.context_id or "")
         if not incident_id:
             raise ValueError("explain_incident_replay requires incident_id")
+        if not _is_admin_envelope(envelope):
+            records = self.task_store.list_a2a_task_records(
+                incident_id=incident_id,
+                limit=100,
+                owner_id=_owner_id_from_envelope(envelope),
+            )
+            if not any(record.skill == SKILL_DIAGNOSE_INCIDENT for record in records):
+                raise LookupError("A2A replay task not found")
         task_id = task_id_for_envelope("replay", envelope)
         existing_record = self._get_task_record(task_id)
         if existing_record is not None:
@@ -787,6 +795,10 @@ def _owner_id_from_envelope(envelope: A2AEnvelope) -> str:
         return ""
     _, owner_id, _ = message_id.split(":", 2)
     return owner_id
+
+
+def _is_admin_envelope(envelope: A2AEnvelope) -> bool:
+    return bool(envelope.metadata.get("__autooncall_admin"))
 
 
 def _a2a_run_status_payload(run_status: dict[str, Any]) -> dict[str, Any]:

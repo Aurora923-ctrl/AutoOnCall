@@ -57,6 +57,22 @@ def test_trusted_table_statement_requires_allowlisted_table_and_operation() -> N
         )
         == "DELETE FROM trace_events WHERE incident_id IN (%s)"
     )
+    assert (
+        trusted_table_statement(
+            "SELECT_ALL_COUNT",
+            table="trace_events",
+            allowed_tables=allowed,
+        )
+        == "SELECT COUNT(*) FROM trace_events"
+    )
+    assert (
+        trusted_table_statement(
+            "DELETE_ALL",
+            table="trace_events",
+            allowed_tables=allowed,
+        )
+        == "DELETE FROM trace_events"
+    )
 
     with pytest.raises(ValueError, match="untrusted SQL identifier"):
         trusted_table_statement(

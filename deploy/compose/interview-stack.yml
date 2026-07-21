@@ -12,10 +12,10 @@ services:
       - --long-query-time=10
       - --performance-schema=ON
     environment:
-      MYSQL_ROOT_PASSWORD: ${AUTOONCALL_MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_ROOT_PASSWORD: ${AUTOONCALL_MYSQL_ROOT_PASSWORD:?Set AUTOONCALL_MYSQL_ROOT_PASSWORD before starting MySQL}
       MYSQL_DATABASE: ${AUTOONCALL_MYSQL_DATABASE:-autooncall}
       MYSQL_USER: ${AUTOONCALL_MYSQL_USER:-autooncall}
-      MYSQL_PASSWORD: ${AUTOONCALL_MYSQL_PASSWORD:-autooncall123}
+      MYSQL_PASSWORD: ${AUTOONCALL_MYSQL_PASSWORD:?Set AUTOONCALL_MYSQL_PASSWORD before starting MySQL}
     ports:
       - "127.0.0.1:13306:3306"
     volumes:

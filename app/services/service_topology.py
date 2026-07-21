@@ -11,17 +11,23 @@ import yaml
 from app.config import config
 
 
+class ServiceTopologyError(RuntimeError):
+    """Raised when configured topology cannot safely select a dependency instance."""
+
+
 @lru_cache(maxsize=1)
 def load_service_topology() -> dict[str, Any]:
     """Load optional service topology from YAML."""
     path = Path(config.service_topology_path)
     if not path.exists():
-        return {}
+        raise ServiceTopologyError(f"Service topology file does not exist: {path}")
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ServiceTopologyError("Service topology could not be loaded") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("services"), dict):
+        raise ServiceTopologyError("Service topology must contain a services mapping")
+    return payload
 
 
 def get_service_dependencies(service_name: str) -> dict[str, Any]:
@@ -47,10 +53,25 @@ def get_dependency_instances(service_name: str, dependency_type: str) -> list[st
     values = dependencies.get(dependency_type)
     if not isinstance(values, list):
         return []
-    return [str(value) for value in values if value]
+    instances: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ServiceTopologyError(
+                f"Invalid {dependency_type} instance for {service_name}; "
+                "topology values must be non-empty strings"
+            )
+        instance = value.strip()
+        if instance not in instances:
+            instances.append(instance)
+    return instances
 
 
 def get_primary_dependency_instance(service_name: str, dependency_type: str) -> str:
-    """Return the first declared dependency instance for one service."""
+    """Return the sole declared instance, rejecting ambiguous topology."""
     instances = get_dependency_instances(service_name, dependency_type)
+    if len(instances) > 1:
+        raise ServiceTopologyError(
+            f"Multiple {dependency_type} instances are configured for {service_name}; "
+            "the plan must select one explicitly"
+        )
     return instances[0] if instances else ""

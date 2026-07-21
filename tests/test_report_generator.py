@@ -618,6 +618,30 @@ def test_report_generator_records_report_generated_trace(monkeypatch, tmp_path) 
     assert report_events[0].metadata["report_id"] == report.report_id
 
 
+def test_report_generator_uses_the_injected_trace_repository(monkeypatch, tmp_path) -> None:
+    report_generator_module = importlib.import_module("app.services.report_generator")
+    state = _state_with_redis_evidence()
+    trace_store = TraceService(tmp_path / "trace.db")
+    trace_store.create_event(
+        trace_id=state["trace_id"],
+        incident_id=state["incident"]["incident_id"],
+        node_name="workflow",
+        event_type="workflow_started",
+    )
+
+    monkeypatch.setattr(report_generator_module, "trace_service", trace_store)
+    generator = report_generator_module.ReportGenerator(tmp_path / "reports.db")
+    report = generator.generate_from_state(state, status="completed")
+
+    assert [
+        event.event_type
+        for event in trace_store.list_events(
+            incident_id=report.incident_id,
+            event_type="report_generated",
+        )
+    ] == ["report_generated"]
+
+
 def test_report_generator_renders_runbook_references(tmp_path) -> None:
     state = _state_with_redis_evidence()
     state["gathered_evidence"].append(
@@ -1131,6 +1155,24 @@ def test_report_generator_caps_mock_only_analysis_confidence(tmp_path) -> None:
     )
 
     assert report.confidence == 0.5
+
+
+def test_completed_request_with_pending_approval_is_downgraded(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    state["pending_approval"] = {
+        "approval_id": "approval-1",
+        "status": "pending",
+        "action": "change",
+    }
+
+    report = ReportGenerator(tmp_path / "approval.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status == "waiting_approval"
+    assert report.manual_action_required is True
 
 
 def test_report_generator_caps_unknown_successful_evidence_confidence(tmp_path) -> None:

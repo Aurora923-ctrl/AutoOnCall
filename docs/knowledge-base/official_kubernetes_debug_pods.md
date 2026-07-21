@@ -1,19 +1,14 @@
----
-reviewers:
-- mikedanese
-- thockin
-title: Debug Pods
-content_type: task
-weight: 10
----
-
-<!-- overview -->
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6bf0602c0bf364/content/en/docs/tasks/debug/debug-application/debug-pods.md
+Upstream revision: c3317651dc19ef683c5c4463bb6bf0602c0bf364
+Retrieved: 2026-07-21
+License: CC BY 4.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 This guide is to help users debug applications that are deployed into Kubernetes
 and not behaving correctly. This is *not* a guide for people who want to debug their cluster.
-For that you should check out [this guide](/docs/tasks/debug/debug-cluster).
-
-<!-- body -->
+For that you should check out this guide.
 
 ## Diagnosing the problem
 
@@ -48,7 +43,7 @@ Reasons include:
 
 * **You don't have enough resources**: You may have exhausted the supply of CPU
   or Memory in your cluster, in this case you need to delete Pods, adjust resource
-  requests, or add new nodes to your cluster. See [Compute Resources document](/docs/concepts/configuration/manage-resources-containers/)
+  requests, or add new nodes to your cluster. See Compute Resources document
   for more information.
 
 * **You are using `hostPort`**: When you bind a Pod to a `hostPort` there are a
@@ -56,10 +51,9 @@ Reasons include:
   is unnecessary, try using a Service object to expose your Pod.  If you do require
   `hostPort` then you can only schedule as many Pods as there are nodes in your Kubernetes cluster.
 
-
 #### My pod stays waiting
 
-If a Pod is stuck in the `Waiting` state, then it has been scheduled to a worker node, 
+If a Pod is stuck in the `Waiting` state, then it has been scheduled to a worker node,
 but it can't run on that machine. Again, the information from `kubectl describe ...`
 should be informative. The most common cause of `Waiting` pods is a failure to pull the image.
 There are three things to check:
@@ -69,14 +63,13 @@ There are three things to check:
 * Try to manually pull the image to see if the image can be pulled. For example,
   if you use Docker on your PC, run `docker pull <image>`.
 
-
 #### My pod stays terminating
 
 If a Pod is stuck in the `Terminating` state, it means that a deletion has been
 issued for the Pod, but the control plane is unable to delete the Pod object.
 
-This typically happens if the Pod has a [finalizer](/docs/concepts/overview/working-with-objects/finalizers/)
-and there is an [admission webhook](/docs/reference/access-authn-authz/extensible-admission-controllers/)
+This typically happens if the Pod has a finalizer
+and there is an admission webhook
 installed in the cluster that prevents the control plane from removing the
 finalizer.
 
@@ -100,7 +93,7 @@ If you are the author of the webhook:
 #### My pod is crashing or otherwise unhealthy
 
 Once your pod has been scheduled, the methods described in
-[Debug Running Pods](/docs/tasks/debug/debug-application/debug-running-pod/)
+Debug Running Pods
 are available for debugging.
 
 #### My pod is running but not doing what I told it to do
@@ -121,8 +114,6 @@ I0805 10:43:25.129850   46757 schema.go:126] unknown field: commnd
 I0805 10:43:25.129973   46757 schema.go:129] this may be a false alarm, see https://github.com/kubernetes/kubernetes/issues/6842
 pods/mypod
 ```
-
-<!-- TODO: Now that #11914 is merged, this advice may need to be updated -->
 
 The next thing to check is whether the pod on the apiserver
 matches the pod you meant to create (e.g. in a yaml file on your local machine).
@@ -184,14 +175,12 @@ Verify that the pod's `containerPort` matches up with the Service's `targetPort`
 
 #### Network traffic is not forwarded
 
-Please see [debugging service](/docs/tasks/debug/debug-application/debug-service/) for more information.
-
-## {{% heading "whatsnext" %}}
+Please see debugging service for more information.
 
 If none of the above solves your problem, follow the instructions in
-[Debugging Service document](/docs/tasks/debug/debug-application/debug-service/)
+Debugging Service document
 to make sure that your `Service` is running, has `Endpoints`, and your `Pods` are
 actually serving; you have DNS working, iptables rules installed, and kube-proxy
 does not seem to be misbehaving.
 
-You may also visit [troubleshooting document](/docs/tasks/debug/) for more information.
+You may also visit troubleshooting document for more information.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -21,6 +23,8 @@ from app.tools.ops_tool import (
 )
 from app.tools.redis_tool import QueryRedisStatusTool
 from app.tools.runbook_tool import SearchRunbookTool
+
+MAX_TOOL_OUTPUT_BYTES = 1024 * 1024
 
 
 class ToolRegistry:
@@ -56,6 +60,13 @@ class ToolRegistry:
         """Return registry-owned policy metadata instead of trusting extension declarations."""
         tool = self.get(name)
         if tool is None:
+            if name == "manual_analysis":
+                return {
+                    "name": name,
+                    "read_only": True,
+                    "risk_level": "low",
+                    "trusted": True,
+                }
             return None
         if name not in self._trusted_tools:
             return {
@@ -108,31 +119,24 @@ class ToolRegistry:
                 f"Tool invocation mismatch: requested {name}, "
                 f"but policy step declares {step_tool_name}"
             )
-            return ToolExecutionResult(
-                tool_name=name,
-                status="failed",
+            return _policy_mismatch_result(
+                name=name,
                 input_args=normalized_input_args,
-                output={
-                    "status": "failed",
-                    "source": "policy_guard",
-                    "policy": "forbidden",
-                    "risk_level": "high",
-                    "read_only": tool.read_only,
-                    "reason": reason,
-                    "matched_rules": ["tool:step-name-mismatch"],
-                    "summary": f"工具执行被 Policy Guard 拦截: {reason}",
-                },
-                risk_level="high",
                 read_only=tool.read_only,
-                error_message=reason,
-                metadata={
-                    "policy_guard": {
-                        "policy": "forbidden",
-                        "risk_level": "high",
-                        "read_only": tool.read_only,
-                        "matched_rules": ["tool:step-name-mismatch"],
-                    }
-                },
+                reason=reason,
+                rule="tool:step-name-mismatch",
+            )
+        step_input_args = _step_input_args(step)
+        if step_input_args is not None and not _same_structured_value(
+            _apply_tool_input_defaults(step_input_args, tool.input_schema or {}),
+            normalized_input_args,
+        ):
+            return _policy_mismatch_result(
+                name=name,
+                input_args=normalized_input_args,
+                read_only=tool.read_only,
+                reason="Tool invocation input_args do not match the policy-approved step",
+                rule="tool:step-input-mismatch",
             )
         from app.agent.aiops.risk_controller import assess_plan_step
 
@@ -233,6 +237,69 @@ def _step_tool_name(step: PlanStep | dict[str, Any] | None) -> str:
     return ""
 
 
+def _step_input_args(step: PlanStep | dict[str, Any] | None) -> dict[str, Any] | None:
+    if isinstance(step, PlanStep):
+        return dict(step.input_args)
+    if isinstance(step, dict):
+        value = step.get("input_args")
+        return dict(value) if isinstance(value, dict) else None
+    return None
+
+
+def _same_structured_value(left: Any, right: Any) -> bool:
+    left_json = json.dumps(
+        left,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    right_json = json.dumps(
+        right,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hmac.compare_digest(left_json, right_json)
+
+
+def _policy_mismatch_result(
+    *,
+    name: str,
+    input_args: dict[str, Any],
+    read_only: bool,
+    reason: str,
+    rule: str,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name=name,
+        status="failed",
+        input_args=input_args,
+        output={
+            "status": "failed",
+            "source": "policy_guard",
+            "policy": "forbidden",
+            "risk_level": "high",
+            "read_only": read_only,
+            "reason": reason,
+            "matched_rules": [rule],
+            "summary": f"Tool execution blocked by Policy Guard: {reason}",
+        },
+        risk_level="high",
+        read_only=read_only,
+        error_message=reason,
+        metadata={
+            "policy_guard": {
+                "policy": "forbidden",
+                "risk_level": "high",
+                "read_only": read_only,
+                "matched_rules": [rule],
+            }
+        },
+    )
+
+
 def _validate_tool_input(
     name: str,
     input_args: dict[str, Any],
@@ -271,7 +338,34 @@ def _validate_tool_output(
     tool: AIOpsTool,
 ) -> ToolExecutionResult | None:
     schema = tool.output_schema or {}
-    if not schema or result.status != "success":
+    if result.status != "success":
+        return None
+    try:
+        serialized = json.dumps(
+            result.output,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return _invalid_output_result(
+            name,
+            result,
+            tool,
+            "Tool output is not JSON serializable",
+            path=[],
+            validator="json_serializable",
+        )
+    if len(serialized) > MAX_TOOL_OUTPUT_BYTES:
+        return _invalid_output_result(
+            name,
+            result,
+            tool,
+            f"Tool output exceeds {MAX_TOOL_OUTPUT_BYTES} bytes",
+            path=[],
+            validator="max_output_bytes",
+        )
+    if not schema:
         return None
     try:
         Draft202012Validator.check_schema(schema)

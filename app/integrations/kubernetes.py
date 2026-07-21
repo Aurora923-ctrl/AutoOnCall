@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -18,6 +19,7 @@ from app.integrations.base import (
     public_adapter_failure_message,
     require_config,
     require_kubernetes_label_value,
+    require_kubernetes_path_segment,
     require_success_payload,
 )
 
@@ -41,6 +43,8 @@ class KubernetesStatusAdapter:
         self, service_name: str, time_range: str = "10m"
     ) -> dict[str, Any]:
         api_server = require_config(self.api_server, "KUBERNETES_API_SERVER")
+        namespace = require_kubernetes_path_segment(self.namespace, field_name="namespace")
+        namespace_path = quote(namespace, safe="")
         label_value = require_kubernetes_label_value(service_name, field_name="service_name")
         selector = f"app={label_value}"
         async with httpx.AsyncClient(
@@ -50,7 +54,7 @@ class KubernetesStatusAdapter:
             transport=self.transport,
         ) as client:
             pod_response = await client.get(
-                f"{api_server}/api/v1/namespaces/{self.namespace}/pods",
+                f"{api_server}/api/v1/namespaces/{namespace_path}/pods",
                 params={"labelSelector": selector},
             )
             pod_response.raise_for_status()
@@ -64,7 +68,7 @@ class KubernetesStatusAdapter:
             events_error: dict[str, Any] | None = None
             try:
                 event_response = await client.get(
-                    f"{api_server}/api/v1/namespaces/{self.namespace}/events",
+                    f"{api_server}/api/v1/namespaces/{namespace_path}/events",
                     params={"fieldSelector": "involvedObject.kind=Pod"},
                 )
                 event_response.raise_for_status()
@@ -117,7 +121,7 @@ class KubernetesStatusAdapter:
                 "raw_truncated": True,
             },
             service_name=service_name,
-            namespace=self.namespace,
+            namespace=namespace,
             time_range=time_range,
             event_window_seconds=window_seconds,
             pods=pods,

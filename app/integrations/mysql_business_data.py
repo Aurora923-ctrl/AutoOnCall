@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import math
 from typing import Any
 
 from app.config import config
+from app.core.resilience import run_bounded_sync_call
 from app.integrations.base import ExternalAdapterError, ExternalAdapterNotFoundError
 from app.integrations.mysql import MySQLStatusAdapter
 
@@ -23,15 +24,30 @@ class MySQLBusinessDataAdapter:
         return bool(self.dsn)
 
     async def query_service_catalog(self, service_name: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._query_service_catalog_sync, service_name)
+        return await run_bounded_sync_call(
+            "mysql-business-data",
+            "query_service_catalog",
+            lambda: self._query_service_catalog_sync(service_name),
+            timeout_seconds=self.timeout_seconds,
+        )
 
     async def query_deploy_history(self, service_name: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._query_deploy_history_sync, service_name)
+        return await run_bounded_sync_call(
+            "mysql-business-data",
+            "query_deploy_history",
+            lambda: self._query_deploy_history_sync(service_name),
+            timeout_seconds=self.timeout_seconds,
+        )
 
     async def search_tickets(
         self, service_name: str, query: str, limit: int
     ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._search_tickets_sync, service_name, query, limit)
+        return await run_bounded_sync_call(
+            "mysql-business-data",
+            "search_tickets",
+            lambda: self._search_tickets_sync(service_name, query, limit),
+            timeout_seconds=self.timeout_seconds,
+        )
 
     def _query_service_catalog_sync(self, service_name: str) -> dict[str, Any]:
         row = self._fetch_one(
@@ -94,9 +110,9 @@ class MySQLBusinessDataAdapter:
 
         connection = pymysql.connect(
             **MySQLStatusAdapter._connection_kwargs(self.dsn),
-            connect_timeout=int(self.timeout_seconds),
-            read_timeout=int(self.timeout_seconds),
-            write_timeout=int(self.timeout_seconds),
+            connect_timeout=max(1, math.ceil(self.timeout_seconds)),
+            read_timeout=max(1, math.ceil(self.timeout_seconds)),
+            write_timeout=max(1, math.ceil(self.timeout_seconds)),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:

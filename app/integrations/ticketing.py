@@ -43,6 +43,8 @@ class TicketingAdapter:
         self, service_name: str, query: str = "", limit: int = 5
     ) -> dict[str, Any]:
         if self.url:
+            source = "ticket_api"
+            evidence_origin = "http:ticket_history"
             url = require_config(self.url, "TICKET_API_URL")
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds,
@@ -68,13 +70,16 @@ class TicketingAdapter:
                 for ticket in self._filter_tickets(tickets, service_name, query, limit)
             ]
         else:
+            source = "mysql"
+            evidence_origin = "mysql:aiops_history_tickets"
             normalized_tickets = [
                 self._ticket_summary(ticket)
                 for ticket in await self.mysql_adapter.search_tickets(service_name, query, limit)
             ]
             payload = {"items": normalized_tickets}
         return adapter_success(
-            source="ticket_api",
+            source=source,
+            evidence_origin=evidence_origin,
             summary=f"工单系统返回 {len(normalized_tickets)} 条 {service_name} 相似故障",
             signals={"ticket_count": len(normalized_tickets)},
             raw=payload,
@@ -106,7 +111,8 @@ class TicketingAdapter:
                 )
             )
             return adapter_success(
-                source="ticket_api",
+                source="mysql",
+                evidence_origin="mysql:aiops_history_tickets",
                 summary=f"工单创建成功: {ticket.get('ticket_id', '')}",
                 signals={"duplicate": False, "ticket_count": 1},
                 raw={"ticket": ticket},
@@ -140,6 +146,7 @@ class TicketingAdapter:
                 ticket = self._ticket_summary(payload.get("ticket", payload))
                 return adapter_success(
                     source="ticket_api",
+                    evidence_origin="http:ticket_creation",
                     summary="工单系统发现重复工单，未创建新记录",
                     signals={"duplicate": True, "ticket_count": 1},
                     raw=payload,
@@ -158,6 +165,7 @@ class TicketingAdapter:
             raise ExternalAdapterResponseError("Ticket creation response missing ticket_id")
         return adapter_success(
             source="ticket_api",
+            evidence_origin="http:ticket_creation",
             summary=f"工单创建成功: {ticket.get('ticket_id', '')}",
             signals={"duplicate": False, "ticket_count": 1},
             raw=payload,

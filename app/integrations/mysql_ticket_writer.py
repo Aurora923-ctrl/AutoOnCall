@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import math
 from typing import Any
 
 from app.config import config
+from app.core.resilience import run_bounded_sync_call
 from app.integrations.base import ExternalAdapterError
 from app.integrations.mysql import MySQLStatusAdapter
 
@@ -33,15 +34,19 @@ class MySQLTicketWriterAdapter:
         risk_action: str = "",
         idempotency_key: str = "",
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._create_ticket_sync,
-            service_name,
-            title,
-            description,
-            severity,
-            approval_id,
-            risk_action,
-            idempotency_key,
+        return await run_bounded_sync_call(
+            "mysql-ticket-writer",
+            "create_ticket",
+            lambda: self._create_ticket_sync(
+                service_name,
+                title,
+                description,
+                severity,
+                approval_id,
+                risk_action,
+                idempotency_key,
+            ),
+            timeout_seconds=self.timeout_seconds,
         )
 
     def _create_ticket_sync(
@@ -74,9 +79,9 @@ class MySQLTicketWriterAdapter:
         }
         connection = pymysql.connect(
             **MySQLStatusAdapter._connection_kwargs(self.dsn),
-            connect_timeout=int(self.timeout_seconds),
-            read_timeout=int(self.timeout_seconds),
-            write_timeout=int(self.timeout_seconds),
+            connect_timeout=max(1, math.ceil(self.timeout_seconds)),
+            read_timeout=max(1, math.ceil(self.timeout_seconds)),
+            write_timeout=max(1, math.ceil(self.timeout_seconds)),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:

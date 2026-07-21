@@ -12,7 +12,7 @@ from openpyxl import Workbook
 
 from app.api import file as file_api
 from app.services import vector_index_service as vector_index_module
-from app.services.document_splitter_service import document_splitter_service
+from app.services.document_splitter_service import canonical_source_id, document_splitter_service
 from app.services.vector_index_service import SingleFileIndexingResult, VectorIndexService
 
 
@@ -71,6 +71,32 @@ async def test_upload_file_reports_indexing_failure_without_failing_upload(
     }
     assert (tmp_path / "runbook.md").read_bytes() == b"# runbook\n"
     assert called_paths == [str(tmp_path / "runbook.md")]
+
+
+@pytest.mark.asyncio
+async def test_overwrite_upload_restores_previous_file_when_indexing_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
+    target = tmp_path / "runbook.md"
+    target.write_bytes(b"old-version")
+    monkeypatch.setattr(
+        file_api.vector_index_service,
+        "index_single_file",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("milvus unavailable")),
+    )
+
+    response = await file_api.upload_file(
+        UploadFile(file=io.BytesIO(b"new-version"), filename="runbook.md")
+    )
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 207
+    assert payload["data"]["overwritten"] is True
+    assert payload["data"]["indexing_ready"] is False
+    assert target.read_bytes() == b"old-version"
+    assert not list(tmp_path.glob("*.backup"))
 
 
 @pytest.mark.asyncio
@@ -377,8 +403,47 @@ async def test_cancelled_upload_keeps_same_name_lock_until_indexing_thread_finis
 
     assert indexed_contents == [b"first-version", b"second-version"]
     assert (tmp_path / "same.md").read_bytes() == b"second-version"
-    assert second_payload["data"]["overwritten"] is True
+    assert second_payload["data"]["overwritten"] is False
     assert second_payload["data"]["indexing_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_overwrite_restores_previous_file_after_indexing_stops(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
+    target = tmp_path / "same.md"
+    target.write_bytes(b"previous-version")
+    index_started = threading.Event()
+    release_index = threading.Event()
+
+    def success_index(path: str) -> SingleFileIndexingResult:
+        index_started.set()
+        assert release_index.wait(timeout=5)
+        assert Path(path).read_bytes() == b"replacement-version"
+        return SingleFileIndexingResult(
+            file_path=path,
+            status="success",
+            chunk_count=1,
+        ).finish()
+
+    monkeypatch.setattr(file_api.vector_index_service, "index_single_file", success_index)
+
+    task = asyncio.create_task(
+        file_api.upload_file(
+            UploadFile(file=io.BytesIO(b"replacement-version"), filename="same.md")
+        )
+    )
+    assert await asyncio.to_thread(index_started.wait, 5)
+    task.cancel()
+    release_index.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert target.read_bytes() == b"previous-version"
+    assert not list(tmp_path.glob("*.backup"))
 
 
 @pytest.mark.asyncio
@@ -1015,6 +1080,50 @@ def test_splitter_treats_uppercase_markdown_extension_as_markdown() -> None:
     assert docs[0].metadata.get("h1") == "Redis"
 
 
+def test_canonical_source_id_casefolds_windows_paths_but_preserves_posix_case() -> None:
+    assert canonical_source_id(r"C:\Repo\Uploads\Runbook.MD") == "uploads/runbook.md"
+    assert canonical_source_id(r"c:\repo\uploads\runbook.md") == "uploads/runbook.md"
+    assert canonical_source_id("/srv/app/uploads/Runbook.MD") == "uploads/Runbook.MD"
+
+
+def test_source_lock_uses_canonical_windows_identity(tmp_path) -> None:
+    service = VectorIndexService()
+    service._source_lock_dir = tmp_path / "locks"
+
+    upper = service._source_lock(r"C:\Repo\Uploads\Runbook.MD")
+    lower = service._source_lock(r"c:\repo\uploads\runbook.md")
+
+    assert upper.lock_file == lower.lock_file
+
+
+def test_reindex_preserves_unchanged_chunk_id_after_inserting_earlier_section() -> None:
+    source = "docs/knowledge-base/runbook.md"
+    original = document_splitter_service.split_document(
+        "# Redis\n\nRedis maxclients diagnostic content for responders.",
+        source,
+    )[0]
+    snapshot = {
+        "chunks": [
+            {
+                "chunk_id": original.metadata["_chunk_id"],
+                "metadata": dict(original.metadata),
+            }
+        ]
+    }
+    updated = document_splitter_service.split_document(
+        "# New\n\nNew preliminary diagnostic section for responders.\n\n"
+        "# Redis\n\nRedis maxclients diagnostic content for responders.",
+        source,
+    )
+
+    VectorIndexService._preserve_existing_chunk_ids(updated, snapshot)
+
+    unchanged = next(document for document in updated if "Redis maxclients" in document.page_content)
+    inserted = next(document for document in updated if "New preliminary" in document.page_content)
+    assert unchanged.metadata["_chunk_id"] == original.metadata["_chunk_id"]
+    assert inserted.metadata["_chunk_id"].startswith("runbook.md#h-")
+
+
 def test_splitter_does_not_merge_chunks_across_markdown_headings() -> None:
     docs = document_splitter_service.split_document(
         "# Redis\n\n## maxclients\n\n连接数耗尽处理。\n\n## latency\n\n延迟升高处理。",
@@ -1307,7 +1416,7 @@ def test_index_single_file_does_not_publish_new_lexical_data_when_vector_cleanup
 
     normalized_path = runbook.resolve().as_posix()
     assert fake_lexical.upserted_sources == [normalized_path]
-    assert fake_vector.compensated_ids == []
+    assert fake_vector.compensated_ids == [["vec-1"]]
     assert fake_lexical.stale_sources[-1] == (normalized_path, "cleanup unavailable")
 
 
@@ -1361,7 +1470,7 @@ def test_index_single_file_compensates_new_vectors_when_lexical_commit_fails(
     with pytest.raises(RuntimeError, match="索引文件失败"):
         service.index_single_file(str(runbook))
 
-    assert fake_vector.compensated_ids == []
+    assert fake_vector.compensated_ids == [["vec-new"]]
     assert fake_lexical.stale_sources[-1][1] == "lexical disk unavailable"
 
 

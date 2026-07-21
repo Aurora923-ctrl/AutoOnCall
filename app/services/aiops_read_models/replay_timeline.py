@@ -17,7 +17,14 @@ from app.services.aiops_read_models.incident import compact_plan_step
 def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
     """Normalize trace events into a frontend-friendly replay timeline."""
     timeline = []
-    for event in events:
+    for event in sorted(
+        events,
+        key=lambda item: (
+            item.created_at,
+            _replay_event_priority(item),
+            item.event_id,
+        ),
+    ):
         public_event = public_trace_event(event)
         stage = replay_stage_for_event(event)
         timeline.append(
@@ -49,11 +56,28 @@ def build_replay_timeline(events: list[TraceEvent]) -> list[dict[str, Any]]:
     return timeline
 
 
+def _replay_event_priority(event: TraceEvent) -> int:
+    """Make same-timestamp replay ordering match causal workflow stages."""
+    stage_order = {
+        "alert": 0,
+        "planner": 1,
+        "executor": 2,
+        "replanner": 3,
+        "approval": 4,
+        "change": 5,
+        "report": 6,
+        "trace": 7,
+    }
+    return stage_order.get(replay_stage_for_event(event), 99)
+
+
 def replay_stage_for_event(event: TraceEvent) -> str:
     """Classify a trace event into one diagnosis replay stage."""
     event_type = str(event.event_type or "")
     node_name = str(event.node_name or "")
 
+    if "report" in event_type or "report" in node_name:
+        return "report"
     if event_type.startswith("change") or node_name == "safe_change_workflow":
         return "change"
     if event_type.startswith("approval") or node_name == "approval_service":
@@ -66,8 +90,6 @@ def replay_stage_for_event(event: TraceEvent) -> str:
         return "replanner"
     if node_name == "planner":
         return "planner"
-    if "report" in event_type or "report" in node_name:
-        return "report"
     if event_type in {"workflow_started", "alert_received"}:
         return "alert"
     return "trace"

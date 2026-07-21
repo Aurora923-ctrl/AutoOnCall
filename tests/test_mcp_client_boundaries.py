@@ -338,3 +338,70 @@ async def test_close_mcp_client_closes_isolated_client_without_resetting_global(
     assert isolated_client.closed is True
     assert mcp_client_module._mcp_client is global_client
     assert mcp_client_module._mcp_client_cache_key == "cached"
+
+
+@pytest.mark.asyncio
+async def test_close_mcp_client_cancels_active_discovery_before_close(monkeypatch) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class DiscoveringClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_tools(self) -> list[object]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        async def aclose(self) -> None:
+            assert cancelled.is_set()
+            self.closed = True
+
+    client = DiscoveringClient()
+    monkeypatch.setattr(mcp_client_module, "_mcp_client", client)
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_cache_key", "cached")
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_lock", asyncio.Lock())
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_lock_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(mcp_client_module, "_mcp_active_tasks", set())
+    monkeypatch.setattr(mcp_client_module, "_mcp_closing", False)
+
+    discovery = asyncio.create_task(
+        mcp_client_module.discover_safe_mcp_tools(client, timeout_seconds=10)
+    )
+    await started.wait()
+    await mcp_client_module.close_mcp_client()
+
+    with pytest.raises(asyncio.CancelledError):
+        await discovery
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_mcp_client_blocks_reinitialization_until_close_finishes(monkeypatch) -> None:
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class CloseableClient:
+        async def aclose(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+
+    monkeypatch.setattr(mcp_client_module, "_mcp_client", CloseableClient())
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_cache_key", "cached")
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_lock", asyncio.Lock())
+    monkeypatch.setattr(mcp_client_module, "_mcp_client_lock_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(mcp_client_module, "_mcp_active_tasks", set())
+    monkeypatch.setattr(mcp_client_module, "_mcp_closing", False)
+
+    closing = asyncio.create_task(mcp_client_module.close_mcp_client())
+    await close_started.wait()
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await mcp_client_module.get_mcp_client(servers={"one": {"transport": "stdio"}})
+
+    allow_close.set()
+    await closing

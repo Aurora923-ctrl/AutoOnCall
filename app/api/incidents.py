@@ -7,7 +7,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query
 
 from app.config import config
-from app.core.auth import ADMIN_SCOPE, DIAGNOSE_SCOPE, READ_SCOPE, AuthPrincipal, require_scope
+from app.core.auth import (
+    ADMIN_SCOPE,
+    DIAGNOSE_SCOPE,
+    READ_SCOPE,
+    AuthPrincipal,
+    require_scope,
+    scoped_session_id,
+)
+from app.core.ownership import owns_incident, principal_or_anonymous
 from app.models.api_contracts import (
     IncidentFeedbackListResponse,
     IncidentFeedbackResponse,
@@ -95,12 +103,13 @@ def get_eval_summary_for_replay() -> dict[str, Any] | None:
 @router.get(
     "/incidents",
     response_model=IncidentListResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def list_incidents(
     limit: int = Query(default=20, ge=1, le=100),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """List incident summaries known by report, trace, or approval storage."""
+    principal = principal_or_anonymous(principal)
     limit = limit if isinstance(limit, int) else 20
     report_by_incident = {
         report.incident_id: report for report in get_report_generator().list_reports()
@@ -125,6 +134,9 @@ async def list_incidents(
     for incident_id in incident_ids:
         report = report_by_incident.get(incident_id)
         state = state_by_incident.get(incident_id)
+        if principal.enabled and not principal.has_scope(ADMIN_SCOPE):
+            if state is None or not owns_incident(principal, get_incident_state_store(), incident_id):
+                continue
         _, events, approvals = select_incident_artifacts(
             report,
             state,
@@ -139,12 +151,16 @@ async def list_incidents(
 @router.get(
     "/incidents/{incident_id}",
     response_model=IncidentOverviewResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_incident_overview(incident_id: IncidentId) -> dict:
+async def get_incident_overview(
+    incident_id: IncidentId,
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
+) -> dict:
     """Return one incident overview assembled from report, trace, and approval state."""
-    report = get_report_generator().get_report(incident_id)
     state = get_incident_state_store().get_incident_state(incident_id)
+    if not owns_incident(principal, get_incident_state_store(), incident_id):
+        raise HTTPException(status_code=404, detail="incident not found")
+    report = get_report_generator().get_report(incident_id)
     _, events, approvals = select_incident_artifacts(
         report,
         state,
@@ -159,12 +175,16 @@ async def get_incident_overview(incident_id: IncidentId) -> dict:
 @router.get(
     "/incidents/{incident_id}/replay",
     response_model=IncidentReplayResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_incident_replay(incident_id: IncidentId) -> dict:
+async def get_incident_replay(
+    incident_id: IncidentId,
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
+) -> dict:
     """Return a replay-ready incident view assembled from all diagnosis artifacts."""
-    report = get_report_generator().get_report(incident_id)
     state = get_incident_state_store().get_incident_state(incident_id)
+    if not owns_incident(principal, get_incident_state_store(), incident_id):
+        raise HTTPException(status_code=404, detail="incident not found")
+    report = get_report_generator().get_report(incident_id)
     trace_id, events, approvals = select_incident_artifacts(
         report,
         state,
@@ -174,7 +194,11 @@ async def get_incident_replay(incident_id: IncidentId) -> dict:
     change_executions = [
         build_change_execution_read_model(execution)
         for execution in get_change_execution_service().list_executions(incident_id=incident_id)
-        if execution.trace_id == trace_id
+        if (
+            not trace_id
+            or not execution.trace_id
+            or execution.trace_id == trace_id
+        )
     ]
     if report is None and not events and not approvals and state is None and not change_executions:
         raise HTTPException(status_code=404, detail="incident not found")
@@ -192,15 +216,17 @@ async def get_incident_replay(incident_id: IncidentId) -> dict:
 @router.get(
     "/incidents/{incident_id}/trace",
     response_model=IncidentTraceResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def get_incident_trace(
     incident_id: IncidentId,
     event_type: str | None = Query(default=None),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """Return trace events for one incident."""
     event_type = event_type if isinstance(event_type, str) else None
     trace_repository = get_trace_service()
+    if not owns_incident(principal, get_incident_state_store(), incident_id):
+        raise HTTPException(status_code=404, detail="incident not found")
     raw_events = trace_repository.list_events(incident_id=incident_id)
     report = get_report_generator().get_report(incident_id)
     state = get_incident_state_store().get_incident_state(incident_id)
@@ -226,14 +252,16 @@ async def get_incident_trace(
 @router.get(
     "/incidents/{incident_id}/report",
     response_model=IncidentReportResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def get_incident_report(
     incident_id: IncidentId,
     response_format: str | None = Query(default=None, alias="format"),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """Return the latest structured diagnosis report for one incident."""
     response_format = response_format if isinstance(response_format, str) else None
+    if not owns_incident(principal, get_incident_state_store(), incident_id):
+        raise HTTPException(status_code=404, detail="incident report not found")
     report = get_report_generator().get_report(incident_id)
     if report is None:
         raise HTTPException(status_code=404, detail="incident report not found")
@@ -270,12 +298,23 @@ async def submit_incident_feedback(
     if payload.report_id != report.report_id:
         raise HTTPException(status_code=400, detail="report_id does not match latest report")
     store = create_aiops_store()
+    if not owns_incident(principal, store, incident_id):
+        raise HTTPException(status_code=404, detail="incident report not found")
     if payload.session_id:
-        snapshot = store.get_aiops_session_snapshot(payload.session_id)
+        resolved_session_id = scoped_session_id(principal, payload.session_id)
+        snapshot = store.get_aiops_session_snapshot(resolved_session_id)
         if snapshot is None or snapshot.incident_id != incident_id:
             raise HTTPException(status_code=400, detail="session_id does not belong to incident")
-        if payload.run_id and payload.run_id != payload.session_id:
-            raise HTTPException(status_code=400, detail="run_id does not match session_id")
+        if payload.run_id:
+            resolved_run_id = scoped_session_id(principal, payload.run_id)
+            if resolved_run_id != resolved_session_id:
+                raise HTTPException(status_code=400, detail="run_id does not match session_id")
+        payload = payload.model_copy(
+            update={
+                "session_id": resolved_session_id,
+                "run_id": resolved_session_id if payload.run_id else "",
+            }
+        )
     elif payload.run_id:
         raise HTTPException(status_code=400, detail="run_id requires session_id")
     if payload.trace_id and payload.trace_id != report.trace_id:

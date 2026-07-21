@@ -27,14 +27,18 @@ document.head.appendChild(style);
 
 // 初始化应用
 function bootstrapAutoOnCallApp() {
+    if (window.autoOnCallApp) {
+        return window.autoOnCallApp;
+    }
     window.autoOnCallApp = new AutoOnCallApp();
     window.dispatchEvent(new CustomEvent('autooncall:ready', {
         detail: { app: window.autoOnCallApp }
     }));
+    return window.autoOnCallApp;
 }
 
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootstrapAutoOnCallApp);
+    document.addEventListener('DOMContentLoaded', bootstrapAutoOnCallApp, { once: true });
 } else {
     bootstrapAutoOnCallApp();
 }

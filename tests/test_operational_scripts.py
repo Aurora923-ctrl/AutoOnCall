@@ -52,6 +52,30 @@ def test_makefile_upload_fails_when_any_document_indexing_fails() -> None:
     assert "exit 1" in upload
 
 
+def test_rag_clean_rebuild_requires_explicit_drop_confirmation() -> None:
+    script = (ROOT / "scripts" / "maintenance" / "rebuild_rag_index.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--confirm-drop" in script
+    assert "lexical_index_service.replace_all_sources" in script
+    assert "assess_lexical_identity" in script
+    assert "clean_bulk_upsert_single_flush" in script
+    assert "collection.upsert" in script
+    assert "collection.flush(timeout=180)" in script
+    assert "create_shadow_collection" in script
+    assert "utility.rename_collection" in script
+
+
+def test_makefile_exposes_rag_rebuild_and_identity_gates() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "rag-index-rebuild:" in makefile
+    assert "rebuild_rag_index.py --docs-dir $(DOCS_DIR) --confirm-drop" in makefile
+    assert "rag-index-identity:" in makefile
+    assert "rag_index_identity.py --docs-dir $(DOCS_DIR)" in makefile
+
+
 def test_production_docs_use_current_maintenance_script_paths() -> None:
     production = (ROOT / "deploy" / "production.md").read_text(encoding="utf-8")
 
@@ -77,6 +101,7 @@ def test_mysql_init_provisions_writable_aiops_runtime_schema() -> None:
         "approval_requests",
         "change_executions",
         "aiops_sessions",
+        "a2a_tasks",
         "incident_states",
         "diagnosis_reports",
         "schema_migrations",
@@ -85,7 +110,7 @@ def test_mysql_init_provisions_writable_aiops_runtime_schema() -> None:
 
     assert "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX" in runtime_schema
     assert "ON autooncall.* TO 'autooncall'@'%'" in runtime_schema
-    assert "INSERT IGNORE INTO schema_migrations" in runtime_schema
+    assert "INSERT IGNORE INTO schema_migrations" not in runtime_schema
 
 
 def test_destructive_maintenance_scripts_require_explicit_confirmation(
@@ -271,6 +296,15 @@ def test_pycharm_process_cleanup_uses_owned_pid_files() -> None:
     assert "PROCESS_TOKENS" not in stop_script
 
 
+def test_launcher_rejects_background_processes_that_exit_immediately() -> None:
+    launcher = (ROOT / "scripts" / "dev" / "pycharm_one_click_start.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "process.poll()" in launcher
+    assert "exited during startup" in launcher
+
+
 def test_windows_wrappers_delegate_to_owned_pid_launchers() -> None:
     start_script = (ROOT / "scripts" / "dev" / "start-windows.bat").read_text(encoding="utf-8")
     stop_script = (ROOT / "scripts" / "dev" / "stop-windows.bat").read_text(encoding="utf-8")
@@ -342,6 +376,18 @@ def test_makefile_verify_runs_quality_gate_targets() -> None:
     assert "@$(MAKE) hygiene-check" in verify
 
 
+def test_makefile_full_gate_includes_dependency_async_and_frontend_checks() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    full_gate = makefile.split("full-gate:", maxsplit=1)[1].split(
+        "live-eval:",
+        maxsplit=1,
+    )[0]
+
+    assert "@$(MAKE) dependency-lock-check" in full_gate
+    assert "@$(MAKE) async-blocking-audit" in full_gate
+    assert "@$(MAKE) frontend-verify" in full_gate
+
+
 def test_makefile_uses_stable_rag_contract_and_explicit_candidate_promotion() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
@@ -410,15 +456,26 @@ def test_production_exposure_warnings_for_open_demo_defaults(monkeypatch) -> Non
     assert "AIOps mock fallback is enabled while binding to a non-local host" in warnings
 
 
-def test_production_exposure_strict_mode_fails_closed(monkeypatch) -> None:
+def test_production_exposure_fails_closed_by_default(monkeypatch) -> None:
     monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
     monkeypatch.setattr(main_module.config, "debug", False)
     monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
     monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
-    monkeypatch.setattr(main_module.config, "production_exposure_strict", True)
+    monkeypatch.setattr(main_module.config, "production_exposure_strict", False)
+    monkeypatch.setattr(main_module.config, "allow_insecure_external_demo", False)
 
     with pytest.raises(RuntimeError, match="Unsafe production exposure configuration"):
         main_module.enforce_production_exposure_policy()
+
+
+def test_production_exposure_allows_explicit_insecure_demo_override(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "host", "0.0.0.0")
+    monkeypatch.setattr(main_module.config, "debug", False)
+    monkeypatch.setattr(main_module.config, "api_auth_enabled", False)
+    monkeypatch.setattr(main_module.config, "cors_allowed_origins", "*")
+    monkeypatch.setattr(main_module.config, "allow_insecure_external_demo", True)
+
+    main_module.enforce_production_exposure_policy()
 
 
 def test_production_exposure_rejects_enabled_auth_without_usable_tokens(monkeypatch) -> None:

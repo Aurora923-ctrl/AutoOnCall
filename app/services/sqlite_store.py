@@ -6,7 +6,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -30,409 +30,12 @@ from app.services.incident_lifecycle import (
     merge_incident_state,
 )
 from app.services.incident_state_builder import build_incident_state_from_alert
-from app.services.schema_migrations import SchemaMigration, apply_sqlite_migrations
-from app.services.sql_safety import bind_markers, trusted_table_statement
-
-_RETENTION_SQL: dict[str, tuple[str, str]] = {
-    "alert_events": (
-        """
-        SELECT COUNT(*) FROM alert_events AS target
-        WHERE target.updated_at < ? AND target.status = 'resolved'
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved', 'change_validated',
-                    'waiting_manual_execution', 'observing', 'partial_success',
-                    'recovery_pending', 'rollback_recommended'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM alert_events AS target
-        WHERE target.updated_at < ? AND target.status = 'resolved'
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved', 'change_validated',
-                    'waiting_manual_execution', 'observing', 'partial_success',
-                    'recovery_pending', 'rollback_recommended'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed', 'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "trace_events": (
-        """
-        SELECT COUNT(*) FROM trace_events AS target
-        WHERE target.created_at < ?
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM trace_events AS target
-        WHERE target.created_at < ?
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "approval_requests": (
-        """
-        SELECT COUNT(*) FROM approval_requests AS target
-        WHERE target.updated_at < ? AND target.status != 'pending'
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.approval_id = target.approval_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM approval_requests AS target
-        WHERE target.updated_at < ? AND target.status != 'pending'
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.approval_id = target.approval_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "diagnosis_reports": (
-        """
-        SELECT COUNT(*) FROM diagnosis_reports AS target
-        WHERE target.updated_at < ?
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM diagnosis_reports AS target
-        WHERE target.updated_at < ?
-          AND NOT EXISTS (
-              SELECT 1 FROM incident_states AS state
-              WHERE state.incident_id = target.incident_id
-                AND state.status NOT IN (
-                    'completed', 'incomplete', 'degraded', 'needs_human',
-                    'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                    'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM aiops_sessions AS session
-              WHERE session.incident_id = target.incident_id
-                AND session.status IN (
-                    'running', 'planning', 'executing', 'resume_running',
-                    'waiting_approval', 'approval_approved'
-                )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_requests AS approval
-              WHERE approval.incident_id = target.incident_id
-                AND approval.status = 'pending'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM alert_events AS alert
-              WHERE alert.incident_id = target.incident_id
-                AND alert.status != 'resolved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = target.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "change_executions": (
-        """
-        SELECT COUNT(*) FROM change_executions
-        WHERE updated_at < ?
-          AND status IN (
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed',
-              'closed', 'escalated'
-          )
-        """,
-        """
-        DELETE FROM change_executions
-        WHERE updated_at < ?
-          AND status IN (
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed',
-              'closed', 'escalated'
-          )
-        """,
-    ),
-    "aiops_sessions": (
-        """
-        SELECT COUNT(*) FROM aiops_sessions
-        WHERE updated_at < ?
-          AND status NOT IN (
-              'running', 'planning', 'executing', 'resume_running',
-              'waiting_approval', 'approval_approved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = aiops_sessions.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM aiops_sessions
-        WHERE updated_at < ?
-          AND status NOT IN (
-              'running', 'planning', 'executing', 'resume_running',
-              'waiting_approval', 'approval_approved'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = aiops_sessions.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-    "incident_states": (
-        """
-        SELECT COUNT(*) FROM incident_states
-        WHERE updated_at < ?
-          AND status IN (
-              'completed', 'incomplete', 'degraded', 'needs_human',
-              'approval_rejected', 'approval_cancelled', 'approval_resumed',
-              'blocked', 'failed', 'escalated', 'resolved', 'closed',
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = incident_states.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-        """
-        DELETE FROM incident_states
-        WHERE updated_at < ?
-          AND status IN (
-              'completed', 'incomplete', 'degraded', 'needs_human',
-              'approval_rejected', 'approval_cancelled', 'approval_resumed',
-              'blocked', 'failed', 'escalated', 'resolved', 'closed',
-              'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-              'rolled_back', 'rollback_failed'
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM change_executions AS execution
-              WHERE execution.incident_id = incident_states.incident_id
-                AND execution.status NOT IN (
-                    'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                    'rolled_back', 'rollback_failed',
-                    'closed', 'escalated'
-                )
-          )
-        """,
-    ),
-}
-_RUNTIME_RESET_SQL = (
-    (
-        "change_executions",
-        "SELECT COUNT(*) FROM change_executions",
-        "DELETE FROM change_executions",
-    ),
-    (
-        "approval_requests",
-        "SELECT COUNT(*) FROM approval_requests",
-        "DELETE FROM approval_requests",
-    ),
-    (
-        "diagnosis_reports",
-        "SELECT COUNT(*) FROM diagnosis_reports",
-        "DELETE FROM diagnosis_reports",
-    ),
-    ("trace_events", "SELECT COUNT(*) FROM trace_events", "DELETE FROM trace_events"),
-    ("aiops_sessions", "SELECT COUNT(*) FROM aiops_sessions", "DELETE FROM aiops_sessions"),
-    ("a2a_tasks", "SELECT COUNT(*) FROM a2a_tasks", "DELETE FROM a2a_tasks"),
-    ("incident_states", "SELECT COUNT(*) FROM incident_states", "DELETE FROM incident_states"),
-    ("alert_events", "SELECT COUNT(*) FROM alert_events", "DELETE FROM alert_events"),
+from app.services.sql_safety import bind_markers
+from app.services.store_maintenance import (
+    cleanup_sqlite_runtime_data,
+    reset_sqlite_runtime_data,
 )
+from app.services.store_schema import initialize_sqlite_store
 
 
 def resolve_sqlite_path(storage_path: str | Path | None = None) -> Path:
@@ -446,24 +49,13 @@ def resolve_sqlite_path(storage_path: str | Path | None = None) -> Path:
     return path
 
 
-_CHANGE_EXECUTION_TERMINAL_STATUSES = (
-    "precheck_failed",
-    "dry_run_failed",
-    "sandbox_validated",
-    "rolled_back",
-    "rollback_failed",
-    "closed",
-    "escalated",
-)
-
-
 class AIOpsSQLiteStore:
     """Small SQLite repository for trace, approval, and report state."""
 
     def __init__(self, database_path: str | Path | None = None):
         self.database_path = resolve_sqlite_path(database_path)
         self.migration_warnings: list[str] = []
-        self._initialize()
+        initialize_sqlite_store(self.database_path, self._connect)
 
     def save_alert_event(self, event: AlertEvent) -> None:
         """Persist the latest state of one normalized alert event."""
@@ -1392,15 +984,16 @@ class AIOpsSQLiteStore:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO a2a_tasks (
-                    task_id, message_id, request_fingerprint, skill, incident_id,
+                    task_id, message_id, request_fingerprint, owner_id, skill, incident_id,
                     state, created_at, updated_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
                     record.message_id,
                     record.request_fingerprint,
+                    record.owner_id,
                     record.skill,
                     record.incident_id,
                     record.state,
@@ -1426,19 +1019,21 @@ class AIOpsSQLiteStore:
                 if (
                     existing.message_id != record.message_id
                     or existing.request_fingerprint != record.request_fingerprint
+                    or existing.owner_id != record.owner_id
                 ):
                     raise ValueError("A2A task ownership mismatch")
                 record.created_at = existing.created_at
             connection.execute(
                 """
                 INSERT INTO a2a_tasks (
-                    task_id, message_id, request_fingerprint, skill, incident_id,
+                    task_id, message_id, request_fingerprint, owner_id, skill, incident_id,
                     state, created_at, updated_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     message_id = excluded.message_id,
                     request_fingerprint = excluded.request_fingerprint,
+                    owner_id = excluded.owner_id,
                     skill = excluded.skill,
                     incident_id = excluded.incident_id,
                     state = excluded.state,
@@ -1449,6 +1044,7 @@ class AIOpsSQLiteStore:
                     record.task_id,
                     record.message_id,
                     record.request_fingerprint,
+                    record.owner_id,
                     record.skill,
                     record.incident_id,
                     record.state,
@@ -1487,7 +1083,7 @@ class AIOpsSQLiteStore:
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC, rowid DESC LIMIT ?"
-        params.append(limit)
+        params.append(max(1, min(int(limit or 20), 100)))
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [A2ATaskRecord.model_validate(_load_payload(row)) for row in rows]
@@ -1725,401 +1321,16 @@ class AIOpsSQLiteStore:
 
     def reset_runtime_data(self) -> dict[str, int]:
         """Delete all AIOps runtime records while preserving the database schema."""
-        deleted: dict[str, int] = {}
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            for table, count_sql, delete_sql in _RUNTIME_RESET_SQL:
-                count = connection.execute(count_sql).fetchone()[0]
-                deleted[table] = int(count)
-                connection.execute(delete_sql)
-        return deleted
+        return reset_sqlite_runtime_data(self._connect)
 
     def cleanup_older_than(self, *, keep_days: int, dry_run: bool = False) -> dict[str, Any]:
         """Delete runtime records older than the retention window."""
-        if keep_days < 1:
-            raise ValueError("keep_days must be >= 1")
-
-        cutoff = datetime.now(UTC) - timedelta(days=keep_days)
-        cutoff_text = cutoff.isoformat()
-        deleted: dict[str, int] = {}
-
-        with self._connect() as connection:
-            if not dry_run:
-                connection.execute("BEGIN IMMEDIATE")
-            eligible_incidents = self._select_retention_eligible_incidents(
-                connection,
-                cutoff_text=cutoff_text,
-            )
-            if dry_run:
-                deleted = self._count_retention_incidents(connection, eligible_incidents)
-            else:
-                deleted = self._delete_retention_incidents(connection, eligible_incidents)
-                try:
-                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                except sqlite3.OperationalError:
-                    pass
-
-        return {
-            "database_path": str(self.database_path),
-            "keep_days": keep_days,
-            "cutoff": cutoff_text,
-            "dry_run": dry_run,
-            "deleted": deleted,
-        }
-
-    @staticmethod
-    def _select_retention_eligible_incidents(
-        connection: sqlite3.Connection,
-        *,
-        cutoff_text: str,
-    ) -> list[str]:
-        terminal_placeholders = bind_markers(
-            len(_CHANGE_EXECUTION_TERMINAL_STATUSES),
-            "?",
+        return cleanup_sqlite_runtime_data(
+            self._connect,
+            database_path=self.database_path,
+            keep_days=keep_days,
+            dry_run=dry_run,
         )
-        rows = connection.execute(
-            f"""
-            SELECT incident_id
-            FROM (
-                SELECT incident_id FROM alert_events
-                UNION SELECT incident_id FROM trace_events
-                UNION SELECT incident_id FROM approval_requests
-                UNION SELECT incident_id FROM change_executions
-                UNION SELECT incident_id FROM aiops_sessions
-                UNION SELECT incident_id FROM incident_states
-                UNION SELECT incident_id FROM diagnosis_reports
-            ) AS incidents
-            WHERE NOT EXISTS (
-                SELECT 1 FROM alert_events AS alert
-                WHERE alert.incident_id = incidents.incident_id
-                  AND (alert.status != 'resolved' OR alert.updated_at >= ?)
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM trace_events AS trace
-                WHERE trace.incident_id = incidents.incident_id
-                  AND trace.created_at >= ?
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM approval_requests AS approval
-                WHERE approval.incident_id = incidents.incident_id
-                  AND (approval.status = 'pending' OR approval.updated_at >= ?)
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM change_executions AS execution
-                WHERE execution.incident_id = incidents.incident_id
-                  AND (
-                      execution.status NOT IN ({terminal_placeholders})
-                      OR execution.updated_at >= ?
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM aiops_sessions AS session
-                WHERE session.incident_id = incidents.incident_id
-                  AND (
-                      session.status IN (
-                          'running', 'planning', 'executing', 'resume_running',
-                          'waiting_approval', 'approval_approved', 'change_validated',
-                          'waiting_manual_execution', 'observing', 'partial_success',
-                          'recovery_pending', 'rollback_recommended'
-                      )
-                      OR session.updated_at >= ?
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM incident_states AS state
-                WHERE state.incident_id = incidents.incident_id
-                  AND (
-                      state.status NOT IN (
-                          'completed', 'incomplete', 'degraded', 'needs_human',
-                          'approval_rejected', 'approval_cancelled', 'approval_resumed',
-                          'blocked', 'failed', 'escalated', 'resolved', 'closed',
-                          'precheck_failed', 'dry_run_failed', 'sandbox_validated',
-                          'rolled_back', 'rollback_failed'
-                      )
-                      OR state.updated_at >= ?
-                  )
-            )
-              AND NOT EXISTS (
-                SELECT 1 FROM diagnosis_reports AS report
-                WHERE report.incident_id = incidents.incident_id
-                  AND report.updated_at >= ?
-            )
-            ORDER BY incident_id
-            """,  # nosec B608 -- only bind markers from bind_markers are interpolated.
-            (
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-                *_CHANGE_EXECUTION_TERMINAL_STATUSES,
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-                cutoff_text,
-            ),
-        ).fetchall()
-        return [str(row["incident_id"]) for row in rows]
-
-    @staticmethod
-    def _count_retention_incidents(
-        connection: sqlite3.Connection,
-        incident_ids: list[str],
-    ) -> dict[str, int]:
-        counts = dict.fromkeys(_RETENTION_SQL, 0)
-        if not incident_ids:
-            return counts
-        for table in _RETENTION_SQL:
-            row = connection.execute(
-                trusted_table_statement(
-                    "SELECT_COUNT",
-                    table=table,
-                    allowed_tables=_RETENTION_SQL,
-                    value_count=len(incident_ids),
-                    marker="?",
-                ),
-                incident_ids,
-            ).fetchone()
-            counts[table] = int(row[0])
-        return counts
-
-    @staticmethod
-    def _delete_retention_incidents(
-        connection: sqlite3.Connection,
-        incident_ids: list[str],
-    ) -> dict[str, int]:
-        deleted = dict.fromkeys(_RETENTION_SQL, 0)
-        if not incident_ids:
-            return deleted
-        deletion_order = (
-            "change_executions",
-            "approval_requests",
-            "diagnosis_reports",
-            "trace_events",
-            "aiops_sessions",
-            "incident_states",
-            "alert_events",
-        )
-        for table in deletion_order:
-            cursor = connection.execute(
-                trusted_table_statement(
-                    "DELETE",
-                    table=table,
-                    allowed_tables=deletion_order,
-                    value_count=len(incident_ids),
-                    marker="?",
-                ),
-                incident_ids,
-            )
-            deleted[table] = int(cursor.rowcount or 0)
-        return deleted
-
-    def _initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("""
-                CREATE TABLE IF NOT EXISTS alert_events (
-                    fingerprint TEXT PRIMARY KEY,
-                    incident_id TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    service_name TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    environment TEXT NOT NULL,
-                    starts_at TEXT,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_alert_events_incident
-                    ON alert_events(incident_id, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_alert_events_status
-                    ON alert_events(status, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_alert_events_service
-                    ON alert_events(service_name, updated_at);
-
-                CREATE TABLE IF NOT EXISTS trace_events (
-                    event_id TEXT PRIMARY KEY,
-                    trace_id TEXT NOT NULL,
-                    incident_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    node_name TEXT NOT NULL,
-                    step_id TEXT,
-                    tool_name TEXT,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_trace_events_incident
-                    ON trace_events(incident_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_trace_events_trace
-                    ON trace_events(trace_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_trace_events_type
-                    ON trace_events(event_type, created_at);
-
-                CREATE TABLE IF NOT EXISTS approval_requests (
-                    approval_id TEXT PRIMARY KEY,
-                    incident_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    risk_level TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    idempotency_key TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    decided_at TEXT,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_approval_requests_incident
-                    ON approval_requests(incident_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_approval_requests_status
-                    ON approval_requests(status, created_at);
-
-                CREATE TABLE IF NOT EXISTS change_executions (
-                    change_execution_id TEXT PRIMARY KEY,
-                    change_plan_id TEXT NOT NULL,
-                    approval_id TEXT NOT NULL,
-                    incident_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    UNIQUE(incident_id, change_plan_id, approval_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_change_executions_incident
-                    ON change_executions(incident_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_change_executions_plan
-                    ON change_executions(change_plan_id, created_at);
-
-                CREATE TABLE IF NOT EXISTS aiops_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    incident_id TEXT NOT NULL,
-                    trace_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    node_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_aiops_sessions_incident
-                    ON aiops_sessions(incident_id, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_aiops_sessions_trace
-                    ON aiops_sessions(trace_id, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_aiops_sessions_status
-                    ON aiops_sessions(status, updated_at);
-
-                CREATE TABLE IF NOT EXISTS a2a_tasks (
-                    task_id TEXT PRIMARY KEY,
-                    message_id TEXT NOT NULL,
-                    request_fingerprint TEXT NOT NULL,
-                    skill TEXT NOT NULL,
-                    incident_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_a2a_tasks_message
-                    ON a2a_tasks(message_id, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_a2a_tasks_incident
-                    ON a2a_tasks(incident_id, updated_at);
-
-                CREATE TABLE IF NOT EXISTS incident_states (
-                    incident_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    service_name TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    environment TEXT NOT NULL,
-                    trace_id TEXT,
-                    session_id TEXT,
-                    approval_status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_incident_states_status
-                    ON incident_states(status, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_incident_states_service
-                    ON incident_states(service_name, updated_at);
-
-                CREATE TABLE IF NOT EXISTS diagnosis_reports (
-                    report_id TEXT PRIMARY KEY,
-                    incident_id TEXT NOT NULL,
-                    trace_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    payload TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_diagnosis_reports_incident
-                    ON diagnosis_reports(incident_id, created_at);
-                """)
-            report_columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(diagnosis_reports)").fetchall()
-            }
-            if "updated_at" not in report_columns:
-                connection.execute("ALTER TABLE diagnosis_reports ADD COLUMN updated_at TEXT")
-                connection.execute(
-                    "UPDATE diagnosis_reports SET updated_at = created_at WHERE updated_at IS NULL"
-                )
-            apply_sqlite_migrations(
-                connection,
-                [
-                    SchemaMigration(1, "runtime_schema_baseline", lambda _connection: None),
-                    SchemaMigration(
-                        2,
-                        "approval_and_change_idempotency",
-                        self._apply_sqlite_approval_and_change_idempotency,
-                    ),
-                ],
-            )
-
-    def _apply_sqlite_approval_and_change_idempotency(
-        self,
-        connection: sqlite3.Connection,
-    ) -> None:
-        approval_columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(approval_requests)").fetchall()
-        }
-        if "idempotency_key" not in approval_columns:
-            connection.execute("ALTER TABLE approval_requests ADD COLUMN idempotency_key TEXT")
-        if "updated_at" not in approval_columns:
-            connection.execute("ALTER TABLE approval_requests ADD COLUMN updated_at TEXT")
-            connection.execute(
-                "UPDATE approval_requests SET updated_at = "
-                "COALESCE(decided_at, created_at) WHERE updated_at IS NULL"
-            )
-        connection.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_approval_idempotency
-            ON approval_requests(idempotency_key)
-            WHERE status = 'pending' AND idempotency_key IS NOT NULL
-            """)
-        try:
-            connection.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_executions_scope
-                ON change_executions(incident_id, change_plan_id, approval_id)
-                """)
-        except sqlite3.IntegrityError as exc:
-            duplicate_groups = self._count_change_execution_scope_duplicates(connection)
-            raise RuntimeError(
-                "SQLite change_executions contains "
-                f"{duplicate_groups} duplicate business-scope groups"
-            ) from exc
-        except sqlite3.OperationalError as exc:
-            raise RuntimeError(
-                "SQLite change_executions schema cannot enforce business-scope idempotency"
-            ) from exc
-
-    def _count_change_execution_scope_duplicates(self, connection: sqlite3.Connection) -> int:
-        row = connection.execute("""
-            SELECT COUNT(*) AS duplicate_groups
-            FROM (
-                SELECT 1
-                FROM change_executions
-                GROUP BY incident_id, change_plan_id, approval_id
-                HAVING COUNT(*) > 1
-            )
-            """).fetchone()
-        return int(row["duplicate_groups"] or 0) if row is not None else 0
 
     def _record_migration_warning(self, message: str) -> None:
         self.migration_warnings.append(message)

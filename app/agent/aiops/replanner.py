@@ -4,7 +4,7 @@ Replanner 节点：重新规划或生成最终响应
 """
 
 from textwrap import dedent
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_qwq import ChatQwen
@@ -16,8 +16,6 @@ from app.models.plan import PlanStep
 from app.services.aiops_state_utils import extract_incident_id
 from app.services.approval_service import approval_service
 from app.services.approval_workflow import (
-    build_change_plan_from_risk_decision,
-    create_approval_request_from_risk_decision,
     generate_approval_waiting_response,
     generate_forbidden_response,
 )
@@ -29,12 +27,23 @@ from app.tools.registry import create_default_tool_registry
 
 from .evidence_analyzer import EvidenceAnalysis, analyze_evidence, render_analysis_summary
 from .plan_fallback import deduplicate_plan_steps, ensure_unique_step_ids
+from .replan_approval import build_approval_state_update, extract_risk_decision
+from .replan_decision import (
+    ReplanDecision,
+    decide_with_llm_or_analysis,
+    decision_from_analysis,
+    normalize_llm_replan_decision,
+)
 from .risk_controller import RiskControlDecision, assess_plan_step
-from .state import PlanExecuteState, normalize_plan_state_update, parse_plan_step
+from .state import (
+    MAX_AGENT_EXECUTED_STEPS,
+    PlanExecuteState,
+    normalize_plan_state_update,
+    parse_plan_step,
+)
 from .utils import format_tools_description
 
-MAX_STEPS = 8
-LLM_DECISION_SAFE_SKIP_DECISIONS = {"retry_failed_tool", "request_approval"}
+MAX_STEPS = MAX_AGENT_EXECUTED_STEPS
 REPLANNER_CONTEXT_CHAR_LIMIT = 3000
 RESPONSE_CONTEXT_CHAR_LIMIT = 4000
 
@@ -43,31 +52,6 @@ class Response(BaseModel):
     """最终响应的格式"""
 
     response: str = Field(description="对用户的最终响应")
-
-
-class ReplanDecision(BaseModel):
-    """Structured Replanner decision."""
-
-    decision: Literal[
-        "continue_investigation",
-        "add_steps",
-        "retry_failed_tool",
-        "request_approval",
-        "generate_report",
-        "escalate_to_human",
-    ] = Field(
-        description="""下一步行动：
-        - continue_investigation: 当前剩余计划合理，继续执行
-        - add_steps: 追加缺失证据采集步骤
-        - retry_failed_tool: 重试失败工具或替代工具
-        - request_approval: 修复动作需要人工审批
-        - generate_report: 证据足够，生成报告
-        - escalate_to_human: 证据不足且无法安全自动继续"""
-    )
-    reason: str = Field(default="", description="决策原因")
-    new_steps: list[PlanStep] = Field(
-        default_factory=list, description="需要追加或重试的结构化步骤"
-    )
 
 
 replanner_prompt = ChatPromptTemplate.from_messages(
@@ -280,18 +264,8 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
 
 
 def _decision_from_analysis(analysis: EvidenceAnalysis) -> ReplanDecision:
-    """Normalize EvidenceAnalysis into the Replanner decision contract."""
-    new_steps: list[PlanStep] = []
-    if analysis.decision == "retry_failed_tool":
-        new_steps = analysis.retry_steps
-    elif analysis.decision == "add_steps":
-        new_steps = analysis.recommended_steps
-
-    return ReplanDecision(
-        decision=analysis.decision,
-        reason=analysis.reason,
-        new_steps=new_steps,
-    )
+    """Compatibility wrapper for the extracted decision module."""
+    return decision_from_analysis(analysis)
 
 
 async def _decide_with_llm_or_analysis(
@@ -299,32 +273,27 @@ async def _decide_with_llm_or_analysis(
     analysis: EvidenceAnalysis,
     analysis_decision: ReplanDecision,
 ) -> tuple[ReplanDecision, str]:
-    """Let an optional structured LLM critic refine the deterministic evidence decision."""
-    if not config.aiops_replanner_llm_enabled:
-        return analysis_decision, "evidence_analyzer"
+    """Compatibility wrapper for the extracted decision module."""
 
-    if analysis_decision.decision in LLM_DECISION_SAFE_SKIP_DECISIONS:
-        return analysis_decision, "evidence_analyzer_safety_priority"
-
-    try:
-        llm_decision = await _generate_llm_replan_decision(
-            state,
-            analysis,
-            analysis_decision,
+    async def generate(
+        current_state: PlanExecuteState,
+        current_analysis: EvidenceAnalysis,
+        current_decision: ReplanDecision,
+    ) -> Any:
+        return await _generate_llm_replan_decision(
+            current_state,
+            current_analysis,
+            current_decision,
             _create_llm(),
         )
-        normalized_decision = _normalize_llm_replan_decision(
-            llm_decision,
-            state,
-            analysis,
-            analysis_decision,
-        )
-        if normalized_decision is not None:
-            return normalized_decision, "llm_structured"
-    except Exception as exc:
-        logger.warning(f"Replanner LLM 决策不可用，回退到 Evidence Analyzer: {exc}")
 
-    return analysis_decision, "evidence_analyzer_fallback"
+    return await decide_with_llm_or_analysis(
+        state,
+        analysis,
+        analysis_decision,
+        llm_enabled=config.aiops_replanner_llm_enabled,
+        generate_llm_decision=generate,
+    )
 
 
 async def _generate_llm_replan_decision(
@@ -349,41 +318,13 @@ def _normalize_llm_replan_decision(
     analysis: EvidenceAnalysis,
     analysis_decision: ReplanDecision,
 ) -> ReplanDecision | None:
-    """Validate LLM output against deterministic evidence and risk gates."""
-    decision = _coerce_replan_decision(decision_obj)
-    if decision is None:
-        logger.warning("Replanner LLM 返回无法解析的结构化决策，已忽略")
-        return None
-
-    reason = (decision.reason or "").strip() or analysis_decision.reason
-
-    if decision.decision == "generate_report" and not analysis.evidence_sufficient:
-        logger.warning("Replanner LLM 试图在证据不足时生成报告，已回退到 Evidence Analyzer")
-        return None
-
-    if decision.decision == "continue_investigation" and not _has_remaining_plan(state):
-        logger.warning("Replanner LLM 选择继续执行但没有剩余计划，已回退到 Evidence Analyzer")
-        return None
-
-    if decision.decision == "retry_failed_tool" and not _has_failed_tool_record(state):
-        logger.warning("Replanner LLM 选择重试但没有可重试失败工具，已回退到 Evidence Analyzer")
-        return None
-
-    if decision.decision in {"add_steps", "retry_failed_tool"}:
-        steps = _coerce_plan_steps(decision.new_steps)
-        if not steps:
-            logger.warning("Replanner LLM 决策需要新步骤但未提供有效 PlanStep，已回退")
-            return None
-        safe_steps = _safe_llm_steps_or_none(
-            steps,
-            state,
-            retry=decision.decision == "retry_failed_tool",
-        )
-        if safe_steps is None:
-            return None
-        return ReplanDecision(decision=decision.decision, reason=reason, new_steps=safe_steps)
-
-    return ReplanDecision(decision=decision.decision, reason=reason, new_steps=[])
+    """Compatibility wrapper for the extracted decision module."""
+    return normalize_llm_replan_decision(
+        decision_obj,
+        state,
+        analysis,
+        analysis_decision,
+    )
 
 
 def _coerce_replan_decision(decision_obj: Any) -> ReplanDecision | None:
@@ -633,99 +574,24 @@ def _approval_state_update(
     reason: str,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Build structured risk and approval state for a paused action."""
-    risk_decision = _extract_risk_decision(state)
-    if risk_decision is None:
-        if not force:
-            return {}
-        normalized_reason = reason or "后续动作可能影响线上系统，需要人工审批后再继续"
-        risk_decision = RiskControlDecision(
-            action="需要人工确认的后续处置动作",
-            risk_level="medium",
-            policy="approval_required",
-            need_approval=True,
-            allowed=False,
-            reason=normalized_reason,
-            matched_rules=["replanner:forced-approval"],
-        )
-    elif reason and reason not in risk_decision.reason:
-        risk_decision.reason = f"{risk_decision.reason}；{reason}"
-
-    risk_assessment = risk_decision.to_risk_assessment()
-    change_plan = build_change_plan_from_risk_decision(state, risk_decision)
-    trace_service.record_risk_decision(
-        trace_id=state.get("trace_id") or "trace-unknown",
-        incident_id=extract_incident_id(state),
-        step_id=risk_decision.step_id,
-        action=risk_decision.action,
-        policy=risk_decision.policy,
-        risk_level=risk_decision.risk_level,
-        reason=risk_decision.reason,
-        matched_rules=risk_decision.matched_rules,
-        status="blocked",
-    )
-    update: dict[str, Any] = {
-        "risk_assessment": risk_assessment.model_dump(mode="json"),
-    }
-
-    if risk_decision.policy == "forbidden":
-        update["pending_approval"] = None
-        update["response"] = _generate_forbidden_response(risk_decision)
-        update["errors"] = [risk_decision.reason]
-        update["change_plan"] = change_plan.model_dump(mode="json")
-        return update
-
-    approval = create_approval_request_from_risk_decision(
+    """Compatibility wrapper for the extracted approval module."""
+    return build_approval_state_update(
         state,
-        risk_decision,
+        reason,
+        force=force,
         approval_repository=approval_service,
-        change_plan=change_plan,
+        trace_repository=trace_service,
+        risk_extractor=_extract_risk_decision,
     )
-    update["pending_approval"] = approval.model_dump(mode="json")
-    update["change_plan"] = change_plan.model_dump(mode="json")
-    update["response"] = _generate_approval_waiting_response(update)
-    return update
 
 
 def _extract_risk_decision(state: PlanExecuteState) -> RiskControlDecision | None:
-    """Infer risk from remaining structured plan steps."""
-    registry = create_default_tool_registry([])
-    current_plan = state.get("current_plan", [])
-    if not current_plan and state.get("plan"):
-        return RiskControlDecision(
-            action="Legacy text-only plan",
-            risk_level="high",
-            read_only=False,
-            policy="forbidden",
-            need_approval=True,
-            allowed=False,
-            forbidden=True,
-            reason="Legacy text-only plan cannot be risk assessed safely",
-            matched_rules=["plan:legacy-unassessed"],
-        )
-    for raw_step in current_plan:
-        try:
-            step = raw_step if isinstance(raw_step, PlanStep) else PlanStep(**raw_step)
-        except Exception:
-            return RiskControlDecision(
-                action="Invalid structured plan step",
-                risk_level="high",
-                read_only=False,
-                policy="forbidden",
-                need_approval=True,
-                allowed=False,
-                forbidden=True,
-                reason="Remaining plan contains an invalid structured step and cannot be assessed safely",
-                matched_rules=["plan:invalid-step"],
-            )
-        decision = assess_plan_step(
-            step,
-            tool_registry=registry,
-            incident=state.get("incident"),
-        )
-        if decision.policy != "allow":
-            return decision
-    return None
+    """Compatibility wrapper for the extracted approval module."""
+    return extract_risk_decision(
+        state,
+        registry_factory=create_default_tool_registry,
+        assessor=assess_plan_step,
+    )
 
 
 def _record_replanner_decision(

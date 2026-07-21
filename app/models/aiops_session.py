@@ -28,7 +28,7 @@ class AIOpsSessionSnapshot(BaseModel):
     node_name: str = "workflow"
     input: str = ""
     incident: dict[str, Any] = Field(default_factory=dict)
-    plan: list[dict[str, Any]] = Field(default_factory=list)
+    plan: list[Any] = Field(default_factory=list)
     current_plan: list[dict[str, Any]] = Field(default_factory=list)
     executed_steps: list[dict[str, Any]] = Field(default_factory=list)
     past_steps: list[dict[str, Any]] = Field(default_factory=list)
@@ -86,7 +86,7 @@ class AIOpsSessionSnapshot(BaseModel):
             node_name=node_name,
             input=str(state.get("input") or ""),
             incident=incident,
-            plan=_to_dict_list(state.get("plan")),
+            plan=_to_plan_list(state.get("plan")),
             current_plan=_to_dict_list(state.get("current_plan")),
             executed_steps=_to_dict_list(state.get("executed_steps")),
             past_steps=_normalize_past_steps(state.get("past_steps")),
@@ -163,6 +163,13 @@ def _to_dict_list(value: Any) -> list[dict[str, Any]]:
 
 def _to_string_list(value: Any) -> list[str]:
     return string_list(value)
+
+
+def _to_plan_list(value: Any) -> list[Any]:
+    """Preserve legacy text plans and older structured plan snapshots."""
+    if not isinstance(value, list):
+        return []
+    return [_json_safe(item) for item in value]
 
 
 def _normalize_past_steps(value: Any) -> list[dict[str, Any]]:

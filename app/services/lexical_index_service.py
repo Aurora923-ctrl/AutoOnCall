@@ -7,6 +7,7 @@ import math
 import os
 import re
 import threading
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -75,6 +76,90 @@ class LexicalIndexService:
             if deleted or stale_removed:
                 self._save_index(payload)
             return deleted
+
+    def clear(self) -> None:
+        """Atomically reset all lexical chunks and stale-source markers."""
+        with self._locked_payload():
+            self._save_index({"version": 1, "chunks": [], "stale_sources": {}})
+
+    def replace_all_sources(self, documents_by_source: dict[str, list[Document]]) -> None:
+        """Atomically replace the complete lexical index."""
+        payload: dict[str, Any] = {"version": 1, "chunks": [], "stale_sources": {}}
+        for source_path, documents in documents_by_source.items():
+            source_id = canonical_source_id(source_path)
+            self._replace_source_in_payload(
+                payload,
+                source_path=source_path,
+                source_id=source_id,
+                documents=documents,
+                clear_stale=True,
+            )
+        with self._locked_payload():
+            self._save_index(payload)
+
+    def snapshot_index_state(self) -> dict[str, Any]:
+        """Return a complete restorable index snapshot."""
+        with self._locked_payload():
+            return deepcopy(self._load_index(strict=True))
+
+    def restore_index_state(self, snapshot: dict[str, Any]) -> None:
+        """Restore a complete snapshot after a failed maintenance rebuild."""
+        with self._locked_payload():
+            self._save_index(deepcopy(snapshot))
+
+    def snapshot_source_state(self, source_path: str) -> dict[str, Any]:
+        """Return a restorable snapshot for one source before a cross-index update."""
+        source_id = canonical_source_id(source_path)
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
+        return {
+            "source_id": source_id,
+            "chunks": deepcopy(
+                [
+                    chunk
+                    for chunk in payload["chunks"]
+                    if canonical_source_id(str(chunk.get("source_path") or "")) == source_id
+                ]
+            ),
+            "stale_reason": payload["stale_sources"].get(source_id),
+        }
+
+    def restore_source_state(self, source_path: str, snapshot: dict[str, Any]) -> None:
+        """Restore one source snapshot after a failed vector/lexical transaction."""
+        source_id = canonical_source_id(source_path)
+        snapshot_chunks = deepcopy(snapshot.get("chunks") or [])
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
+            payload["chunks"] = [
+                chunk
+                for chunk in payload["chunks"]
+                if canonical_source_id(str(chunk.get("source_path") or "")) != source_id
+            ]
+            payload["chunks"].extend(snapshot_chunks)
+            stale_reason = snapshot.get("stale_reason")
+            if stale_reason:
+                payload["stale_sources"][source_id] = str(stale_reason)
+            else:
+                payload["stale_sources"].pop(source_id, None)
+            self._save_index(payload)
+
+    def identity_records(self) -> list[dict[str, str]]:
+        """Return lexical identity fields for rebuild and consistency verification."""
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
+        records: list[dict[str, str]] = []
+        for chunk in payload["chunks"]:
+            metadata = dict(chunk.get("metadata") or {})
+            records.append(
+                {
+                    "source_file": str(metadata.get("_file_name") or ""),
+                    "source_id": str(metadata.get("_source_id") or ""),
+                    "chunk_id": str(metadata.get("_chunk_id") or chunk.get("chunk_id") or ""),
+                    "document_hash": str(metadata.get("_document_hash") or ""),
+                    "chunk_hash": str(metadata.get("_chunk_hash") or ""),
+                }
+            )
+        return records
 
     def mark_source_stale(self, source_path: str, reason: str) -> None:
         """Mark a source as stale so retrieval will not trust old chunks for it."""
@@ -154,6 +239,55 @@ class LexicalIndexService:
 
         scored.sort(key=lambda item: (-item[1], item[0].metadata.get("_chunk_id", "")))
         return scored[:top_k]
+
+    def search_exact_entities(
+        self,
+        query: str,
+        *,
+        entities: set[str],
+        top_k: int,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Return chunks containing exact incident, version, or primary-key entities."""
+        normalized_entities = {str(item).strip().casefold() for item in entities if str(item).strip()}
+        if not normalized_entities:
+            return []
+        with self._locked_payload():
+            payload = self._load_index(strict=True)
+        stale_sources = set(payload["stale_sources"])
+        matches: list[tuple[Document, float]] = []
+        for chunk in payload["chunks"]:
+            source_path = str(chunk.get("source_path") or "")
+            if canonical_source_id(source_path) in stale_sources:
+                continue
+            metadata = dict(chunk.get("metadata") or {})
+            if not _metadata_matches_filter(metadata, metadata_filter):
+                continue
+            searchable = _searchable_text(str(chunk.get("content") or ""), metadata).casefold()
+            matched = {
+                entity
+                for entity in normalized_entities
+                if _contains_exact_entity(searchable, entity)
+            }
+            if not matched:
+                continue
+            metadata["_lexical_score"] = 100.0 + len(matched)
+            metadata["_exact_entities"] = sorted(matched)
+            metadata["_retrieval_source"] = "lexical"
+            matches.append(
+                (
+                    Document(page_content=str(chunk.get("content") or ""), metadata=metadata),
+                    100.0 + len(matched),
+                )
+            )
+        matches.sort(
+            key=lambda item: (
+                -item[1],
+                str(item[0].metadata.get("_file_name") or ""),
+                str(item[0].metadata.get("_chunk_id") or ""),
+            )
+        )
+        return matches[:top_k]
 
     def _document_to_record(
         self, document: Document, *, source_path: str, rank: int
@@ -354,6 +488,12 @@ def _metadata_values_equal(actual: Any, expected: Any) -> bool:
     if isinstance(actual, int | float) and isinstance(expected, int | float):
         return float(actual) == float(expected)
     return type(actual) is type(expected) and actual == expected
+
+
+def _contains_exact_entity(searchable: str, entity: str) -> bool:
+    """Use token boundaries so rc1 does not match rc10 and IDs remain exact."""
+    pattern = rf"(?<![a-z0-9_-]){re.escape(entity)}(?![a-z0-9_-])"
+    return re.search(pattern, searchable, flags=re.IGNORECASE) is not None
 
 
 def _average(values: list[int]) -> float:

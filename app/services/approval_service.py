@@ -15,6 +15,10 @@ from app.models.incident import utc_now
 from app.services.aiops_store import create_aiops_store
 from app.services.incident_state_builder import build_incident_state_from_approval
 from app.services.legacy_migration import resolve_legacy_jsonl_path
+from app.services.policies.approval_policy import (
+    APPROVAL_DECISION_STATUS,
+    APPROVAL_PENDING_STATUS,
+)
 from app.services.sqlite_store import resolve_sqlite_path
 from app.services.trace_service import TraceService, trace_service
 
@@ -58,7 +62,7 @@ class ApprovalService:
 
     def create_request(self, request: ApprovalRequest) -> ApprovalRequest:
         """Create a pending approval request without mutating an existing request."""
-        if request.status != "pending":
+        if request.status != APPROVAL_PENDING_STATUS:
             raise ApprovalStateError("new approval requests must start in pending status")
         request = self._with_plan_fingerprint(request).model_copy(
             update={"projection_pending": ["incident_state", "trace"]}
@@ -82,7 +86,7 @@ class ApprovalService:
         idempotency_key: str,
     ) -> ApprovalRequest:
         """Atomically create one pending request for an idempotent risky action."""
-        if request.status != "pending":
+        if request.status != APPROVAL_PENDING_STATUS:
             raise ApprovalStateError("new approval requests must start in pending status")
         key = idempotency_key.strip()
         if not key:
@@ -166,11 +170,12 @@ class ApprovalService:
         approval_id: str,
         decision: Literal["approve", "reject", "cancel"],
         decided_by: str = "operator",
+        decided_by_principal_id: str | None = None,
         reason: str = "",
     ) -> ApprovalRequest:
         """Approve or reject a pending request."""
         request = self.get_request(approval_id)
-        if request.status != "pending":
+        if request.status != APPROVAL_PENDING_STATUS:
             raise ApprovalStateError(f"Approval {approval_id} is already {request.status}")
         if self.is_expired(request):
             self._cancel_pending_request(
@@ -183,11 +188,7 @@ class ApprovalService:
 
         status = cast(
             Literal["approved", "rejected", "cancelled"],
-            {
-                "approve": "approved",
-                "reject": "rejected",
-                "cancel": "cancelled",
-            }[decision],
+            APPROVAL_DECISION_STATUS[decision],
         )
         change_plan = request.change_plan
         metadata = dict(request.metadata or {})
@@ -200,6 +201,7 @@ class ApprovalService:
                 "status": status,
                 "decided_at": utc_now(),
                 "decided_by": decided_by,
+                "decided_by_principal_id": decided_by_principal_id,
                 "decision_reason": reason,
                 "change_plan": change_plan,
                 "metadata": metadata,
@@ -216,6 +218,7 @@ class ApprovalService:
         approval_id: str,
         *,
         decided_by: str = "operator",
+        decided_by_principal_id: str | None = None,
         reason: str = "",
     ) -> ApprovalRequest:
         """Cancel one pending approval so it can no longer be reused."""
@@ -223,6 +226,7 @@ class ApprovalService:
             approval_id,
             decision="cancel",
             decided_by=decided_by,
+            decided_by_principal_id=decided_by_principal_id,
             reason=reason,
         )
 
@@ -414,6 +418,7 @@ class ApprovalService:
         incident_id: str,
         decision: Literal["approve", "reject", "cancel"],
         decided_by: str = "operator",
+        decided_by_principal_id: str | None = None,
         reason: str = "",
     ) -> ApprovalRequest:
         """Decide the newest pending request for an incident."""
@@ -424,6 +429,7 @@ class ApprovalService:
             approval_id=pending[-1].approval_id,
             decision=decision,
             decided_by=decided_by,
+            decided_by_principal_id=decided_by_principal_id,
             reason=reason,
         )
 

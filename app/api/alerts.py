@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from threading import Lock
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query
 from loguru import logger
 
 from app.config import config
@@ -29,6 +29,12 @@ from app.services.trace_service import trace_service
 from app.utils.public_errors import GENERIC_DIAGNOSIS_ERROR, public_exception_message
 
 router = APIRouter()
+ALERT_FINGERPRINT_MAX_LENGTH = 256
+ALERT_SERVICE_NAME_MAX_LENGTH = 120
+AlertFingerprint = Annotated[
+    str,
+    Path(..., min_length=1, max_length=ALERT_FINGERPRINT_MAX_LENGTH),
+]
 ALERT_AUTO_DIAGNOSIS_MAX_CONCURRENCY = 2
 _alert_auto_diagnosis_semaphore = asyncio.Semaphore(ALERT_AUTO_DIAGNOSIS_MAX_CONCURRENCY)
 _alert_auto_diagnosis_lock = Lock()
@@ -109,7 +115,11 @@ async def list_alerts(
     status: (
         Literal["firing", "resolved", "active", "triggered", "inactive", "ok", "closed"] | None
     ) = Query(default=None),
-    service_name: str | None = Query(default=None),
+    service_name: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=ALERT_SERVICE_NAME_MAX_LENGTH,
+    ),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> AlertListResponse:
     """Return recently ingested normalized alerts."""
@@ -126,7 +136,7 @@ async def list_alerts(
     response_model=AlertDetailResponse,
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
-async def get_alert(fingerprint: str) -> AlertDetailResponse:
+async def get_alert(fingerprint: AlertFingerprint) -> AlertDetailResponse:
     """Return one normalized alert by fingerprint."""
     alert = get_alert_ingestion_service().get_alert_event(fingerprint)
     if alert is None:

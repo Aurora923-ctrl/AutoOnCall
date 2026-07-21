@@ -45,7 +45,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | 1 | `query_redis_status` | `query_redis_status` | `redis_info` | Redis incident-window evidence shows near-maxclient saturation |
 | 2 | `query_metrics` | `query_metrics` | `prometheus` | 5xx and P95 latency increased during the incident window |
 | 3 | `query_logs` | `query_logs` | `loki` | Application logs contain Redis timeout / pool wait symptoms |
-| 4 | `search_runbook` | `search_runbook` | `redis_postmortem.pdf`, `tickets.csv` | PDF postmortem and historical ticket table join the RCA evidence chain |
+| 4 | `search_runbook` | `search_runbook` | `redis_postmortem.pdf`, `tickets.xlsx` | PDF postmortem and historical ticket workbook join the RCA evidence chain |
 | 5 | `search_history_ticket` | `search_history_ticket` | `ticket_api` | Similar Redis maxclients incident exists |
 | 6 | `suggest_remediation` | `suggest_remediation` | `rule_based` | Produces non-executing remediation guidance |
 
@@ -58,7 +58,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | Loki | Redis timeout and pool-wait logs | Application requests waited on Redis connections | Log sampling may miss some failed requests |
 | PDF postmortem | `redis_postmortem.pdf` records `connected_clients=9940`, `maxclients=10000`, `blocked_clients=37` | Knowledge evidence confirms the outage-window interpretation and approval boundary | Postmortem is retrospective evidence and must be paired with live signals |
 | Historical ticket | Similar Redis maxclients incident | Prior ticket supports the remediation playbook | Historical similarity is advisory, not proof |
-| CSV ticket table | `tickets.csv` row `ticket_id=INC-REDIS-001` links root cause and approved resolution | Historical experience supports the chosen remediation path | Table rows are historical context, not live proof |
+| XLSX ticket table | `tickets.xlsx` row `ticket_id=INC-REDIS-001` links root cause and approved resolution | Historical experience supports the chosen remediation path | Table rows are historical context, not live proof |
 | Runbook | Maxclients investigation checklist | Gives a safe operator workflow | Eval fixture is deterministic offline content |
 
 ## Evidence Matrix
@@ -68,7 +68,7 @@ This is the main Redis portfolio case for interviews. It demonstrates a live ada
 | Live Evidence | `redis_info` incident evidence: `connected_clients=9940/maxclients=10000`, `blocked_clients=37` | Primary Redis-domain evidence for maxclients exhaustion |
 | Live Evidence | Prometheus and Loki symptoms | Confirms user impact and timing without pretending to prove Redis alone |
 | Knowledge Basis | `redis_postmortem.pdf` and Redis runbook checklist | Grounds the investigation workflow and remediation boundary |
-| Historical Experience | `ticket_api` and `tickets.csv` row `INC-REDIS-001` | Shows a similar prior incident and approved resolution path |
+| Historical Experience | `ticket_api` and `tickets.xlsx` row `INC-REDIS-001` | Shows a similar prior incident and approved resolution path |
 | Other | Current `live_info.connected_clients` | Proves adapter connectivity and current runtime state, not outage-window saturation |
 
 ## Runtime Vs Incident Window

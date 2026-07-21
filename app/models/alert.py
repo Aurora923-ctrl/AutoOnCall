@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,8 @@ MAX_ALERT_SEVERITY_LENGTH = 16
 MAX_ALERT_ENVIRONMENT_LENGTH = 64
 MAX_ALERT_TEXT_LENGTH = 4096
 MAX_ALERT_URL_LENGTH = 2048
+MAX_ALERT_MAPPING_ITEMS = 100
+MAX_ALERT_RAW_PAYLOAD_CHARS = 64_000
 
 
 class AlertEvent(BaseModel):
@@ -58,6 +61,12 @@ class AlertEvent(BaseModel):
             and self.ends_at < self.starts_at
         ):
             raise ValueError("ends_at must not be earlier than starts_at")
+        if len(self.labels) > MAX_ALERT_MAPPING_ITEMS:
+            raise ValueError("labels contains too many items")
+        if len(self.annotations) > MAX_ALERT_MAPPING_ITEMS:
+            raise ValueError("annotations contains too many items")
+        if len(json.dumps(self.raw_payload, ensure_ascii=False, default=str)) > MAX_ALERT_RAW_PAYLOAD_CHARS:
+            raise ValueError("raw_payload is too large")
         return self
 
 

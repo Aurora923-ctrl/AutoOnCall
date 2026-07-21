@@ -1,19 +1,16 @@
----
-title: "Troubleshoot log ingestion (WRITE) | Grafana Loki documentation"
-description: "Describes how to troubleshoot and debug specific errors when ingesting logs into Grafana Loki."
----
-
-> For a curated documentation index, see [llms.txt](/llms.txt). For the complete documentation index, see [llms-full.txt](/llms-full.txt).
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/grafana/loki/blob/925c8c7c7c6feface41c5bef12c74f05c05e8c84/docs/sources/operations/troubleshooting/troubleshoot-ingest.md
+Upstream revision: 925c8c7c7c6feface41c5bef12c74f05c05e8c84
+Retrieved: 2026-07-21
+License: Grafana documentation terms; upstream repository AGPL-3.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 # Troubleshoot log ingestion (WRITE)
 
-This guide helps you troubleshoot errors that occur when ingesting logs into Loki and writing logs to storage. When Loki rejects log ingestion requests, it’s typically due to exceeding rate limits, violating validation rules, or encountering storage issues.
+This guide helps you troubleshoot errors that occur when ingesting logs into Loki and writing logs to storage. When Loki rejects log ingestion requests, it's typically due to exceeding rate limits, violating validation rules, or encountering storage issues.
 
-Before you begin, ensure you have the following:
-
-- Access to Grafana Loki logs and metrics
 - Understanding of your log ingestion pipeline (Alloy or custom clients)
-- Permissions to configure limits and settings if needed
 
 ## Monitoring ingestion errors
 
@@ -42,37 +39,33 @@ The tenant has exceeded their configured ingestion rate limit. This is a global 
 
 - `ingestion_rate_mb`: 4 MB/sec
 - `ingestion_burst_size_mb`: 6 MB
-- `ingestion_rate_strategy`: “global” (shared across all distributors)
+- `ingestion_rate_strategy`: "global" (shared across all distributors)
 
 **Resolution:**
 
-- **Increase rate limits** (if you have sufficient cluster resources):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    ingestion_rate_mb: 8
-    ingestion_burst_size_mb: 12
-  ```
-- **Reduce log volume** by:
-  
+* **Increase rate limits** (if you have sufficient cluster resources):
+
+   ```yaml
+   limits_config:
+     ingestion_rate_mb: 8
+     ingestion_burst_size_mb: 12
+   ```
+
+* **Reduce log volume** by:
+
   - Filtering unnecessary log lines using Alloy processing stages
   - Collecting logs from fewer targets
   - Sampling high-volume streams
-  - Using Alloy’s rate limiting and filtering capabilities
-- **Switch to local strategy** (if using single-region deployment):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    ingestion_rate_strategy: local
-  ```
-  
-  > Note
-  > 
-  > This multiplies the effective limit by the number of distributor replicas.
+  - Using Alloy's rate limiting and filtering capabilities
+
+* **Switch to local strategy** (if using single-region deployment):
+
+   ```yaml
+   limits_config:
+     ingestion_rate_strategy: local
+   ```
+
+   This multiplies the effective limit by the number of distributor replicas.
 
 **Properties:**
 
@@ -103,23 +96,20 @@ The tenant has reached the maximum number of active streams. Active streams are 
 
 **Resolution:**
 
-- **Reduce stream cardinality** by:
-  
+* **Reduce stream cardinality** by:
+
   - Using fewer unique label combinations by removing unnecessary labels
   - Avoiding high-cardinality labels (IDs, timestamps, UUIDs)
   - Using structured metadata instead of labels for high-cardinality data
-- **Increase stream limits** (if you have sufficient memory):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_global_streams_per_user: 10000
-  ```
 
-> Note
-> 
-> Do not increase stream limits to accommodate high cardinality labels, this can result in Loki flushing extremely high numbers of small files which will make for extremely poor query performance. As volume and the size of the infrastructure being monitored increase, it would be expected to increase the stream limit. However even for hundreds of TBs per day of logs you should avoid exceeding 300,000 max global streams per user.
+* **Increase stream limits** (if you have sufficient memory):
+
+   ```yaml
+   limits_config:
+     max_global_streams_per_user: 10000
+   ```
+
+Do not increase stream limits to accommodate high cardinality labels, this can result in Loki flushing extremely high numbers of small files which will make for extremely poor query performance.  As volume and the size of the infrastructure being monitored increase, it would be expected to increase the stream limit. However even for hundreds of TBs per day of logs you should avoid exceeding 300,000 max global streams per user.
 
 **Properties:**
 
@@ -130,7 +120,7 @@ The tenant has reached the maximum number of active streams. Active streams are 
 
 ## Validation errors
 
-Validation errors occur when log data doesn’t meet Loki’s requirements. These return HTTP status code `400 Bad Request` and are **not retryable**.
+Validation errors occur when log data doesn't meet Loki's requirements. These return HTTP status code `400 Bad Request` and are **not retryable**.
 
 ### Error: `line_too_long`
 
@@ -149,37 +139,31 @@ A log line exceeds the maximum allowed size.
 
 **Resolution:**
 
-- **Truncate long lines** instead of discarding them:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_line_size: 256KB
-    max_line_size_truncate: true
-  ```
-- **Increase the line size limit** (not recommended above 256KB):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_line_size: 256KB
-  ```
-  
-  > Warning
-  > 
-  > Loki was built as a large multi-user, multi-tenant database and as such this limit becomes very important to maintain stability and performance with many users query the database simultaneously. We strongly recommend against increasing the max\_line\_size, doing so will make it very difficult to provide consistent query performance and stability of the system without having to throw extremely large amounts of memory and/or increasing the GRPC message size limits to really high levels, both of which will likely lead to poorer performance and worse experiences.
-- **Filter or truncate logs before sending** using Alloy processing stages:
-  
-  Alloy ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```alloy
-  stage.replace {
-    expression = "^(.{10000}).*$"
-    replace    = "$1"
-  }
-  ```
+* **Truncate long lines** instead of discarding them:
+
+   ```yaml
+   limits_config:
+     max_line_size: 256KB
+     max_line_size_truncate: true
+   ```
+
+* **Increase the line size limit** (not recommended above 256KB):
+
+   ```yaml
+   limits_config:
+     max_line_size: 256KB
+   ```
+
+   Loki was built as a large multi-user, multi-tenant database and as such this limit becomes very important to maintain stability and performance with many users query the database simultaneously. We strongly recommend against increasing the max_line_size, doing so will make it very difficult to provide consistent query performance and stability of the system without having to throw extremely large amounts of memory and/or increasing the GRPC message size limits to really high levels, both of which will likely lead to poorer performance and worse experiences.
+
+* **Filter or truncate logs before sending** using Alloy processing stages:
+
+   ```alloy
+   stage.replace {
+     expression = "^(.{10000}).*$"
+     replace    = "$1"
+   }
+   ```
 
 **Properties:**
 
@@ -196,7 +180,7 @@ A log line exceeds the maximum allowed size.
 
 **Cause:**
 
-Label names or values contain invalid characters or don’t follow Prometheus naming conventions:
+Label names or values contain invalid characters or don't follow Prometheus naming conventions:
 
 - Label names must match regex: `[a-zA-Z_][a-zA-Z0-9_]*`
 - Label names cannot start with `__` (reserved for Grafana internal use)
@@ -210,38 +194,35 @@ This validation is always enabled and cannot be disabled.
 
 **Resolution:**
 
-- **Fix label names** in your log shipping configuration:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  # Incorrect
-  labels:
-    "123-app": "value"      # Starts with number
-    "app-name": "value"     # Contains hyphen
-    "__internal": "value"   # Reserved prefix
-  
-  # Correct
-  labels:
-    app_123: "value"
-    app_name: "value"
-    internal_label: "value"
-  ```
-- **Use Alloy’s relabeling stages** to fix labels:
-  
-  Alloy ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```alloy
-  stage.label_drop {
-    values = ["invalid_label"]
-  }
-  
-  stage.labels {
-    values = {
-      app_name = "",
-    }
-  }
-  ```
+* **Fix label names** in your log shipping configuration:
+
+   ```yaml
+   # Incorrect
+   labels:
+     "123-app": "value"      # Starts with number
+     "app-name": "value"     # Contains hyphen
+     "__internal": "value"   # Reserved prefix
+
+   # Correct
+   labels:
+     app_123: "value"
+     app_name: "value"
+     internal_label: "value"
+   ```
+
+* **Use Alloy's relabeling stages** to fix labels:
+
+   ```alloy
+   stage.label_drop {
+     values = ["invalid_label"]
+   }
+
+   stage.labels {
+     values = {
+       app_name = "",
+     }
+   }
+   ```
 
 **Properties:**
 
@@ -267,8 +248,6 @@ This validation is always enabled and cannot be disabled. Every stream must have
 **Resolution:**
 
 Ensure all log streams have at least one label. Update your log shipping configuration to include labels:
-
-Alloy ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```alloy
 loki.write "default" {
@@ -296,44 +275,40 @@ loki.source.file "logs" {
 - HTTP status: 400 Bad Request
 - Configurable per tenant: No
 
-### Error: `out_of_order` / `too_far_behind`
+### Error: `too_far_behind`
 
 These errors occur when log entries arrive in the wrong chronological order.
 
 **Error messages:**
 
-- When `unordered_writes: false`: `entry out of order`
-- When `unordered_writes: true`: `entry too far behind, entry timestamp is: <timestamp>, oldest acceptable timestamp is: <cutoff>`
+- `entry too far behind, entry timestamp is: <timestamp>, oldest acceptable timestamp is: <cutoff>`
 
 **Cause:**
 
-Logs are being ingested with timestamps that violate Loki’s ordering constraints:
+Logs are being ingested with timestamps that violate Loki's ordering constraints:
 
-- With `unordered_writes: false`: Any log older than the most recent log in the stream is rejected
-- With `unordered_writes: true` (default): Logs older than half of `max_chunk_age` from the newest entry are rejected
+- Logs older than half of `max_chunk_age` from the newest entry are rejected
 
 **Default configuration:**
 
-- `unordered_writes`: true (since Loki 2.4)
 - `max_chunk_age`: 2 hours
 - Acceptable timestamp window: 1 hour behind the newest entry (half of `max_chunk_age`)
 
 **Resolution:**
 
-- **Ensure timestamps are assigned correctly**:
-  
+* **Ensure timestamps are assigned correctly**:
+
   - Use a timestamp parsing stage in Alloy if logs have embedded timestamps
   - Avoid letting Alloy assign timestamps at read time for delayed log delivery
-  
-  Alloy ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```alloy
-  stage.timestamp {
-    source = "timestamp_field"
-    format = "RFC3339"
-  }
-  ```
-- **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
+
+   ```alloy
+   stage.timestamp {
+     source = "timestamp_field"
+     format = "RFC3339"
+   }
+   ```
+
+* **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
 
 **Properties:**
 
@@ -350,7 +325,7 @@ Logs are being ingested with timestamps that violate Loki’s ordering constrain
 
 **Cause:**
 
-The log entry’s timestamp is older than the configured maximum sample age. This prevents ingestion of very old logs.
+The log entry's timestamp is older than the configured maximum sample age. This prevents ingestion of very old logs.
 
 **Default configuration:**
 
@@ -359,25 +334,25 @@ The log entry’s timestamp is older than the configured maximum sample age. Thi
 
 **Resolution:**
 
-- **Increase the maximum sample age**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    reject_old_samples_max_age: 336h  # 14 days
-  ```
-- **Fix log delivery delays** causing old timestamps.
-- **For historical log imports**, temporarily disable the check per tenant.
-- **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
-- **Disable old sample rejection** (not recommended):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    reject_old_samples: false
-  ```
+* **Increase the maximum sample age**:
+
+   ```yaml
+   limits_config:
+     reject_old_samples_max_age: 336h  # 14 days
+   ```
+
+* **Fix log delivery delays** causing old timestamps.
+
+* **For historical log imports**, temporarily disable the check per tenant.
+
+* **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
+
+* **Disable old sample rejection** (not recommended):
+
+   ```yaml
+   limits_config:
+     reject_old_samples: false
+   ```
 
 **Properties:**
 
@@ -394,7 +369,7 @@ The log entry’s timestamp is older than the configured maximum sample age. Thi
 
 **Cause:**
 
-The log entry’s timestamp is further in the future than the configured grace period allows.
+The log entry's timestamp is further in the future than the configured grace period allows.
 
 **Default configuration:**
 
@@ -402,9 +377,11 @@ The log entry’s timestamp is further in the future than the configured grace p
 
 **Resolution:**
 
-- **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
-- **Verify application timestamps** Validate timestamp generation in your applications.
-- **Verify timestamp parsing** in your log shipping configuration.
+* **Check for clock skew** between log sources and Loki. Ensure clocks are synchronized across your infrastructure.
+
+* **Verify application timestamps** Validate timestamp generation in your applications.
+
+* **Verify timestamp parsing** in your log shipping configuration.
 
 **Properties:**
 
@@ -429,15 +406,12 @@ The stream has more labels than allowed.
 
 **Resolution:**
 
-- **Reduce the number of labels** by:
-  
+* **Reduce the number of labels** by:
   - Using structured metadata for high-cardinality data
   - Removing unnecessary labels
   - Combining related labels
 
-> Warning
-> 
-> We strongly recommend against increasing `max_label_names_per_series`, doing so creates a larger index which hurts query performance as well as opens the door for cardinality explosions. You should be able to categorize your logs with 15 labels or typically much less. In all our years of running Loki, out of thousands of requests to increase this value, the number of valid exceptions we have seen can be counted on one hand.
+We strongly recommend against increasing `max_label_names_per_series`, doing so creates a larger index which hurts query performance as well as opens the door for cardinality explosions. You should be able to categorize your logs with 15 labels or typically much less. In all our years of running Loki, out of thousands of requests to increase this value, the number of valid exceptions we have seen can be counted on one hand.
 
 **Properties:**
 
@@ -462,7 +436,7 @@ A label name exceeds the maximum allowed length.
 
 **Resolution:**
 
-- **Shorten label names** in your log shipping configuration to under the configured limit. You can use abbreviations or shorter descriptive names.
+* **Shorten label names** in your log shipping configuration to under the configured limit. You can use abbreviations or shorter descriptive names.
 
 **Properties:**
 
@@ -487,8 +461,9 @@ A label value exceeds the maximum allowed length.
 
 **Resolution:**
 
-- **Shorten label values** in your log shipping configuration to under the configured limit. You can use hash values for very long identifiers.
-- **Use structured metadata** for long values instead of labels.
+* **Shorten label values** in your log shipping configuration to under the configured limit. You can use hash values for very long identifiers.
+
+* **Use structured metadata** for long values instead of labels.
 
 **Properties:**
 
@@ -513,9 +488,11 @@ This validation is always enabled and cannot be disabled. Duplicate label names 
 
 **Resolution:**
 
-- **Remove duplicates** Remove duplicate label definitions in your log shipping configuration to ensure unique label names per stream.
-- **Check clients** Check your ingestion pipeline for label conflicts.
-- **Verify processing** Verify your label processing and transformation rules.
+* **Remove duplicates** Remove duplicate label definitions in your log shipping configuration to ensure unique label names per stream.
+
+* **Check clients** Check your ingestion pipeline for label conflicts.
+
+* **Verify processing** Verify your label processing and transformation rules.
 
 **Properties:**
 
@@ -542,8 +519,9 @@ The HTTP compressed push request body exceeds the configured limit in your gatew
 
 **Resolution:**
 
-- **Split large batches** into smaller, more frequent requests.
-- **Increase batch limit** Increase the allowed body size on your gateway/reverse proxy. For example, in the Helm chart set `gateway.nginxConfig.clientMaxBodySize`; default is 4M.
+* **Split large batches** into smaller, more frequent requests.
+
+* **Increase batch limit** Increase the allowed body size on your gateway/reverse proxy.  For example, in the Helm chart set `gateway.nginxConfig.clientMaxBodySize`; default is 4M.
 
 **Properties:**
 
@@ -572,11 +550,11 @@ Disk space is not limited by Loki configuration; it depends on your infrastructu
 
 **Resolution:**
 
-- **Free up disk space** on Loki instances.
-- **Configure retention policies** to remove old data.
-- **Scale storage capacity** by adding more disk space.
-- **Monitor disk usage** and set up alerts before reaching critical levels.
-- **Review compactor settings** to ensure old data is being cleaned up.
+* **Free up disk space** on Loki instances.
+* **Configure retention policies** to remove old data.
+* **Scale storage capacity** by adding more disk space.
+* **Monitor disk usage** and set up alerts before reaching critical levels.
+* **Review compactor settings** to ensure old data is being cleaned up.
 
 **Properties:**
 
@@ -593,48 +571,44 @@ Disk space is not limited by Loki configuration; it depends on your infrastructu
 
 **Common causes and errors:**
 
-- **S3/Object Storage errors:**
-  
-  - `NoSuchBucket`: Storage bucket doesn’t exist
+* **S3/Object Storage errors:**
+  - `NoSuchBucket`: Storage bucket doesn't exist
   - `AccessDenied`: Invalid credentials or permissions
   - `RequestTimeout`: Network or storage latency issues
 
 **Resolution:**
 
-- **Verify storage configuration**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  storage_config:
-    aws:
-      s3: s3://region/bucket-name
-      s3forcepathstyle: true
-  ```
-- **Check credentials and permissions**:
-  
+* **Verify storage configuration**:
+
+   ```yaml
+   storage_config:
+     aws:
+       s3: s3://region/bucket-name
+       s3forcepathstyle: true
+   ```
+
+* **Check credentials and permissions**:
   - Ensure service account has write permissions
   - Verify IAM roles for S3
   - Check API keys for cloud storage
-- **Monitor storage health**:
-  
+
+* **Monitor storage health**:
   - Check object storage availability
-- **Review storage metrics**:
-  
+
+* **Review storage metrics**:
   - `loki_ingester_chunks_flushed_total`
   - `loki_ingester_chunks_flush_errors_total`
-- **Increase retries and timeouts**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  storage_config:
-    aws:
-      s3:
-        http_config:
-          idle_conn_timeout: 90s
-          response_header_timeout: 0s
-  ```
+
+* **Increase retries and timeouts**:
+
+   ```yaml
+   storage_config:
+     aws:
+       s3:
+         http_config:
+           idle_conn_timeout: 90s
+           response_header_timeout: 0s
+   ```
 
 **Properties:**
 
@@ -653,7 +627,7 @@ Disk space is not limited by Loki configuration; it depends on your infrastructu
 
 **Cause:**
 
-The disk where the WAL is stored has run out of space. When this occurs, Loki continues accepting writes but doesn’t log them to the WAL, losing durability guarantees.
+The disk where the WAL is stored has run out of space. When this occurs, Loki continues accepting writes but doesn't log them to the WAL, losing durability guarantees.
 
 **Default configuration:**
 
@@ -663,24 +637,24 @@ The disk where the WAL is stored has run out of space. When this occurs, Loki co
 
 **Resolution:**
 
-- **Increase disk space** for the WAL directory.
-- **Monitor disk usage** and set up alerts:
-  
-  promql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```promql
-  loki_ingester_wal_disk_full_failures_total > 0
-  ```
-- **Reduce log volume** to decrease WAL growth.
-- **Check WAL checkpoint frequency**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  ingester:
-    checkpoint_duration: 5m
-  ```
-- **Verify WAL cleanup** is working - old segments should be deleted after checkpointing.
+* **Increase disk space** for the WAL directory.
+
+* **Monitor disk usage** and set up alerts:
+
+   ```promql
+   loki_ingester_wal_disk_full_failures_total > 0
+   ```
+
+* **Reduce log volume** to decrease WAL growth.
+
+* **Check WAL checkpoint frequency**:
+
+   ```yaml
+   ingester:
+     checkpoint_duration: 5m
+   ```
+
+* **Verify WAL cleanup** is working - old segments should be deleted after checkpointing.
 
 **Properties:**
 
@@ -689,9 +663,7 @@ The disk where the WAL is stored has run out of space. When this occurs, Loki co
 - HTTP status: N/A (writes succeed, but durability is compromised)
 - Configurable per tenant: No
 
-> Note
-> 
-> The WAL sacrifices durability for availability - it won’t reject writes when the disk is full. After disk space is restored, durability guarantees resume. Use metric `loki_ingester_wal_disk_usage_percent` to monitor disk usage.
+The WAL sacrifices durability for availability - it won't reject writes when the disk is full. After disk space is restored, durability guarantees resume. Use metric `loki_ingester_wal_disk_usage_percent` to monitor disk usage.
 
 ### Error: WAL corruption
 
@@ -718,16 +690,15 @@ The WAL has become corrupted, possibly due to:
 
 **Resolution:**
 
-- **Monitor for corruption**:
-  
-  promql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```promql
-  increase(loki_ingester_wal_corruptions_total[5m]) > 0
-  ```
-- **Automatic recovery**: Loki attempts to recover readable data and continues starting.
-- **Investigate root cause**:
-  
+* **Monitor for corruption**:
+
+   ```promql
+   increase(loki_ingester_wal_corruptions_total[5m]) > 0
+   ```
+
+* **Automatic recovery**: Loki attempts to recover readable data and continues starting.
+
+* **Investigate root cause**:
   - Check disk health
   - Review system logs for I/O errors
   - Verify filesystem integrity
@@ -739,9 +710,7 @@ The WAL has become corrupted, possibly due to:
 - HTTP status: N/A (occurs during startup, not request handling)
 - Configurable per tenant: No
 
-> Note
-> 
-> Loki prioritizes availability over complete data recovery. The replication factor provides redundancy if one ingester loses WAL data. Recovered data may be incomplete if corruption is severe.
+Loki prioritizes availability over complete data recovery. The replication factor provides redundancy if one ingester loses WAL data. Recovered data may be incomplete if corruption is severe.
 
 ## Network and connectivity errors
 
@@ -764,11 +733,11 @@ The Loki service is unavailable or not listening on the expected port.
 
 **Resolution:**
 
-- **Verify Loki is running** and healthy.
-- **Check network connectivity** between client and Loki.
-- **Confirm the correct hostname and port** configuration.
-- **Review firewall and security group** settings.
-- **Check for CPU starvation** as a Loki pod that is overwhelmed could fail to respond to a request.
+* **Verify Loki is running** and healthy.
+* **Check network connectivity** between client and Loki.
+* **Confirm the correct hostname and port** configuration.
+* **Review firewall and security group** settings.
+* **Check for CPU starvation** as a Loki pod that is overwhelmed could fail to respond to a request.
 
 **Properties:**
 
@@ -794,10 +763,10 @@ Requests are timing out due to slow response times or network issues.
 
 **Resolution:**
 
-- **Increase timeout values** in your ingestion client.
-- **Check Loki performance** and resource utilization.
-- **Review network latency** between client and server.
-- **Scale Loki resources** if needed.
+* **Increase timeout values** in your ingestion client.
+* **Check Loki performance** and resource utilization.
+* **Review network latency** between client and server.
+* **Scale Loki resources** if needed.
 
 **Properties:**
 
@@ -814,7 +783,7 @@ Requests are timing out due to slow response times or network issues.
 
 **Cause:**
 
-A downstream client (such as Grafana, a load balancer, or another Loki component) canceled a gRPC request before the server finished processing it. `Code(499)` is a non-standard gRPC status code derived from the HTTP 499 status (“Client Closed Request”), which Loki uses internally when it detects a Go `context.Canceled` error. Because it is not the standard gRPC `Canceled` code (code 1), the gRPC logging middleware logs it at `warn` level instead of `debug` level.
+A downstream client (such as Grafana, a load balancer, or another Loki component) canceled a gRPC request before the server finished processing it. `Code(499)` is a non-standard gRPC status code derived from the HTTP 499 status ("Client Closed Request"), which Loki uses internally when it detects a Go `context.Canceled` error. Because it is not the standard gRPC `Canceled` code (code 1), the gRPC logging middleware logs it at `warn` level instead of `debug` level.
 
 The `method` field indicates which gRPC operation was interrupted. Common methods include `/logproto.Querier/GetChunkIDs`, `/logproto.Querier/Query`, and `/logproto.Querier/Series`. Although these are query-path operations, the error appears in ingester logs because ingesters serve gRPC read requests from queriers.
 
@@ -833,27 +802,26 @@ Common triggers include:
 
 **Resolution:**
 
-- **Determine whether this is expected behavior.** Occasional Code(499) warnings are normal in production and indicate that a client disconnected before the server responded. These are safe to ignore if they occur infrequently.
-- **Investigate frequent occurrences.** If you see a high rate of Code(499) errors, check for:
-  
+* **Determine whether this is expected behavior.** Occasional Code(499) warnings are normal in production and indicate that a client disconnected before the server responded. These are safe to ignore if they occur infrequently.
+
+* **Investigate frequent occurrences.** If you see a high rate of Code(499) errors, check for:
   - Queries that are too broad or slow, causing clients to time out
   - Timeout mismatches between layers (for example, a load balancer timeout shorter than the Loki query timeout)
   - Overloaded ingesters or queriers that cannot respond quickly enough
-- **Align timeouts across your stack.** Ensure that timeouts increase from outer layers inward so that Loki has time to respond before upstream components give up:
-  
-  ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```none
+
+* **Align timeouts across your stack.** Ensure that timeouts increase from outer layers inward so that Loki has time to respond before upstream components give up:
+
+  ```
   Grafana timeout > Load balancer timeout > Query frontend timeout > Querier timeout
   ```
-- **Check query performance.** Use Loki metrics to identify slow queries:
-  
-  promql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```promql
-  histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[5m])) by (le, route))
-  ```
-- **Reduce log noise.** If the warnings are expected and you want to reduce log volume, increase the log level for the affected component to `error` using `-log.level=error`. Note that this suppresses all warn-level messages, not just Code(499) warnings.
+
+* **Check query performance.** Use Loki metrics to identify slow queries:
+
+   ```promql
+   histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[5m])) by (le, route))
+   ```
+
+* **Reduce log noise.** If the warnings are expected and you want to reduce log volume, increase the log level for the affected component to `error` using `-log.level=error`. Note that this suppresses all warn-level messages, not just Code(499) warnings.
 
 **Properties:**
 
@@ -879,10 +847,10 @@ Loki is temporarily unable to handle requests due to high load or maintenance. T
 
 **Resolution:**
 
-- **Implement retry logic** with exponential backoff in your client.
-- **Scale Loki ingester instances** to handle load.
-- **Check for resource constraints** (CPU, memory, storage).
-- **Review ingestion patterns** for sudden spikes.
+* **Implement retry logic** with exponential backoff in your client.
+* **Scale Loki ingester instances** to handle load.
+* **Check for resource constraints** (CPU, memory, storage).
+* **Review ingestion patterns** for sudden spikes.
 
 **Properties:**
 
@@ -903,7 +871,7 @@ These errors occur when using structured metadata incorrectly.
 
 **Cause:**
 
-Structured metadata is disabled in the Loki configuration. This feature must be explicitly enabled.
+`allow_structured_metadata` defaults to `true`, so this error usually means it has been explicitly disabled, either globally or as a per-tenant override.
 
 **Default configuration:**
 
@@ -911,16 +879,15 @@ Structured metadata is disabled in the Loki configuration. This feature must be 
 
 **Resolution:**
 
-- **Enable structured metadata**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    allow_structured_metadata: true
-  ```
-- **Move metadata to regular labels** if structured metadata isn’t needed.
-- **Contact your Loki administrator** to enable the feature.
+* **Enable structured metadata**:
+
+   ```yaml
+   limits_config:
+     allow_structured_metadata: true
+   ```
+
+* **Move metadata to regular labels** if structured metadata isn't needed.
+* **Contact your Loki administrator** to enable the feature.
 
 **Properties:**
 
@@ -945,16 +912,16 @@ The structured metadata size exceeds the configured limit.
 
 **Resolution:**
 
-- **Reduce the size** of structured metadata by removing unnecessary fields.
-- **Increase the limit**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_structured_metadata_size: 128KB
-  ```
-- **Use compression or abbreviations** for metadata values.
+* **Reduce the size** of structured metadata by removing unnecessary fields.
+
+* **Increase the limit**:
+
+   ```yaml
+   limits_config:
+     max_structured_metadata_size: 128KB
+   ```
+
+* **Use compression or abbreviations** for metadata values.
 
 **Properties:**
 
@@ -979,16 +946,16 @@ The number of structured metadata entries exceeds the limit.
 
 **Resolution:**
 
-- **Reduce the number** of structured metadata entries by consolidating fields.
-- **Increase the limit**:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_structured_metadata_entries_count: 256
-  ```
-- **Combine related metadata** into single entries using JSON or other formats.
+* **Reduce the number** of structured metadata entries by consolidating fields.
+
+* **Increase the limit**:
+
+   ```yaml
+   limits_config:
+     max_structured_metadata_entries_count: 256
+   ```
+
+* **Combine related metadata** into single entries using JSON or other formats.
 
 **Properties:**
 
@@ -1022,10 +989,10 @@ Ingestion has been administratively blocked for the tenant, typically due to pol
 
 **Resolution:**
 
-- **Wait until the block expires** if a time limit is set.
-- **Contact your Loki administrator** to understand the block reason.
-- **Review tenant usage patterns** and policies.
-- **Check for policy-specific blocks** if using ingestion policies.
+* **Wait until the block expires** if a time limit is set.
+* **Contact your Loki administrator** to understand the block reason.
+* **Review tenant usage patterns** and policies.
+* **Check for policy-specific blocks** if using ingestion policies.
 
 **Properties:**
 
@@ -1038,45 +1005,41 @@ Ingestion has been administratively blocked for the tenant, typically due to pol
 
 Follow this workflow when investigating ingestion issues:
 
-- **Check metrics**:
-  
-  promql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```promql
-  # See which errors are occurring
-  sum by (reason) (rate(loki_discarded_samples_total[5m]))
-  
-  # Identify affected tenants
-  sum by (tenant, reason) (rate(loki_discarded_bytes_total[5m]))
-  ```
-- **Review logs** from distributors and ingesters:
-  
-  Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```bash
-  # Enable write failure logging per tenant
-  limits_config:
-    limited_log_push_errors: true
-  ```
-- **Test push endpoint**:
-  
-  Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```bash
-  curl -H "Content-Type: application/json" \
-       -XPOST http://loki:3100/loki/api/v1/push \
-       --data-raw '{"streams":[{"stream":{"job":"test"},"values":[["'"$(date +%s)000000000"'","test log line"]]}]}'
-  ```
-- **Check tenant limits**:
-  
-  Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```bash
-  curl http://loki:3100/loki/api/v1/user_stats
-  ```
-- **Review configuration** for affected tenant or global limits.
-- **Monitor system resources**:
-  
+* **Check metrics**:
+
+   ```promql
+   # See which errors are occurring
+   sum by (reason) (rate(loki_discarded_samples_total[5m]))
+
+   # Identify affected tenants
+   sum by (tenant, reason) (rate(loki_discarded_bytes_total[5m]))
+   ```
+
+* **Review logs** from distributors and ingesters:
+
+   ```bash
+   # Enable write failure logging per tenant
+   limits_config:
+     limited_log_push_errors: true
+   ```
+
+* **Test push endpoint**:
+
+   ```bash
+   curl -H "Content-Type: application/json" \
+        -XPOST http://loki:3100/loki/api/v1/push \
+        --data-raw '{"streams":[{"stream":{"job":"test"},"values":[["'"$(date +%s)000000000"'","test log line"]]}]}'
+   ```
+
+* **Check tenant limits**:
+
+   ```bash
+   curl http://loki:3100/loki/api/v1/user_stats
+   ```
+
+* **Review configuration** for affected tenant or global limits.
+
+* **Monitor system resources**:
   - Ingester memory usage
   - Disk space for WAL
   - Storage backend health
@@ -1084,10 +1047,10 @@ Follow this workflow when investigating ingestion issues:
 
 ## Additional resources
 
-- [Loki Configuration Reference](/docs/loki/latest/configuration/)
-- [Request Validation and Rate Limits](/docs/loki/latest/operations/request-validation-rate-limits/)
-- [Write-Ahead Log Documentation](/docs/loki/latest/operations/storage/wal/)
-- [Alloy Configuration](/docs/alloy/latest/reference/components/loki/)
-- [Alloy loki.source.file](/docs/alloy/latest/reference/components/loki.source.file/)
-- [Alloy loki.write](/docs/alloy/latest/reference/components/loki.write/)
-- [Multi-tenancy and Limits](/docs/loki/latest/operations/multi-tenancy/)
+- [Loki Configuration Reference](https://grafana.com/docs/loki/<LOKI_VERSION>/configuration/)
+- [Request Validation and Rate Limits](https://grafana.com/docs/loki/<LOKI_VERSION>/operations/request-validation-rate-limits/)
+- [Write-Ahead Log Documentation](https://grafana.com/docs/loki/<LOKI_VERSION>/operations/storage/wal/)
+- [Alloy Configuration](https://grafana.com/docs/alloy/<ALLOY_VERSION>/reference/components/loki/)
+- [Alloy loki.source.file](https://grafana.com/docs/alloy/<ALLOY_VERSION>/reference/components/loki.source.file/)
+- [Alloy loki.write](https://grafana.com/docs/alloy/<ALLOY_VERSION>/reference/components/loki.write/)
+- [Multi-tenancy and Limits](https://grafana.com/docs/loki/<LOKI_VERSION>/operations/multi-tenancy/)

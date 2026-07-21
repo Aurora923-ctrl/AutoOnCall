@@ -14,10 +14,12 @@ class AutoOnCallApp {
             maxSize: 10 * 1024 * 1024
         };
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
-        this.currentWorkbenchView = 'incidents';
-        this.currentIncidentTab = 'overview';
+        this.workbenchStorageKey = 'autooncallWorkbenchState';
+        const savedWorkbench = this.loadWorkbenchState();
+        this.currentWorkbenchView = savedWorkbench.view || 'incidents';
+        this.currentIncidentTab = savedWorkbench.incidentTab || 'overview';
         this.apiTokenStorageKey = 'autooncallApiToken';
-        this.selectedIncidentId = '';
+        this.selectedIncidentId = savedWorkbench.incidentId || '';
         this.aiOpsDemoIncidents = {};
         this.aiOpsDemoIncidentAliases = {};
         this.aiOpsDemoIncidentsLoaded = false;
@@ -25,6 +27,8 @@ class AutoOnCallApp {
         this.aiOpsRunStorageKey = 'autooncallAIOpsRun';
         this.lastAIOpsRunState = this.loadLastAIOpsRunState();
         this.activeAIOpsRun = null;
+        this.requestControllers = new Map();
+        this.pendingActions = new Set();
         this.dashboardState = {
             incidents: [],
             alerts: [],
@@ -59,7 +63,11 @@ class AutoOnCallApp {
         this.renderKnowledgeUploadState(this.knowledgeUploadState);
         this.renderAuthTokenState();
         this.loadUploadConstraints();
-        this.setWorkbenchView(this.currentWorkbenchView);
+        this.updateWorkbenchTitle();
+        this.updateWorkbenchPanelVisibility();
+        this.updateWorkbenchNavState();
+        this.updateIncidentTabNavState();
+        this.refreshWorkbenchData(this.currentWorkbenchView);
         this.loadAIOpsStatusCatalog();
         this.loadAIOpsDemoIncidents();
         this.restoreLastAIOpsRun();
@@ -371,6 +379,28 @@ Object.assign(window.AutoOnCallApp.prototype, {
 
     // 绑定事件监听器
 ,
+    loadWorkbenchState() {
+        try {
+            const raw = sessionStorage.getItem(this.workbenchStorageKey);
+            const state = raw ? JSON.parse(raw) : {};
+            return state && typeof state === 'object' ? state : {};
+        } catch {
+            return {};
+        }
+    }
+    ,
+    saveWorkbenchState() {
+        try {
+            sessionStorage.setItem(this.workbenchStorageKey, JSON.stringify({
+                view: this.currentWorkbenchView,
+                incidentTab: this.currentIncidentTab,
+                incidentId: this.selectedIncidentId || ''
+            }));
+        } catch {
+            // Session restoration is best effort.
+        }
+    }
+    ,
     bindEvents() {
         if (this.mobileMenuBtn) {
             this.mobileMenuBtn.addEventListener('click', () => this.toggleMobileSidebar());
@@ -619,20 +649,30 @@ Object.assign(window.AutoOnCallApp.prototype, {
             this.approvalList.addEventListener('click', (event) => {
                 const diagnosisResumeButton = event.target.closest('[data-diagnosis-resume]');
                 if (diagnosisResumeButton) {
-                    this.resumeDiagnosisWorkflow(
-                        diagnosisResumeButton.getAttribute('data-incident-id'),
-                        diagnosisResumeButton.getAttribute('data-approval-id'),
-                        { openReport: true }
+                    const approvalId = diagnosisResumeButton.getAttribute('data-approval-id');
+                    this.runExclusiveAction(
+                        `diagnosis-resume:${approvalId}`,
+                        () => this.resumeDiagnosisWorkflow(
+                            diagnosisResumeButton.getAttribute('data-incident-id'),
+                            approvalId,
+                            { openReport: true }
+                        ),
+                        [diagnosisResumeButton]
                     );
                     return;
                 }
                 const resumeButton = event.target.closest('[data-change-resume]');
                 if (resumeButton) {
-                    this.startSafeChangeWorkflow(
-                        resumeButton.getAttribute('data-incident-id'),
-                        resumeButton.getAttribute('data-change-plan-id'),
-                        resumeButton.getAttribute('data-approval-id'),
-                        resumeButton.getAttribute('data-change-mode')
+                    const approvalId = resumeButton.getAttribute('data-approval-id');
+                    this.runExclusiveAction(
+                        `change-resume:${approvalId}`,
+                        () => this.startSafeChangeWorkflow(
+                            resumeButton.getAttribute('data-incident-id'),
+                            resumeButton.getAttribute('data-change-plan-id'),
+                            approvalId,
+                            resumeButton.getAttribute('data-change-mode')
+                        ),
+                        [resumeButton]
                     );
                     return;
                 }
@@ -640,11 +680,19 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 if (button) {
                     const approvalItem = button.closest('.approval-item');
                     const reasonInput = approvalItem ? approvalItem.querySelector('[data-approval-reason]') : null;
-                    this.submitApprovalDecision(
-                        button.getAttribute('data-incident-id'),
-                        button.getAttribute('data-approval-id'),
-                        button.getAttribute('data-approval-decision'),
-                        reasonInput ? reasonInput.value : ''
+                    const approvalId = button.getAttribute('data-approval-id');
+                    const actionButtons = approvalItem
+                        ? Array.from(approvalItem.querySelectorAll('[data-approval-decision]'))
+                        : [button];
+                    this.runExclusiveAction(
+                        `approval:${approvalId}`,
+                        () => this.submitApprovalDecision(
+                            button.getAttribute('data-incident-id'),
+                            approvalId,
+                            button.getAttribute('data-approval-decision'),
+                            reasonInput ? reasonInput.value : ''
+                        ),
+                        actionButtons
                     );
                 }
             });
@@ -656,10 +704,18 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 if (!resultButton) return;
                 const executionItem = resultButton.closest('.change-execution-card');
                 const notesInput = executionItem ? executionItem.querySelector('[data-manual-notes]') : null;
-                this.submitManualChangeResult(
-                    resultButton.getAttribute('data-change-execution-id'),
-                    resultButton.getAttribute('data-manual-result'),
-                    notesInput ? notesInput.value : ''
+                const executionId = resultButton.getAttribute('data-change-execution-id');
+                const actionButtons = executionItem
+                    ? Array.from(executionItem.querySelectorAll('[data-manual-result]'))
+                    : [resultButton];
+                this.runExclusiveAction(
+                    `manual-result:${executionId}`,
+                    () => this.submitManualChangeResult(
+                        executionId,
+                        resultButton.getAttribute('data-manual-result'),
+                        notesInput ? notesInput.value : ''
+                    ),
+                    actionButtons
                 );
             });
         }

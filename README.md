@@ -13,7 +13,7 @@ and add no external infrastructure requirement.
 
 AutoOnCall 是一个面向 OnCall 故障诊断场景的 Python 3.11 FastAPI 应用。它把告警接入、RAG Runbook、Plan-Execute-Replan 诊断、工具取证、风险审批、Trace、报告和安全变更记录串成一条可解释、可审计、可评测的 AIOps 闭环。
 
-当前 `docs/knowledge-base/` 包含 20 份 Markdown、PDF、HTML、CSV 和 XLSX
+当前 `docs/knowledge-base/` 包含 Markdown、PDF、HTML 和 XLSX 运维知识资产
 知识资产。运行 `make knowledge-quality` 可生成真实本地解析、切分、重复率、
 新鲜度和临时 Milvus CRUD 一致性报告；运行 `make benchmark-baseline` 会把完整
 本地基线保存到独立的 `logs/benchmarks/<run_id>/`，不会覆盖历史结果。工作区
@@ -302,6 +302,10 @@ Approval approved
 uv sync --locked --extra dev
 ```
 
+Compose 示例不会再使用内置数据库或 MinIO 密码。首次启动前请从 `.env.example`
+复制并替换 `MILVUS_MINIO_ROOT_*`、`AUTOONCALL_MYSQL_ROOT_PASSWORD` 和
+`AUTOONCALL_MYSQL_PASSWORD`，或通过 secret manager 注入这些变量。
+
 本地、CI 和 Docker 都以 `uv.lock` 为依赖真相；修改依赖后先运行 `uv lock` 并提交
 `pyproject.toml` 与 `uv.lock`。也可以使用：
 
@@ -496,6 +500,9 @@ make eval-rag
 make eval-change
 make eval-replanner
 make hygiene-check
+make dependency-lock-check
+make async-blocking-audit
+make frontend-verify
 ```
 
 演示前可以额外运行轻量契约验证，它不启动 uvicorn，也不依赖 DashScope、Milvus、MCP、Prometheus、Redis 或 MySQL，只用进程内 ASGI 和 fake service 固化 API/SSE/ToolContract 字段：

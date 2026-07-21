@@ -186,6 +186,99 @@ def test_dangerous_shell_command_is_forbidden() -> None:
     assert "shell:rm-rf" in decision.matched_rules
 
 
+def test_dangerous_patterns_are_normalized_before_matching() -> None:
+    cases = [
+        ("DROP/**/TABLE orders", "sql:drop-table"),
+        ("redis-cli FLUSH ALL", "redis:flush"),
+        ("kill - 9 123", "shell:kill-9"),
+    ]
+
+    for command, expected_rule in cases:
+        decision = assess_plan_step(
+            PlanStep(
+                tool_name="query_mysql_status",
+                purpose="Validate operator-provided text",
+                input_args={"query": command},
+                risk_level="low",
+            )
+        )
+
+        assert decision.policy == "forbidden"
+        assert expected_rule in decision.matched_rules
+
+
+def test_untrusted_suggest_remediation_cannot_use_read_only_exception() -> None:
+    class UntrustedRegistry:
+        def get_policy_metadata(self, name: str) -> dict:
+            return {"name": name, "read_only": False, "risk_level": "high", "trusted": False}
+
+    decision = assess_plan_step(
+        PlanStep(
+            tool_name="suggest_remediation",
+            purpose="Untrusted extension action",
+            input_args={},
+            risk_level="low",
+        ),
+        tool_registry=UntrustedRegistry(),
+    )
+
+    assert decision.policy == "approval_required"
+    assert decision.risk_level == "high"
+    assert decision.read_only is False
+
+
+def test_registry_missing_tool_is_high_risk_and_not_read_only() -> None:
+    class Registry:
+        def get_policy_metadata(self, name: str):
+            return None
+
+    decision = assess_plan_step(
+        PlanStep(
+            tool_name="unknown_extension",
+            purpose="Run an extension action",
+            input_args={},
+            risk_level="low",
+        ),
+        tool_registry=Registry(),
+    )
+
+    assert decision.policy == "approval_required"
+    assert decision.risk_level == "high"
+    assert decision.read_only is False
+
+
+def test_caller_supplied_audited_flag_cannot_allow_write_sql() -> None:
+    decision = assess_plan_step(
+        PlanStep(
+            tool_name="query_mysql_status",
+            purpose="Inspect a caller-provided query",
+            input_args={"sql": "UPDATE orders SET status = 'done'", "audited": True},
+            risk_level="low",
+        )
+    )
+
+    assert decision.policy == "forbidden"
+    assert "sql:unaudited" in decision.matched_rules
+
+
+def test_common_command_aliases_are_forbidden() -> None:
+    for command, rule in (
+        ("k rm pod order-1", "k8s:delete"),
+        ("redis-cli FLUSHALL", "redis:flush"),
+        ("rm -fr /data/orders", "shell:rm-rf"),
+    ):
+        decision = assess_plan_step(
+            PlanStep(
+                tool_name="query_logs",
+                purpose="Inspect text",
+                input_args={"text": command},
+                risk_level="low",
+            )
+        )
+        assert decision.policy == "forbidden"
+        assert rule in decision.matched_rules
+
+
 def test_unaudited_write_sql_is_forbidden() -> None:
     decision = assess_plan_step(
         PlanStep(

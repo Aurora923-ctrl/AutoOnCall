@@ -622,6 +622,66 @@ async def test_registry_rejects_policy_step_for_a_different_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_registry_rejects_arguments_that_differ_from_policy_step() -> None:
+    registry = create_default_tool_registry([])
+
+    result = await registry.arun(
+        "query_metrics",
+        {"service_name": "payment-service"},
+        step={
+            "tool_name": "query_metrics",
+            "purpose": "query approved service metrics",
+            "input_args": {"service_name": "order-service"},
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.output["policy"] == "forbidden"
+    assert result.output["matched_rules"] == ["tool:step-input-mismatch"]
+    assert result.risk_level == "high"
+
+
+@pytest.mark.asyncio
+async def test_registry_fails_closed_for_non_json_serializable_success_output() -> None:
+    class NonSerializableTool(AIOpsTool):
+        name = "non_serializable"
+        input_schema = {"type": "object"}
+        output_schema = {"type": "object"}
+
+        async def _call(self, input_args: dict[str, object]) -> dict[str, object]:
+            return {"value": object()}
+
+    registry = ToolRegistry()
+    registry.register(NonSerializableTool(), trusted=True)
+
+    result = await registry.arun("non_serializable", {})
+
+    assert result.status == "failed"
+    assert result.output["error_type"] == "invalid_output"
+    assert result.output["validation_error"]["validator"] == "json_serializable"
+
+
+@pytest.mark.asyncio
+async def test_registry_fails_closed_for_oversized_success_output(monkeypatch) -> None:
+    class OversizedTool(AIOpsTool):
+        name = "oversized"
+        input_schema = {"type": "object"}
+        output_schema = {"type": "object"}
+
+        async def _call(self, input_args: dict[str, object]) -> dict[str, object]:
+            return {"value": "x" * 128}
+
+    monkeypatch.setattr("app.tools.registry.MAX_TOOL_OUTPUT_BYTES", 64)
+    registry = ToolRegistry()
+    registry.register(OversizedTool(), trusted=True)
+
+    result = await registry.arun("oversized", {})
+
+    assert result.status == "failed"
+    assert result.output["validation_error"]["validator"] == "max_output_bytes"
+
+
+@pytest.mark.asyncio
 async def test_query_metrics_treats_real_mcp_content_block_failures_as_failed(
     monkeypatch,
 ) -> None:

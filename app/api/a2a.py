@@ -12,7 +12,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
@@ -39,6 +39,7 @@ from app.utils.public_errors import public_exception_message
 
 discovery_router = APIRouter()
 router = APIRouter()
+A2A_ID_MAX_LENGTH = 256
 
 
 def ensure_a2a_enabled() -> None:
@@ -90,7 +91,14 @@ def scoped_a2a_payload(payload: dict[str, Any], principal: AuthPrincipal) -> dic
     """Namespace caller-controlled message identity for authenticated requests."""
     if not principal.enabled:
         return payload
-    return scope_message_to_principal(payload, principal.principal_id)
+    scoped = scope_message_to_principal(payload, principal.principal_id)
+    if principal.has_scope("admin"):
+        params = scoped.get("params") if isinstance(scoped.get("params"), dict) else scoped
+        message = params.get("message") if isinstance(params.get("message"), dict) else params
+        metadata = dict(message.get("metadata") or {})
+        metadata["__autooncall_admin"] = True
+        message["metadata"] = metadata
+    return scoped
 
 
 def authenticate_a2a_request(
@@ -291,7 +299,7 @@ async def message_stream(
 
 @router.get("/tasks/{task_id}")
 async def get_task(
-    task_id: str,
+    task_id: str = Path(..., min_length=1, max_length=A2A_ID_MAX_LENGTH),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     x_autooncall_token: str | None = Header(default=None, alias="X-AutoOnCall-Token"),
     a2a_version: str | None = Header(default=None, alias="A2A-Version"),
@@ -327,7 +335,7 @@ async def get_task(
 
 @router.get("/tasks")
 async def list_tasks(
-    incident_id: str | None = Query(default=None),
+    incident_id: str | None = Query(default=None, min_length=1, max_length=128),
     limit: int = Query(default=20, ge=1, le=100),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     x_autooncall_token: str | None = Header(default=None, alias="X-AutoOnCall-Token"),

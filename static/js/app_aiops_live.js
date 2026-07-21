@@ -4,6 +4,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         const selectedIncident = incident || this.getSelectedAIOpsIncident();
         const response = await this.apiFetch(`${this.apiBaseUrl}/aiops`, {
             method: 'POST',
+            timeoutMs: 0,
             headers: {
                 'Content-Type': 'application/json',
             },
@@ -26,14 +27,50 @@ Object.assign(window.AutoOnCallApp.prototype, {
         this.activeAIOpsRun = aiopsRun;
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = '';
         let terminalReceived = false;
+        const handleSseEvent = ({ data: rawData }) => {
+            if (rawData === '[DONE]') {
+                terminalReceived = true;
+                return true;
+            }
+            const sseMessage = this.parseSseJson(rawData);
+            if (!sseMessage) {
+                aiopsRun.errors.push('无法解析诊断事件 JSON');
+                return false;
+            }
+            fullResponse = this.applyAIOpsEvent(sseMessage, aiopsRun, fullResponse);
+            aiopsRun.responseText = fullResponse;
+            if (sseMessage.type === 'error') {
+                terminalReceived = true;
+                const eventError = new Error(
+                    sseMessage.data || sseMessage.message || '智能运维分析失败'
+                );
+                eventError.aiopsTerminalEvent = true;
+                throw eventError;
+            }
+            if (sseMessage.type === 'complete' || sseMessage.type === 'done') {
+                terminalReceived = true;
+                return true;
+            }
+            this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
+            return false;
+        };
+        const parser = this.createSseParser(handleSseEvent);
 
         try {
             while (true) {
                 const { done, value } = await reader.read();
 
                 if (done) {
+                    if (parser.push(decoder.decode()) || parser.finish()) {
+                        this.updateAIOpsMessage(
+                            loadingMessageElement,
+                            fullResponse,
+                            this.buildAIOpsDetails(aiopsRun)
+                        );
+                        await this.refreshAfterAIOpsRun(aiopsRun);
+                        return;
+                    }
                     if (!terminalReceived) {
                         const recoveredPayload = await this.recoverAIOpsRunFromSnapshot(
                             aiopsRun,
@@ -56,53 +93,14 @@ Object.assign(window.AutoOnCallApp.prototype, {
                     break;
                 }
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-
-                for (const line of lines) {
-                    const parsedLine = this.parseSseLine(line);
-                    if (parsedLine.ignored) {
-                        continue;
-                    }
-                    if (parsedLine.done) {
-                        terminalReceived = true;
-                        this.updateAIOpsMessage(
-                            loadingMessageElement,
-                            fullResponse,
-                            this.buildAIOpsDetails(aiopsRun)
-                        );
-                        await this.refreshAfterAIOpsRun(aiopsRun);
-                        return;
-                    }
-
-                    const sseMessage = this.parseSseJson(parsedLine.rawData);
-                    if (!sseMessage) {
-                        aiopsRun.errors.push('无法解析诊断事件 JSON');
-                        continue;
-                    }
-
-                    fullResponse = this.applyAIOpsEvent(sseMessage, aiopsRun, fullResponse);
-                    aiopsRun.responseText = fullResponse;
-                    if (sseMessage.type === 'error') {
-                        terminalReceived = true;
-                        const eventError = new Error(
-                            sseMessage.data || sseMessage.message || '智能运维分析失败'
-                        );
-                        eventError.aiopsTerminalEvent = true;
-                        throw eventError;
-                    }
-                    if (sseMessage.type === 'complete' || sseMessage.type === 'done') {
-                        terminalReceived = true;
-                        this.updateAIOpsMessage(
-                            loadingMessageElement,
-                            fullResponse,
-                            this.buildAIOpsDetails(aiopsRun)
-                        );
-                        await this.refreshAfterAIOpsRun(aiopsRun);
-                        return;
-                    }
-                    this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
+                if (parser.push(decoder.decode(value, { stream: true }))) {
+                    this.updateAIOpsMessage(
+                        loadingMessageElement,
+                        fullResponse,
+                        this.buildAIOpsDetails(aiopsRun)
+                    );
+                    await this.refreshAfterAIOpsRun(aiopsRun);
+                    return;
                 }
             }
         } finally {
@@ -583,7 +581,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const response = await this.apiFetch(`${this.apiBaseUrl}/aiops/demo/incidents`);
             if (!response.ok) return;
-            const payload = await response.json();
+            const payload = await this.readJsonResponse(response);
             const items = Array.isArray(payload.items) ? payload.items : [];
             if (!items.length) return;
 

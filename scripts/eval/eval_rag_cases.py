@@ -25,17 +25,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.services.document_loaders import document_loader_registry
 from app.services.document_splitter_service import document_splitter_service
-from app.services.rag_retrieval_service import (
-    document_to_retrieval_chunk,
+from app.services.rag_retrieval.candidates import document_to_retrieval_chunk
+from app.services.rag_retrieval.intent import (
     infer_retrieval_preferences,
     retrieval_intent_multiplier,
-    select_required_sources,
 )
+from app.services.rag_retrieval.selection import select_required_sources
 from scripts.eval.benchmark_metrics import proportion_metric
 from scripts.eval.eval_environment import (
     collect_dataset_provenance,
     collect_eval_environment,
     provenance_markdown_lines,
+    read_utf8_text_strict,
 )
 
 DEFAULT_CASES_PATH = REPO_ROOT / "eval" / "rag_cases.yaml"
@@ -81,7 +82,7 @@ DOMAIN_TERMS = {
 
 def load_cases(path: str | Path = DEFAULT_CASES_PATH) -> list[dict[str, Any]]:
     """Load and normalize legacy and stage-2 RAG cases from YAML."""
-    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    payload = yaml.safe_load(read_utf8_text_strict(path))
     cases = payload.get("cases", []) if isinstance(payload, dict) else []
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"No RAG eval cases found in {path}")

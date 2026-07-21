@@ -8,6 +8,7 @@ from scripts.eval.run_benchmark_baseline import (
     build_official_block_reasons,
     reserve_run_directory,
     write_interview_scorecard,
+    write_failed_pointer,
 )
 
 
@@ -99,3 +100,21 @@ def test_benchmark_writes_scorecard_into_same_run_directory(tmp_path) -> None:
     scorecard = json.loads((run_dir / "interview_scorecard.json").read_text("utf-8"))
     assert scorecard["run"]["run_id"] == "run-001"
     assert (run_dir / "interview_scorecard.md").exists()
+
+
+def test_failed_benchmark_does_not_replace_latest_pass_pointer(tmp_path) -> None:
+    run_dir = tmp_path / "failed-run"
+    run_dir.mkdir()
+    manifest_json = run_dir / "baseline_manifest.json"
+    manifest_md = run_dir / "baseline_manifest.md"
+    manifest_json.write_text("{}", encoding="utf-8")
+    manifest_md.write_text("# failed\n", encoding="utf-8")
+    payload = {
+        "run": {"run_id": "failed-run", "ended_at": "2026-07-21T00:00:00+00:00"},
+        "summary": {"status": "failed", "baseline_status": "candidate_incomplete"},
+    }
+
+    write_failed_pointer(tmp_path, payload, manifest_json, manifest_md)
+
+    assert not (tmp_path / "latest.json").exists()
+    assert json.loads((tmp_path / "latest_failed.json").read_text("utf-8"))["run_id"] == "failed-run"

@@ -1,7 +1,10 @@
----
-title: Alerting
-sort_rank: 5
----
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/prometheus/docs/blob/47c3b182327d2832daadb00d0beacfcd802e4458/docs/practices/alerting.md
+Upstream revision: 47c3b182327d2832daadb00d0beacfcd802e4458
+Retrieved: 2026-07-21
+License: Apache-2.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 We recommend that you read [My Philosophy on Alerting](https://docs.google.com/a/boxever.com/document/d/199PqyG3UsyXlwieHaqbGiWVa8eMWi8zzAn0YfcApr8Q/edit)
 based on Rob Ewaschuk's observations at Google.

@@ -2,19 +2,58 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Redis Capacity Wiki - Maxclients</title>
+  <title>Redis Capacity Runbook - Client Headroom</title>
 </head>
 <body>
-  <nav>Home Search Owner</nav>
-  <h1>Redis Capacity Wiki</h1>
-  <h2>Maxclients exhaustion</h2>
-  <p>For order-service, the interview golden incident uses connected_clients=9940,
-  maxclients=10000, blocked_clients=37, and Redis timeout logs.</p>
-  <p>The diagnosis must separate current live_info from incident-window evidence. A
-  healthy current Redis container proves adapter connectivity, not that the outage is
-  still happening.</p>
-  <h2>Approval boundary</h2>
-  <p>Increasing maxclients, resizing Redis capacity, restarting Redis, or changing
-  application pool limits requires human approval and a change window.</p>
+  <h1>Redis Capacity Runbook</h1>
+  <h2>Scope and ownership</h2>
+  <p>This runbook applies when Redis clients are rejected, connection-pool wait rises,
+  connected_clients approaches effective maxclients, or retry amplification is suspected.
+  It does not cover command latency without connection pressure.</p>
+  <p>Owner: Redis Service Team. Escalation: Commerce Platform SRE. Last reviewed:
+  2026-07-21. Related tickets: INC-REDIS-001, INC-REDIS-009, and CR-REDIS-2026-071.</p>
+  <p>This document is the Redis Capacity Wiki. It distinguishes live_info from
+  incident-window evidence and records the maxclients approval boundary.</p>
+
+  <h2>Evidence and metric queries</h2>
+  <p>Capture incident-window values for connected_clients, blocked_clients,
+  rejected_connections_total, application pool waiting, HTTP 5xx, and P95 latency.
+  Compare connected_clients with the effective limit after operating-system file descriptor
+  reservations, not only the configured maxclients value.</p>
+  <pre>redis_connected_clients / redis_config_maxclients
+rate(redis_rejected_connections_total[5m])
+histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m])))</pre>
+
+  <h2>Log patterns</h2>
+  <p>Search for ERR max number of clients reached, Redis connection timeout, pool acquire
+  timeout, connection refused, retry exhausted, and repeated reconnect attempts. Group by
+  service, release, pod, and client library to identify the connection owner.</p>
+
+  <h2>Decision tree</h2>
+  <p>If connected_clients is below 70% and rejected connections are zero, investigate
+  network latency or slow commands instead. If client headroom is below 10%, identify retry
+  growth and idle-pool retention. If one release owns the growth, prepare a reversible
+  application canary. If growth is broad, prepare capacity review with the Redis owner.</p>
+
+  <h2>Safe response</h2>
+  <p>First preserve Redis INFO, application pool metrics, deploy history, and logs from the
+  same incident window. Then generate a change plan with expected effect, canary scope,
+  approver, rollback command, and observation period. Do not restart Redis, raise maxclients,
+  or resize pools automatically.</p>
+
+  <h2>Approval and rollback conditions</h2>
+  <p>Changing maxclients, operating-system file limits, Redis capacity, retry policy, or pool
+  limits requires human approval and a production change window. Roll back if error rate,
+  replication lag, memory pressure, or connection churn worsens during the canary.</p>
+
+  <h2>Recovery criteria</h2>
+  <p>Declare recovery only when connected_clients remains below 80% of effective capacity,
+  blocked_clients and rejected connections return to baseline, customer error rate is below
+  the service threshold, and the signals remain stable for at least 30 minutes.</p>
+
+  <h2>Historical context</h2>
+  <p>The sanitized golden incident recorded connected_clients=9940, maxclients=10000, and
+  blocked_clients=37. Treat these values as historical evidence, not as current live_info.
+  See redis_postmortem.pdf and the tickets sheet in tickets.xlsx.</p>
 </body>
 </html>

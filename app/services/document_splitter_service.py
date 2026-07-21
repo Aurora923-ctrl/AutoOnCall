@@ -1,6 +1,7 @@
 """文档分割服务模块 - 基于 LangChain 的智能文档分割"""
 
 import hashlib
+import re
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -240,17 +241,94 @@ def _build_chunk_id(file_path: str, index: int) -> str:
 
 def canonical_source_id(file_path: str) -> str:
     """Build a stable source identity independent of the deployment root."""
-    normalized = str(file_path or "").replace("\\", "/").rstrip("/")
+    raw_path = str(file_path or "").strip()
+    normalized = re.sub(r"/+", "/", raw_path.replace("\\", "/")).rstrip("/")
+    configured_identity = _configured_source_identity(raw_path)
+    if configured_identity:
+        return configured_identity
     lowered = normalized.lower()
     for marker in ("/docs/knowledge-base/", "/uploads/"):
         position = lowered.rfind(marker)
         if position >= 0:
-            return normalized[position + 1 :]
+            identity = normalized[position + 1 :]
+            return identity.casefold() if _is_windows_style_path(raw_path) else identity
     legacy_marker = "/aiops-docs/"
     legacy_position = lowered.rfind(legacy_marker)
     if legacy_position >= 0:
-        return f"docs/knowledge-base/{normalized[legacy_position + len(legacy_marker) :]}"
-    return normalized or "document"
+        identity = f"docs/knowledge-base/{normalized[legacy_position + len(legacy_marker) :]}"
+        return identity.casefold() if _is_windows_style_path(raw_path) else identity
+    if lowered.startswith("docs/knowledge-base/") or lowered.startswith("uploads/"):
+        return normalized.casefold() if _is_windows_style_path(raw_path) else normalized
+    return normalized.casefold() if _is_windows_style_path(raw_path) else normalized or "document"
+
+
+def _is_windows_style_path(value: str) -> bool:
+    normalized = str(value or "").replace("\\", "/")
+    return bool(re.match(r"^[A-Za-z]:/", normalized)) or normalized.startswith("//") or "\\" in value
+
+
+def _configured_source_identity(file_path: str) -> str:
+    """Resolve a source against configured roots, including duplicate root basenames."""
+    if not file_path:
+        return ""
+    try:
+        candidate = Path(file_path).resolve()
+    except OSError:
+        return ""
+    raw_roots = [
+        item.strip()
+        for item in str(config.index_allowed_roots or "").split(",")
+        if item.strip()
+    ]
+    if config.upload_dir:
+        raw_roots.append(str(config.upload_dir))
+
+    roots: list[tuple[Path, str]] = []
+    label_counts: dict[str, int] = {}
+    seen: set[str] = set()
+    for raw_root in raw_roots:
+        try:
+            resolved_root = Path(raw_root).resolve()
+        except OSError:
+            continue
+        root_key = _path_comparison_key(resolved_root)
+        if root_key in seen:
+            continue
+        seen.add(root_key)
+        base_label = _source_root_label(raw_root, resolved_root)
+        count = label_counts.get(base_label.casefold(), 0) + 1
+        label_counts[base_label.casefold()] = count
+        label = base_label if count == 1 else f"{base_label}@{count}"
+        roots.append((resolved_root, label))
+
+    candidate_key = _path_comparison_key(candidate)
+    for resolved_root, label in roots:
+        root_key = _path_comparison_key(resolved_root).rstrip("/")
+        prefix = f"{root_key}/"
+        if candidate_key == root_key:
+            relative = ""
+        elif candidate_key.startswith(prefix):
+            relative = candidate_key[len(prefix) :]
+        else:
+            continue
+        identity = f"{label}/{relative}".rstrip("/")
+        return identity.casefold() if _is_windows_style_path(str(candidate)) else identity
+    return ""
+
+
+def _path_comparison_key(path: Path) -> str:
+    normalized = re.sub(r"/+", "/", path.as_posix()).rstrip("/")
+    return normalized.casefold() if _is_windows_style_path(str(path)) else normalized
+
+
+def _source_root_label(raw_root: str, resolved_root: Path) -> str:
+    normalized = re.sub(r"/+", "/", str(raw_root).replace("\\", "/")).strip("/")
+    lowered = normalized.casefold()
+    if lowered.endswith("docs/knowledge-base"):
+        return "docs/knowledge-base"
+    if lowered.endswith("uploads"):
+        return "uploads"
+    return resolved_root.name or "root"
 
 
 def _build_source_id(file_path: str) -> str:

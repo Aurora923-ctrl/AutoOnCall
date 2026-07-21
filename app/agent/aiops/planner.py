@@ -3,7 +3,6 @@ Planner 节点：制定执行计划
 基于 LangGraph 官方教程实现
 """
 
-import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_retry
 from app.config import config
+from app.core.resilience import run_bounded_sync_call
 from app.models.evidence import Evidence
 from app.models.plan import PlanStep
 from app.services.rag_read_models import compact_retrieval_payload
@@ -130,7 +130,12 @@ async def _call_knowledge_retriever(
     query: str,
 ) -> dict[str, Any]:
     """Call the sync retrieval stack without blocking the event loop."""
-    result = await asyncio.to_thread(knowledge_retriever, query)
+    result = await run_bounded_sync_call(
+        "rag-retrieval",
+        "planner_context",
+        lambda: knowledge_retriever(query),
+        timeout_seconds=12.0,
+    )
     if inspect.isawaitable(result):
         result = await result
     return dict(result or {})

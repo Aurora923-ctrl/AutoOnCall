@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.api import aiops
+from app.config import config
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.report import DiagnosisReport
@@ -514,6 +515,57 @@ async def test_aiops_run_status_returns_404_for_unknown_session(monkeypatch) -> 
 
     assert response.status_code == 404
     assert response.json()["detail"] == "AIOps diagnosis run not found"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_aiops_run_reads_are_scoped_to_presented_token(monkeypatch) -> None:
+    monkeypatch.setattr(config, "api_auth_enabled", True)
+    monkeypatch.setattr(config, "api_auth_tokens", "")
+    monkeypatch.setattr(config, "api_read_token", "reader-secret-token")
+    monkeypatch.setattr(config, "api_operator_token", "")
+    monkeypatch.setattr(config, "api_approver_token", "")
+    monkeypatch.setattr(config, "api_change_token", "")
+    monkeypatch.setattr(config, "api_admin_token", "")
+    owned_snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="principal:00505bee9fcd6466:shared-run",
+        status="completed",
+        state={"trace_id": "trace-owned", "incident": {"incident_id": "INC-OWNED"}},
+    )
+    foreign_snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="principal:foreign-principal:shared-run",
+        status="completed",
+        state={"trace_id": "trace-foreign", "incident": {"incident_id": "INC-FOREIGN"}},
+    )
+    test_app = _build_test_app(
+        monkeypatch,
+        {
+            "aiops": FakeAIOpsService(
+                owned_snapshot,
+                snapshots=[foreign_snapshot, owned_snapshot],
+            ),
+            "traces": FakeTraceService([]),
+            "reports": FakeReportGenerator(None),
+            "approvals": FakeApprovalService([]),
+        },
+    )
+
+    headers = {"Authorization": "Bearer reader-secret-token"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=test_app),
+        base_url="http://testserver",
+    ) as client:
+        list_response = await client.get("/api/aiops/runs", headers=headers)
+        own_response = await client.get("/api/aiops/runs/shared-run", headers=headers)
+        foreign_response = await client.get(
+            "/api/aiops/runs/principal:foreign-principal:shared-run",
+            headers=headers,
+        )
+
+    assert list_response.status_code == 200
+    assert [item["incident_id"] for item in list_response.json()["items"]] == ["INC-OWNED"]
+    assert own_response.status_code == 200
+    assert own_response.json()["incident_id"] == "INC-OWNED"
+    assert foreign_response.status_code == 404
 
 
 @pytest.mark.asyncio

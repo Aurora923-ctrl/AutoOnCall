@@ -78,13 +78,13 @@ def enforce_production_exposure_policy() -> None:
     """Warn or fail closed for unsafe production-facing demo defaults."""
 
     warnings = production_exposure_warnings()
-    if warnings and config.production_exposure_strict:
+    if warnings and not config.allow_insecure_external_demo:
         message = "Unsafe production exposure configuration: " + "; ".join(warnings)
         logger.error(message)
         raise RuntimeError(message)
 
     for warning in warnings:
-        logger.warning(f"⚠️ 生产暴露配置提示: {warning}")
+        logger.warning(f"允许不安全的外部演示配置: {warning}")
 
 
 @asynccontextmanager
@@ -151,8 +151,9 @@ app.include_router(approvals.router, prefix="/api", tags=["AIOps人工审批"])
 app.include_router(incidents.router, prefix="/api", tags=["AIOps故障事件"])
 app.include_router(evaluations.router, prefix="/api", tags=["离线评测"])
 app.include_router(feedback.router, prefix="/api", tags=["反馈闭环"])
-app.include_router(a2a.discovery_router, tags=["A2A Agent"])
-app.include_router(a2a.router, prefix=config.normalized_a2a_base_path, tags=["A2A Agent"])
+if config.a2a_enabled:
+    app.include_router(a2a.discovery_router, tags=["A2A Agent"])
+    app.include_router(a2a.router, prefix=config.normalized_a2a_base_path, tags=["A2A Agent"])
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

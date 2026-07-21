@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -19,9 +21,19 @@ from app.integrations.base import (
     require_config,
 )
 
+_redis_operation_deadline: ContextVar[float | None] = ContextVar(
+    "redis_operation_deadline",
+    default=None,
+)
+
 
 class RedisInfoAdapter:
     """Read Redis INFO plus optional CONFIG/SLOWLOG data over TCP."""
+
+    MAX_RESP_BULK_BYTES = 8 * 1024 * 1024
+    MAX_RESP_ARRAY_ITEMS = 10_000
+    MAX_RESP_DEPTH = 16
+    MAX_RESP_TOTAL_BYTES = 16 * 1024 * 1024
 
     def __init__(self):
         self.redis_url = config.resolved_redis_url
@@ -41,8 +53,13 @@ class RedisInfoAdapter:
         time_range: str,
     ) -> dict[str, Any]:
         target = self._resolve_target(redis_instance)
-        reader, writer = await self._open_connection(target)
+        deadline_token = _redis_operation_deadline.set(
+            asyncio.get_running_loop().time() + self.timeout_seconds
+        )
+        reader: asyncio.StreamReader | None = None
+        writer: asyncio.StreamWriter | None = None
         try:
+            reader, writer = await self._open_connection(target)
             await self._authenticate(reader, writer, target)
             info_text = await self._send_command(reader, writer, "INFO")
             info = self._parse_info(info_text)
@@ -60,8 +77,9 @@ class RedisInfoAdapter:
             evidence_hash = await self._read_evidence_hash(reader, writer)
             timeline = await self._read_timeline(reader, writer)
         finally:
-            writer.close()
-            await writer.wait_closed()
+            if writer is not None:
+                await self._close_writer(writer)
+            _redis_operation_deadline.reset(deadline_token)
 
         maxclients = self._parse_maxclients(maxclients_text)
         missing_fields = self._missing_required_info_fields(info, maxclients)
@@ -252,13 +270,19 @@ class RedisInfoAdapter:
     async def ping(self, redis_instance: str = "") -> dict[str, Any]:
         """Return a lightweight connectivity check for readiness endpoints."""
         target = self._resolve_target(redis_instance)
-        reader, writer = await self._open_connection(target)
+        deadline_token = _redis_operation_deadline.set(
+            asyncio.get_running_loop().time() + self.timeout_seconds
+        )
+        reader: asyncio.StreamReader | None = None
+        writer: asyncio.StreamWriter | None = None
         try:
+            reader, writer = await self._open_connection(target)
             await self._authenticate(reader, writer, target)
             response = await self._send_command(reader, writer, "PING")
         finally:
-            writer.close()
-            await writer.wait_closed()
+            if writer is not None:
+                await self._close_writer(writer)
+            _redis_operation_deadline.reset(deadline_token)
         return {"status": "connected", "message": response or "PONG", "endpoint": target["display"]}
 
     async def _open_connection(
@@ -272,7 +296,7 @@ class RedisInfoAdapter:
                 target["port"],
                 ssl=True if target.get("use_tls") else None,
             ),
-            timeout=self.timeout_seconds,
+            timeout=self._remaining_timeout(),
         )
 
     async def _authenticate(
@@ -338,35 +362,98 @@ class RedisInfoAdapter:
     ) -> Any:
         command = self._encode_resp(parts)
         writer.write(command)
-        await writer.drain()
-        return await self._read_resp(reader)
+        await asyncio.wait_for(writer.drain(), timeout=self._remaining_timeout())
+        return await self._read_resp(
+            reader,
+            depth=0,
+            remaining_bytes=[self.MAX_RESP_TOTAL_BYTES],
+        )
 
-    async def _read_resp(self, reader: asyncio.StreamReader) -> Any:
-        line = await asyncio.wait_for(reader.readline(), timeout=self.timeout_seconds)
+    async def _read_resp(
+        self,
+        reader: asyncio.StreamReader,
+        *,
+        depth: int,
+        remaining_bytes: list[int],
+    ) -> Any:
+        if depth > self.MAX_RESP_DEPTH:
+            raise ExternalAdapterError("Redis response nesting limit exceeded")
+        try:
+            timeout = self._remaining_timeout()
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        except ValueError as exc:
+            raise ExternalAdapterError("Redis response line is too large") from exc
         if not line:
             raise ExternalAdapterError("Redis closed connection")
+        self._consume_resp_bytes(remaining_bytes, len(line))
+        if not line.endswith(b"\r\n"):
+            raise ExternalAdapterError("Redis returned a malformed RESP line")
         prefix = line[:1]
         if prefix == b"-":
             raise ExternalAdapterError(line[1:].decode(errors="replace").strip())
         if prefix == b"+":
             return line[1:].decode(errors="replace").strip()
         if prefix == b"$":
-            length = int(line[1:].strip())
+            length = self._parse_resp_length(line, "bulk")
             if length < 0:
                 return None
+            if length > self.MAX_RESP_BULK_BYTES:
+                raise ExternalAdapterError("Redis bulk response exceeds size limit")
+            self._consume_resp_bytes(remaining_bytes, length + 2)
+            timeout = self._remaining_timeout()
             data = await asyncio.wait_for(
                 reader.readexactly(length + 2),
-                timeout=self.timeout_seconds,
+                timeout=timeout,
             )
+            if not data.endswith(b"\r\n"):
+                raise ExternalAdapterError("Redis returned a malformed bulk response")
             return data[:-2].decode(errors="replace")
         if prefix == b"*":
-            count = int(line[1:].strip())
+            count = self._parse_resp_length(line, "array")
             if count < 0:
                 return None
-            return [await self._read_resp(reader) for _ in range(count)]
+            if count > self.MAX_RESP_ARRAY_ITEMS:
+                raise ExternalAdapterError("Redis array response exceeds item limit")
+            return [
+                await self._read_resp(
+                    reader,
+                    depth=depth + 1,
+                    remaining_bytes=remaining_bytes,
+                )
+                for _ in range(count)
+            ]
         if prefix == b":":
             return int(line[1:].decode(errors="replace").strip())
         return line.decode(errors="replace").strip()
+
+    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        with suppress(Exception):
+            await asyncio.wait_for(writer.wait_closed(), timeout=min(self.timeout_seconds, 1.0))
+
+    def _remaining_timeout(self) -> float:
+        deadline = _redis_operation_deadline.get()
+        if deadline is None:
+            return self.timeout_seconds
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Redis operation timeout exhausted")
+        return remaining
+
+    @staticmethod
+    def _parse_resp_length(line: bytes, response_type: str) -> int:
+        try:
+            return int(line[1:].strip())
+        except ValueError as exc:
+            raise ExternalAdapterError(
+                f"Redis returned an invalid {response_type} length"
+            ) from exc
+
+    @staticmethod
+    def _consume_resp_bytes(remaining_bytes: list[int], amount: int) -> None:
+        remaining_bytes[0] -= amount
+        if remaining_bytes[0] < 0:
+            raise ExternalAdapterError("Redis response exceeds total size limit")
 
     async def _read_incident_evidence(
         self,

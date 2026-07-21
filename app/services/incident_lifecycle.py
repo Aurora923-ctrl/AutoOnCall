@@ -3,109 +3,55 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import UTC, datetime
 from typing import Any
 
 from app.models.alert import AlertEvent
 from app.models.incident_state import IncidentState
+from app.services.policies.lifecycle import (
+    ACTIVE_DIAGNOSIS_STATUSES,
+    AI_OBJECT_STATUSES,
+    AIOPS_RUN_FILTER_STATUSES,
+    ALERT_AUTO_DIAGNOSIS_ACTIVE_STATUSES,
+    ALERT_AUTO_DIAGNOSIS_FAILURE_SOURCE,
+    ALERT_MUTABLE_INCIDENT_STATUSES,
+    APPROVAL_LIFECYCLE_STATUSES,
+    CHANGE_LIFECYCLE_STATUSES,
+    HARD_TERMINAL_INCIDENT_STATUSES,
+    REPORT_ONLY_STATUSES,
+    REPORT_SAFE_INSUFFICIENT_EVIDENCE_STATUSES,
+    REPORT_SAFE_POLICY_BOUNDARY_STATUSES,
+    incident_status_from_report_status,
+    incident_status_from_runtime_status,
+    manual_action_required_from_change_execution,
+    manual_result_source_statuses,
+    report_requires_manual_action,
+    snapshot_status_from_event,
+    status_after_approved_run,
+    status_from_change_execution,
+    status_from_manual_result,
+    terminal_event_status,
+    trace_status_from_manual_result,
+)
 
-CHANGE_LIFECYCLE_STATUSES = {
-    "change_prechecking",
-    "change_dry_run",
-    "change_validated",
-    "sandbox_validated",
-    "waiting_manual_execution",
-    "change_executing_sandbox",
-    "observing",
-    "partial_success",
-    "recovery_pending",
-    "resolved",
-    "rollback_recommended",
-    "rolled_back",
-    "rollback_failed",
-    "precheck_failed",
-    "dry_run_failed",
-    "escalated",
-}
-
-REPORT_ONLY_STATUSES = {
-    "completed",
-    "incomplete",
-    "degraded",
-    "needs_human",
-    "waiting_approval",
-    "approval_approved",
-    "approval_rejected",
-    "approval_resumed",
-    "blocked",
-    "failed",
-}
-
-AI_OBJECT_STATUSES = {
-    *REPORT_ONLY_STATUSES,
-    "approval_cancelled",
-    "rollback_recommended",
-    "partial_success",
-    "recovery_pending",
-    "rolled_back",
-    "rollback_failed",
-    "precheck_failed",
-    "dry_run_failed",
-    "manual_result_required",
-    "manual_result_recorded",
-    "dry_run_completed",
-    "closed",
-}
-
-AIOPS_RUN_FILTER_STATUSES = [
-    "running",
-    "resume_running",
-    "completed",
-    "waiting_approval",
-    "approval_approved",
-    "approval_rejected",
-    "approval_cancelled",
-    "approval_resumed",
-    "change_validated",
-    "waiting_manual_execution",
-    "resolved",
-    "rollback_recommended",
-    "partial_success",
-    "recovery_pending",
-    "rolled_back",
-    "rollback_failed",
-    "precheck_failed",
-    "dry_run_failed",
-    "failed",
-    "blocked",
-    "escalated",
+__all__ = [
+    "AI_OBJECT_STATUSES",
+    "AIOPS_RUN_FILTER_STATUSES",
+    "REPORT_SAFE_INSUFFICIENT_EVIDENCE_STATUSES",
+    "REPORT_SAFE_POLICY_BOUNDARY_STATUSES",
+    "incident_status_from_report_status",
+    "incident_status_from_runtime_status",
+    "manual_action_required_from_change_execution",
+    "manual_result_source_statuses",
+    "report_requires_manual_action",
+    "snapshot_status_from_event",
+    "status_after_approved_run",
+    "status_from_change_execution",
+    "status_from_manual_result",
+    "terminal_event_status",
+    "trace_status_from_manual_result",
 ]
-
-POST_APPROVAL_RUN_STATUSES = {
-    "approval_resumed",
-    "change_validated",
-    "resolved",
-    "rollback_recommended",
-    "precheck_running",
-    "precheck_failed",
-    "dry_run_running",
-    "dry_run_completed",
-    "dry_run_failed",
-    "waiting_manual_execution",
-    "manual_result_required",
-    "manual_execution_recorded",
-    "manual_result_recorded",
-    "sandbox_executing",
-    "sandbox_validated",
-    "observing",
-    "partial_success",
-    "recovery_pending",
-    "rolled_back",
-    "rollback_failed",
-    "escalated",
-    "closed",
-    "failed",
-}
 
 ALERT_FIRING_STATUSES = {"firing", "active", "triggered"}
 ALERT_RESOLVED_STATUSES = {"resolved", "inactive", "ok", "closed"}
@@ -115,48 +61,6 @@ PRODUCTION_ENVIRONMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CHINESE_PRODUCTION_ENVIRONMENT_PATTERN = re.compile(r"^(?:线上|生产)(?:$|[-_.:/\s].+)")
-ALERT_MUTABLE_INCIDENT_STATUSES = {
-    "created",
-    "investigating",
-    "alert_firing",
-    "alert_resolved",
-    "resolved",
-}
-ACTIVE_DIAGNOSIS_STATUSES = {
-    "created",
-    "investigating",
-    "diagnosing",
-    "running",
-    "planning",
-    "executing",
-    "alert_firing",
-    "alert_resolved",
-}
-ALERT_AUTO_DIAGNOSIS_ACTIVE_STATUSES = {"running", "queued"}
-ALERT_AUTO_DIAGNOSIS_FAILURE_SOURCE = "alert_auto_diagnosis"
-APPROVAL_LIFECYCLE_STATUSES = {
-    "waiting_approval",
-    "approval_approved",
-    "approval_rejected",
-    "approval_cancelled",
-    "approval_resumed",
-}
-HARD_TERMINAL_INCIDENT_STATUSES = {
-    "completed",
-    "incomplete",
-    "degraded",
-    "needs_human",
-    "approval_rejected",
-    "approval_cancelled",
-    "blocked",
-    "failed",
-    "escalated",
-    "resolved",
-    "closed",
-    "precheck_failed",
-    "dry_run_failed",
-}
-
 STATUS_METADATA: dict[str, dict[str, Any]] = {
     "investigating": {
         "label": "排查中",
@@ -398,120 +302,9 @@ def infer_terminal_report_status(state: dict[str, Any]) -> str:
     return "completed"
 
 
-def snapshot_status_from_event(event: dict[str, Any]) -> str:
-    """Map streamed workflow events to durable session snapshot states."""
-    event_type = event.get("type")
-    if event_type == "approval_required":
-        return "waiting_approval"
-    if event_type == "report":
-        structured_report = event.get("structured_report") or {}
-        if isinstance(structured_report, dict) and structured_report.get("status"):
-            return str(structured_report["status"])
-        return "completed"
-    if event_type == "error":
-        return "failed"
-    return "running"
-
-
-def incident_status_from_runtime_status(status: str) -> str:
-    """Normalize runtime/report statuses into an IncidentState status."""
-    if status in {"running", "planning", "executing"}:
-        return "diagnosing"
-    if status in {
-        "resume_running",
-        "waiting_approval",
-        "approval_approved",
-        "approval_rejected",
-        "approval_resumed",
-        "blocked",
-        "escalated",
-        "failed",
-        "completed",
-    }:
-        return status
-    if status.startswith("approval_"):
-        return status
-    return status or "diagnosing"
-
-
-def terminal_event_status(event: dict[str, Any]) -> str:
-    """Derive the terminal workflow status from a streamed event payload."""
-    structured_report = event.get("structured_report") or {}
-    if isinstance(structured_report, dict) and structured_report.get("status"):
-        return str(structured_report["status"])
-
-    risk_assessment = event.get("risk_assessment") or {}
-    if event.get("pending_approval"):
-        return "waiting_approval"
-    if isinstance(risk_assessment, dict) and risk_assessment.get("policy") == "forbidden":
-        return "blocked"
-    if event.get("errors"):
-        return "escalated"
-    if event.get("type") == "error":
-        return "failed"
-    return "completed"
-
-
-def incident_status_from_report_status(status: str) -> str:
-    """Map a report status to the IncidentState lifecycle status."""
-    return status if status in REPORT_ONLY_STATUSES else status or "completed"
-
-
-def status_from_change_execution(status: str) -> str:
-    """Map a ChangeExecution status to the Incident/Report lifecycle status."""
-    if status == "precheck_running":
-        return "change_prechecking"
-    if status == "dry_run_running":
-        return "change_dry_run"
-    if status == "dry_run_completed":
-        return "change_validated"
-    if status == "sandbox_validated":
-        return "change_validated"
-    if status == "waiting_manual_execution":
-        return "waiting_manual_execution"
-    if status == "sandbox_executing":
-        return "change_executing_sandbox"
-    if status == "manual_execution_recorded":
-        return "observing"
-    if status == "closed":
-        return "resolved"
-    if status == "partial_success":
-        return "partial_success"
-    if status == "recovery_pending":
-        return "recovery_pending"
-    if status == "rollback_recommended":
-        return "rollback_recommended"
-    if status == "rolled_back":
-        return "rolled_back"
-    if status == "rollback_failed":
-        return "rollback_failed"
-    if status in {"precheck_failed", "dry_run_failed", "escalated"}:
-        return status
-    return status or "change_pending"
-
-
-def status_after_approved_run(report_status: str) -> str:
-    """Resolve a diagnosis run status after its approval has been granted."""
-    return report_status if report_status in POST_APPROVAL_RUN_STATUSES else "approval_approved"
-
-
-def manual_action_required_from_change_execution(status: str, *, fallback: bool) -> bool:
-    """Return whether a change execution still needs human action."""
-    if not status:
-        return fallback
-    return status not in {
-        "closed",
-        "dry_run_completed",
-        "sandbox_validated",
-        "rolled_back",
-        "dry_run_failed",
-        "precheck_failed",
-    }
-
-
 def is_production_environment(value: Any) -> bool:
     """Return True for canonical production names and qualified production variants."""
-    environment = str(value or "").strip().lower()
+    environment = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
     if environment in PRODUCTION_ENVIRONMENT_NAMES:
         return True
     return bool(

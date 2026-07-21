@@ -49,7 +49,7 @@ class QueryRedisStatusTool(AIOpsTool):
         redis_instance = (
             input_args.get("redis_instance")
             or get_primary_dependency_instance(service_name, "redis")
-            or "redis-cluster-prod"
+            or ""
         )
         time_range = clamp_duration(
             input_args.get("time_range"),

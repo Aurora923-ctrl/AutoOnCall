@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
+
 from app.config import config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +43,41 @@ PROMPT_SOURCE_PATHS = [
     REPO_ROOT / "app" / "services" / "rag_agent_service.py",
     REPO_ROOT / "app" / "services" / "rag_answer_policy.py",
 ]
+MOJIBAKE_MARKERS = frozenset(
+    "锛銆鈥馃鍛璇鐨绱€鏃ュ織妫绱㈠け璐鎴愬姛瀹℃壒"
+)
+
+
+def read_utf8_text_strict(path: str | Path, *, reject_mojibake: bool = True) -> str:
+    """Read an evaluation input as strict UTF-8 and reject likely transcoding damage."""
+    source_path = Path(path)
+    try:
+        text = source_path.read_bytes().decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Evaluation input is not valid UTF-8: {source_path}") from exc
+    if text.startswith("\ufeff"):
+        text = text.removeprefix("\ufeff")
+    if reject_mojibake:
+        suspicious = detect_mojibake_fragments(text)
+        if suspicious:
+            preview = ", ".join(repr(item) for item in suspicious[:3])
+            raise ValueError(
+                f"Evaluation input contains likely mojibake: {source_path}; fragments={preview}"
+            )
+    return text
+
+
+def detect_mojibake_fragments(text: str) -> list[str]:
+    """Return compact lines with a high density of common UTF-8/GBK mojibake glyphs."""
+    suspicious: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        marker_count = sum(character in MOJIBAKE_MARKERS for character in line)
+        if "锟斤拷" in line or "\ufffd" in line or marker_count >= 4:
+            suspicious.append(line[:160])
+    return suspicious
 
 
 def collect_eval_environment(
@@ -164,12 +201,26 @@ def collect_worktree_state(root: Path = REPO_ROOT) -> dict[str, Any]:
         for item in untracked_raw.split(b"\0")
         if item
     ]
-    untracked_files = []
+    untracked_files: list[dict[str, Any]] = []
     for relative in sorted(untracked_paths):
         path = root / relative
         if not path.is_file():
             continue
-        content = path.read_bytes()
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            # Runtime lock files can disappear or be held exclusively while a
+            # concurrent local process updates an ignored index.
+            logger.warning("Skipping unreadable untracked file during fingerprint: {}", path)
+            untracked_files.append(
+                {
+                    "path": Path(relative).as_posix(),
+                    "size": None,
+                    "sha256": "",
+                    "read_error": type(exc).__name__,
+                }
+            )
+            continue
         untracked_files.append(
             {
                 "path": Path(relative).as_posix(),

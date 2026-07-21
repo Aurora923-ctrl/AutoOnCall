@@ -185,7 +185,10 @@ def run_baseline(
     manifest_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
     manifest_md.write_text(render_markdown(payload), "utf-8")
     write_interview_scorecard(payload, manifest_json=manifest_json, run_dir=run_dir)
-    write_latest_pointer(output_root, payload, manifest_json, manifest_md)
+    if payload["summary"]["status"] == "passed" and complete:
+        write_latest_pointer(output_root, payload, manifest_json, manifest_md)
+    else:
+        write_failed_pointer(output_root, payload, manifest_json, manifest_md)
     return payload, run_dir
 
 
@@ -358,6 +361,29 @@ def write_latest_pointer(
         "utf-8",
     )
     shutil.copyfile(manifest_md, output_root / "latest.md")
+
+
+def write_failed_pointer(
+    output_root: Path,
+    payload: dict[str, Any],
+    manifest_json: Path,
+    manifest_md: Path,
+) -> None:
+    """Keep failed or incomplete runs visible without poisoning the latest pass pointer."""
+    pointer = {
+        "run_id": payload["run"]["run_id"],
+        "status": payload["summary"]["status"],
+        "official_baseline": False,
+        "baseline_status": payload["summary"]["baseline_status"],
+        "manifest_json": _relative_or_absolute(manifest_json),
+        "manifest_md": _relative_or_absolute(manifest_md),
+        "generated_at": payload["run"]["ended_at"],
+    }
+    (output_root / "latest_failed.json").write_text(
+        json.dumps(pointer, ensure_ascii=False, indent=2),
+        "utf-8",
+    )
+    shutil.copyfile(manifest_md, output_root / "latest_failed.md")
 
 
 def render_markdown(payload: dict[str, Any]) -> str:

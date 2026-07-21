@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from typing import Any
@@ -69,6 +70,7 @@ class PrometheusMetricsAdapter:
         ) as client:
             values: dict[str, float] = {}
             empty_queries: list[str] = []
+            deadline = asyncio.get_running_loop().time() + self.timeout_seconds
             for name, template in queries.items():
 
                 async def query_range(
@@ -84,17 +86,25 @@ class PrometheusMetricsAdapter:
                         step_seconds=step_seconds,
                     )
 
-                value, has_data = await call_with_resilience(
-                    "prometheus",
-                    "query_range",
-                    query_range,
-                    timeout_seconds=self.timeout_seconds,
-                    max_attempts=2,
-                    retry_delay_seconds=0.1,
-                    is_retryable=_is_retryable_prometheus_error,
-                    failure_threshold=config.dependency_circuit_failure_threshold,
-                    recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
-                )
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError("Prometheus query budget exhausted")
+                try:
+                    value, has_data = await call_with_resilience(
+                        "prometheus",
+                        "query_range",
+                        query_range,
+                        timeout_seconds=remaining,
+                        # QueryMetricsTool owns the retry policy. Keep the adapter to one
+                        # attempt so nested retries cannot multiply dependency traffic.
+                        max_attempts=1,
+                        retry_delay_seconds=0.1,
+                        is_retryable=_is_retryable_prometheus_error,
+                        failure_threshold=config.dependency_circuit_failure_threshold,
+                        recovery_timeout_seconds=config.dependency_circuit_recovery_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise TimeoutError("Prometheus query budget exhausted") from exc
                 values[name] = value
                 if not has_data:
                     empty_queries.append(name)

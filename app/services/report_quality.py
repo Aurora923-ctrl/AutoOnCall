@@ -14,6 +14,8 @@ STATUS_CONFIDENCE_CAPS = {
     "incomplete": 0.55,
     "degraded": 0.74,
     "needs_human": 0.62,
+    "waiting_approval": 0.62,
+    "blocked": 0.62,
 }
 
 

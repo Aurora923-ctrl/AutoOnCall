@@ -1,7 +1,7 @@
 """Verify that interview multi-source RAG assets are actually written to Milvus.
 
 This script intentionally uses deterministic local vectors instead of cloud embeddings.
-It is a storage/provenance proof for PDF/HTML/CSV/XLSX chunks entering Milvus, not a
+It is a storage/provenance proof for PDF/HTML/XLSX chunks entering Milvus, not a
 semantic-quality benchmark. Retrieval quality remains covered by eval_rag_cases.py.
 """
 
@@ -18,6 +18,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -33,7 +34,7 @@ from scripts.eval.eval_environment import collect_eval_environment, provenance_m
 DEFAULT_DOCS_DIR = REPO_ROOT / "docs" / "knowledge-base"
 DEFAULT_OUTPUT_JSON = REPO_ROOT / "logs" / "milvus_multisource_verification.json"
 DEFAULT_OUTPUT_MD = REPO_ROOT / "logs" / "milvus_multisource_verification.md"
-COLLECTION_NAME = "autooncall_interview_multisource"
+COLLECTION_PREFIX = "autooncall_interview_multisource"
 VECTOR_DIM = 256
 
 REQUIRED_FILES = [
@@ -41,7 +42,6 @@ REQUIRED_FILES = [
     "mysql_slow_query_postmortem.pdf",
     "redis_capacity_wiki.html",
     "payment_wiki.html",
-    "tickets.csv",
     "tickets.xlsx",
 ]
 
@@ -67,9 +67,9 @@ PROBES = [
         "expected_source": "payment_wiki.html",
     },
     {
-        "id": "ticket_csv_history",
+        "id": "ticket_xlsx_history",
         "query": "INC-REDIS-009 promotion lookup retry loop maxclients",
-        "expected_source": "tickets.csv",
+        "expected_source": "tickets.xlsx",
     },
     {
         "id": "deploy_xlsx_history",
@@ -144,9 +144,9 @@ def connect_milvus() -> None:
     )
 
 
-def recreate_collection() -> Collection:
-    if utility.has_collection(COLLECTION_NAME):
-        utility.drop_collection(COLLECTION_NAME)
+def recreate_collection(collection_name: str) -> Collection:
+    if utility.has_collection(collection_name):
+        utility.drop_collection(collection_name)
     schema = CollectionSchema(
         fields=[
             FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=80, is_primary=True),
@@ -157,7 +157,7 @@ def recreate_collection() -> Collection:
         description="Interview multi-source RAG Milvus verification collection",
         enable_dynamic_field=False,
     )
-    collection = Collection(COLLECTION_NAME, schema=schema, num_shards=1)
+    collection = Collection(collection_name, schema=schema, num_shards=1)
     collection.create_index(
         field_name="vector",
         index_params={"metric_type": "L2", "index_type": "FLAT", "params": {}},
@@ -211,7 +211,12 @@ def run_probes(collection: Collection) -> list[dict[str, Any]]:
     return results
 
 
-def summarize(records: list[dict[str, Any]], probes: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(
+    records: list[dict[str, Any]],
+    probes: list[dict[str, Any]],
+    *,
+    collection_name: str = "",
+) -> dict[str, Any]:
     by_type: dict[str, int] = defaultdict(int)
     by_source: dict[str, int] = defaultdict(int)
     for record in records:
@@ -222,7 +227,7 @@ def summarize(records: list[dict[str, Any]], probes: list[dict[str, Any]]) -> di
     return {
         "run": {
             "generated_at": datetime.now(UTC).isoformat(),
-            "collection": COLLECTION_NAME,
+            "collection": collection_name,
             "vector_dim": VECTOR_DIM,
             "scope": (
                 "Milvus storage/provenance verification for multi-source RAG assets; "
@@ -306,14 +311,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     records = load_documents(Path(args.docs_dir))
+    collection_name = f"{COLLECTION_PREFIX}_{uuid4().hex[:12]}"
     connect_milvus()
+    payload: dict[str, Any]
     try:
-        collection = recreate_collection()
+        collection = recreate_collection(collection_name)
         insert_records(collection, records)
         probes = run_probes(collection)
-        payload = summarize(records, probes)
+        payload = summarize(records, probes, collection_name=collection_name)
     finally:
-        connections.disconnect("default")
+        try:
+            if utility.has_collection(collection_name):
+                utility.drop_collection(collection_name)
+        finally:
+            connections.disconnect("default")
     write_outputs(payload, Path(args.summary_json), Path(args.summary_md))
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))

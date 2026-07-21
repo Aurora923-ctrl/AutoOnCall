@@ -27,7 +27,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.config import config
 from app.services.rag_agent_service import RagAgentService
-from app.services.rag_answer_policy import ensure_citation_block
+from app.services.rag_answer_policy import (
+    citation_pair_map,
+    ensure_citation_block,
+    extract_citation_pairs,
+)
 from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
@@ -528,10 +532,19 @@ async def query_product_behavior(
 ) -> dict[str, Any]:
     """Run the same public product method while keeping offline retrieval deterministic."""
     if answer_source == "runtime":
-        return await agent.query_with_retrieval(
-            query,
-            session_id=f"ragas-{case.get('id', 'case')}",
-        )
+        try:
+            return await agent.query_with_retrieval(
+                query,
+                session_id=f"ragas-{case.get('id', 'case')}",
+                include_evaluation_context=True,
+            )
+        except TypeError as exc:
+            if "include_evaluation_context" not in str(exc):
+                raise
+            return await agent.query_with_retrieval(
+                query,
+                session_id=f"ragas-{case.get('id', 'case')}",
+            )
 
     from app.services import rag_agent_service as rag_agent_module
 
@@ -655,6 +668,7 @@ def sample_from_chat_payload(
     retrieved_contexts = contexts_for_citations(
         retrieval_payload,
         normalized_citations,
+        evaluation_contexts=chat_payload.get("_evaluation_contexts"),
     )
     invalid_reasons = validate_ragas_input(
         case,
@@ -2731,10 +2745,22 @@ def contexts_from_retrieval(payload: dict[str, Any]) -> list[str]:
 def contexts_for_citations(
     retrieval_payload: dict[str, Any],
     citations: list[dict[str, Any]],
+    *,
+    evaluation_contexts: Any = None,
 ) -> list[str]:
     """Return semantic Judge contexts in the same order as answer citations."""
+    if isinstance(evaluation_contexts, list):
+        full_by_chunk = {
+            str(item.get("chunk_id") or "").strip(): str(item.get("content") or "").strip()
+            for item in evaluation_contexts
+            if isinstance(item, dict)
+            and str(item.get("chunk_id") or "").strip()
+            and str(item.get("content") or "").strip()
+        }
+    else:
+        full_by_chunk = {}
     if not citations:
-        return contexts_from_retrieval(retrieval_payload)
+        return list(full_by_chunk.values()) or contexts_from_retrieval(retrieval_payload)
 
     results = [
         item
@@ -2755,7 +2781,9 @@ def contexts_for_citations(
         item = result_by_chunk.get(chunk_id)
         if item is None:
             continue
-        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        content = full_by_chunk.get(chunk_id) or str(
+            item.get("content") or item.get("content_preview") or ""
+        ).strip()
         if content:
             contexts.append(content)
             seen_chunks.add(chunk_id)
@@ -2915,11 +2943,14 @@ def citation_quality_scores(sample: RagasCaseSample) -> dict[str, float]:
         for item in sample.citations
         if str(item.get("source_file") or "").strip() and str(item.get("chunk_id") or "").strip()
     ]
-    existence = 1.0 if valid and has_answer_citation(sample) else 0.0
+    cited_pairs = answer_citation_pairs(sample.answer, valid)
+    existence = 1.0 if valid and cited_pairs else 0.0
     retrieved_ids = set(sample.retrieved_context_ids)
     expected_ids = set(sample.reference_context_ids)
+    preserve_chunks = any("#" in item for item in retrieved_ids | expected_ids)
     cited_ids = {
-        normalize_context_id(item.get("source_file") or item.get("chunk_id")) for item in valid
+        citation_context_id(source_file, chunk_id, preserve_chunks=preserve_chunks)
+        for source_file, chunk_id in cited_pairs
     }
     cited_ids.discard("")
     support = ratio(len(cited_ids & retrieved_ids), len(cited_ids)) if cited_ids else 0.0
@@ -2930,6 +2961,42 @@ def citation_quality_scores(sample: RagasCaseSample) -> dict[str, float]:
         "citation_support_score": support,
         "citation_correctness_score": correctness,
     }
+
+
+def citation_context_id(
+    source_file: Any,
+    chunk_id: Any,
+    *,
+    preserve_chunks: bool,
+) -> str:
+    """Return the citation identity at the same granularity as the evaluated case."""
+    chunk_text = str(chunk_id or "").strip()
+    if preserve_chunks and chunk_text:
+        return chunk_text
+    return normalize_context_id(source_file or chunk_text)
+
+
+def answer_citation_pairs(
+    answer: str,
+    citations: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """Resolve current numbered citations while retaining the legacy text contract."""
+    pairs = extract_citation_pairs(
+        answer,
+        citation_map=citation_pair_map(citations),
+    )
+    if pairs:
+        return pairs
+    if re.search(r"\[\s*(?:证据\s*)?\d+\s*\]", str(answer or "")):
+        return []
+    return [
+        (source_file, chunk_id)
+        for item in citations
+        if (source_file := str(item.get("source_file") or "").strip())
+        and (chunk_id := str(item.get("chunk_id") or "").strip())
+        and source_file in answer
+        and chunk_id in answer
+    ]
 
 
 def deterministic_factual_error(sample: RagasCaseSample) -> bool:
@@ -3133,13 +3200,13 @@ def any_token_overlap(requirement: str, answer: str) -> bool:
 
 
 def has_answer_citation(sample: RagasCaseSample) -> bool:
-    """Check whether the generated answer contains a source_file + chunk_id citation."""
-    for item in sample.citations:
-        source_file = str(item.get("source_file") or "").strip()
-        chunk_id = str(item.get("chunk_id") or "").strip()
-        if source_file and chunk_id and source_file in sample.answer and chunk_id in sample.answer:
-            return True
-    return False
+    """Check whether the answer resolves to a server-issued source/chunk citation."""
+    valid = [
+        item
+        for item in sample.citations
+        if str(item.get("source_file") or "").strip() and str(item.get("chunk_id") or "").strip()
+    ]
+    return bool(valid and answer_citation_pairs(sample.answer, valid))
 
 
 def boundary_language_hit(answer: str) -> bool:

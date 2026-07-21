@@ -47,6 +47,71 @@ from app.utils.public_errors import (
     public_exception_message,
 )
 
+_BACKGROUND_STREAM_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _track_background_stream_task(task: asyncio.Task[Any]) -> None:
+    """Keep detached diagnosis pumps observable until they finish."""
+    _BACKGROUND_STREAM_TASKS.add(task)
+
+    def _done(completed: asyncio.Task[Any]) -> None:
+        _BACKGROUND_STREAM_TASKS.discard(completed)
+        if completed.cancelled():
+            return
+        try:
+            completed.result()
+        except Exception:
+            logger.exception("Detached AIOps stream task failed")
+
+    task.add_done_callback(_done)
+
+
+async def _pump_stream(
+    source: Any,
+    queue: asyncio.Queue[Any],
+    detached: asyncio.Event,
+) -> None:
+    """Run diagnosis after an SSE client disconnects, without retaining its queue."""
+    try:
+        async for event in source:
+            if not detached.is_set():
+                await queue.put(("event", event))
+    except asyncio.CancelledError as exc:
+        if not detached.is_set():
+            await asyncio.shield(queue.put(("error", exc)))
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise
+        return
+    except BaseException as exc:
+        if not detached.is_set():
+            await queue.put(("error", exc))
+        return
+    if not detached.is_set():
+        await queue.put(("done", None))
+
+
+async def _stream_with_disconnect_survival(source: Any) -> AsyncIterator[Any]:
+    """Bridge a durable diagnosis generator to SSE while surviving client disconnects."""
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    detached = asyncio.Event()
+    task = asyncio.create_task(_pump_stream(source, queue, detached))
+    _track_background_stream_task(task)
+    try:
+        while True:
+            kind, value = await queue.get()
+            if kind == "done":
+                return
+            if kind == "error":
+                raise value
+            yield value
+    except asyncio.CancelledError:
+        detached.set()
+        raise
+    finally:
+        if not task.done():
+            detached.set()
+
 
 def build_aiops_runs_payload(
     *,
@@ -57,14 +122,17 @@ def build_aiops_runs_payload(
     status: str | None,
     service_name: str | None,
     limit: int,
+    session_id_prefix: str = "",
 ) -> dict:
     """Return recent durable diagnosis run summaries."""
-    filtered = bool(status or service_name)
+    filtered = bool(status or service_name or session_id_prefix)
     fetch_limit = 100 if filtered else limit
-    snapshots = aiops_service.list_session_snapshots(
+    fetched_snapshots = aiops_service.list_session_snapshots(
         incident_id=incident_id,
         limit=fetch_limit,
     )
+    fetched_count = len(fetched_snapshots)
+    snapshots = _filter_session_owner(fetched_snapshots, session_id_prefix)
     items = _build_filtered_aiops_run_summaries(
         snapshots,
         approval_service=approval_service,
@@ -72,14 +140,16 @@ def build_aiops_runs_payload(
         status=status,
         service_name=service_name,
     )
-    offset = len(snapshots)
-    while filtered and len(items) < limit and len(snapshots) == fetch_limit:
-        snapshots = aiops_service.list_session_snapshots(
+    offset = fetched_count
+    while filtered and len(items) < limit and fetched_count == fetch_limit:
+        fetched_snapshots = aiops_service.list_session_snapshots(
             incident_id=incident_id,
             limit=fetch_limit,
             offset=offset,
         )
-        offset += len(snapshots)
+        fetched_count = len(fetched_snapshots)
+        offset += fetched_count
+        snapshots = _filter_session_owner(fetched_snapshots, session_id_prefix)
         items.extend(
             _build_filtered_aiops_run_summaries(
                 snapshots,
@@ -89,6 +159,8 @@ def build_aiops_runs_payload(
                 service_name=service_name,
             )
         )
+        if fetched_count < fetch_limit:
+            break
     return {
         "count": len(items[:limit]),
         "items": items[:limit],
@@ -98,6 +170,16 @@ def build_aiops_runs_payload(
             "service_name": service_name or "",
         },
     }
+
+
+def _filter_session_owner(snapshots: list[Any], session_id_prefix: str) -> list[Any]:
+    if not session_id_prefix:
+        return snapshots
+    return [
+        snapshot
+        for snapshot in snapshots
+        if str(getattr(snapshot, "session_id", "")).startswith(session_id_prefix)
+    ]
 
 
 def _build_filtered_aiops_run_summaries(
@@ -172,10 +254,11 @@ async def diagnosis_event_stream(
     safe_session_id = sanitize_log_value(session_id)
     terminal_emitted = False
     try:
-        async for event in aiops_service.diagnose(
+        source = aiops_service.diagnose(
             session_id=session_id,
             incident=incident,
-        ):
+        )
+        async for event in _stream_with_disconnect_survival(source):
             yield sse_message(event)
 
             if is_terminal_event(event):
@@ -303,11 +386,12 @@ async def resume_diagnosis_event_stream(
     safe_session_id = sanitize_log_value(session_id)
     terminal_emitted = False
     try:
-        async for event in aiops_service.resume_after_approval(
+        source = aiops_service.resume_after_approval(
             session_id=session_id,
             incident_id=incident_id,
             approval=approval,
-        ):
+        )
+        async for event in _stream_with_disconnect_survival(source):
             yield sse_message(event)
             if is_terminal_event(event):
                 terminal_emitted = True
@@ -379,19 +463,22 @@ async def safe_change_event_stream(
     approval_id: str,
     mode: str,
     operator: str,
+    operator_principal_id: str,
     observe_window_seconds: int,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield SSE messages for safe change workflow resume."""
     terminal_emitted = False
     try:
-        async for event in change_service.start_after_approval(
+        source = change_service.start_after_approval(
             incident_id=incident_id,
             change_plan_id=change_plan_id,
             approval_id=approval_id,
             mode=mode,
             operator=operator,
+            operator_principal_id=operator_principal_id,
             observe_window_seconds=observe_window_seconds,
-        ):
+        )
+        async for event in _stream_with_disconnect_survival(source):
             yield sse_message(event)
             if is_terminal_event(event):
                 terminal_emitted = True
@@ -482,12 +569,14 @@ def build_manual_change_result_payload(
     change_service: Any,
     change_execution_id: str,
     request: Any,
+    operator_principal_id: str = "",
 ) -> dict:
     """Record a manual execution result for a waiting safe change workflow."""
     try:
         execution = change_service.record_manual_result(
             change_execution_id=change_execution_id,
             request=request,
+            operator_principal_id=operator_principal_id,
         )
     except ChangeExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

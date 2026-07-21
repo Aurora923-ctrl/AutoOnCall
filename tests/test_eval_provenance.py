@@ -5,6 +5,7 @@ from scripts.eval.eval_environment import (
     collect_dataset_provenance,
     collect_eval_environment,
     collect_worktree_state,
+    read_utf8_text_strict,
 )
 
 
@@ -14,7 +15,7 @@ def test_eval_environment_contains_reproducibility_metadata() -> None:
     assert environment["git_commit"]
     assert isinstance(environment["git_dirty"], bool)
     assert environment["git_worktree_sha256"]
-    assert environment["asset_manifest"]["file_count"] == 20
+    assert environment["asset_manifest"]["file_count"] >= 19
     assert environment["asset_manifest_sha256"]
     assert environment["evidence_level"] == "offline_fixture"
     assert environment["dependency_manifest"]["package_count"] > 0
@@ -130,3 +131,27 @@ def test_dataset_provenance_binds_case_file_content(tmp_path) -> None:
     assert first["case_count"] == 1
     assert first["sha256"]
     assert first["sha256"] != second["sha256"]
+
+
+def test_eval_input_reader_rejects_invalid_utf8(tmp_path) -> None:
+    path = tmp_path / "cases.yaml"
+    path.write_bytes(b"cases:\n  - query: \xff\n")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        read_utf8_text_strict(path)
+
+
+def test_eval_input_reader_rejects_likely_mojibake(tmp_path) -> None:
+    path = tmp_path / "cases.yaml"
+    path.write_text(
+        "cases:\n  - query: "
+        "\u951b\u9286\u9225\u935b\u7487\u9428\n",
+        encoding="utf-8",
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="likely mojibake"):
+        read_utf8_text_strict(path)

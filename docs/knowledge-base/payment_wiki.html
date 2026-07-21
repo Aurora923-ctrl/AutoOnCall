@@ -2,20 +2,58 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Payment Runbook - MySQL Slow Query</title>
+  <title>Payment Runbook - MySQL Query and Pool Waiting</title>
 </head>
 <body>
-  <h1>Payment Runbook</h1>
-  <h2>MySQL slow query</h2>
-  <p>When payment-service has checkout latency, first confirm the slow query digest,
-  active_connections, pool_waiting, and recent deploy history.</p>
-  <p>The golden case facts are slow_queries=18, active_connections=188/200, and
-  pool_waiting=6. They indicate slow SQL held connections and amplified pool wait.</p>
-  <p>After locating the SQL digest, run EXPLAIN in a read-only path. Adding an index,
-  rewriting SQL, changing connection-pool settings, or restarting services requires
-  human approval and a change window.</p>
-  <h2>Deploy correlation</h2>
-  <p>payment-api-2026.07.06-rc3 changed checkout query loading and must be checked as
-  historical context, not as proof without MySQL evidence.</p>
+  <h1>Payment MySQL Runbook</h1>
+  <h2>Scope and ownership</h2>
+  <p>This runbook applies when checkout latency, MySQL slow-query volume, active connection
+  occupancy, or application pool_waiting rises. Owner: Payments Reliability. DBA escalation:
+  Database Platform. Last reviewed: 2026-07-21. Related tickets: INC-MYSQL-014,
+  INC-MYSQL-021, and CR-MYSQL-2026-044.</p>
+
+  <h2>Evidence and metric queries</h2>
+  <p>Align slow_queries, active_connections, pool_waiting, connection hold time, HTTP latency,
+  timeout rate, and deploy history to the same incident window. A recent release is a
+  hypothesis until a SQL digest or plan change connects it to the symptoms.</p>
+  <pre>rate(mysql_global_status_slow_queries[5m])
+mysql_global_status_threads_connected / mysql_global_variables_max_connections
+sum by (service) (application_db_pool_waiting)
+histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))</pre>
+
+  <h2>Log and digest patterns</h2>
+  <p>Search for checkout timeout, pool acquire timeout, lock wait timeout, deadlock,
+  rows examined, temporary table, filesort, and the normalized SQL digest. Group by release,
+  endpoint, tenant class, and database user.</p>
+
+  <h2>Read-only diagnosis</h2>
+  <p>Capture the normalized digest and run EXPLAIN through an approved read-only path.
+  Compare estimated rows, chosen indexes, join order, temporary-table use, and lock behavior
+  with the previous known-good plan. Do not run an unbounded production query to reproduce
+  the issue.</p>
+
+  <h2>Decision tree</h2>
+  <p>If pool_waiting rises while connection hold time rises, prioritize slow SQL or lock
+  contention. If connections rise without longer hold time, investigate a leak or pool
+  sizing. If lock waits dominate, use the database lock-wait runbook. If only one release
+  introduces the digest, prepare a feature rollback or canary disable plan.</p>
+
+  <h2>Change and approval boundary</h2>
+  <p>Adding an index, rewriting SQL, changing pool size, terminating sessions, restarting
+  services, or disabling a production feature requires a reviewed change plan and human
+  approval. The plan must include expected rows affected, lock risk, replica impact,
+  rollback steps, and observation thresholds.</p>
+
+  <h2>Rollback conditions</h2>
+  <p>Roll back a canary if payment error rate exceeds 2%, lock wait rises, replica lag exceeds
+  10 seconds, active connections continue growing, or the target SQL digest becomes slower.
+  Prefer application feature rollback before emergency database mutation when it removes the
+  triggering query safely.</p>
+
+  <h2>Recovery criteria and history</h2>
+  <p>Recovery requires pool_waiting=0, active connections below 70% of capacity, payment P95
+  below 1 second, stable replication, and no duplicate-charge signal for 30 minutes. The
+  sanitized incident facts were slow_queries=18, active_connections=188/200, pool_waiting=6,
+  and release payment-api-2026.07.06-rc3.</p>
 </body>
 </html>

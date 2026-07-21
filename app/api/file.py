@@ -9,7 +9,7 @@ from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 import aiofiles  # type: ignore[import-untyped]
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from filelock import AsyncFileLock
 from loguru import logger
@@ -137,7 +137,9 @@ async def upload_file(file: UploadFile = File(...)):
     summary="批量索引目录（运维入口）",
     description="面向 make upload 等批处理/运维流程；前端工作台主入口仍使用 /upload。",
 )
-async def index_directory(directory_path: str | None = None):
+async def index_directory(
+    directory_path: str | None = Query(default=None, min_length=1, max_length=1024),
+):
     """
     批量索引指定目录下的所有文件。
 
@@ -179,17 +181,16 @@ async def index_directory(directory_path: str | None = None):
     dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def knowledge_indexing_reports(
-    doc_type: str | None = None,
-    limit: int = 100,
+    doc_type: str | None = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     """Return persisted loader cleaning quality reports and doc_type aggregates."""
-    safe_limit = max(1, min(int(limit), 500))
     return {
         "code": 200,
         "message": "success",
         "data": indexing_quality_service.build_report(
             doc_type=doc_type,
-            limit=safe_limit,
+            limit=limit,
         ),
     }
 
@@ -232,13 +233,20 @@ async def _save_and_index_upload(
     """Save and index one file while the caller holds its per-path upload lock."""
     _cleanup_stale_upload_temps(file_path)
     overwritten = file_path.exists()
+    backup_path = file_path.with_name(f".{file_path.name}.{uuid4().hex}.backup")
     if overwritten:
         logger.info(f"文件已存在，将覆盖: {file_path}")
-    uploaded_size = await _save_upload_file(
-        file,
-        file_path,
-        file_extension=file_extension,
-    )
+        await asyncio.to_thread(file_path.replace, backup_path)
+    try:
+        uploaded_size = await _save_upload_file(
+            file,
+            file_path,
+            file_extension=file_extension,
+        )
+    except BaseException:
+        if overwritten:
+            await _restore_upload_backup(file_path, backup_path)
+        raise
 
     logger.info(f"文件上传成功: {file_path}")
 
@@ -268,6 +276,10 @@ async def _save_and_index_upload(
             logger.warning(f"上传文件索引未完成: {file_path}")
     except asyncio.CancelledError:
         logger.warning(f"上传请求已取消，索引任务完成后释放同名文件锁: {file_path}")
+        if overwritten:
+            await _restore_upload_backup(file_path, backup_path)
+        else:
+            await asyncio.to_thread(file_path.unlink, missing_ok=True)
         raise
     except Exception:
         logger.exception(f"向量索引创建失败: {file_path}")
@@ -276,6 +288,10 @@ async def _save_and_index_upload(
         )
 
     indexing_ready = indexing_status.get("status") == "success"
+    if indexing_ready:
+        await asyncio.to_thread(backup_path.unlink, missing_ok=True)
+    elif overwritten:
+        await _restore_upload_backup(file_path, backup_path)
     response_status = 200 if indexing_ready else 207
     response_message = "success" if indexing_ready else "partial_success"
 
@@ -537,3 +553,12 @@ def _cleanup_stale_upload_temps(file_path: Path) -> None:
             temp_path.unlink(missing_ok=True)
         except OSError:
             logger.warning(f"清理遗留临时上传文件失败: {temp_path}")
+
+
+async def _restore_upload_backup(file_path: Path, backup_path: Path) -> None:
+    """Restore the previous upload version after a failed replacement transaction."""
+    if backup_path.exists():
+        await asyncio.to_thread(file_path.unlink, missing_ok=True)
+        await asyncio.to_thread(backup_path.replace, file_path)
+    else:
+        await asyncio.to_thread(file_path.unlink, missing_ok=True)

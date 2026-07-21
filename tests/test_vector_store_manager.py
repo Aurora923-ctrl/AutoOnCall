@@ -226,6 +226,31 @@ def test_vector_id_changes_when_chunk_version_changes() -> None:
     ) != vector_store_module.build_vector_document_id(new)
 
 
+def test_vector_id_does_not_drift_when_only_document_hash_changes() -> None:
+    old = Document(
+        page_content="same content",
+        metadata={
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "old-document",
+            "_chunk_hash": "same-chunk",
+        },
+    )
+    new = Document(
+        page_content="same content",
+        metadata={
+            "_source_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "new-document",
+            "_chunk_hash": "same-chunk",
+        },
+    )
+
+    assert vector_store_module.build_vector_document_id(
+        old
+    ) == vector_store_module.build_vector_document_id(new)
+
+
 def test_add_documents_fails_when_flush_cannot_confirm_visibility(monkeypatch) -> None:
     manager = vector_store_module.VectorStoreManager()
     captured: dict[str, object] = {}

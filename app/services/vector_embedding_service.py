@@ -109,11 +109,13 @@ class DashScopeEmbeddings(Embeddings):
                     dimensions=self.dimensions,
                     encoding_format="float",
                 )
-                embeddings = [item.embedding for item in response.data]
-                if len(embeddings) != len(batch):
+                response_items = list(response.data)
+                if len(response_items) != len(batch):
                     raise RuntimeError(
-                        f"Embedding 返回数量不一致: expected={len(batch)}, actual={len(embeddings)}"
+                        f"Embedding 返回数量不一致: expected={len(batch)}, "
+                        f"actual={len(response_items)}"
                     )
+                embeddings = self._ordered_response_embeddings(response_items, expected=len(batch))
                 return [
                     self._validate_embedding(embedding, label=f"document batch {batch_index}")
                     for embedding in embeddings
@@ -129,6 +131,26 @@ class DashScopeEmbeddings(Embeddings):
                 )
                 time.sleep(sleep_seconds)
         raise RuntimeError(f"文档嵌入 batch {batch_index} 失败: {last_error}") from last_error
+
+    @staticmethod
+    def _ordered_response_embeddings(response_items: list[object], *, expected: int) -> list[object]:
+        """Validate provider indexes and restore the input order."""
+        indexes = [getattr(item, "index", None) for item in response_items]
+        if all(index is None for index in indexes):
+            return [getattr(item, "embedding", None) for item in response_items]
+        if any(isinstance(index, bool) or not isinstance(index, int) for index in indexes):
+            raise RuntimeError("Embedding 返回 index 格式无效")
+        normalized_indexes = [int(index) for index in indexes]
+        if sorted(normalized_indexes) != list(range(expected)):
+            raise RuntimeError(
+                "Embedding 返回 index 不完整或重复: "
+                f"expected={list(range(expected))}, actual={normalized_indexes}"
+            )
+        ordered = sorted(
+            zip(normalized_indexes, response_items, strict=True),
+            key=lambda pair: pair[0],
+        )
+        return [getattr(item, "embedding", None) for _index, item in ordered]
 
     def embed_query(self, text: str) -> list[float]:
         """

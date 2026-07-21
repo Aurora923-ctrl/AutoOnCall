@@ -6,6 +6,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any, cast
 from uuid import uuid4
@@ -21,6 +22,7 @@ from app.agent.aiops import (
     planner,
     replanner,
 )
+from app.config import config
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.approval import ApprovalRequest
 from app.models.incident import Incident
@@ -38,7 +40,9 @@ from app.services.aiops_progress import (
     progress_event_payload,
     state_with_progress,
 )
+from app.services.aiops_resume import AIOpsResume
 from app.services.aiops_resume_reports import _build_persisted_resume_report
+from app.services.aiops_run import AIOpsRun
 from app.services.aiops_service_helpers import (
     _attach_trace_event,
     _build_fallback_final_response,
@@ -128,6 +132,8 @@ class AIOpsService:
         self._active_run_lock = Lock()
         self._active_diagnosis_sessions: set[str] = set()
         self._active_resume_approvals: set[str] = set()
+        self._run_use_case = AIOpsRun(self)
+        self._resume_use_case = AIOpsResume(self)
 
         self.graph = self._build_graph()
         logger.info("Plan-Execute-Replan Service 初始化完成")
@@ -174,7 +180,16 @@ class AIOpsService:
         logger.info("工作流图构建完成")
         return compiled_graph
 
-    async def execute(
+    def execute(
+        self,
+        user_input: str,
+        session_id: str | None = None,
+        incident: Incident | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Delegate a new diagnosis to the dedicated run use case."""
+        return self._run_use_case.execute(user_input, session_id, incident)
+
+    async def _execute_diagnosis_run(
         self,
         user_input: str,
         session_id: str | None = None,
@@ -672,6 +687,14 @@ class AIOpsService:
             for snapshot in snapshots:
                 if snapshot.status not in {"running", "resume_running"}:
                     continue
+                updated_at = snapshot.updated_at
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=UTC)
+                age_seconds = (datetime.now(UTC) - updated_at).total_seconds()
+                if age_seconds < config.aiops_reconciliation_stale_seconds:
+                    # Another worker may still own this run.  Startup reconciliation
+                    # must not turn a recently heartbeating run into a false failure.
+                    continue
                 state = snapshot.to_state()
                 state["errors"] = [
                     *list(state.get("errors") or []),
@@ -782,7 +805,21 @@ class AIOpsService:
             )
         return f"resume-{approval.approval_id}"
 
-    async def resume_after_approval(
+    def resume_after_approval(
+        self,
+        *,
+        session_id: str,
+        incident_id: str,
+        approval: ApprovalRequest,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Delegate approval recovery to the dedicated resume use case."""
+        return self._resume_use_case.execute(
+            session_id=session_id,
+            incident_id=incident_id,
+            approval=approval,
+        )
+
+    async def _execute_approval_resume(
         self,
         *,
         session_id: str,

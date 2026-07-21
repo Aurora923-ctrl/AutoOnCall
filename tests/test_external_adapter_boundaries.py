@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 from app.integrations.base import (
+    ExternalAdapterError,
     ExternalAdapterNotFoundError,
     ExternalAdapterResponseError,
     classify_adapter_error,
@@ -17,7 +19,7 @@ from app.integrations.kubernetes import KubernetesStatusAdapter
 from app.integrations.log_gateway import HTTPLogGatewayAdapter
 from app.integrations.loki import LokiLogAdapter
 from app.integrations.prometheus import PrometheusMetricsAdapter
-from app.integrations.redis_info import RedisInfoAdapter
+from app.integrations.redis_info import RedisInfoAdapter, _redis_operation_deadline
 from app.integrations.service_catalog import CMDBAdapter, DeployHistoryAdapter
 from app.integrations.ticketing import TicketingAdapter
 
@@ -108,6 +110,33 @@ async def test_prometheus_treats_non_finite_values_as_missing() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_prometheus_uses_one_total_budget_across_all_queries() -> None:
+    calls = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.015)
+        return _response(
+            {
+                "status": "success",
+                "data": {"resultType": "vector", "result": []},
+            }
+        )
+
+    adapter = PrometheusMetricsAdapter(
+        base_url="http://prometheus",
+        timeout_seconds=0.025,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(TimeoutError, match="budget"):
+        await adapter.query_service_metrics("order-service")
+
+    assert calls < 5
+
+
 def test_redis_stream_resp_parser_preserves_nested_entries() -> None:
     payload = [
         [
@@ -168,6 +197,63 @@ def test_redis_unknown_named_instance_does_not_fall_back_to_default() -> None:
 
     with pytest.raises(ExternalAdapterNotFoundError, match="redis-cluster-typo"):
         adapter._resolve_target("redis-cluster-typo")
+
+
+@pytest.mark.asyncio
+async def test_redis_resp_rejects_oversized_bulk_before_reading_body() -> None:
+    adapter = RedisInfoAdapter()
+    reader = asyncio.StreamReader()
+    reader.feed_data(f"${adapter.MAX_RESP_BULK_BYTES + 1}\r\n".encode())
+    reader.feed_eof()
+
+    with pytest.raises(ExternalAdapterError, match="bulk response exceeds"):
+        await adapter._read_resp(
+            reader,
+            depth=0,
+            remaining_bytes=[adapter.MAX_RESP_TOTAL_BYTES],
+        )
+
+
+@pytest.mark.asyncio
+async def test_redis_resp_rejects_excessive_nesting() -> None:
+    adapter = RedisInfoAdapter()
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"*1\r\n" * (adapter.MAX_RESP_DEPTH + 2) + b"+OK\r\n")
+    reader.feed_eof()
+
+    with pytest.raises(ExternalAdapterError, match="nesting limit"):
+        await adapter._read_resp(
+            reader,
+            depth=0,
+            remaining_bytes=[adapter.MAX_RESP_TOTAL_BYTES],
+        )
+
+
+@pytest.mark.asyncio
+async def test_redis_commands_share_one_operation_deadline() -> None:
+    adapter = RedisInfoAdapter()
+    adapter.timeout_seconds = 0.1
+    reader = asyncio.StreamReader()
+
+    async def delayed_drain() -> None:
+        await asyncio.sleep(0.06)
+
+    class Writer:
+        def write(self, _: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            await delayed_drain()
+
+    reader.feed_data(b"+OK\r\n+OK\r\n")
+    reader.feed_eof()
+    token = _redis_operation_deadline.set(asyncio.get_running_loop().time() + 0.1)
+    try:
+        assert await adapter._send_command(reader, Writer(), "PING") == "OK"
+        with pytest.raises(TimeoutError):
+            await adapter._send_command(reader, Writer(), "PING")
+    finally:
+        _redis_operation_deadline.reset(token)
 
 
 def test_redis_named_instance_requires_explicit_instance_map() -> None:
@@ -264,6 +350,49 @@ async def test_kubernetes_event_partial_failure_is_classified_and_redacted(
     ]
     assert "10.0.0.8" not in str(payload)
     assert "secret-token" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_rejects_namespace_path_escape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.integrations.kubernetes.config.kubernetes_api_server",
+        "https://kubernetes",
+    )
+    monkeypatch.setattr(
+        "app.integrations.kubernetes.config.kubernetes_namespace",
+        "../kube-system",
+    )
+    adapter = KubernetesStatusAdapter(
+        transport=httpx.MockTransport(lambda _request: _response({"items": []}))
+    )
+
+    with pytest.raises(ExternalAdapterError, match="namespace"):
+        await adapter.query_service_status("order-service")
+
+
+@pytest.mark.asyncio
+async def test_business_adapter_percent_encodes_service_path_segment() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.raw_path.decode())
+        return _response(
+            {
+                "service": {
+                    "owner": "team",
+                    "dependencies": [],
+                }
+            }
+        )
+
+    await CMDBAdapter(
+        url="http://cmdb",
+        transport=httpx.MockTransport(handler),
+    ).query_service("../admin")
+
+    assert paths == ["/services/..%2Fadmin.json"]
 
 
 @pytest.mark.asyncio

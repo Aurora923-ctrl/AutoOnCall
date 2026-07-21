@@ -43,7 +43,11 @@ def build_incident_overview(
     sorted_events = sorted(selected_events, key=lambda item: (item.created_at, item.event_id))
     sorted_approvals = sorted(
         selected_approvals,
-        key=lambda item: (item.created_at, item.approval_id),
+        key=lambda item: (
+            item.decided_at or item.created_at,
+            item.created_at,
+            item.approval_id,
+        ),
     )
     latest_event = sorted_events[-1] if sorted_events else None
     latest_approval = sorted_approvals[-1] if sorted_approvals else None

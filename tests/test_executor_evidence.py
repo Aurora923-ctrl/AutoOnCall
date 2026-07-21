@@ -647,6 +647,76 @@ async def test_executor_fanout_is_bounded_to_four_read_only_evidence_steps(
 
 
 @pytest.mark.asyncio
+async def test_executor_fanout_respects_remaining_global_execution_budget(monkeypatch) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "get_mcp_client_with_retry",
+        fake_get_mcp_client_with_retry,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "create_default_tool_registry",
+        lambda _: create_fanout_registry(),
+    )
+    steps = [
+        PlanStep(
+            step_id=f"s{index}",
+            tool_name=tool_name,
+            purpose=f"执行 {tool_name}",
+            input_args={"service_name": "order-service"},
+        )
+        for index, tool_name in enumerate(
+            ["query_metrics", "query_logs", "query_redis_status"],
+            1,
+        )
+    ]
+    state = state_with_steps(steps)
+    state["executed_steps"] = [
+        PlanStep(
+            step_id=f"done-{index}",
+            tool_name="query_metrics",
+            status="success",
+        ).model_dump(mode="json")
+        for index in range(executor_module.MAX_AGENT_EXECUTED_STEPS - 1)
+    ]
+
+    update = await executor_module.executor(state)
+
+    assert [record["tool_name"] for record in update["tool_call_records"]] == ["query_metrics"]
+    assert [step["tool_name"] for step in update["current_plan"]] == [
+        "query_logs",
+        "query_redis_status",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_propagates_cancellation_without_committing_failed_step(monkeypatch) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "get_mcp_client_with_retry",
+        fake_get_mcp_client_with_retry,
+    )
+
+    async def cancelled_registry_step(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        executor_module,
+        "_try_execute_registered_step",
+        cancelled_registry_step,
+    )
+    step = PlanStep(
+        step_id="s-cancelled",
+        tool_name="query_metrics",
+        purpose="cancel this step",
+        input_args={"service_name": "order-service"},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor_module.executor(state_with_step(step))
+
+
+@pytest.mark.asyncio
 async def test_executor_registry_step_records_unconfigured_adapter_without_mock(
     monkeypatch,
 ) -> None:
@@ -890,27 +960,11 @@ async def test_executor_unregistered_tool_fallback_is_failed_evidence(monkeypatc
 
     update = await executor_module.executor(state)
 
-    assert update["past_steps"][0][1] == "legacy fallback observation"
-    assert update["executed_steps"][0]["status"] == "failed"
-    assert update["errors"]
-
-    evidence = update["gathered_evidence"][0]
-    assert evidence["source_tool"] == "query_unregistered_system"
-    assert evidence["data_source"] == "failed"
-    assert evidence["confidence"] == 0.1
-    assert evidence["raw_data"]["status"] == "failed"
-    assert evidence["raw_data"]["error_message"]
-    assert evidence["raw_data"]["metadata"]["execution_path"] == "llm_toolnode_fallback"
-
-    assert update["warnings"]
-    assert "LLM ToolNode 兜底路径" in update["warnings"][0]
-
-    record = update["tool_call_records"][0]
-    assert record["tool_name"] == "query_unregistered_system"
-    assert record["status"] == "failed"
-    assert record["error_message"]
-    assert record["output"]["structured_tool_registered"] is False
-    assert record["output"]["fallback_reason"] == ("structured_tool_not_registered")
+    assert update["current_plan"] == [step.model_dump(mode="json")]
+    assert update["risk_assessment"]["policy"] == "approval_required"
+    assert update["pending_approval"]["tool_name"] == "query_unregistered_system"
+    assert "past_steps" in update
+    assert "tool_call_records" not in update
 
 
 @pytest.mark.asyncio
@@ -950,17 +1004,9 @@ async def test_executor_fallback_records_actual_safe_tool_call(monkeypatch) -> N
 
     update = await executor_module.executor(state_with_step(step))
 
-    assert [item["tool_name"] for item in update["tool_call_records"]] == [
-        "get_current_time",
-        "query_unregistered_system",
-    ]
-    actual = update["tool_call_records"][0]
-    assert actual["status"] == "success"
-    assert actual["actual_tool_invoked"] is True
-    assert actual["invocation_kind"] == "tool"
-    wrapper = update["tool_call_records"][1]
-    assert wrapper["status"] == "failed"
-    assert wrapper["actual_tool_invoked"] is False
+    assert update["risk_assessment"]["policy"] == "approval_required"
+    assert update["pending_approval"]["tool_name"] == "query_unregistered_system"
+    assert "tool_call_records" not in update
 
 
 @pytest.mark.asyncio

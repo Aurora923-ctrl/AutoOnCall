@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     rag_model_max_retries: int = Field(default=1, ge=0)
     rag_model_retry_delay_seconds: float = Field(default=0.25, ge=0)
     rag_stream_spool_max_memory_bytes: int = Field(default=1_048_576, ge=1)
+    rag_session_history_max_messages: int = Field(default=200, ge=2, le=10_000)
 
     chunk_max_size: int = 800
     chunk_overlap: int = 100
@@ -129,6 +130,7 @@ class Settings(BaseSettings):
     aiops_storage_backend: str = "sqlite"
     aiops_sqlite_path: str = "data/aiops_state.db"
     alert_auto_diagnosis_timeout_seconds: float = Field(default=900.0, gt=0)
+    aiops_reconciliation_stale_seconds: float = Field(default=1800.0, gt=0)
     aiops_feedback_path: str = "data/aiops_feedback.jsonl"
     aiops_mock_fallback_enabled: bool = False
     aiops_replanner_llm_enabled: bool = False
@@ -147,7 +149,8 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = (
         f"http://{LOCAL_DEMO_HOST}:{LOCAL_DEMO_PORT},http://localhost:{LOCAL_DEMO_PORT}"
     )
-    production_exposure_strict: bool = False
+    production_exposure_strict: bool = True
+    allow_insecure_external_demo: bool = False
     log_retention_days: int = 14
 
     # ---- OpenTelemetry / dependency resilience ---------------------------------
@@ -169,7 +172,9 @@ class Settings(BaseSettings):
     api_read_token: str = ""
     api_operator_token: str = ""
     api_approver_token: str = ""
+    api_approver_principal_id: str = ""
     api_change_token: str = ""
+    api_change_principal_id: str = ""
     api_admin_token: str = ""
 
     # ---- Prometheus 适配器配置 ------------------------------------------------

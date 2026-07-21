@@ -57,6 +57,16 @@ def normalize_data_source(source_tool: str, raw_data: dict[str, Any] | None = No
     normalized = source.strip().lower()
     if normalized in DATA_SOURCE_ALIASES:
         return str(DATA_SOURCE_ALIASES[normalized])
+    if normalized == "mysql":
+        origin = ""
+        if isinstance(output, dict):
+            origin = str(output.get("evidence_origin") or "")
+        if origin == "mysql:aiops_service_catalog":
+            return "cmdb"
+        if origin == "mysql:aiops_deploy_history":
+            return "deploy_history"
+        if origin == "mysql:aiops_history_tickets":
+            return "ticket_api"
     if normalized in KNOWN_EVIDENCE_SOURCES:
         return normalized
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any, Literal, cast
@@ -12,6 +14,7 @@ from app.models.change_plan import ChangePlan, change_plan_fingerprint
 from app.services.aiops_state_utils import extract_incident_id, incident_field
 from app.services.approval_service import approval_service
 from app.services.change_plan_builder import build_change_plan
+from app.services.policies.approval_policy import RISK_POLICY_VERSION
 
 
 def build_change_plan_from_risk_decision(
@@ -27,11 +30,17 @@ def build_change_plan_from_risk_decision(
         service_name=str(incident_field(state, "service_name", "unknown-service")),
         environment=str(incident_field(state, "environment", "unknown")),
         reason=str(_decision_value(decision, "reason", "")),
+        input_args=dict(_decision_value(decision, "input_args", {}) or {}),
         metadata={
             "trace_id": state.get("trace_id"),
             "session_id": state.get("session_id"),
             "step_id": _decision_value(decision, "step_id", None),
             "policy": _decision_value(decision, "policy", "approval_required"),
+            "risk_policy_version": _decision_value(
+                decision,
+                "policy_version",
+                RISK_POLICY_VERSION,
+            ),
         },
     )
 
@@ -59,6 +68,9 @@ def create_approval_request_from_risk_decision(
         reason=str(_decision_value(decision, "reason", "")),
         step_id=_optional_str(_decision_value(decision, "step_id", None)),
         tool_name=_optional_str(_decision_value(decision, "tool_name", None)),
+        risk_policy_version=str(
+            _decision_value(decision, "policy_version", RISK_POLICY_VERSION)
+        ),
         change_plan=plan,
         metadata={
             "trace_id": state.get("trace_id"),
@@ -66,6 +78,12 @@ def create_approval_request_from_risk_decision(
             "policy": _decision_value(decision, "policy", "approval_required"),
             "matched_rules": _decision_value(decision, "matched_rules", []),
             "read_only": _decision_value(decision, "read_only", False),
+            "input_args": dict(_decision_value(decision, "input_args", {}) or {}),
+            "risk_policy_version": _decision_value(
+                decision,
+                "policy_version",
+                RISK_POLICY_VERSION,
+            ),
             "idempotency_key": idempotency_key,
             "change_plan": plan.model_dump(mode="json"),
             "change_plan_fingerprint": change_plan_fingerprint(plan),
@@ -159,16 +177,28 @@ def build_approval_idempotency_key(
     """Build a stable key for one pending risky action within an incident."""
     plan = change_plan or build_change_plan_from_risk_decision(state, decision)
     payload = {
-        "incident_id": extract_incident_id(state),
-        "session_id": state.get("session_id") or state.get("trace_id") or "",
-        "trace_id": state.get("trace_id") or "",
-        "step_id": _decision_value(decision, "step_id", None),
-        "tool_name": _decision_value(decision, "tool_name", None),
-        "action": _decision_value(decision, "action", ""),
+        "incident_id": _normalize_identity_text(extract_incident_id(state)),
+        "session_id": _normalize_identity_text(
+            state.get("session_id") or state.get("trace_id") or ""
+        ),
+        "trace_id": _normalize_identity_text(state.get("trace_id") or ""),
+        "step_id": _normalize_identity_text(_decision_value(decision, "step_id", None)),
+        "tool_name": _normalize_identity_text(_decision_value(decision, "tool_name", None)),
+        "action": _normalize_display_text(_decision_value(decision, "action", "")),
         "risk_level": _decision_value(decision, "risk_level", "medium"),
         "policy": _decision_value(decision, "policy", "approval_required"),
-        "service_name": incident_field(state, "service_name", "unknown-service"),
-        "environment": incident_field(state, "environment", "unknown"),
+        "input_args": dict(_decision_value(decision, "input_args", {}) or {}),
+        "risk_policy_version": _decision_value(
+            decision,
+            "policy_version",
+            RISK_POLICY_VERSION,
+        ),
+        "service_name": _normalize_identity_text(
+            incident_field(state, "service_name", "unknown-service")
+        ),
+        "environment": _normalize_identity_text(
+            incident_field(state, "environment", "unknown")
+        ),
         "change_plan_scope": _change_plan_idempotency_scope(plan),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -237,3 +267,12 @@ def _normalize_risk_level(value: Any) -> Literal["low", "medium", "high"]:
     if text in {"low", "medium", "high"}:
         return text  # type: ignore[return-value]
     return "medium"
+
+
+def _normalize_identity_text(value: Any) -> str:
+    return _normalize_display_text(value).casefold()
+
+
+def _normalize_display_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()

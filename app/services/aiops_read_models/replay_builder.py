@@ -56,13 +56,21 @@ def build_incident_replay(
     sorted_events = sorted(selected_events, key=lambda item: (item.created_at, item.event_id))
     sorted_approvals = sorted(
         selected_approvals,
-        key=lambda item: (item.created_at, item.approval_id),
+        key=lambda item: (
+            item.decided_at or item.created_at,
+            item.created_at,
+            item.approval_id,
+        ),
     )
     changes = sort_replay_change_executions(
         [
             item
             for item in change_executions or []
-            if str(item.get("trace_id") or "") == selected_trace_id
+            if (
+                not selected_trace_id
+                or not str(item.get("trace_id") or "")
+                or str(item.get("trace_id") or "") == selected_trace_id
+            )
         ]
     )
     overview = build_incident_overview(

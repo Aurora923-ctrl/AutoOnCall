@@ -10,6 +10,10 @@ from app.models.approval import ApprovalRequest
 from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
+from app.services.policies.approval_policy import (
+    effective_approval_status,
+    incident_status_from_approvals as policy_incident_status_from_approvals,
+)
 from app.utils.redaction import redact_sensitive_data
 
 
@@ -34,27 +38,16 @@ def latest_timestamp(
 
 def infer_status_from_approvals(approvals: list[ApprovalRequest]) -> str:
     """Infer an incident status when only approval records exist."""
-    if any(approval.status == "pending" for approval in approvals):
-        return "waiting_approval"
-    if any(approval.status == "approved" for approval in approvals):
-        return "approval_approved"
-    if any(approval.status == "rejected" for approval in approvals):
-        return "approval_rejected"
-    if any(approval.status == "cancelled" for approval in approvals):
-        return "approval_cancelled"
-    if approvals:
-        return "approval_decided"
-    return "investigating"
+    return policy_incident_status_from_approvals(approval.status for approval in approvals)
 
 
 def approval_status_from_approvals(approvals: list[ApprovalRequest]) -> str:
     """Return the effective approval status for a group of approval requests."""
-    if any(approval.status == "pending" for approval in approvals):
-        return "pending"
-    if approvals:
-        latest = latest_approval_request(approvals)
-        return latest.status if latest else "not_required"
-    return "not_required"
+    latest = latest_approval_request(approvals)
+    return effective_approval_status(
+        (approval.status for approval in approvals),
+        latest_status=latest.status if latest else "",
+    )
 
 
 def effective_incident_status(
@@ -118,12 +111,10 @@ def build_approval_summary(
     """Build a shared approval summary for run and incident read models."""
     latest = latest_approval or latest_approval_request(approvals)
     counts = Counter(approval.status for approval in approvals)
-    if any(approval.status == "pending" for approval in approvals):
-        effective_status = "pending"
-    elif latest:
-        effective_status = latest.status
-    else:
-        effective_status = "not_required"
+    effective_status = effective_approval_status(
+        (approval.status for approval in approvals),
+        latest_status=latest.status if latest else "",
+    )
     return {
         "total": len(approvals),
         "status": effective_status,

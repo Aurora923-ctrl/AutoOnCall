@@ -526,6 +526,49 @@ async def test_replanner_rejects_unsafe_llm_steps_and_falls_back(monkeypatch) ->
     assert "query_redis_status" in tool_names
 
 
+def test_llm_replan_steps_are_bounded() -> None:
+    state = create_initial_aiops_state(
+        "order-service latency",
+        session_id="replanner-bounded-steps",
+    )
+    state["current_plan"] = [
+        PlanStep(
+            step_id="remaining",
+            tool_name="query_logs",
+            purpose="keep investigating",
+        ).model_dump(mode="json")
+    ]
+    analysis = replanner_module.EvidenceAnalysis(
+        decision="continue_investigation",
+        reason="baseline",
+    )
+    baseline = replanner_module.ReplanDecision(
+        decision="continue_investigation",
+        reason="baseline",
+    )
+    decision = replanner_module._normalize_llm_replan_decision(
+        replanner_module.ReplanDecision(
+            decision="add_steps",
+            reason="too many steps",
+            new_steps=[
+                PlanStep(
+                    step_id=f"extra-{index}",
+                    tool_name="query_logs",
+                    purpose=f"query logs {index}",
+                    input_args={"service_name": "order-service", "query": str(index)},
+                )
+                for index in range(20)
+            ],
+        ),
+        state,
+        analysis,
+        baseline,
+    )
+
+    assert decision is not None
+    assert len(decision.new_steps) == replanner_module.MAX_STEPS
+
+
 @pytest.mark.asyncio
 async def test_replanner_generates_report_when_evidence_is_sufficient(monkeypatch) -> None:
     monkeypatch.setattr(

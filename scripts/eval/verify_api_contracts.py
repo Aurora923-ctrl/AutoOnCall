@@ -18,6 +18,7 @@ import tempfile
 from collections.abc import Awaitable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ from app.models.approval import ApprovalRequest
 from app.models.change_execution import ChangeExecution
 from app.models.change_plan import ChangePlan
 from app.models.incident import Incident
+from app.models.incident_state import IncidentState
 from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from scripts.eval.eval_environment import collect_eval_environment, provenance_markdown_lines
@@ -57,8 +59,10 @@ TRACE_ID = "trace-contract-001"
 APPROVAL_ID = "apr-contract-001"
 CHANGE_PLAN_ID = "chg-contract-001"
 OPERATOR_TOKEN = "contract-operator-token"
-APPROVER_TOKEN = "contract-approver-token"
-CHANGE_TOKEN = "contract-change-token"
+APPROVER_TOKEN = OPERATOR_TOKEN
+CHANGE_TOKEN = OPERATOR_TOKEN
+OPERATOR_PRINCIPAL_ID = sha256(OPERATOR_TOKEN.encode("utf-8")).hexdigest()[:16]
+SCOPED_SESSION_ID = f"principal:{OPERATOR_PRINCIPAL_ID}:{SESSION_ID}"
 
 OPERATOR_HEADERS = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
 APPROVER_HEADERS = {"Authorization": f"Bearer {APPROVER_TOKEN}"}
@@ -220,7 +224,7 @@ class FakeAIOpsService:
 
     def __init__(self, report: DiagnosisReport) -> None:
         self.report = report
-        self.snapshot = _build_snapshot(report)
+        self.snapshot = _build_snapshot(report).model_copy(update={"session_id": SCOPED_SESSION_ID})
 
     async def diagnose(
         self,
@@ -521,11 +525,19 @@ class FakeReportGenerator:
 class FakeIncidentStateStore:
     """Incident state store stub for read models that ask for lifecycle state."""
 
-    def get_incident_state(self, incident_id: str) -> None:
-        return None
+    def __init__(self) -> None:
+        self.state = IncidentState(
+            incident_id=INCIDENT_ID,
+            trace_id=TRACE_ID,
+            session_id=SCOPED_SESSION_ID,
+            status="waiting_approval",
+        )
+
+    def get_incident_state(self, incident_id: str) -> IncidentState | None:
+        return self.state if incident_id == INCIDENT_ID else None
 
     def list_incident_states(self) -> list[Any]:
-        return []
+        return [self.state]
 
 
 class FakeChangeExecutionService:
@@ -918,7 +930,7 @@ async def _check_aiops_run_status(client: httpx.AsyncClient) -> dict[str, Any]:
     )
     _require(response.status_code == 200, f"expected 200, got {response.status_code}")
     payload = response.json()
-    _require(payload.get("session_id") == SESSION_ID, "session_id mismatch")
+    _require(payload.get("session_id") == SCOPED_SESSION_ID, "session_id mismatch")
     _require(payload.get("incident_id") == INCIDENT_ID, "incident_id mismatch")
     _require(payload.get("trace_id") == TRACE_ID, "trace_id mismatch")
     progress = _require_dict(payload.get("progress"), "progress")
@@ -1171,7 +1183,7 @@ def _build_approval() -> ApprovalRequest:
         change_plan=change_plan,
         metadata={
             "trace_id": TRACE_ID,
-            "session_id": SESSION_ID,
+            "session_id": SCOPED_SESSION_ID,
             "change_plan": change_plan.model_dump(mode="json"),
         },
     )

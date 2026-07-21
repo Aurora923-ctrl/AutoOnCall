@@ -284,3 +284,67 @@ def test_lexical_index_does_not_overwrite_corrupt_state(tmp_path) -> None:
         )
 
     assert index_path.read_text(encoding="utf-8") == "{broken"
+
+
+def test_lexical_index_restores_source_snapshot_after_failed_transaction(tmp_path) -> None:
+    index_path = tmp_path / "lexical.json"
+    service = LexicalIndexService(index_path)
+    source = "docs/knowledge-base/redis.md"
+    old = Document(
+        page_content="old Redis runbook",
+        metadata={
+            "_source": source,
+            "_source_id": source,
+            "_file_name": "redis.md",
+            "_chunk_id": "redis.md#0001",
+            "_document_hash": "old-doc",
+            "_chunk_hash": "old-chunk",
+        },
+    )
+    service.upsert_source(source, [old])
+    snapshot = service.snapshot_source_state(source)
+    service.upsert_source(
+        source,
+        [
+            Document(
+                page_content="new Redis runbook",
+                metadata={
+                    "_source": source,
+                    "_source_id": source,
+                    "_file_name": "redis.md",
+                    "_chunk_id": "redis.md#0002",
+                    "_document_hash": "new-doc",
+                    "_chunk_hash": "new-chunk",
+                },
+            )
+        ],
+    )
+
+    service.restore_source_state(source, snapshot)
+
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [chunk["content"] for chunk in payload["chunks"]] == ["old Redis runbook"]
+
+
+def test_lexical_index_restores_complete_snapshot(tmp_path) -> None:
+    index_path = tmp_path / "lexical.json"
+    service = LexicalIndexService(index_path)
+    service.upsert_source(
+        "docs/knowledge-base/redis.md",
+        [Document(page_content="old Redis runbook", metadata={"_chunk_id": "redis.md#0001"})],
+    )
+    snapshot = service.snapshot_index_state()
+
+    service.replace_all_sources(
+        {
+            "docs/knowledge-base/mysql.md": [
+                Document(page_content="new MySQL runbook", metadata={"_chunk_id": "mysql.md#0001"})
+            ]
+        }
+    )
+    service.restore_index_state(snapshot)
+
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [chunk["source_path"] for chunk in payload["chunks"]] == [
+        "docs/knowledge-base/redis.md"
+    ]

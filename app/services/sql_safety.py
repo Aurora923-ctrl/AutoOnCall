@@ -30,12 +30,12 @@ def trusted_in_clause(count: int, marker: BindMarker) -> str:
 
 
 def trusted_table_statement(
-    operation: Literal["SELECT_COUNT", "DELETE"],
+    operation: Literal["SELECT_COUNT", "DELETE", "SELECT_ALL_COUNT", "DELETE_ALL"],
     *,
     table: str,
     allowed_tables: Collection[str],
-    value_count: int,
-    marker: BindMarker,
+    value_count: int = 0,
+    marker: BindMarker = "?",
 ) -> str:
     """Build retention SQL from an allowlisted table and generated bind markers.
 
@@ -44,6 +44,10 @@ def trusted_table_statement(
     no values, only driver parameter markers.
     """
     safe_table = trusted_identifier(table, allowed=allowed_tables)
+    if operation == "SELECT_ALL_COUNT":
+        return f"SELECT COUNT(*) FROM {safe_table}"  # nosec B608
+    if operation == "DELETE_ALL":
+        return f"DELETE FROM {safe_table}"  # nosec B608
     in_clause = trusted_in_clause(value_count, marker)
     if operation == "SELECT_COUNT":
         return f"SELECT COUNT(*) FROM {safe_table} WHERE incident_id IN {in_clause}"  # nosec B608

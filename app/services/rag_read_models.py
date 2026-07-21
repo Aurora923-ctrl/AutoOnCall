@@ -7,6 +7,8 @@ import math
 import re
 from typing import Any
 
+from app.services.policies.retrieval_policy import RETRIEVAL_NO_ANSWER, RETRIEVAL_SUCCESS
+
 
 def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep only frontend-safe retrieval fields."""
@@ -68,6 +70,7 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
     raw_metadata = item.get("metadata")
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     compact = {
+        "citation_index": item.get("citation_index"),
         "rank": item.get("rank"),
         "doc_id": public_source_path(item.get("doc_id")),
         "source_id": public_source_id(item.get("source_id") or item.get("doc_id")),
@@ -95,14 +98,14 @@ def compact_retrieval_chunk(item: dict[str, Any]) -> dict[str, Any]:
 
 def build_runbook_summary(payload: dict[str, Any]) -> str:
     """Create a compact summary for runbook retrieval results."""
-    if payload.get("status") == "success":
+    if payload.get("status") == RETRIEVAL_SUCCESS:
         results = payload.get("retrieval_results") or []
         sources = sorted(
             {str(item.get("source_file")) for item in results if item.get("source_file")}
         )
         source_text = "、".join(sources[:3]) if sources else "未知来源"
         return f"Runbook 检索命中 {len(results)} 条可信片段，来源：{source_text}"
-    if payload.get("status") == "no_answer":
+    if payload.get("status") == RETRIEVAL_NO_ANSWER:
         return "未找到可信 Runbook 来源"
     return str(payload.get("summary") or "Runbook 检索失败")
 

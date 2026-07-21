@@ -9,6 +9,8 @@ from typing import Any, Literal
 from app.models.plan import PlanStep
 from app.services.service_topology import service_has_dependency
 
+from .fallback_scenarios import match_fallback_scenario
+
 STANDARD_TOOL_NAMES = [
     "query_alerts",
     "query_metrics",
@@ -31,6 +33,7 @@ STANDARD_TOOL_NAMES = [
     "run_shell",
     "delete_pod",
 ]
+MAX_PLAN_STEPS = 8
 
 REQUESTED_ACTION_ALIASES = {
     "execute_sql": "execute_sql",
@@ -145,7 +148,10 @@ def normalize_plan_steps(
             )
         ]
 
-    return append_incident_requested_action_step(deduplicate_plan_steps(steps), incident)
+    return append_incident_requested_action_step(
+        deduplicate_plan_steps(steps),
+        incident,
+    )[:MAX_PLAN_STEPS]
 
 
 def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None) -> list[PlanStep]:
@@ -154,6 +160,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
     symptom = infer_symptom(input_text, incident)
     lowered = symptom.lower()
     dependency_hint = infer_dependency_hint(service_name, lowered)
+    scenario = match_fallback_scenario(lowered)
     golden_steps = build_golden_dependency_plan(
         service_name,
         symptom,
@@ -297,7 +304,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "输出风险受控的处理建议",
             risk_level="medium",
         )
-    elif contains_any(lowered, ["redis", "connection timeout", "maxclients", "连接超时", "连接数"]):
+    elif scenario is not None and scenario.name == "redis":
         add(
             "query_service_context",
             f"查询 {service_name} 的 owner、namespace 和上下游依赖",
@@ -340,7 +347,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "输出低风险和需审批的修复建议",
             risk_level="medium",
         )
-    elif contains_any(lowered, ["mysql", "slow query", "慢查询", "锁等待", "连接池"]):
+    elif scenario is not None and scenario.name == "mysql":
         add(
             "query_service_context",
             f"查询 {service_name} 的 owner、namespace 和数据库依赖",
@@ -384,9 +391,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "输出风险受控的处理建议",
             risk_level="medium",
         )
-    elif contains_any(
-        lowered, ["crashloopbackoff", "crash loop", "pod crash", "pod 重启", "重启次数"]
-    ):
+    elif scenario is not None and scenario.name == "crashloop":
         add(
             "query_service_context",
             f"查询 {service_name} 的 owner、namespace 和依赖",
@@ -418,9 +423,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "获取标准排查路径",
             {"query": f"{service_name} Pod CrashLoopBackOff OOMKilled Runbook"},
         )
-    elif contains_any(
-        lowered, ["服务不可用", "unavailable", "5xx", "503", "502", "不可用", "无法访问"]
-    ):
+    elif scenario is not None and scenario.name == "unavailable":
         add(
             "query_service_context",
             f"查询 {service_name} 的 owner、namespace 和上下游依赖",
@@ -453,7 +456,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             {"query": f"{service_name} 服务不可用 5xx Runbook"},
         )
         add("search_history_ticket", "检索历史服务不可用相似故障", "寻找相似根因和处置方式")
-    elif contains_any(lowered, ["响应慢", "slow", "latency", "p95", "超时", "timeout", "延迟"]):
+    elif scenario is not None and scenario.name == "latency":
         add(
             "query_service_context",
             f"查询 {service_name} 的 owner、namespace 和上下游依赖",
@@ -486,7 +489,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "获取慢响应排查路径",
             {"query": f"{service_name} 接口响应慢 P95 timeout Runbook"},
         )
-    elif contains_any(lowered, ["cpu", "高 cpu", "cpu 高", "cpu 使用率"]):
+    elif scenario is not None and scenario.name == "cpu":
         add(
             "query_metrics",
             f"检查 {service_name} CPU 使用率、P95 和错误率趋势",
@@ -509,7 +512,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "输出需审批的动作建议",
             risk_level="medium",
         )
-    elif contains_any(lowered, ["memory", "内存", "oom", "内存高"]):
+    elif scenario is not None and scenario.name == "memory":
         add(
             "query_metrics",
             f"检查 {service_name} 内存使用率、P95 和错误率趋势",
@@ -531,7 +534,7 @@ def build_fallback_plan(input_text: str, incident: dict[str, Any] | None = None)
             "获取内存问题排查方法",
             {"query": f"{service_name} 内存高 OOM Runbook"},
         )
-    elif contains_any(lowered, ["disk", "磁盘", "磁盘高", "磁盘满", "no space"]):
+    elif scenario is not None and scenario.name == "disk":
         add(
             "query_metrics", f"检查 {service_name} 资源指标和错误率趋势", "确认磁盘异常是否影响服务"
         )

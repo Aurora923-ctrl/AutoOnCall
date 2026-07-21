@@ -37,6 +37,35 @@ def test_sqlite_a2a_task_record_rejects_ownership_overwrite(tmp_path) -> None:
     assert stored.incident_id == "inc-owned"
 
 
+def test_sqlite_a2a_task_records_persist_and_filter_owner(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "a2a-owner.db")
+    alice = A2ATaskRecord(
+        task_id="task-alice",
+        message_id="msg-alice",
+        request_fingerprint="a" * 64,
+        owner_id="alice",
+        skill="diagnose_incident",
+        incident_id="inc-owner",
+        state="TASK_STATE_COMPLETED",
+    )
+    bob = alice.model_copy(
+        update={
+            "task_id": "task-bob",
+            "message_id": "msg-bob",
+            "request_fingerprint": "b" * 64,
+            "owner_id": "bob",
+        }
+    )
+
+    assert store.create_a2a_task_record(alice) is True
+    assert store.create_a2a_task_record(bob) is True
+
+    reloaded = AIOpsSQLiteStore(store.database_path)
+    assert [record.task_id for record in reloaded.list_a2a_task_records(owner_id="alice")] == [
+        "task-alice"
+    ]
+
+
 def test_sqlite_store_upserts_aiops_session_snapshot(tmp_path) -> None:
     store = AIOpsSQLiteStore(tmp_path / "aiops.db")
 
@@ -225,6 +254,35 @@ def test_aiops_session_snapshot_preserves_resume_retry_state_and_response() -> N
     assert recovered["resume_approval_id"] == "apr-resume-state"
     assert recovered["resume_status"] == "failed"
     assert recovered["resume_attempt"] == 2
+
+
+def test_aiops_session_snapshot_preserves_legacy_plan_text() -> None:
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="session-legacy-plan",
+        state={
+            "trace_id": "trace-legacy-plan",
+            "incident": {"incident_id": "inc-legacy-plan"},
+            "plan": ["step one", "step two"],
+        },
+    )
+
+    assert snapshot.plan == ["step one", "step two"]
+    assert snapshot.to_state()["plan"] == ["step one", "step two"]
+
+
+def test_aiops_session_snapshot_preserves_older_structured_plan_items() -> None:
+    plan = [{"step_id": "s1", "tool_name": "query_metrics"}]
+    snapshot = AIOpsSessionSnapshot.from_state(
+        session_id="session-structured-plan",
+        state={
+            "trace_id": "trace-structured-plan",
+            "incident": {"incident_id": "inc-structured-plan"},
+            "plan": plan,
+        },
+    )
+
+    assert snapshot.plan == plan
+    assert snapshot.to_state()["plan"] == plan
 
 
 def test_sqlite_store_upserts_incident_state_without_losing_identity_fields(tmp_path) -> None:

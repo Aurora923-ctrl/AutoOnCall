@@ -84,6 +84,16 @@ class CircuitBreaker:
         with self._lock:
             self._half_open_probe_active = False
 
+    def record_non_retryable_failure(self) -> None:
+        """Ignore caller failures in closed state, but fail a half-open probe closed."""
+
+        with self._lock:
+            self._half_open_probe_active = False
+            if self._state == "half_open":
+                self._failures += 1
+                self._opened_at = time.monotonic()
+                self._transition("open")
+
     def _advance_recovery_state(self) -> None:
         if (
             self._state == "open"
@@ -101,6 +111,47 @@ _breakers: dict[str, CircuitBreaker] = {}
 _breakers_lock = Lock()
 _sync_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dependency-call")
 _sync_call_slots = BoundedSemaphore(8)
+
+
+async def run_bounded_sync_call(
+    dependency: str,
+    operation: str,
+    call: Callable[[], T],
+    *,
+    timeout_seconds: float,
+) -> T:
+    """Run blocking I/O on the bounded dependency executor within one total deadline."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    with dependency_operation(dependency, operation) as observation:
+        while not _sync_call_slots.acquire(blocking=False):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                observation.status = "timeout"
+                raise TimeoutError(f"{dependency} worker capacity exhausted")
+            await asyncio.sleep(min(0.01, remaining))
+
+        try:
+            future = loop.run_in_executor(_sync_executor, _run_sync_call, call)
+        except BaseException:
+            _sync_call_slots.release()
+            raise
+
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                observation.status = "timeout"
+                raise TimeoutError(f"{dependency} call timed out")
+            return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except TimeoutError:
+            observation.status = "timeout"
+            raise TimeoutError(f"{dependency} call timed out") from None
 
 
 def get_circuit_breaker(
@@ -169,7 +220,7 @@ async def call_with_resilience(
                     if retryable:
                         breaker.record_failure()
                     else:
-                        breaker.record_success()
+                        breaker.record_non_retryable_failure()
                     observation.status = "timeout" if isinstance(exc, TimeoutError) else "error"
                     raise
                 observation.retry_count += 1
@@ -239,7 +290,7 @@ def call_sync_with_resilience(
                 if retryable:
                     breaker.record_failure()
                 else:
-                    breaker.record_success()
+                    breaker.record_non_retryable_failure()
                 observation.status = "timeout" if isinstance(error, TimeoutError) else "error"
                 raise error
             observation.retry_count += 1

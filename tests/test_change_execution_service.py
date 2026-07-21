@@ -16,6 +16,7 @@ from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService
 from app.services.change_execution_service import ChangeExecutionService, ChangeExecutionStateError
 from app.services.change_plan_builder import build_change_plan
+from app.services.policies.approval_policy import RISK_POLICY_VERSION
 from app.services.report_generator import ReportGenerator
 from app.services.sqlite_store import AIOpsSQLiteStore
 from app.services.trace_service import TraceService
@@ -198,6 +199,7 @@ def _approved_request(
     environment: str = "prod",
     metadata: dict[str, Any] | None = None,
 ):
+    approval_step_id = "approved-remediation-step"
     plan = build_change_plan(
         incident_id=incident_id,
         action=action,
@@ -206,7 +208,12 @@ def _approved_request(
         service_name="order-service",
         environment=environment,
         reason="生产变更需要审批",
-        metadata={"trace_id": "trace-safe-change", **(metadata or {})},
+        metadata={
+            "trace_id": "trace-safe-change",
+            "step_id": approval_step_id,
+            "risk_policy_version": RISK_POLICY_VERSION,
+            **(metadata or {}),
+        },
     )
     request = approval_store.create_request(
         ApprovalRequest(
@@ -214,8 +221,15 @@ def _approved_request(
             action=action,
             risk_level=risk_level,
             reason="生产变更需要审批",
+            step_id=approval_step_id,
+            tool_name="suggest_remediation",
+            risk_policy_version=RISK_POLICY_VERSION,
             change_plan=plan,
-            metadata={"trace_id": "trace-safe-change", "change_plan": plan.model_dump(mode="json")},
+            metadata={
+                "trace_id": "trace-safe-change",
+                "input_args": dict(plan.metadata["approved_input_args"]),
+                "change_plan": plan.model_dump(mode="json"),
+            },
         )
     )
     approved = approval_store.decide_request(
@@ -590,7 +604,11 @@ async def test_dry_run_failure_never_enters_manual_execution(tmp_path) -> None:
         tool_name="suggest_remediation",
         service_name="order-service",
         environment="prod",
-        metadata={"trace_id": "trace-dry-run-failure"},
+        metadata={
+            "trace_id": "trace-dry-run-failure",
+            "step_id": "dry-run-failure-step",
+            "risk_policy_version": RISK_POLICY_VERSION,
+        },
     )
     blocked_step = plan.steps[0].model_copy(update={"can_dry_run": False})
     blocked_plan = plan.model_copy(update={"steps": [blocked_step]})
@@ -600,8 +618,14 @@ async def test_dry_run_failure_never_enters_manual_execution(tmp_path) -> None:
             action=blocked_plan.action,
             risk_level=blocked_plan.risk_level,
             reason="production change requires approval",
+            step_id="dry-run-failure-step",
+            tool_name="suggest_remediation",
+            risk_policy_version=RISK_POLICY_VERSION,
             change_plan=blocked_plan,
-            metadata={"trace_id": "trace-dry-run-failure"},
+            metadata={
+                "trace_id": "trace-dry-run-failure",
+                "input_args": dict(blocked_plan.metadata["approved_input_args"]),
+            },
         )
     )
     approval = approval_store.decide_request(
@@ -665,6 +689,7 @@ async def test_manual_record_waits_then_closes_after_operator_result(tmp_path) -
             notes="人工已在变更平台执行并确认指标恢复",
             evidence={"change_ticket": "CHG-001"},
             observed_metrics={"service_5xx_rate": 0.0},
+            step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
         ),
     )
 
@@ -782,6 +807,7 @@ async def test_concurrent_manual_results_have_single_winner(tmp_path) -> None:
                     notes=f"result from {operator}",
                     evidence={"change_ticket": f"CHG-{operator}"},
                     observed_metrics={"service_5xx_rate": 0.0},
+                    step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
                 ),
             )
         except ChangeExecutionStateError as exc:
@@ -834,6 +860,10 @@ async def test_manual_result_preserves_extended_recovery_states(
     if manual_status == "rollback_failed":
         request_kwargs["evidence"] = {}
         request_kwargs["observed_metrics"] = {}
+    if manual_status == "rolled_back":
+        request_kwargs["step_results"] = [
+            {"step_id": plan.steps[0].step_id, "status": "rolled_back"}
+        ]
 
     updated = service.record_manual_result(
         execution_id,
@@ -875,6 +905,7 @@ async def test_partial_execution_can_transition_to_rolled_back(tmp_path) -> None
             notes="completed rollback for the changed scope",
             evidence={"change_ticket": "CHG-PARTIAL"},
             observed_metrics={"service_5xx_rate": 0.0},
+            step_results=[{"step_id": plan.steps[0].step_id, "status": "rolled_back"}],
         ),
     )
 
@@ -915,6 +946,7 @@ async def test_recovery_pending_can_close_after_observation(tmp_path) -> None:
             notes="observation window passed",
             evidence={"change_ticket": "CHG-RECOVERY"},
             observed_metrics={"service_5xx_rate": 0.0},
+            step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
         ),
     )
 
@@ -932,6 +964,10 @@ async def test_multi_step_success_requires_every_approved_step_result(tmp_path) 
         tool_name="suggest_remediation",
         service_name="order-service",
         environment="prod",
+        metadata={
+            "step_id": "multi-step-approved",
+            "risk_policy_version": RISK_POLICY_VERSION,
+        },
     )
     second_step = plan.steps[0].model_copy(update={"step_id": "second-approved-step"})
     expanded_plan = plan.model_copy(update={"steps": [*plan.steps, second_step]})
@@ -940,7 +976,11 @@ async def test_multi_step_success_requires_every_approved_step_result(tmp_path) 
             incident_id=expanded_plan.incident_id,
             action=expanded_plan.action,
             risk_level=expanded_plan.risk_level,
+            step_id="multi-step-approved",
+            tool_name="suggest_remediation",
+            risk_policy_version=RISK_POLICY_VERSION,
             change_plan=expanded_plan,
+            metadata={"input_args": dict(expanded_plan.metadata["approved_input_args"])},
         )
     )
     approval = approval_store.decide_request(
@@ -987,6 +1027,10 @@ async def test_multi_step_partial_requires_complete_mixed_step_results(tmp_path)
         tool_name="suggest_remediation",
         service_name="order-service",
         environment="prod",
+        metadata={
+            "step_id": "multi-step-partial-approved",
+            "risk_policy_version": RISK_POLICY_VERSION,
+        },
     )
     first_step = plan.steps[0]
     first_rollback = plan.rollback_plan[0]
@@ -1008,7 +1052,11 @@ async def test_multi_step_partial_requires_complete_mixed_step_results(tmp_path)
             incident_id=expanded_plan.incident_id,
             action=expanded_plan.action,
             risk_level=expanded_plan.risk_level,
+            step_id="multi-step-partial-approved",
+            tool_name="suggest_remediation",
+            risk_policy_version=RISK_POLICY_VERSION,
             change_plan=expanded_plan,
+            metadata={"input_args": dict(expanded_plan.metadata["approved_input_args"])},
         )
     )
     approval = approval_store.decide_request(
@@ -1095,6 +1143,7 @@ async def test_manual_result_survives_projection_failures(monkeypatch, tmp_path)
             notes="external change completed",
             evidence={"change_ticket": "CHG-PROJECTION"},
             observed_metrics={"service_5xx_rate": 0.0},
+            step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
         ),
     )
 
@@ -1145,6 +1194,7 @@ async def test_manual_result_projection_failures_are_marked_and_repaired(
             notes="external change completed",
             evidence={"change_ticket": "CHG-REPAIR"},
             observed_metrics={"service_5xx_rate": 0.0},
+            step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
         ),
     )
 
@@ -1188,6 +1238,7 @@ async def test_manual_result_persists_projection_outbox_before_sync(monkeypatch,
                 notes="external change completed",
                 evidence={"change_ticket": "CHG-OUTBOX"},
                 observed_metrics={"service_5xx_rate": 0.0},
+                step_results=[{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
             ),
         )
 

@@ -4,81 +4,25 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal, cast
+import unicodedata
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 
 from app.models.approval import RiskAssessment
 from app.models.plan import PlanStep
 from app.services.incident_lifecycle import is_production_environment
+from app.services.policies.approval_policy import (
+    ACTION_TOOLS_REQUIRING_APPROVAL,
+    HARD_FORBIDDEN_TOOLS,
+    READ_ONLY_TOOL_NAMES,
+    RISK_POLICY_VERSION,
+    RiskPolicy,
+    matched_action_patterns,
+)
 from app.tools.base import RiskLevel
 
-RiskPolicy = Literal["allow", "approval_required", "forbidden"]
-
 RISK_ORDER: dict[RiskLevel, int] = {"low": 0, "medium": 1, "high": 2}
-
-READ_ONLY_PREFIXES = ("query_", "search_", "get_", "retrieve_")
-READ_ONLY_TOOL_NAMES = {"manual_analysis", "suggest_remediation"}
-
-HARD_FORBIDDEN_TOOLS = {
-    "delete_pod",
-    "delete_k8s_pod",
-    "restart_database",
-    "modify_prod_config",
-    "execute_shell",
-    "run_shell",
-    "run_command",
-    "execute_command",
-    "execute_sql",
-    "run_sql",
-    "kill_process",
-    "shutdown_host",
-}
-
-ACTION_TOOLS_REQUIRING_APPROVAL = {
-    "restart_service",
-    "scale_service",
-    "rollback_deployment",
-    "apply_config_change",
-    "drain_node",
-    "clear_cache",
-}
-
-FORBIDDEN_PATTERNS = [
-    (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "shell:rm-rf"),
-    (re.compile(r"\bkill\s+-9\b", re.IGNORECASE), "shell:kill-9"),
-    (re.compile(r"\bshutdown\b", re.IGNORECASE), "shell:shutdown"),
-    (re.compile(r"\bkubectl\s+delete\b", re.IGNORECASE), "k8s:delete"),
-    (re.compile(r"\bdrop\s+table\b", re.IGNORECASE), "sql:drop-table"),
-    (re.compile(r"\btruncate\s+table\b", re.IGNORECASE), "sql:truncate-table"),
-    (re.compile(r"\bdelete\s+from\b", re.IGNORECASE), "sql:delete"),
-    (re.compile(r"\bupdate\s+\w+", re.IGNORECASE), "sql:update"),
-    (re.compile(r"\binsert\s+into\b", re.IGNORECASE), "sql:insert"),
-    (re.compile(r"\balter\s+table\b", re.IGNORECASE), "sql:alter-table"),
-    (re.compile(r"删除\s*pod", re.IGNORECASE), "k8s:delete-pod"),
-    (re.compile(r"重启.*数据库", re.IGNORECASE), "database:restart"),
-    (re.compile(r"修改.*生产.*配置", re.IGNORECASE), "config:modify-prod"),
-    (re.compile(r"未审核.*sql", re.IGNORECASE), "sql:unaudited"),
-]
-
-APPROVAL_PATTERNS = [
-    (
-        re.compile(r"\brestart\s+(service|pod|database|db|deployment)\b", re.IGNORECASE),
-        "action:restart",
-    ),
-    (re.compile(r"\brollback\s+(service|deployment|release)\b", re.IGNORECASE), "action:rollback"),
-    (
-        re.compile(r"\bscale\s+(service|deployment|replica|replicas)\b", re.IGNORECASE),
-        "action:scale",
-    ),
-    (re.compile(r"\blimit\s+traffic\b", re.IGNORECASE), "action:limit-traffic"),
-    (re.compile(r"重启.*服务", re.IGNORECASE), "action:restart-service"),
-    (re.compile(r"扩容|缩容", re.IGNORECASE), "action:scale"),
-    (re.compile(r"回滚", re.IGNORECASE), "action:rollback"),
-    (re.compile(r"限流|降级", re.IGNORECASE), "action:traffic-control"),
-    (re.compile(r"调整.*maxclients", re.IGNORECASE), "action:redis-config"),
-    (re.compile(r"修改.*配置", re.IGNORECASE), "action:config-change"),
-]
 
 
 class RiskControlDecision(BaseModel):
@@ -87,6 +31,7 @@ class RiskControlDecision(BaseModel):
     action: str
     tool_name: str = ""
     step_id: str | None = None
+    input_args: dict[str, Any] = Field(default_factory=dict)
     risk_level: RiskLevel = "low"
     read_only: bool = True
     policy: RiskPolicy = "allow"
@@ -95,6 +40,7 @@ class RiskControlDecision(BaseModel):
     forbidden: bool = False
     reason: str = ""
     matched_rules: list[str] = Field(default_factory=list)
+    policy_version: str = RISK_POLICY_VERSION
 
     def to_risk_assessment(self) -> RiskAssessment:
         """Convert the policy decision into the public risk model."""
@@ -119,7 +65,10 @@ def assess_plan_step(
     plan_step = step if isinstance(step, PlanStep) else PlanStep(**step)
     metadata = _get_tool_metadata(plan_step.tool_name, tool_registry)
     read_only = _resolve_read_only(plan_step, metadata)
-    risk_level = _max_risk(plan_step.risk_level, _metadata_risk(metadata))
+    risk_level = _max_risk(
+        plan_step.risk_level,
+        _metadata_risk(metadata, registry_present=tool_registry is not None),
+    )
     context = _step_context(plan_step)
 
     forbidden_rules = _matched_forbidden_rules(plan_step, context)
@@ -128,6 +77,7 @@ def assess_plan_step(
             action=_action_text(plan_step),
             tool_name=plan_step.tool_name,
             step_id=plan_step.step_id,
+            input_args=plan_step.input_args,
             risk_level="high",
             read_only=read_only,
             policy="forbidden",
@@ -145,6 +95,7 @@ def assess_plan_step(
             action=_action_text(plan_step),
             tool_name=plan_step.tool_name,
             step_id=plan_step.step_id,
+            input_args=plan_step.input_args,
             risk_level=approval_risk,
             read_only=read_only,
             policy="approval_required",
@@ -159,6 +110,7 @@ def assess_plan_step(
         action=_action_text(plan_step),
         tool_name=plan_step.tool_name,
         step_id=plan_step.step_id,
+        input_args=plan_step.input_args,
         risk_level=risk_level,
         read_only=read_only,
         policy="allow",
@@ -193,12 +145,15 @@ def _resolve_read_only(step: PlanStep, metadata: Any | None) -> bool:
         return bool(metadata["read_only"])
     if metadata is not None and hasattr(metadata, "read_only"):
         return bool(metadata.read_only)
-    if step.tool_name in HARD_FORBIDDEN_TOOLS or step.tool_name in ACTION_TOOLS_REQUIRING_APPROVAL:
+    tool_name = _normalize_tool_name(step.tool_name)
+    if tool_name in HARD_FORBIDDEN_TOOLS or tool_name in ACTION_TOOLS_REQUIRING_APPROVAL:
         return False
-    return step.tool_name.startswith(READ_ONLY_PREFIXES) or step.tool_name in READ_ONLY_TOOL_NAMES
+    return tool_name in READ_ONLY_TOOL_NAMES
 
 
-def _metadata_risk(metadata: Any | None) -> RiskLevel:
+def _metadata_risk(metadata: Any | None, *, registry_present: bool = False) -> RiskLevel:
+    if metadata is None and registry_present:
+        return "high"
     value = (
         metadata.get("risk_level", "low")
         if isinstance(metadata, dict)
@@ -221,13 +176,8 @@ def _max_risk(*levels: str) -> RiskLevel:
 
 def _step_context(step: PlanStep) -> str:
     """Return only action-owned text used for action-pattern matching."""
-    parts = [
-        step.tool_name,
-        step.purpose,
-        step.expected_evidence,
-        _json_text(step.input_args),
-    ]
-    return " ".join(part for part in parts if part).lower()
+    parts = [step.tool_name, step.purpose, step.expected_evidence, *_structured_text(step.input_args)]
+    return _normalize_action_text(" ".join(part for part in parts if part))
 
 
 def _json_text(value: Any) -> str:
@@ -237,25 +187,47 @@ def _json_text(value: Any) -> str:
         return str(value)
 
 
+def _structured_text(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        items: list[str] = []
+        for key, item in value.items():
+            items.append(str(key))
+            items.extend(_structured_text(item))
+        return items
+    if isinstance(value, (list, tuple, set)):
+        items = []
+        for item in value:
+            items.extend(_structured_text(item))
+        return items
+    return [str(value)]
+
+
+def _normalize_action_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value).casefold()
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    text = re.sub(r"(?m)(?:--|#)[^\r\n]*", " ", text)
+    text = "".join(" " if unicodedata.category(char).startswith("C") else char for char in text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _matched_forbidden_rules(step: PlanStep, context: str) -> list[str]:
     rules: list[str] = []
-    if step.tool_name in HARD_FORBIDDEN_TOOLS:
-        rules.append(f"tool:{step.tool_name}")
+    tool_name = _normalize_tool_name(step.tool_name)
+    if tool_name in HARD_FORBIDDEN_TOOLS:
+        rules.append(f"tool:{tool_name}")
     if _has_unaudited_sql(step):
         rules.append("sql:unaudited")
-    for pattern, rule_name in FORBIDDEN_PATTERNS:
-        if pattern.search(context):
-            rules.append(rule_name)
+    rules.extend(matched_action_patterns(context, forbidden=True))
     return _dedupe(rules)
 
 
 def _has_unaudited_sql(step: PlanStep) -> bool:
-    tool_name = step.tool_name.lower()
+    tool_name = _normalize_tool_name(step.tool_name)
     if "sql" not in tool_name and "sql" not in step.input_args:
         return False
-    if step.input_args.get("audited") is True:
-        return False
-    sql = str(step.input_args.get("sql") or step.input_args.get("query") or "")
+    sql = _normalize_action_text(
+        str(step.input_args.get("sql") or step.input_args.get("query") or "")
+    )
     if not sql and tool_name in {"execute_sql", "run_sql"}:
         return True
     return bool(
@@ -273,20 +245,19 @@ def _matched_approval_rules(
     read_only: bool,
     risk_level: RiskLevel,
 ) -> list[str]:
-    if step.tool_name == "suggest_remediation":
+    tool_name = _normalize_tool_name(step.tool_name)
+    if tool_name == "suggest_remediation" and read_only:
         return []
-    if read_only and step.tool_name != "manual_analysis":
+    if read_only and tool_name != "manual_analysis":
         return []
     rules: list[str] = []
     if risk_level == "high" or (risk_level == "medium" and not read_only):
         rules.append(f"risk:{risk_level}")
     if not read_only:
         rules.append("tool:not-read-only")
-    if step.tool_name in ACTION_TOOLS_REQUIRING_APPROVAL:
-        rules.append(f"tool:{step.tool_name}")
-    for pattern, rule_name in APPROVAL_PATTERNS:
-        if pattern.search(context):
-            rules.append(rule_name)
+    if tool_name in ACTION_TOOLS_REQUIRING_APPROVAL:
+        rules.append(f"tool:{tool_name}")
+    rules.extend(matched_action_patterns(context, forbidden=False))
     return _dedupe(rules)
 
 
@@ -300,7 +271,9 @@ def _risk_for_approval(
         return "high"
     if not read_only and _is_prod_incident(incident):
         return "high"
-    if step.tool_name in ACTION_TOOLS_REQUIRING_APPROVAL and _is_prod_incident(incident):
+    if _normalize_tool_name(step.tool_name) in ACTION_TOOLS_REQUIRING_APPROVAL and _is_prod_incident(
+        incident
+    ):
         return "high"
     return _max_risk(risk_level, "medium")
 
@@ -337,3 +310,7 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _normalize_tool_name(value: str) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()

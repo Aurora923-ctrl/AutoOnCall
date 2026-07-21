@@ -8,7 +8,12 @@ from fastapi import FastAPI
 
 from app.api import aiops, approvals, chat, evaluations, file as file_api
 from app.config import config
-from app.core.auth import ROLE_SCOPES, authenticate_request
+from app.core.auth import (
+    ROLE_SCOPES,
+    AuthPrincipal,
+    authenticate_request,
+    scoped_session_id,
+)
 from app.models.approval import ApprovalRequest
 from app.services.approval_service import ApprovalService
 
@@ -165,8 +170,14 @@ async def test_read_token_can_read_but_cannot_approve_or_diagnose(monkeypatch) -
 async def test_approver_token_is_used_as_approval_audit_actor(monkeypatch, tmp_path) -> None:
     _set_auth_config(monkeypatch, enabled=True, approver_token="approve-secret-token")
     service = ApprovalService(tmp_path / "approvals.db")
+    principal = authenticate_request("approve", x_autooncall_token="approve-secret-token")
     request = service.create_request(
-        ApprovalRequest(incident_id="inc-auth-audit", action="限流接口", risk_level="medium")
+        ApprovalRequest(
+            incident_id="inc-auth-audit",
+            action="限流接口",
+            risk_level="medium",
+            metadata={"session_id": scoped_session_id(principal, "approval-audit")},
+        )
     )
     monkeypatch.setattr(approvals, "get_approval_service", lambda: service)
     app = _build_app()
@@ -309,3 +320,57 @@ def test_json_tokens_with_same_audit_name_do_not_overwrite_each_other(monkeypatc
     assert reader.has_scope("diagnose") is False
     assert operator.token_name == "shared-actor"
     assert operator.has_scope("diagnose") is True
+
+
+def test_request_accepts_matching_duplicate_token_headers(monkeypatch) -> None:
+    _set_auth_config(monkeypatch, enabled=True, read_token="read-secret-token")
+
+    principal = authenticate_request(
+        "read",
+        credentials=type(
+            "Credentials",
+            (),
+            {"scheme": "Bearer", "credentials": "read-secret-token"},
+        )(),
+        x_autooncall_token="read-secret-token",
+    )
+
+    assert principal.has_scope("read") is True
+
+
+def test_request_rejects_conflicting_token_headers(monkeypatch) -> None:
+    _set_auth_config(monkeypatch, enabled=True, read_token="read-secret-token")
+
+    with pytest.raises(Exception) as exc_info:
+        authenticate_request(
+            "read",
+            credentials=type(
+                "Credentials",
+                (),
+                {"scheme": "Bearer", "credentials": "different-secret-token"},
+            )(),
+            x_autooncall_token="read-secret-token",
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "multiple API token headers" in str(getattr(exc_info.value, "detail", ""))
+
+
+def test_scoped_session_id_stays_within_durable_store_limit() -> None:
+    principal = AuthPrincipal(enabled=True, principal_id="a" * 16)
+
+    scoped = scoped_session_id(principal, "s" * 128)
+
+    assert len(scoped) <= 128
+    assert scoped.startswith("principal:" + ("a" * 16) + ":")
+    assert scoped_session_id(principal, scoped) == scoped
+
+
+def test_admin_session_ids_are_not_rewritten() -> None:
+    principal = AuthPrincipal(
+        enabled=True,
+        principal_id="a" * 16,
+        scopes=frozenset({"admin"}),
+    )
+
+    assert scoped_session_id(principal, "principal:foreign:run-1") == "principal:foreign:run-1"

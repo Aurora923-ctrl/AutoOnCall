@@ -1,20 +1,16 @@
----
-reviewers:
-- thockin
-- bowei
-content_type: task
-title: Debug Services
-weight: 20
----
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6bf0602c0bf364/content/en/docs/tasks/debug/debug-application/debug-service.md
+Upstream revision: c3317651dc19ef683c5c4463bb6bf0602c0bf364
+Retrieved: 2026-07-21
+License: CC BY 4.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
-<!-- overview -->
 An issue that comes up rather frequently for new installations of Kubernetes is
 that a Service is not working properly.  You've run your Pods through a
 Deployment (or other workload controller) and created a Service, but you
 get no response when you try to access it.  This document will hopefully help
 you to figure out what's going wrong.
-
-<!-- body -->
 
 ## Running commands in a Pod
 
@@ -25,9 +21,7 @@ sees.  The simplest way to do this is to run an interactive busybox Pod:
 kubectl run -it --rm --restart=Never busybox --image=registry.k8s.io/busybox:1.27.2 sh
 ```
 
-{{< note >}}
 If you don't see a command prompt, try pressing enter.
-{{< /note >}}
 
 If you already have a running Pod that you prefer to use, you can run a
 command in it using:
@@ -219,7 +213,7 @@ Services, these values might be the same.
 If you have deployed any Network Policy Ingress rules which may affect incoming
 traffic to `hostnames-*` Pods, these need to be reviewed.
 
-Please refer to [Network Policies](/docs/concepts/services-networking/network-policies/) for more details.
+Please refer to Network Policies for more details.
 
 ## Does the Service work by DNS name?
 
@@ -272,9 +266,7 @@ own cluster.
 
 You can also try this from a Node in the cluster:
 
-{{< note >}}
 10.0.0.10 is the cluster's DNS Service IP, yours might be different.
-{{< /note >}}
 
 ```shell
 nslookup hostnames.default.svc.cluster.local 10.0.0.10
@@ -349,7 +341,7 @@ Service works by its IP address.  From a Pod in your cluster, access the
 Service's IP (from `kubectl get` above).
 
 ```shell
-for i in $(seq 1 3); do 
+for i in $(seq 1 3); do
     wget -qO- 10.0.1.175:80
 done
 ```
@@ -442,7 +434,7 @@ they are running fine and not crashing.
 
 The "RESTARTS" column says that these pods are not crashing frequently or being
 restarted.  Frequent restarts could lead to intermittent connectivity issues.
-If the restart count is high, read more about how to [debug pods](/docs/tasks/debug/debug-application/debug-pods).
+If the restart count is high, read more about how to debug pods.
 
 Inside the Kubernetes system is a control loop which evaluates the selector of
 every Service and saves the results into one or more EndpointSlice objects.
@@ -470,9 +462,7 @@ Let's check again that the Pods are actually working - you can bypass the
 Service mechanism and go straight to the Pods, as listed by the Endpoints
 above.
 
-{{< note >}}
 These commands use the Pod port (9376), rather than the Service port (80).
-{{< /note >}}
 
 From within a Pod:
 
@@ -621,7 +611,7 @@ This might sound unlikely, but it does happen and it is supposed to work.
 This can happen when the network is not properly configured for "hairpin"
 traffic, usually when `kube-proxy` is running in `iptables` mode and Pods
 are connected with bridge network. The `Kubelet` exposes a `hairpin-mode`
-[flag](/docs/reference/command-line-tools-reference/kubelet/) that allows endpoints of a Service to loadbalance
+flag that allows endpoints of a Service to loadbalance
 back to themselves if they try to access their own Service VIP. The
 `hairpin-mode` flag must either be set to `hairpin-veth` or
 `promiscuous-bridge`.
@@ -691,8 +681,5 @@ Contact us on
 [Forum](https://discuss.kubernetes.io) or
 [GitHub](https://github.com/kubernetes/kubernetes).
 
-## {{% heading "whatsnext" %}}
-
-Visit the [troubleshooting overview document](/docs/tasks/debug/)
+Visit the troubleshooting overview document
 for more information.
-

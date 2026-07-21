@@ -9,6 +9,7 @@ from typing import Any, Literal, overload
 import httpx
 
 _KUBERNETES_LABEL_VALUE_RE = re.compile(r"^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$")
+_KUBERNETES_PATH_SEGMENT_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 
 
 class ExternalAdapterError(RuntimeError):
@@ -65,6 +66,14 @@ def require_kubernetes_label_value(value: Any, *, field_name: str = "label value
     return text
 
 
+def require_kubernetes_path_segment(value: Any, *, field_name: str) -> str:
+    """Validate a DNS-label path segment before interpolating it into a Kubernetes URL."""
+    text = str(value or "").strip()
+    if not text or not _KUBERNETES_PATH_SEGMENT_RE.fullmatch(text):
+        raise ExternalAdapterError(f"{field_name} must be a valid Kubernetes DNS label")
+    return text
+
+
 def parse_duration_seconds(value: str, *, default_seconds: int = 600) -> int:
     """Parse compact duration strings such as 10m, 1h, or 30s."""
     text = (value or "").strip().lower()
@@ -90,6 +99,8 @@ def adapter_success(
         **payload,
         "status": "success",
         "source": source,
+        "source_quality": payload.get("source_quality", "live"),
+        "evidence_origin": payload.get("evidence_origin", source),
         "signals": signals or {},
         "raw": raw if raw is not None else {},
         "summary": summary,

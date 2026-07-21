@@ -77,7 +77,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
 
-            const data = await response.json();            
+            const data = await this.readJsonResponse(response);
             // 移除等待提示消息
             if (loadingMessage && loadingMessage.parentNode) {
                 loadingMessage.parentNode.removeChild(loadingMessage);
@@ -120,6 +120,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const response = await this.apiFetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
+                timeoutMs: 0,
                 headers: {
                     'Content-Type': 'application/json',
                 },
@@ -141,21 +142,9 @@ Object.assign(window.AutoOnCallApp.prototype, {
             // 处理流式响应
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let buffer = '';
             let terminalReceived = false;
 
-            const handleSseLine = (line) => {
-                const normalizedLine = line.endsWith('\r') ? line.slice(0, -1) : line;
-                if (normalizedLine.trim() === '') return false;
-
-                if (normalizedLine.startsWith('id:') || normalizedLine.startsWith('event:')) {
-                    return false;
-                }
-                if (!normalizedLine.startsWith('data:')) {
-                    return false;
-                }
-
-                const rawData = normalizedLine.substring(5).trim();
+            const handleSseEvent = ({ data: rawData }) => {
                 if (rawData === '[DONE]') {
                     terminalReceived = true;
                     this.handleStreamComplete(
@@ -230,14 +219,14 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 }
                 return false;
             };
+            const parser = this.createSseParser(handleSseEvent);
 
             try {
                 while (true) {
                     const { done, value } = await reader.read();
                     
                     if (done) {
-                        buffer += decoder.decode();
-                        if (buffer && handleSseLine(buffer)) {
+                        if (parser.push(decoder.decode()) || parser.finish()) {
                             return;
                         }
                         if (!terminalReceived) {
@@ -249,18 +238,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
                         return;
                     }
 
-                    // 解码数据并添加到缓冲区
-                    buffer += decoder.decode(value, { stream: true });
-                    
-                    // 按行分割处理
-                    const lines = buffer.split('\n');
-                    // 保留最后一行（可能不完整）
-                    buffer = lines.pop() || '';
-                    
-                    for (const line of lines) {
-                        if (handleSseLine(line)) {
-                            return;
-                        }
+                    if (parser.push(decoder.decode(value, { stream: true }))) {
+                        return;
                     }
                 }
             } finally {
@@ -544,9 +523,11 @@ Object.assign(window.AutoOnCallApp.prototype, {
     renderRagSourceItem(item, rejected = false) {
         const score = this.formatRetrievalScore(item.score);
         const preview = item.content_preview || item.content || '';
+        const citationLabel = item.citation_index ? `证据 ${item.citation_index}` : '';
         return `
             <details class="rag-source-item${rejected ? ' rejected' : ''}">
                 <summary>
+                    ${citationLabel ? `<span>${this.escapeHtml(citationLabel)}</span>` : ''}
                     <span>${this.escapeHtml(item.source_file || '未知来源')}</span>
                     <span>${this.escapeHtml(item.chunk_id || 'unknown-chunk')}</span>
                     <span>score=${this.escapeHtml(score)}</span>
@@ -696,6 +677,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             // 发送上传请求
             const response = await this.apiFetch(`${this.apiBaseUrl}/upload`, {
                 method: 'POST',
+                timeoutMs: 0,
                 body: formData
             });
 
@@ -703,7 +685,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
 
-            const data = await response.json();
+            const data = await this.readJsonResponse(response);
 
             const acceptedUploadStatus = data.code === 200
                 || data.code === 207

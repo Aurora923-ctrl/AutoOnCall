@@ -17,7 +17,7 @@ PYTHON ?= .venv/Scripts/python.exe
 else
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then printf '.venv/bin/python'; elif [ -x venv/bin/python ]; then printf 'venv/bin/python'; else printf 'python3'; fi)
 endif
-MYPY_PYTHON_VERSION ?= $(shell $(PYTHON) -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+MYPY_PYTHON_VERSION ?= 3.11
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -28,7 +28,7 @@ NC = \033[0m
 
 .PHONY: help init bootstrap verify verify-local hygiene-check reference-check dependency-lock-check async-blocking-audit frontend-install frontend-lint frontend-test frontend-schema frontend-schema-check frontend-verify live-eval start stop restart check upload clean up down status wait \
         install install-dev dev run seed-demo reset-demo-data demo demo-reports interview-demo interview-demo-all interview-summary interview-ragas test test-quick eval eval-rag eval-ragas eval-ragas-full-core eval-ragas-full-generated-core eval-ragas-full-runtime-core eval-change eval-replanner export-bad-cases format format-check lint fix type-check \
-        api-contract-verify knowledge-quality benchmark-baseline candidate-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
+        api-contract-verify knowledge-quality rag-index-rebuild rag-index-identity benchmark-baseline candidate-baseline official-baseline performance-smoke performance-real-model performance-rag-runtime controlled-fault-readiness full-gate security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
         interview-up interview-down interview-status sandbox-verify sandbox-demo refresh-quality-artifacts
@@ -655,13 +655,14 @@ remove:  ## 移除依赖包 (用法: make remove PKG=package_name)
 
 format:  ## 格式化代码
 	@echo "$(YELLOW)🎨 格式化代码...$(NC)"
-	$(PYTHON) -m ruff check --select I --fix app/ 2>/dev/null || true
-	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
+	$(PYTHON) -m isort --profile black --line-length 100 app/ scripts/ tests/
+	$(PYTHON) -m black --line-length 100 app/ scripts/ tests/
 	@echo "$(GREEN)✅ 格式化完成$(NC)"
 
 format-check:  ## 检查格式（不修改文件）
 	@echo "$(YELLOW)🎨 检查代码格式（不修改文件）...$(NC)"
-	$(PYTHON) -m ruff format --check app/ scripts/ tests/
+	$(PYTHON) -m isort --check-only --profile black --line-length 100 app/ scripts/ tests/
+	$(PYTHON) -m black --check --line-length 100 app/ scripts/ tests/
 	@echo "$(GREEN)✅ 格式检查通过$(NC)"
 
 lint:  ## 代码检查
@@ -671,8 +672,9 @@ lint:  ## 代码检查
 
 fix:  ## 自动修复代码问题
 	@echo "$(YELLOW)🔧 自动修复代码问题...$(NC)"
-	$(PYTHON) -m ruff check --fix app/ 2>/dev/null || true
-	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
+	$(PYTHON) -m ruff check --fix app/ scripts/ tests/
+	$(PYTHON) -m isort --profile black --line-length 100 app/ scripts/ tests/
+	$(PYTHON) -m black --line-length 100 app/ scripts/ tests/
 	@echo "$(GREEN)✅ 修复完成$(NC)"
 
 type-check:  ## 类型检查
@@ -731,6 +733,12 @@ eval-replanner:  ## 运行 Replanner LLM 决策离线评测
 
 knowledge-quality:  ## Measure all knowledge assets and temporary Milvus CRUD consistency
 	$(PYTHON) scripts/eval/eval_knowledge_quality.py --docs-dir $(DOCS_DIR) --summary-json logs/knowledge_quality.json --summary-md logs/knowledge_quality.md
+
+rag-index-rebuild:  ## Drop and cleanly rebuild vector and lexical indexes, then verify identity
+	$(PYTHON) scripts/maintenance/rebuild_rag_index.py --docs-dir $(DOCS_DIR) --confirm-drop
+
+rag-index-identity:  ## Verify exact source, chunk, document, and content identity in Milvus
+	$(PYTHON) scripts/eval/rag_index_identity.py --docs-dir $(DOCS_DIR)
 
 benchmark-baseline:  ## Run one timestamped local benchmark without overwriting history
 	$(PYTHON) scripts/eval/run_benchmark_baseline.py
@@ -836,6 +844,8 @@ full-gate:  ## Stage-8 full quality gate; expensive live experiments remain expl
 	@$(MAKE) type-check
 	@$(MAKE) security
 	$(PYTHON) -m pytest tests/ --cov=app --cov-report=term
+	@$(MAKE) dependency-lock-check
+	@$(MAKE) async-blocking-audit
 	@$(MAKE) api-contract-verify
 	@$(MAKE) knowledge-quality
 	@$(MAKE) eval-rag
@@ -845,6 +855,7 @@ full-gate:  ## Stage-8 full quality gate; expensive live experiments remain expl
 	@$(MAKE) eval-replanner
 	@$(MAKE) performance-smoke
 	@$(MAKE) controlled-fault-readiness
+	@$(MAKE) frontend-verify
 	@$(MAKE) reference-check
 	@$(MAKE) hygiene-check
 	@$(MAKE) benchmark-baseline

@@ -40,9 +40,11 @@ class ApprovalRequest(BaseModel):
     status: Literal["pending", "approved", "rejected", "cancelled"] = "pending"
     step_id: str | None = Field(default=None, max_length=128)
     tool_name: str | None = Field(default=None, max_length=120)
+    risk_policy_version: str = Field(default="", max_length=64)
     change_plan: ChangePlan | None = None
     requested_by: str = Field(default="aiops-agent", max_length=120)
     decided_by: str | None = Field(default=None, max_length=120)
+    decided_by_principal_id: str | None = Field(default=None, max_length=128)
     decision_reason: str = Field(default="", max_length=2000)
     metadata: dict[str, Any] = Field(default_factory=dict)
     projection_pending: list[str] = Field(default_factory=list)

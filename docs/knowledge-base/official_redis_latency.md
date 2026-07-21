@@ -1,17 +1,10 @@
----
-aliases:
-- /manual/optimization/latency/
-- /management/optimization/latency/
-categories:
-- docs
-- operate
-- stack
-- oss
-description: Finding the causes of slow responses
-linkTitle: Latency diagnosis
-title: Diagnosing latency issues
-weight: 1
----
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/redis/docs/blob/36a9e2dbb407116f2a9d46d0f600cebdf8e4be68/content/operate/oss_and_stack/management/optimization/latency.md
+Upstream revision: 36a9e2dbb407116f2a9d46d0f600cebdf8e4be68
+Retrieved: 2026-07-21
+License: CC BY-NC-SA 4.0 and upstream notices
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 This document will help you understand what the problem could be if you
 are experiencing latency problems with Redis.
@@ -21,19 +14,18 @@ issues a command and the time the reply to the command is received by the
 client. Usually Redis processing time is extremely low, in the sub microsecond
 range, but there are certain conditions leading to higher latency figures.
 
-I've little time, give me the checklist
----
+## I've little time, give me the checklist
 
 The following documentation is very important in order to run Redis in
 a low latency fashion. However I understand that we are busy people, so
 let's start with a quick checklist. If you fail following these steps, please
 return here to read the full documentation.
 
-1. Make sure you are not running slow commands that are blocking the server. Use the Redis [Slow Log feature](/commands/slowlog) to check this.
+1. Make sure you are not running slow commands that are blocking the server. Use the Redis Slow Log feature to check this.
 2. For EC2 users, make sure you use HVM based modern EC2 instances, like m3.medium. Otherwise fork() is too slow.
 3. Transparent huge pages must be disabled from your kernel. Use `echo never > /sys/kernel/mm/transparent_hugepage/enabled` to disable them, and restart your Redis process.
 4. If you are using a virtual machine, it is possible that you have an intrinsic latency that has nothing to do with Redis. Check the minimum latency you can expect from your runtime environment using `./redis-cli --intrinsic-latency 100`. Note: you need to run this command in *the server* not in the client.
-5. Enable and use the [Latency monitor]({{< relref "operate/oss_and_stack/management/optimization/latency-monitor" >}}) feature of Redis in order to get a human readable description of the latency events and causes in your Redis instance.
+5. Enable and use the Latency monitor feature of Redis in order to get a human readable description of the latency events and causes in your Redis instance.
 
 In general, use the following table for durability VS latency/performance tradeoffs, ordered from stronger safety to better latency.
 
@@ -45,8 +37,7 @@ In general, use the following table for durability VS latency/performance tradeo
 
 And now for people with 15 minutes to spend, the details...
 
-Measuring latency
------------------
+## Measuring latency
 
 If you are experiencing latency problems, you probably know how to measure
 it in the context of your application, or maybe your latency problem is very
@@ -55,22 +46,20 @@ latency of a Redis server in milliseconds, just try:
 
     redis-cli --latency -h `host` -p `port`
 
-Using the internal Redis latency monitoring subsystem
----
+## Using the internal Redis latency monitoring subsystem
 
 Since Redis 2.8.13, Redis provides latency monitoring capabilities that
 are able to sample different execution paths to understand where the
 server is blocking. This makes debugging of the problems illustrated in
 this documentation much simpler, so we suggest enabling latency monitoring
-ASAP. Please refer to the [Latency monitor documentation]({{< relref "operate/oss_and_stack/management/optimization/latency-monitor" >}}).
+ASAP. Please refer to the Latency monitor documentation.
 
 While the latency monitoring sampling and reporting capabilities will make
 it simpler to understand the source of latency in your Redis system, it is still
 advised that you read this documentation extensively to better understand
 the topic of Redis and latency spikes.
 
-Latency baseline
-----------------
+## Latency baseline
 
 There is a kind of latency that is inherently part of the environment where
 you run Redis, that is the latency provided by your operating system kernel
@@ -123,8 +112,7 @@ instance running Redis and Apache:
 Here we have an intrinsic latency of 9.7 milliseconds: this means that we can't ask better than that to Redis. However other runs at different times in different virtualization environments with higher load or with noisy neighbors can easily show even worse values. We were able to measure up to 40 milliseconds in
 systems otherwise apparently running normally.
 
-Latency induced by network and communication
---------------------------------------------
+## Latency induced by network and communication
 
 Clients connect to Redis using a TCP/IP connection or a Unix domain connection.
 The typical latency of a 1 Gbit/s network is about 200 us, while the latency
@@ -162,14 +150,13 @@ placement (taskset), cgroups, real-time priorities (chrt), NUMA
 configuration (numactl), or by using a low-latency kernel. Please note
 vanilla Redis is not really suitable to be bound on a **single** CPU core.
 Redis can fork background tasks that can be extremely CPU consuming
-like [`BGSAVE`](/commands/bgsave) or [`BGREWRITEAOF`](/commands/bgrewriteaof). These tasks must **never** run on the same core
+like `BGSAVE` or `BGREWRITEAOF`. These tasks must **never** run on the same core
 as the main event loop.
 
 In most situations, these kind of system level optimizations are not needed.
 Only do them if you require them, and if you are familiar with them.
 
-Single threaded nature of Redis
--------------------------------
+## Single threaded nature of Redis
 
 Redis uses a *mostly* single threaded design. This means that a single process
 serves all the client requests, using a technique called **multiplexing**.
@@ -185,15 +172,14 @@ we use threads in Redis in order to perform some slow I/O operations in the
 background, mainly related to disk I/O, but this does not change the fact
 that Redis serves all the requests using a single thread.
 
-Latency generated by slow commands
-----------------------------------
+## Latency generated by slow commands
 
 A consequence of being single thread is that when a request is slow to serve
 all the other clients will wait for this request to be served. When executing
-normal commands, like [`GET`](/commands/get) or [`SET`](/commands/set) or [`LPUSH`](/commands/lpush) this is not a problem
+normal commands, like `GET` or `SET` or `LPUSH` this is not a problem
 at all since these commands are executed in constant (and very small) time.
-However there are commands operating on many elements, like [`SORT`](/commands/sort), [`LREM`](/commands/lrem),
-[`SUNION`](/commands/sunion) and others. For instance taking the intersection of two big sets
+However there are commands operating on many elements, like `SORT`, `LREM`,
+`SUNION` and others. For instance taking the intersection of two big sets
 can take a considerable amount of time.
 
 The algorithmic complexity of all commands is documented. A good practice
@@ -204,7 +190,7 @@ values composed of many elements, or you should run a replica using Redis
 replication where you run all your slow queries.
 
 It is possible to monitor slow commands using the Redis
-[Slow Log feature](/commands/slowlog).
+Slow Log feature.
 
 Additionally, you can use your favorite per-process monitoring program
 (top, htop, prstat, etc ...) to quickly check the CPU consumption of the
@@ -212,14 +198,13 @@ main Redis process. If it is high while the traffic is not, it is usually
 a sign that slow commands are used.
 
 **IMPORTANT NOTE**: a VERY common source of latency generated by the execution
-of slow commands is the use of the [`KEYS`](/commands/keys) command in production environments.
-[`KEYS`](/commands/keys), as documented in the Redis documentation, should only be used for
+of slow commands is the use of the `KEYS` command in production environments.
+`KEYS`, as documented in the Redis documentation, should only be used for
 debugging purposes. Since Redis 2.8 a new commands were introduced in order to
 iterate the key space and other large collections incrementally, please check
-the [`SCAN`](/commands/scan), [`SSCAN`](/commands/sscan), [`HSCAN`](/commands/hscan) and [`ZSCAN`](/commands/zscan) commands for more information.
+the `SCAN`, `SSCAN`, `HSCAN` and `ZSCAN` commands for more information.
 
-Latency generated by fork
--------------------------
+## Latency generated by fork
 
 In order to generate the RDB file in background, or to rewrite the Append Only File if AOF persistence is enabled, Redis has to fork background processes.
 The fork operation (running in the main thread) can induce latency by itself.
@@ -239,13 +224,12 @@ which will involve allocating and copying 48 MB of memory. It takes time
 and CPU, especially on virtual machines where allocation and initialization
 of a large memory chunk can be expensive.
 
-Fork time in different systems
-------------------------------
+## Fork time in different systems
 
 Modern hardware is pretty fast at copying the page table, but Xen is not.
 The problem with Xen is not virtualization-specific, but Xen-specific. For instance using VMware or Virtual Box does not result into slow fork time.
 The following is a table that compares fork time for different Redis instance
-size. Data is obtained performing a BGSAVE and looking at the `latest_fork_usec` filed in the [`INFO`](/commands/info) command output.
+size. Data is obtained performing a BGSAVE and looking at the `latest_fork_usec` filed in the `INFO` command output.
 
 However the good news is that **new types of EC2 HVM based instances are much
 better with fork times**, almost on par with physical servers, so for example
@@ -261,8 +245,7 @@ using m3.medium (or better) instances will provide good results.
 
 As you can see certain VMs running on Xen have a performance hit that is between one order to two orders of magnitude. For EC2 users the suggestion is simple: use modern HVM based instances.
 
-Latency induced by transparent huge pages
------------------------------------------
+## Latency induced by transparent huge pages
 
 Unfortunately when a Linux kernel has transparent huge pages enabled, Redis
 incurs to a big latency penalty after the `fork` call is used in order to
@@ -276,8 +259,7 @@ Make sure to **disable transparent huge pages** using the following command:
 
     echo never > /sys/kernel/mm/transparent_hugepage/enabled
 
-Latency induced by swapping (operating system paging)
------------------------------------------------------
+## Latency induced by swapping (operating system paging)
 
 Linux (and many other modern operating systems) is able to relocate memory
 pages from the memory to the disk, and vice versa, in order to use the
@@ -471,8 +453,7 @@ to lower the memory pressure in your system, either adding more RAM if Redis
 is using more memory than the available, or avoiding running other memory
 hungry processes in the same system.
 
-Latency due to AOF and disk I/O
--------------------------------
+## Latency due to AOF and disk I/O
 
 Another source of latency is due to the Append Only File support on Redis.
 The AOF basically uses two system calls to accomplish its work. One is
@@ -551,8 +532,7 @@ I use the following command:
 
     sudo strace -f -p $(pidof redis-server) -T -e trace=fdatasync,write 2>&1 | grep -v '0.0' | grep -v unfinished
 
-Latency generated by expires
-----------------------------
+## Latency generated by expires
 
 Redis evict expired keys in two ways:
 
@@ -570,12 +550,11 @@ However the algorithm is adaptive and will loop if it finds more than 25% of key
 
 Basically this means that **if the database has many, many keys expiring in the same second, and these make up at least 25% of the current population of keys with an expire set**, Redis can block in order to get the percentage of keys already expired below 25%.
 
-This approach is needed in order to avoid using too much memory for keys that are already expired, and usually is absolutely harmless since it's strange that a big number of keys are going to expire in the same exact second, but it is not impossible that the user used [`EXPIREAT`](/commands/expireat) extensively with the same Unix time.
+This approach is needed in order to avoid using too much memory for keys that are already expired, and usually is absolutely harmless since it's strange that a big number of keys are going to expire in the same exact second, but it is not impossible that the user used `EXPIREAT` extensively with the same Unix time.
 
 In short: be aware that many keys expiring at the same moment can be a source of latency.
 
-Redis software watchdog
----
+## Redis software watchdog
 
 Redis 2.6 introduces the *Redis Software Watchdog* that is a debugging tool
 designed to track those latency problems that for one reason or the other
@@ -590,7 +569,7 @@ It is important to use it only as *last resort* when there is no way to track th
 
 This is how this feature works:
 
-* The user enables the software watchdog using the [`CONFIG SET`](/commands/config-set) command.
+* The user enables the software watchdog using the `CONFIG SET` command.
 * Redis starts monitoring itself constantly.
 * If Redis detects that the server is blocked into some operation that is not returning fast enough, and that may be the source of the latency issue, a low level report about where the server is blocked is dumped on the log file.
 * The user contacts the developers writing a message in the Redis Google Group, including the watchdog report in the message.

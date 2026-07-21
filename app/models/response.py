@@ -76,6 +76,7 @@ class HealthDataResponse(BaseModel):
     version: str
     status: str
     mode: str
+    observability: dict[str, Any] = Field(default_factory=dict)
     checks: dict[str, Any] = Field(default_factory=dict)
     capabilities: dict[str, Any] = Field(default_factory=dict)
     milvus: dict[str, Any] | None = None

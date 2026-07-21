@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.models.a2a import A2ATaskRecord
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
 from app.models.approval import ApprovalRequest
@@ -326,3 +327,41 @@ def test_sqlite_retention_preserves_dependencies_of_active_change_execution(tmp_
     assert store.list_trace_events(incident_id=incident_id)
     assert store.get_latest_report(incident_id) is not None
     assert store.get_change_execution(execution.change_execution_id) is not None
+
+
+def test_sqlite_retention_preserves_active_a2a_task_and_deletes_terminal_task(tmp_path) -> None:
+    store = AIOpsSQLiteStore(tmp_path / "a2a-retention.db")
+    old_time = datetime.now(UTC) - timedelta(days=30)
+    active = A2ATaskRecord(
+        task_id="task-active",
+        message_id="msg-active",
+        request_fingerprint="a" * 64,
+        owner_id="alice",
+        skill="diagnose_incident",
+        incident_id="inc-a2a-active",
+        state="TASK_STATE_WORKING",
+        created_at=old_time,
+        updated_at=old_time,
+    )
+    terminal = active.model_copy(
+        update={
+            "task_id": "task-terminal",
+            "message_id": "msg-terminal",
+            "request_fingerprint": "b" * 64,
+            "incident_id": "inc-a2a-terminal",
+            "state": "TASK_STATE_COMPLETED",
+        }
+    )
+    store.create_a2a_task_record(active)
+    store.create_a2a_task_record(terminal)
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(
+            "UPDATE a2a_tasks SET updated_at = ?",
+            (old_time.isoformat(),),
+        )
+
+    result = store.cleanup_older_than(keep_days=14)
+
+    assert result["deleted"]["a2a_tasks"] == 1
+    assert store.get_a2a_task_record(active.task_id) is not None
+    assert store.get_a2a_task_record(terminal.task_id) is None

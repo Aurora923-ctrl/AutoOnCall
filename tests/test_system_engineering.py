@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.core.resilience import (
     CircuitOpenError,
     call_sync_with_resilience,
     call_with_resilience,
+    run_bounded_sync_call,
 )
 from app.services import mysql_store
 from app.services.schema_migrations import SchemaMigration, apply_sqlite_migrations
@@ -104,6 +106,18 @@ def test_half_open_circuit_allows_only_one_probe(monkeypatch) -> None:
     assert breaker.try_acquire_request() is True
 
 
+def test_half_open_non_retryable_failure_reopens_circuit(monkeypatch) -> None:
+    breaker = CircuitBreaker("half-open-non-retryable", failure_threshold=1, recovery_timeout_seconds=1)
+    breaker.record_failure()
+    monkeypatch.setattr(breaker, "_opened_at", time.monotonic() - 2)
+
+    assert breaker.try_acquire_request() is True
+    breaker.record_non_retryable_failure()
+
+    assert breaker.state == "open"
+    assert breaker.try_acquire_request() is False
+
+
 def test_sync_resilience_enforces_timeout_budget() -> None:
     started = time.monotonic()
 
@@ -121,6 +135,29 @@ def test_sync_resilience_enforces_timeout_budget() -> None:
         )
 
     assert time.monotonic() - started < 0.15
+
+
+@pytest.mark.asyncio
+async def test_bounded_sync_call_releases_capacity_after_deadline_expires_before_await() -> None:
+    release = threading.Event()
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await run_bounded_sync_call(
+            "bounded-sync-timeout",
+            "query",
+            lambda: release.wait(0.2),
+            timeout_seconds=0.01,
+        )
+
+    release.set()
+    result = await run_bounded_sync_call(
+        "bounded-sync-recovery",
+        "query",
+        lambda: "ok",
+        timeout_seconds=1,
+    )
+
+    assert result == "ok"
 
 
 @pytest.mark.asyncio

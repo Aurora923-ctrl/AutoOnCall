@@ -15,6 +15,13 @@ from app.services.a2a_skills import (
     SKILL_GET_INCIDENT_STATUS,
 )
 
+A2A_MESSAGE_ID_MAX_LENGTH = 256
+A2A_TASK_ID_MAX_LENGTH = 256
+A2A_CONTEXT_ID_MAX_LENGTH = 128
+A2A_TEXT_MAX_LENGTH = 8000
+A2A_PARTS_MAX_ITEMS = 100
+A2A_STRUCTURED_PAYLOAD_MAX_CHARS = 256_000
+
 
 @dataclass(frozen=True)
 class A2AEnvelope:
@@ -33,6 +40,11 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
     """Accept A2A HTTP+JSON and simple JSON-RPC-like payloads."""
     if not isinstance(payload, dict):
         raise ValueError("A2A request body must be an object")
+    if (
+        len(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+        > A2A_STRUCTURED_PAYLOAD_MAX_CHARS
+    ):
+        raise ValueError("A2A request body is too large")
     raw_params = payload.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else payload
     raw_message = params.get("message")
@@ -42,6 +54,8 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         raise ValueError("A2A message role must identify the caller as a user")
     raw_parts = message.get("parts")
     parts: list[Any] = raw_parts if isinstance(raw_parts, list) else []
+    if len(parts) > A2A_PARTS_MAX_ITEMS:
+        raise ValueError(f"A2A message parts must contain at most {A2A_PARTS_MAX_ITEMS} items")
     data: dict[str, Any] = {}
     data.update(_mapping(params.get("data")))
     data.update(_data_from_parts(parts))
@@ -77,6 +91,13 @@ def parse_message_envelope(payload: dict[str, Any]) -> A2AEnvelope:
         or data.get("incident_id")
         or ""
     ).strip()
+    _validate_identifier("messageId", message_id, A2A_MESSAGE_ID_MAX_LENGTH)
+    _validate_identifier("taskId", task_id, A2A_TASK_ID_MAX_LENGTH, required=False)
+    _validate_identifier("contextId", context_id, A2A_CONTEXT_ID_MAX_LENGTH, required=False)
+    if len(text) > A2A_TEXT_MAX_LENGTH:
+        raise ValueError(f"A2A message text must contain at most {A2A_TEXT_MAX_LENGTH} characters")
+    if _contains_control_characters(text):
+        raise ValueError("A2A message text contains control characters")
     return A2AEnvelope(
         message_id=message_id,
         task_id=task_id,
@@ -138,6 +159,9 @@ def scope_message_to_principal(payload: dict[str, Any], principal_id: str) -> di
     raw_message = params.get("message")
     message = dict(raw_message) if isinstance(raw_message, dict) else params
     message["messageId"] = f"principal:{principal_id}:{envelope.message_id}"
+    message_metadata = dict(message.get("metadata") or {})
+    message_metadata["__autooncall_principal"] = principal_id
+    message["metadata"] = message_metadata
     message.pop("message_id", None)
     if isinstance(raw_message, dict):
         params["message"] = message
@@ -203,6 +227,27 @@ def incident_from_envelope(envelope: A2AEnvelope) -> Incident:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _validate_identifier(
+    field_name: str,
+    value: str,
+    max_length: int,
+    *,
+    required: bool = True,
+) -> None:
+    if not value:
+        if required:
+            raise ValueError(f"A2A {field_name} is required")
+        return
+    if len(value) > max_length:
+        raise ValueError(f"A2A {field_name} must contain at most {max_length} characters")
+    if _contains_control_characters(value):
+        raise ValueError(f"A2A {field_name} contains control characters")
+
+
+def _contains_control_characters(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def _data_from_parts(parts: list[Any]) -> dict[str, Any]:

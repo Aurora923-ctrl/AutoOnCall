@@ -12,10 +12,12 @@ from fastapi import FastAPI
 
 from app.api import aiops
 from app.config import config
+from app.core.auth import authenticate_request, scoped_session_id
 from app.models.approval import ApprovalRequest
 from app.services.approval_service import ApprovalService
 from app.services.change_execution_service import ChangeExecutionService
 from app.services.change_plan_builder import build_change_plan
+from app.services.policies.approval_policy import RISK_POLICY_VERSION
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
 
@@ -65,6 +67,7 @@ def _build_test_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 def _approved_request(approval_store: ApprovalService):
+    principal = authenticate_request("change", x_autooncall_token="change-secret-token")
     plan = build_change_plan(
         incident_id="inc-api",
         action="人工调整 Redis maxclients",
@@ -72,7 +75,11 @@ def _approved_request(approval_store: ApprovalService):
         tool_name="suggest_remediation",
         service_name="order-service",
         environment="prod",
-        metadata={"trace_id": "trace-api"},
+        metadata={
+            "trace_id": "trace-api",
+            "step_id": "api-approved-step",
+            "risk_policy_version": RISK_POLICY_VERSION,
+        },
     )
     request = approval_store.create_request(
         ApprovalRequest(
@@ -80,8 +87,16 @@ def _approved_request(approval_store: ApprovalService):
             action=plan.action,
             risk_level="high",
             reason="生产变更需要审批",
+            step_id="api-approved-step",
+            tool_name="suggest_remediation",
+            risk_policy_version=RISK_POLICY_VERSION,
             change_plan=plan,
-            metadata={"trace_id": "trace-api", "change_plan": plan.model_dump(mode="json")},
+            metadata={
+                "trace_id": "trace-api",
+                "session_id": scoped_session_id(principal, "change-api"),
+                "input_args": dict(plan.metadata["approved_input_args"]),
+                "change_plan": plan.model_dump(mode="json"),
+            },
         )
     )
     approval = approval_store.decide_request(
@@ -176,6 +191,7 @@ async def test_manual_change_result_api_records_observation(monkeypatch, tmp_pat
                 "notes": "人工执行完成，观察正常",
                 "evidence": {"change_ticket": "CHG-API-1"},
                 "observed_metrics": {"service_5xx_rate": 0},
+                "step_results": [{"step_id": plan.steps[0].step_id, "status": "succeeded"}],
             },
         )
 

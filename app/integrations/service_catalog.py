@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -40,14 +41,19 @@ class CMDBAdapter:
 
     async def query_service(self, service_name: str) -> dict[str, Any]:
         if self.url:
+            source = "cmdb"
+            evidence_origin = "http:cmdb"
             base_url = require_config(self.url, "CMDB_API_URL")
+            service_path = quote(service_name, safe="")
             payload = await _get_json(
-                f"{base_url}/services/{service_name}.json",
+                f"{base_url}/services/{service_path}.json",
                 token=self.token,
                 timeout_seconds=self.timeout_seconds,
                 transport=self.transport,
             )
         else:
+            source = "mysql"
+            evidence_origin = "mysql:aiops_service_catalog"
             payload = await self.mysql_adapter.query_service_catalog(service_name)
         service = payload.get("service", payload)
         if not isinstance(service, dict):
@@ -60,7 +66,8 @@ class CMDBAdapter:
         slo = service.get("slo", {})
         tier = service.get("tier", "")
         return adapter_success(
-            source="cmdb",
+            source=source,
+            evidence_origin=evidence_origin,
             summary=(
                 f"CMDB 返回 {service_name} 的 owner、namespace、tier={tier or 'unknown'} "
                 f"和 {len(dependencies)} 个依赖"
@@ -110,14 +117,19 @@ class DeployHistoryAdapter:
 
     async def query_deployments(self, service_name: str, limit: int = 5) -> dict[str, Any]:
         if self.url:
+            source = "deploy_history"
+            evidence_origin = "http:deploy_history"
             base_url = require_config(self.url, "DEPLOY_HISTORY_API_URL")
+            service_path = quote(service_name, safe="")
             payload = await _get_json(
-                f"{base_url}/deployments/{service_name}.json",
+                f"{base_url}/deployments/{service_path}.json",
                 token=self.token,
                 timeout_seconds=self.timeout_seconds,
                 transport=self.transport,
             )
         else:
+            source = "mysql"
+            evidence_origin = "mysql:aiops_deploy_history"
             payload = await self.mysql_adapter.query_deploy_history(service_name)
         deployments = payload.get(
             "deployments",
@@ -136,7 +148,8 @@ class DeployHistoryAdapter:
         ]
         release_correlation = _release_correlation(service_name, recent_change)
         return adapter_success(
-            source="deploy_history",
+            source=source,
+            evidence_origin=evidence_origin,
             summary=(
                 f"发布历史返回 {service_name} 最近 {len(deployments)} 条变更，"
                 f"latest_status={recent_change.get('status', '') or 'unknown'}"

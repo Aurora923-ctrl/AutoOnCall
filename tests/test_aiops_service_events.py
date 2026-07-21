@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.api.aiops_route_helpers as route_helpers_module
 import app.services.aiops_service as aiops_service_module
 from app.api.aiops_route_helpers import (
     diagnosis_event_stream,
@@ -775,3 +776,49 @@ async def test_sse_route_helpers_propagate_client_cancellation(stream_factory) -
 async def _cancelled_stream():
     raise asyncio.CancelledError
     yield {}
+
+
+@pytest.mark.asyncio
+async def test_diagnosis_stream_continues_after_consumer_disconnect() -> None:
+    completed = asyncio.Event()
+
+    async def source():
+        yield {"type": "status", "stage": "planner", "status": "running"}
+        await asyncio.sleep(0)
+        completed.set()
+        yield {"type": "complete", "status": "completed"}
+
+    stream = diagnosis_event_stream(
+        aiops_service=type(
+            "DisconnectDiagnosisService",
+            (),
+            {"diagnose": lambda self, **_kwargs: source()},
+        )(),
+        session_id="session-disconnect-survival",
+        incident=None,
+    )
+
+    await anext(stream)
+    await stream.aclose()
+    await asyncio.wait_for(completed.wait(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_stream_pump_task_cancellation_is_not_swallowed() -> None:
+    source_started = asyncio.Event()
+
+    async def source():
+        source_started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    detached = asyncio.Event()
+    task = asyncio.create_task(
+        route_helpers_module._pump_stream(source(), queue, detached)
+    )
+    await asyncio.wait_for(source_started.wait(), timeout=0.5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task

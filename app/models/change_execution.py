@@ -101,6 +101,7 @@ class ChangeExecution(BaseModel):
     manual_result: dict[str, Any] = Field(default_factory=dict)
     projection_pending: list[str] = Field(default_factory=list)
     created_by: str = Field(default="operator", max_length=120)
+    created_by_principal_id: str = Field(default="", max_length=128)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

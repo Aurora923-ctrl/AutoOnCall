@@ -13,6 +13,7 @@ from app.models.change_execution import (
 )
 from app.models.change_plan import ChangePlan, ChangeStep, change_plan_fingerprint
 from app.models.incident import utc_now
+from app.services.policies.approval_policy import RISK_POLICY_VERSION
 
 DRY_RUN_TOOL_ALLOWLIST = {"manual_change_record", "suggest_remediation"}
 DRY_RUN_ACTION_ALLOWLIST = {
@@ -25,7 +26,7 @@ DRY_RUN_ACTION_ALLOWLIST = {
     "capacity_change",
     "release_rollback",
 }
-DRY_RUN_INPUT_ALLOWLIST = {
+DRY_RUN_SYSTEM_INPUTS = {
     "action",
     "description",
     "environment",
@@ -78,6 +79,29 @@ def build_pre_check_result(
         "审批动作与 ChangePlan 动作一致",
         "审批动作与 ChangePlan 动作不一致",
     )
+    plan_step_id = str(plan.metadata.get("step_id") or "")
+    plan_tool_name = str(plan.metadata.get("tool_name") or "")
+    check(
+        bool(approval.step_id)
+        and bool(plan_step_id)
+        and approval.step_id == plan_step_id,
+        "审批 step_id 与 ChangePlan 一致",
+        "审批 step_id 与 ChangePlan 不一致或缺失",
+    )
+    check(
+        bool(approval.tool_name)
+        and bool(plan_tool_name)
+        and approval.tool_name == plan_tool_name,
+        "审批 tool_name 与 ChangePlan 一致",
+        "审批 tool_name 与 ChangePlan 不一致或缺失",
+    )
+    check(
+        bool(approval.risk_policy_version)
+        and approval.risk_policy_version == RISK_POLICY_VERSION
+        and str(plan.metadata.get("risk_policy_version") or "") == RISK_POLICY_VERSION,
+        "审批绑定当前风险策略版本",
+        "审批风险策略版本缺失或已过期",
+    )
     check(
         approval.status == "approved",
         "审批状态为 approved",
@@ -94,6 +118,24 @@ def build_pre_check_result(
         "审批风险等级与 ChangePlan 不一致",
     )
     steps = plan_steps(plan)
+    approved_input_args = approval.metadata.get("input_args")
+    check(
+        isinstance(approved_input_args, dict)
+        and approved_input_args == plan.metadata.get("approved_input_args"),
+        "审批参数快照与 ChangePlan 一致",
+        "审批参数快照与 ChangePlan 不一致或缺失",
+    )
+    expected_step_input_args = {
+        **(approved_input_args if isinstance(approved_input_args, dict) else {}),
+        "action": plan.action,
+        "service_name": str(plan.metadata.get("service_name") or ""),
+        "environment": str(plan.metadata.get("environment") or ""),
+    }
+    check(
+        bool(steps) and all(step.input_args == expected_step_input_args for step in steps),
+        "所有变更步骤参数与审批参数及系统范围字段完全一致",
+        "变更步骤参数与审批参数不一致、缺失或包含未审批字段",
+    )
     check(
         bool(steps),
         "ChangePlan 包含可审计的变更步骤",
@@ -108,6 +150,11 @@ def build_pre_check_result(
         all(step.requires_approval for step in steps),
         "所有变更步骤均绑定人工审批",
         "存在未绑定人工审批的变更步骤",
+    )
+    check(
+        all(step.tool_name == plan_tool_name for step in steps),
+        "所有变更步骤 tool_name 与审批工具一致",
+        "变更步骤 tool_name 与审批工具不一致",
     )
     plan_service_name = str(plan.metadata.get("service_name") or "")
     check(
@@ -287,7 +334,11 @@ def _dry_run_step_block_reasons(*, step: ChangeStep, plan: ChangePlan) -> list[s
         reasons.append("environment_unknown")
     if step_environment and step_environment != plan_environment:
         reasons.append("environment_scope_mismatch")
-    if set(step.input_args) - DRY_RUN_INPUT_ALLOWLIST:
+    approved_input_args = plan.metadata.get("approved_input_args")
+    allowed_input_keys = set(DRY_RUN_SYSTEM_INPUTS)
+    if isinstance(approved_input_args, dict):
+        allowed_input_keys.update(approved_input_args)
+    if set(step.input_args) - allowed_input_keys:
         reasons.append("input_args_not_allowlisted")
     return reasons
 

@@ -46,6 +46,7 @@ from .execution_fallbacks import (
 )
 from .risk_controller import RiskControlDecision, assess_plan_step
 from .state import (
+    MAX_AGENT_EXECUTED_STEPS,
     PlanExecuteState,
     normalize_plan_state_update,
     parse_plan_step,
@@ -139,11 +140,16 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         warnings: list[str] = []
         consumed_count = 1
 
+        remaining_execution_budget = max(
+            1,
+            MAX_AGENT_EXECUTED_STEPS - _executed_step_count(state),
+        )
         fanout_steps = _select_read_only_evidence_fanout_steps(
             plan_step,
             current_plan,
             registry,
             state,
+            limit=min(READ_ONLY_EVIDENCE_FANOUT_LIMIT, remaining_execution_budget),
         )
         if len(fanout_steps) > 1:
             batch_results = await _execute_registered_step_fanout(fanout_steps, registry, state)
@@ -216,6 +222,8 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             state_update["warnings"] = warnings
         return state_update
 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         public_message = public_exception_message(e, fallback="步骤执行失败，请检查服务端日志")
         logger.error(
@@ -314,9 +322,11 @@ def _select_read_only_evidence_fanout_steps(
     current_plan: list[dict[str, Any]],
     registry: ToolRegistry,
     state: PlanExecuteState,
+    *,
+    limit: int = READ_ONLY_EVIDENCE_FANOUT_LIMIT,
 ) -> list[PlanStep]:
     """Return adjacent low-risk read-only evidence steps that can run together."""
-    if not plan_step or len(current_plan) <= 1:
+    if not plan_step or len(current_plan) <= 1 or limit <= 1:
         return []
 
     selected: list[PlanStep] = []
@@ -327,9 +337,20 @@ def _select_read_only_evidence_fanout_steps(
         if not _is_read_only_evidence_fanout_step(parsed_step, registry, state):
             break
         selected.append(parsed_step)
-        if len(selected) >= READ_ONLY_EVIDENCE_FANOUT_LIMIT:
+        if len(selected) >= limit:
             break
     return selected
+
+
+def _executed_step_count(state: PlanExecuteState) -> int:
+    """Count executions already committed to state before selecting a fan-out batch."""
+    executed_steps = state.get("executed_steps") or []
+    if executed_steps:
+        return len(executed_steps)
+    tool_call_records = state.get("tool_call_records") or []
+    if tool_call_records:
+        return len(tool_call_records)
+    return len(state.get("past_steps") or [])
 
 
 def _is_read_only_evidence_fanout_step(

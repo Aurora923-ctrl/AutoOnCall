@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
+import math
 import re
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from app.config import config
+from app.core.resilience import run_bounded_sync_call
 from app.integrations.base import (
     ExternalAdapterError,
     ExternalAdapterNotFoundError,
@@ -34,12 +35,22 @@ class MySQLStatusAdapter:
 
     async def query_status(self, service_name: str, mysql_instance: str = "") -> dict[str, Any]:
         dsn = self._resolve_dsn(mysql_instance)
-        return await asyncio.to_thread(self._query_status_sync, service_name, mysql_instance, dsn)
+        return await run_bounded_sync_call(
+            "mysql",
+            "query_status",
+            lambda: self._query_status_sync(service_name, mysql_instance, dsn),
+            timeout_seconds=self.timeout_seconds,
+        )
 
     async def ping(self, mysql_instance: str = "") -> dict[str, Any]:
         """Return a lightweight SELECT 1 connectivity check for readiness endpoints."""
         dsn = self._resolve_dsn(mysql_instance)
-        return await asyncio.to_thread(self._ping_sync, dsn)
+        return await run_bounded_sync_call(
+            "mysql",
+            "ping",
+            lambda: self._ping_sync(dsn),
+            timeout_seconds=self.timeout_seconds,
+        )
 
     def _query_status_sync(
         self,
@@ -54,9 +65,9 @@ class MySQLStatusAdapter:
 
         connection = pymysql.connect(
             **self._connection_kwargs(dsn),
-            connect_timeout=int(self.timeout_seconds),
-            read_timeout=int(self.timeout_seconds),
-            write_timeout=int(self.timeout_seconds),
+            connect_timeout=max(1, math.ceil(self.timeout_seconds)),
+            read_timeout=max(1, math.ceil(self.timeout_seconds)),
+            write_timeout=max(1, math.ceil(self.timeout_seconds)),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:
@@ -212,9 +223,9 @@ class MySQLStatusAdapter:
 
         connection = pymysql.connect(
             **self._connection_kwargs(dsn),
-            connect_timeout=int(self.timeout_seconds),
-            read_timeout=int(self.timeout_seconds),
-            write_timeout=int(self.timeout_seconds),
+            connect_timeout=max(1, math.ceil(self.timeout_seconds)),
+            read_timeout=max(1, math.ceil(self.timeout_seconds)),
+            write_timeout=max(1, math.ceil(self.timeout_seconds)),
             cursorclass=pymysql.cursors.DictCursor,
         )
         try:
@@ -242,13 +253,23 @@ class MySQLStatusAdapter:
     @staticmethod
     def _connection_kwargs(dsn: str) -> dict[str, Any]:
         parsed = urlparse(dsn)
-        return {
+        if parsed.scheme not in {"mysql", "mysql+pymysql"}:
+            raise ExternalAdapterError("MYSQL_DSN must use mysql:// or mysql+pymysql://")
+        if not parsed.hostname:
+            raise ExternalAdapterError("MYSQL_DSN host is required")
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        kwargs: dict[str, Any] = {
             "host": parsed.hostname,
             "port": parsed.port or 3306,
             "user": unquote(parsed.username or ""),
             "password": unquote(parsed.password or ""),
-            "database": (parsed.path or "/").lstrip("/") or None,
+            "database": unquote((parsed.path or "/").lstrip("/")) or None,
         }
+        if query.get("charset"):
+            kwargs["charset"] = query["charset"][-1]
+        if query.get("ssl_ca"):
+            kwargs["ssl"] = {"ca": query["ssl_ca"][-1]}
+        return kwargs
 
     @staticmethod
     def _endpoint(dsn: str) -> str:

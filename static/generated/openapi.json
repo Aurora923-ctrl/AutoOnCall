@@ -566,7 +566,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
                 },
                 {
                   "type": "null"
@@ -635,7 +637,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
                 },
                 {
                   "type": "null"
@@ -650,6 +654,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
               "default": 100,
               "title": "Limit"
             }
@@ -905,7 +911,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
                 },
                 {
                   "type": "null"
@@ -921,7 +929,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
                 },
                 {
                   "type": "null"
@@ -1757,7 +1767,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
                 },
                 {
                   "type": "null"
@@ -1839,6 +1851,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
               "title": "Fingerprint"
             }
           },
@@ -1904,7 +1918,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
                 },
                 {
                   "type": "null"
@@ -1984,6 +2000,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
               "title": "Incident Id"
             }
           },
@@ -2068,6 +2086,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
               "title": "Incident Id"
             }
           },
@@ -3194,432 +3214,6 @@
         }
       }
     },
-    "/.well-known/agent-card.json": {
-      "get": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "Get Agent Card",
-        "description": "Return the public A2A Agent Card for capability discovery.",
-        "operationId": "get_agent_card__well_known_agent_card_json_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/a2a/v1/extendedAgentCard": {
-      "get": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "Get Extended Agent Card",
-        "description": "Return the extended Agent Card with examples for authenticated callers.",
-        "operationId": "get_extended_agent_card_a2a_v1_extendedAgentCard_get",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "X-AutoOnCall-Token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Autooncall-Token"
-            }
-          },
-          {
-            "name": "A2A-Version",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "A2A-Version"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/a2a/v1/message:send": {
-      "post": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "Message Send",
-        "description": "Handle A2A message:send.",
-        "operationId": "message_send_a2a_v1_message_send_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "X-AutoOnCall-Token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Autooncall-Token"
-            }
-          },
-          {
-            "name": "A2A-Version",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "A2A-Version"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Payload"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/a2a/v1/message:stream": {
-      "post": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "Message Stream",
-        "description": "Handle A2A message:stream using SSE.",
-        "operationId": "message_stream_a2a_v1_message_stream_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "X-AutoOnCall-Token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Autooncall-Token"
-            }
-          },
-          {
-            "name": "A2A-Version",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "A2A-Version"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Payload"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/a2a/v1/tasks/{task_id}": {
-      "get": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "Get Task",
-        "description": "Return a current A2A task view backed by an AutoOnCall diagnosis run.",
-        "operationId": "get_task_a2a_v1_tasks__task_id__get",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          },
-          {
-            "name": "X-AutoOnCall-Token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Autooncall-Token"
-            }
-          },
-          {
-            "name": "A2A-Version",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "A2A-Version"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/a2a/v1/tasks": {
-      "get": {
-        "tags": [
-          "A2A Agent"
-        ],
-        "summary": "List Tasks",
-        "description": "Return recent A2A task views.",
-        "operationId": "list_tasks_a2a_v1_tasks_get",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "incident_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Incident Id"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 100,
-              "minimum": 1,
-              "default": 20,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "X-AutoOnCall-Token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Autooncall-Token"
-            }
-          },
-          {
-            "name": "A2A-Version",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "A2A-Version"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/": {
       "get": {
         "summary": "Root",
@@ -4141,6 +3735,12 @@
             ],
             "title": "Tool Name"
           },
+          "risk_policy_version": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Risk Policy Version",
+            "default": ""
+          },
           "change_plan": {
             "anyOf": [
               {
@@ -4168,6 +3768,18 @@
               }
             ],
             "title": "Decided By"
+          },
+          "decided_by_principal_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By Principal Id"
           },
           "decision_reason": {
             "type": "string",
@@ -5833,6 +5445,11 @@
           "mode": {
             "type": "string",
             "title": "Mode"
+          },
+          "observability": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Observability"
           },
           "checks": {
             "additionalProperties": true,

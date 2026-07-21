@@ -1,10 +1,11 @@
 """Human approval API for risky AIOps actions."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from app.core.auth import APPROVE_SCOPE, READ_SCOPE, AuthPrincipal, audit_actor, require_scope
+from app.core.ownership import owns_approval
 from app.models.api_contracts import (
     ApprovalDecisionResponse,
     ApprovalListResponse,
@@ -20,6 +21,8 @@ from app.services.approval_service import (
 
 router = APIRouter()
 ApprovalStatus = Literal["pending", "approved", "rejected", "cancelled"]
+RESOURCE_ID_MAX_LENGTH = 128
+IncidentId = Annotated[str, Path(..., min_length=1, max_length=RESOURCE_ID_MAX_LENGTH)]
 
 
 def get_approval_service() -> ApprovalService:
@@ -30,11 +33,11 @@ def get_approval_service() -> ApprovalService:
 @router.get(
     "/approvals/pending",
     response_model=ApprovalListResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def list_pending_approvals(
-    incident_id: str | None = Query(default=None),
+    incident_id: str | None = Query(default=None, min_length=1, max_length=RESOURCE_ID_MAX_LENGTH),
     include_approved_actions: bool = Query(default=False),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """List the operator approval queue."""
     incident_id = incident_id if isinstance(incident_id, str) else None
@@ -42,9 +45,17 @@ async def list_pending_approvals(
         include_approved_actions if isinstance(include_approved_actions, bool) else False
     )
     service = get_approval_service()
-    requests = service.list_pending(incident_id=incident_id)
+    requests = [
+        request
+        for request in service.list_pending(incident_id=incident_id)
+        if owns_approval(principal, request)
+    ]
     if include_approved_actions:
-        approved_requests = service.list_requests(incident_id=incident_id, status="approved")
+        approved_requests = [
+            request
+            for request in service.list_requests(incident_id=incident_id, status="approved")
+            if owns_approval(principal, request)
+        ]
         requests = [
             *requests,
             *[
@@ -59,14 +70,18 @@ async def list_pending_approvals(
 @router.get(
     "/incidents/{incident_id}/approval",
     response_model=IncidentApprovalListResponse,
-    dependencies=[Depends(require_scope(READ_SCOPE))],
 )
 async def list_incident_approvals(
-    incident_id: str,
+    incident_id: IncidentId,
     status: ApprovalStatus | None = Query(default=None),
+    principal: AuthPrincipal = Depends(require_scope(READ_SCOPE)),
 ) -> dict:
     """List approval requests for one incident."""
-    requests = get_approval_service().list_requests(incident_id=incident_id, status=status)
+    requests = [
+        request
+        for request in get_approval_service().list_requests(incident_id=incident_id, status=status)
+        if owns_approval(principal, request)
+    ]
     return {
         "incident_id": incident_id,
         "items": [request.model_dump(mode="json") for request in requests],
@@ -78,7 +93,7 @@ async def list_incident_approvals(
     response_model=ApprovalDecisionResponse,
 )
 async def submit_incident_approval(
-    incident_id: str,
+    incident_id: IncidentId,
     request: ApprovalDecisionRequest,
     principal: AuthPrincipal = Depends(require_scope(APPROVE_SCOPE)),
 ) -> dict:
@@ -91,10 +106,13 @@ async def submit_incident_approval(
                 status_code=400,
                 detail="approval_id does not belong to the requested incident",
             )
+        if not owns_approval(principal, existing):
+            raise HTTPException(status_code=404, detail="approval not found")
         approval = get_approval_service().decide_request(
             approval_id=request.approval_id,
             decision=request.decision,
             decided_by=decided_by,
+            decided_by_principal_id=principal.principal_id,
             reason=request.reason,
         )
     except ApprovalNotFoundError as exc:

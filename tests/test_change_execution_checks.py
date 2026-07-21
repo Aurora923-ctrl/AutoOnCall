@@ -11,6 +11,7 @@ from app.services.change_execution_checks import (
     build_pre_check_result,
     status_after_dry_run,
 )
+from app.services.change_plan_builder import build_change_plan
 
 
 def _approved_plan(**overrides) -> ChangePlan:
@@ -126,6 +127,26 @@ def test_dry_run_blocks_unapproved_tool_target_args_and_unknown_environment() ->
 
     assert result.status == "failed"
     assert result.blocked_steps == [unsafe_step.step_id]
+
+
+def test_change_plan_builder_does_not_allow_input_args_to_override_scope() -> None:
+    plan = build_change_plan(
+        incident_id="inc-scope",
+        action="restart order-service",
+        risk_level="high",
+        tool_name="suggest_remediation",
+        service_name="order-service",
+        environment="prod",
+        input_args={
+            "action": "change payment-service",
+            "service_name": "payment-service",
+            "environment": "staging",
+        },
+    )
+
+    assert plan.steps[0].input_args["action"] == "restart order-service"
+    assert plan.steps[0].input_args["service_name"] == "order-service"
+    assert plan.steps[0].input_args["environment"] == "prod"
 
 
 def test_pre_check_blocks_plan_step_scope_and_risk_drift(tmp_path) -> None:

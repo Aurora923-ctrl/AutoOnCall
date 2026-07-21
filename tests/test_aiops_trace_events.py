@@ -2,6 +2,8 @@
 
 import asyncio
 import importlib
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -447,11 +449,54 @@ def test_reconcile_incomplete_runs_scans_all_snapshot_pages(tmp_path) -> None:
             },
         )
     )
+    snapshot = service.get_session_snapshot("session-running-after-page")
+    assert snapshot is not None
+    old_timestamp = datetime.now(UTC) - timedelta(hours=2)
+    with service.state_store._connect() as connection:
+        row = connection.execute(
+            "SELECT payload FROM aiops_sessions WHERE session_id = ?",
+            ("session-running-after-page",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload"])
+        payload["updated_at"] = old_timestamp.isoformat()
+        connection.execute(
+            """
+            UPDATE aiops_sessions
+            SET updated_at = ?, payload = ?
+            WHERE session_id = ?
+            """,
+            (
+                old_timestamp.isoformat(),
+                json.dumps(payload, ensure_ascii=False),
+                "session-running-after-page",
+            ),
+        )
 
     assert service.reconcile_incomplete_runs() == 1
     saved = service.get_session_snapshot("session-running-after-page")
     assert saved is not None
     assert saved.status == "failed"
+
+
+def test_reconcile_incomplete_runs_skips_recent_worker_snapshot(tmp_path) -> None:
+    service = AIOpsService()
+    service.state_store = AIOpsSQLiteStore(tmp_path / "reconcile-recent.db")
+    service.state_store.save_aiops_session_snapshot(
+        AIOpsSessionSnapshot.from_state(
+            session_id="session-running-other-worker",
+            status="running",
+            state={
+                "trace_id": "trace-running-other-worker",
+                "incident": {"incident_id": "inc-running-other-worker"},
+            },
+        )
+    )
+
+    assert service.reconcile_incomplete_runs() == 0
+    saved = service.get_session_snapshot("session-running-other-worker")
+    assert saved is not None
+    assert saved.status == "running"
 
 
 def test_resolve_resume_session_id_requires_matching_paused_snapshot(tmp_path) -> None:

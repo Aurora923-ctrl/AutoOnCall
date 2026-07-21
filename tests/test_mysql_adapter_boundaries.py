@@ -63,3 +63,20 @@ def test_mysql_named_instance_requires_explicit_instance_map() -> None:
 
     with pytest.raises(ExternalAdapterNotFoundError, match="payment-mysql"):
         adapter._resolve_dsn("payment-mysql")
+
+
+def test_mysql_dsn_parser_handles_ipv6_encoded_credentials_database_and_options() -> None:
+    kwargs = MySQLStatusAdapter._connection_kwargs(
+        "mysql+pymysql://user:p%40ss%3Aword@[2001:db8::1]:3307/"
+        "payments%2Farchive?charset=utf8mb4&ssl_ca=%2Fetc%2Fmysql%2Fca.pem"
+    )
+
+    assert kwargs == {
+        "host": "2001:db8::1",
+        "port": 3307,
+        "user": "user",
+        "password": "p@ss:word",
+        "database": "payments/archive",
+        "charset": "utf8mb4",
+        "ssl": {"ca": "/etc/mysql/ca.pem"},
+    }

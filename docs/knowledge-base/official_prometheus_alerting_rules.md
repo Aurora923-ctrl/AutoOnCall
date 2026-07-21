@@ -1,7 +1,10 @@
----
-title: Alerting rules
-sort_rank: 3
----
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/prometheus/prometheus/blob/2cf323988931bd586a2ab25160e46bcace9398ae/docs/configuration/alerting_rules.md
+Upstream revision: 2cf323988931bd586a2ab25160e46bcace9398ae
+Retrieved: 2026-07-21
+License: Apache-2.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 Alerting rules allow you to define alert conditions based on Prometheus
 expression language expressions and to send notifications about firing alerts
@@ -11,8 +14,8 @@ elements' label sets.
 
 ## Defining alerting rules
 
-Alerting rules are configured in Prometheus in the same way as [recording
-rules](recording_rules.md).
+Alerting rules are configured in Prometheus in the same way as recording
+rules.
 
 An example rules file with an alert would be:
 
@@ -113,5 +116,5 @@ on top of the simple alert definitions. In Prometheus's ecosystem, the
 role. Thus, Prometheus may be configured to periodically send information about
 alert states to an Alertmanager instance, which then takes care of dispatching
 the right notifications.
-Prometheus can be [configured](configuration.md) to automatically discover available
+Prometheus can be configured to automatically discover available
 Alertmanager instances through its service discovery integrations.

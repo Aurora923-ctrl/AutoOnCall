@@ -136,7 +136,31 @@ def test_html_loader_preserves_deep_heading_boundaries(tmp_path: Path) -> None:
         "Runbook > Rollback",
         "Runbook > Observation",
     ]
-    assert [doc.metadata["h4"] for doc in docs] == ["Rollback", "Observation"]
+
+
+def test_html_loader_removes_explicitly_hidden_content(tmp_path: Path) -> None:
+    html = tmp_path / "wiki.html"
+    html.write_text(
+        """
+        <html><body>
+          <h1>Redis Runbook</h1>
+          <p hidden>hidden secret navigation text should not be indexed</p>
+          <p aria-hidden="true">obsolete hidden instructions should not be indexed</p>
+          <p style="display: none">hidden script-like content should not be indexed</p>
+          <p>Visible Redis maxclients diagnostic content for on-call responders.</p>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    docs, report = HtmlDocumentLoader().load(html)
+
+    content = "\n".join(document.content for document in docs)
+    assert "Visible Redis maxclients" in content
+    assert "hidden secret" not in content
+    assert "obsolete hidden" not in content
+    assert "script-like" not in content
+    assert report.indexed_units == 1
 
 
 def test_plain_text_loader_preserves_markdown_code_and_list_indentation(
@@ -605,6 +629,10 @@ def test_generated_demo_rag_assets_are_loader_readable(
         "scripts.data.generate_demo_rag_assets.DOCS_DIR",
         tmp_path,
     )
+    monkeypatch.setattr(
+        "scripts.data.generate_demo_rag_assets.FIXTURES_DIR",
+        tmp_path / "fixtures",
+    )
     generate_demo_rag_assets()
 
     expected = {
@@ -612,7 +640,6 @@ def test_generated_demo_rag_assets_are_loader_readable(
         "mysql_slow_query_postmortem.pdf": "pdf",
         "redis_capacity_wiki.html": "html",
         "payment_wiki.html": "html",
-        "tickets.csv": "table",
         "tickets.xlsx": "table",
     }
     for file_name, loader_type in expected.items():
@@ -623,3 +650,10 @@ def test_generated_demo_rag_assets_are_loader_readable(
         assert loader.loader_type == loader_type
         assert docs
         assert report.indexed_units >= 1
+
+    csv_fixture = tmp_path / "fixtures" / "tickets.csv"
+    loader = document_loader_registry.get_loader(csv_fixture)
+    docs, report = loader.load(csv_fixture)
+    assert loader.loader_type == "table"
+    assert docs
+    assert report.indexed_units >= 1

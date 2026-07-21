@@ -49,6 +49,7 @@ _PLACEHOLDER_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _MIN_TOKEN_LENGTH = 16
+_SCOPED_SESSION_MAX_LENGTH = 128
 
 
 @dataclass(frozen=True)
@@ -73,9 +74,37 @@ def audit_actor(principal: AuthPrincipal, fallback: str = "operator") -> str:
 
 def scoped_session_id(principal: AuthPrincipal, session_id: str) -> str:
     """Namespace caller-controlled session IDs by authenticated principal."""
+    if not isinstance(principal, AuthPrincipal):
+        return session_id
     if not principal.enabled:
         return session_id
-    return f"principal:{principal.principal_id}:{session_id}"
+    prefix = principal_session_prefix(principal)
+    if session_id.startswith(prefix):
+        return session_id
+    candidate = f"{prefix}{session_id}"
+    if len(candidate) <= _SCOPED_SESSION_MAX_LENGTH:
+        return candidate
+    digest = sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    available = _SCOPED_SESSION_MAX_LENGTH - len(prefix) - len(digest) - 1
+    return f"{prefix}{session_id[:available]}:{digest}"
+
+
+def principal_session_prefix(principal: AuthPrincipal) -> str:
+    """Return the durable namespace prefix for one authenticated principal."""
+    if not isinstance(principal, AuthPrincipal):
+        return ""
+    if not principal.enabled:
+        return ""
+    return f"principal:{principal.principal_id}:"
+
+
+def can_access_session(principal: AuthPrincipal, session_id: str) -> bool:
+    """Return whether a caller may access one durable session identity."""
+    if not isinstance(principal, AuthPrincipal):
+        return True
+    if not principal.enabled or principal.has_scope(ADMIN_SCOPE):
+        return True
+    return session_id.startswith(principal_session_prefix(principal))
 
 
 def require_scope(scope: str):
@@ -124,7 +153,7 @@ def authenticate_request(
             principal = AuthPrincipal(
                 enabled=True,
                 token_name=token_entry["token_name"],
-                principal_id=sha256(token_entry["token"].encode("utf-8")).hexdigest()[:16],
+                principal_id=token_entry["principal_id"],
                 scopes=frozenset(token_entry["scopes"]),
             )
             if not principal.has_scope(required_scope):
@@ -147,8 +176,20 @@ def configured_token_scopes() -> dict[str, dict[str, Any]]:
     registry.update(_parse_json_token_registry(config.api_auth_tokens))
     _add_role_token(registry, "read_token", config.api_read_token, "viewer")
     _add_role_token(registry, "operator_token", config.api_operator_token, "operator")
-    _add_role_token(registry, "approver_token", config.api_approver_token, "approver")
-    _add_role_token(registry, "change_token", config.api_change_token, "change_operator")
+    _add_role_token(
+        registry,
+        "approver_token",
+        config.api_approver_token,
+        "approver",
+        principal_id=config.api_approver_principal_id,
+    )
+    _add_role_token(
+        registry,
+        "change_token",
+        config.api_change_token,
+        "change_operator",
+        principal_id=config.api_change_principal_id,
+    )
     _add_role_token(registry, "admin_token", config.api_admin_token, "admin")
     return registry
 
@@ -157,9 +198,16 @@ def _extract_token(
     credentials: HTTPAuthorizationCredentials | None,
     x_autooncall_token: str | None,
 ) -> str:
+    bearer_token = ""
     if credentials and credentials.scheme.lower() == "bearer" and credentials.credentials:
-        return credentials.credentials.strip()
-    return (x_autooncall_token or "").strip()
+        bearer_token = credentials.credentials.strip()
+    header_token = (x_autooncall_token or "").strip()
+    if bearer_token and header_token and not hmac.compare_digest(bearer_token, header_token):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="multiple API token headers are not allowed",
+        )
+    return bearer_token or header_token
 
 
 def _parse_json_token_registry(raw_value: str) -> dict[str, dict[str, Any]]:
@@ -184,6 +232,7 @@ def _parse_json_token_registry(raw_value: str) -> dict[str, dict[str, Any]]:
         registry[_token_registry_key(token_text)] = {
             "token": token_text,
             "token_name": token_name,
+            "principal_id": _principal_id(value, token_text, token_name),
             "scopes": scopes,
         }
     return registry
@@ -194,14 +243,20 @@ def _add_role_token(
     token_name: str,
     token: str,
     role: str,
+    principal_id: str = "",
 ) -> None:
     token_text = (token or "").strip()
     if not _is_usable_token(token_text):
         return
+    for entry in registry.values():
+        if hmac.compare_digest(token_text, entry["token"]):
+            entry["scopes"] = set(entry["scopes"]) | ROLE_SCOPES[role]
+            return
     registry[token_name] = {
         "token": token_text,
         "token_name": token_name,
-        "scopes": ROLE_SCOPES[role],
+        "principal_id": _safe_principal_id(principal_id, fallback=token_name),
+        "scopes": set(ROLE_SCOPES[role]),
     }
 
 
@@ -219,6 +274,20 @@ def _token_name(value: Any, token: str) -> str:
     if not isinstance(value, dict) or not value.get("name"):
         return fallback
     candidate = str(value["name"]).strip()
+    return candidate if _SAFE_TOKEN_NAME_RE.fullmatch(candidate) else fallback
+
+
+def _principal_id(value: Any, token: str, token_name: str) -> str:
+    if isinstance(value, dict):
+        candidate = value.get("principal_id") or value.get("subject") or value.get("name")
+        if candidate:
+            return _safe_principal_id(str(candidate), fallback=token_name)
+    digest = sha256(token.encode("utf-8")).hexdigest()
+    return f"token:{digest}"
+
+
+def _safe_principal_id(value: str, *, fallback: str) -> str:
+    candidate = str(value or "").strip()
     return candidate if _SAFE_TOKEN_NAME_RE.fullmatch(candidate) else fallback
 
 

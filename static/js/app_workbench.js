@@ -162,6 +162,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         if (target.incidentTab) {
             this.currentIncidentTab = target.incidentTab;
         }
+        this.saveWorkbenchState();
         const isChatView = this.currentWorkbenchView === 'chat';
 
         if (this.mainContent) {
@@ -202,6 +203,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     setIncidentTab(tab) {
         const allowedTabs = ['overview', 'process', 'evidence', 'report', 'response'];
         this.currentIncidentTab = allowedTabs.includes(tab) ? tab : 'overview';
+        this.saveWorkbenchState();
         if (this.currentWorkbenchView !== 'incidents') {
             this.currentWorkbenchView = 'incidents';
             if (this.mainContent) {
@@ -298,8 +300,8 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshHealthStatus() {
         try {
             const [liveResult, readyResult] = await Promise.all([
-                this.apiGetWithStatus('/health/live'),
-                this.apiGetWithStatus('/health/ready')
+                this.apiGetWithStatus('/health/live', { requestKey: 'health-live' }),
+                this.apiGetWithStatus('/health/ready', { requestKey: 'health-ready' })
             ]);
             const live = liveResult.data.data || liveResult.data;
             const ready = readyResult.data.data || readyResult.data;
@@ -447,7 +449,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const query = this.buildAIOpsRunHistoryQuery();
             const data = await this.apiGet(`${this.apiBaseUrl}/aiops/runs?${query}`);
-            this.setDashboardItems('aiopsRuns', data.items);
+            this.setDashboardItems('aiopsRuns', Array.isArray(data?.items) ? data.items : []);
             this.renderAIOpsRunHistory();
         } catch (error) {
             if (this.aiOpsRunHistoryList) {
@@ -693,7 +695,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshIncidents() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/incidents?limit=5`);
-            this.setDashboardItems('incidents', data.items);
+            this.setDashboardItems('incidents', Array.isArray(data?.items) ? data.items : []);
             if (!this.selectedIncidentId && this.dashboardState.incidents.length > 0) {
                 this.selectedIncidentId = this.dashboardState.incidents[0].incident_id;
             }
@@ -743,7 +745,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshAlerts() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/alerts?limit=20`);
-            this.setDashboardItems('alerts', data.items);
+            this.setDashboardItems('alerts', Array.isArray(data?.items) ? data.items : []);
             this.renderAlertList();
         } catch (error) {
             if (this.alertList) {
@@ -850,6 +852,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             this.resetReplayFilters();
         }
         this.selectedIncidentId = incidentId;
+        this.saveWorkbenchState();
         this.renderIncidentList();
         this.renderAIOpsRunCompare();
         await this.refreshSelectedIncidentPanels();
@@ -898,12 +901,15 @@ Object.assign(window.AutoOnCallApp.prototype, {
             this.renderReportError(report.reason);
         }
         if (approvals.status === 'fulfilled') {
-            this.renderApprovals(approvals.value.items || []);
+            this.renderApprovals(Array.isArray(approvals.value?.items) ? approvals.value.items : []);
         } else {
             this.renderApprovalsError(approvals.reason);
         }
         if (changes.status === 'fulfilled') {
-            this.setDashboardItems('changeExecutions', changes.value.items);
+            this.setDashboardItems(
+                'changeExecutions',
+                Array.isArray(changes.value?.items) ? changes.value.items : []
+            );
             this.renderChangeExecutions(this.dashboardState.changeExecutions);
         } else {
             this.renderChangeExecutionError(changes.reason);

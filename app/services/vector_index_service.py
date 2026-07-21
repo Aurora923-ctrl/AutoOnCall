@@ -10,7 +10,7 @@ from loguru import logger
 
 from app.config import config
 from app.services.document_loaders import document_loader_registry
-from app.services.document_splitter_service import document_splitter_service
+from app.services.document_splitter_service import canonical_source_id, document_splitter_service
 from app.services.lexical_index_service import lexical_index_service
 from app.services.vector_store_manager import vector_store_manager
 
@@ -339,23 +339,38 @@ class VectorIndexService:
 
         logger.info(f"开始索引文件: {path}")
         normalized_path = path.as_posix()
+        rollback_succeeded = False
 
         try:
             with self._source_lock(normalized_path):
-                return self._index_single_file_locked(path, normalized_path)
+                lexical_snapshot = self._snapshot_lexical_source(normalized_path)
+                try:
+                    return self._index_single_file_locked(
+                        path,
+                        normalized_path,
+                        lexical_snapshot,
+                    )
+                except Exception:
+                    rollback_succeeded = self._restore_lexical_source(
+                        normalized_path,
+                        lexical_snapshot,
+                    )
+                    raise
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")
-            try:
-                lexical_index_service.mark_source_stale(normalized_path, str(e))
-            except Exception as stale_exc:
-                logger.warning(f"标记陈旧索引失败: {normalized_path}, 错误: {stale_exc}")
+            if not rollback_succeeded:
+                try:
+                    lexical_index_service.mark_source_stale(normalized_path, str(e))
+                except Exception as stale_exc:
+                    logger.warning(f"标记陈旧索引失败: {normalized_path}, 错误: {stale_exc}")
             raise RuntimeError(f"索引文件失败: {e}") from e
 
     def _index_single_file_locked(
         self,
         path: Path,
         normalized_path: str,
+        lexical_snapshot: dict[str, Any],
     ) -> SingleFileIndexingResult:
         """Index one source while holding its cross-process transaction lock."""
         self._mark_source_stale(normalized_path, "indexing_in_progress")
@@ -370,17 +385,26 @@ class VectorIndexService:
             loaded_documents,
             normalized_path,
         )
+        self._preserve_existing_chunk_ids(documents, lexical_snapshot)
         logger.info(f"文档分割完成: {path} -> {len(documents)} 个分片")
 
         if documents:
-            vector_ids = vector_store_manager.add_documents(documents)
-            self._replace_lexical_source_keep_stale(normalized_path, documents)
-            vector_store_manager.delete_by_source_except_ids(
-                normalized_path,
-                vector_ids,
-                raise_on_error=True,
-            )
-            lexical_index_service.clear_source_stale(normalized_path)
+            vector_ids: list[str] = []
+            try:
+                vector_ids = vector_store_manager.add_documents(documents)
+                self._replace_lexical_source_keep_stale(normalized_path, documents)
+                vector_store_manager.delete_by_source_except_ids(
+                    normalized_path,
+                    vector_ids,
+                    raise_on_error=True,
+                )
+                lexical_index_service.clear_source_stale(normalized_path)
+            except Exception:
+                if vector_ids:
+                    compensator = getattr(vector_store_manager, "delete_by_ids", None)
+                    if callable(compensator):
+                        compensator(vector_ids, raise_on_error=False)
+                raise
             logger.info(f"文件索引完成: {path}, 共 {len(documents)} 个分片")
             return SingleFileIndexingResult(
                 file_path=normalized_path,
@@ -410,8 +434,49 @@ class VectorIndexService:
     def _source_lock(self, source_path: str) -> FileLock:
         """Serialize updates for one source across threads and worker processes."""
         self._source_lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_id = hashlib.sha256(source_path.encode("utf-8")).hexdigest()
+        lock_id = hashlib.sha256(canonical_source_id(source_path).encode("utf-8")).hexdigest()
         return FileLock(str(self._source_lock_dir / f"{lock_id}.lock"))
+
+    @staticmethod
+    def _snapshot_lexical_source(source_path: str) -> dict[str, Any]:
+        snapshot = getattr(lexical_index_service, "snapshot_source_state", None)
+        return snapshot(source_path) if callable(snapshot) else {"chunks": [], "stale_reason": None}
+
+    @staticmethod
+    def _restore_lexical_source(source_path: str, snapshot: dict[str, Any]) -> bool:
+        restore = getattr(lexical_index_service, "restore_source_state", None)
+        if callable(restore):
+            restore(source_path, snapshot)
+            return True
+        return False
+
+    @staticmethod
+    def _preserve_existing_chunk_ids(
+        documents: list[Any],
+        lexical_snapshot: dict[str, Any],
+    ) -> None:
+        """Keep unchanged chunk citations stable across local document edits."""
+        existing_by_hash: dict[str, list[str]] = {}
+        for chunk in lexical_snapshot.get("chunks") or []:
+            metadata = dict(chunk.get("metadata") or {})
+            chunk_hash = str(metadata.get("_chunk_hash") or "")
+            chunk_id = str(metadata.get("_chunk_id") or chunk.get("chunk_id") or "")
+            if chunk_hash and chunk_id:
+                existing_by_hash.setdefault(chunk_hash, []).append(chunk_id)
+
+        used_ids: set[str] = set()
+        for document in documents:
+            metadata = dict(document.metadata or {})
+            chunk_hash = str(metadata.get("_chunk_hash") or "")
+            matches = existing_by_hash.get(chunk_hash) or []
+            preserved = next((chunk_id for chunk_id in matches if chunk_id not in used_ids), "")
+            if preserved:
+                metadata["_chunk_id"] = preserved
+            elif lexical_snapshot.get("chunks"):
+                file_name = str(metadata.get("_file_name") or "document")
+                metadata["_chunk_id"] = f"{file_name}#h-{chunk_hash[:12]}"
+            used_ids.add(str(metadata.get("_chunk_id") or ""))
+            document.metadata = metadata
 
     @staticmethod
     def _mark_source_stale(source_path: str, reason: str) -> None:

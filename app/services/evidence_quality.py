@@ -278,10 +278,10 @@ def build_evidence_sufficiency(
             ):
                 failed_domain_types.add(evidence_type)
             continue
-        if not is_successful_or_reference_evidence(evidence, evidence_type):
-            continue
         if is_no_answer_reference(evidence):
             no_answer_reference_seen = True
+            continue
+        if not is_successful_or_reference_evidence(evidence, evidence_type):
             continue
         marker = source_tool or data_source or evidence_type
         if (
@@ -321,6 +321,7 @@ def build_evidence_sufficiency(
     if not reference:
         missing.append("处置参考（Runbook 或历史工单）")
     if no_answer_reference_seen:
+        missing = [item for item in missing if item != "处置参考（Runbook 或历史工单）"]
         missing.append("可信 Runbook / 历史工单处置参考")
 
     complete = not missing
@@ -416,9 +417,39 @@ def _evidence_is_usable(evidence: dict[str, Any]) -> bool:
     raw_data = as_dict(evidence.get("raw_data"))
     if raw_data.get("status") != "success":
         return False
+    output = raw_data.get("output")
+    if not _has_meaningful_output(output):
+        return False
+    if is_no_answer_reference(evidence):
+        return False
     metadata = as_dict(raw_data.get("metadata"))
     quality = as_dict(metadata.get("evidence_quality"))
     return quality.get("usable", True) is not False
+
+
+def _has_meaningful_output(output: Any) -> bool:
+    """Reject successful envelopes that contain no diagnostic observation."""
+    if output is None:
+        return False
+    if isinstance(output, str):
+        return output.strip().lower() not in {"", "ok", "success", "empty", "no data"}
+    if isinstance(output, (list, tuple, set)):
+        return bool(output)
+    if not isinstance(output, dict):
+        return True
+    meaningful_keys = {
+        key
+        for key, value in output.items()
+        if key not in {"status", "source", "metadata", "error_type", "no_answer_rejected"}
+        and value not in (None, "", [], {}, ())
+    }
+    if not meaningful_keys:
+        return any(
+            output.get(key) not in (None, "", [], {}, ())
+            for key in ("source", "summary", "logs", "signals", "data")
+        )
+    summary = str(output.get("summary") or "").strip().lower()
+    return bool(summary) or bool(meaningful_keys)
 
 
 def is_resource_domain_metric(evidence: dict[str, Any], evidence_type: str) -> bool:

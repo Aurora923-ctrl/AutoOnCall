@@ -1,5 +1,8 @@
 """Tests for A2A status and payload projection boundaries."""
 
+import pytest
+
+from app.services.a2a_messages import parse_message_envelope
 from app.services.a2a_payloads import (
     a2a_state_from_autooncall_status,
     data_part,
@@ -31,3 +34,22 @@ def test_a2a_parts_declare_media_types() -> None:
         "data": {"answer": 42},
         "mediaType": "application/json",
     }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": {"messageId": "m" * 257, "parts": []}},
+        {"message": {"messageId": "msg-1", "contextId": "i" * 129, "parts": []}},
+        {
+            "message": {
+                "messageId": "msg-1",
+                "parts": [{"text": "x"} for _ in range(101)],
+            }
+        },
+        {"message": {"messageId": "msg-\nforged", "parts": []}},
+    ],
+)
+def test_a2a_envelope_rejects_unbounded_or_unsafe_identifiers(payload) -> None:
+    with pytest.raises(ValueError):
+        parse_message_envelope(payload)

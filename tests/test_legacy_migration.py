@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.models.a2a import A2ATaskRecord
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
 from app.models.approval import ApprovalRequest
@@ -96,6 +97,17 @@ def test_sqlite_to_mysql_migration_dry_run_counts_all_runtime_tables(
     store.save_aiops_session_snapshot(
         AIOpsSessionSnapshot(session_id="sess-1", incident_id="inc-1", trace_id="trace-1")
     )
+    store.create_a2a_task_record(
+        A2ATaskRecord(
+            task_id="task-1",
+            message_id="msg-1",
+            request_fingerprint="f" * 64,
+            owner_id="principal-1",
+            skill="diagnose_incident",
+            incident_id="inc-1",
+            state="TASK_STATE_SUBMITTED",
+        )
+    )
     store.save_incident_state(IncidentState(incident_id="inc-1", status="completed"))
     store.save_report(DiagnosisReport(incident_id="inc-1", trace_id="trace-1"))
     monkeypatch.setattr(
@@ -118,6 +130,7 @@ def test_sqlite_to_mysql_migration_dry_run_counts_all_runtime_tables(
         "approval_requests": 1,
         "change_executions": 1,
         "aiops_sessions": 1,
+        "a2a_tasks": 1,
         "incident_states": 1,
         "diagnosis_reports": 1,
     }
@@ -179,6 +192,60 @@ def test_mysql_runtime_schema_capacity_matches_model_contracts() -> None:
     assert runtime_schema.count("status VARCHAR(64) NOT NULL") >= 3
     assert "environment VARCHAR(80) NOT NULL" in runtime_schema
     assert "approval_status VARCHAR(64) NOT NULL" in runtime_schema
+
+
+def test_sqlite_a2a_owner_migration_backfills_existing_payload(tmp_path) -> None:
+    database_file = tmp_path / "legacy-a2a.db"
+    with sqlite3.connect(database_file) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE a2a_tasks (
+                task_id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                skill TEXT NOT NULL,
+                incident_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            """
+        )
+        record = A2ATaskRecord(
+            task_id="task-legacy-owner",
+            message_id="msg-legacy-owner",
+            request_fingerprint="c" * 64,
+            owner_id="principal-legacy",
+            skill="diagnose_incident",
+            incident_id="inc-legacy-owner",
+            state="TASK_STATE_COMPLETED",
+        )
+        connection.execute(
+            """
+            INSERT INTO a2a_tasks (
+                task_id, message_id, request_fingerprint, skill, incident_id,
+                state, created_at, updated_at, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.task_id,
+                record.message_id,
+                record.request_fingerprint,
+                record.skill,
+                record.incident_id,
+                record.state,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat(),
+                record.model_dump_json(),
+            ),
+        )
+
+    store = AIOpsSQLiteStore(database_file)
+
+    assert [item.task_id for item in store.list_a2a_task_records(owner_id="principal-legacy")] == [
+        "task-legacy-owner"
+    ]
 
 
 def test_mysql_store_expands_legacy_runtime_column_capacities() -> None:
@@ -413,6 +480,7 @@ def test_mysql_runtime_import_rolls_back_all_tables_on_partial_failure() -> None
             approval_requests=[],
             change_executions=[],
             aiops_sessions=[],
+            a2a_tasks=[],
             incident_states=[],
             diagnosis_reports=[],
         )

@@ -115,6 +115,49 @@ def test_default_embedding_batch_size_respects_dashscope_runtime_limit(monkeypat
     assert [len(batch) for batch in service._embedding_batches(["x"] * 23)] == [10, 10, 3]
 
 
+def test_document_embeddings_are_reordered_by_provider_index(monkeypatch) -> None:
+    service = DashScopeEmbeddings(api_key="test-key", dimensions=2)
+
+    class ResponseItem:
+        def __init__(self, index: int, embedding: list[float]) -> None:
+            self.index = index
+            self.embedding = embedding
+
+    class FakeEmbeddings:
+        def create(self, **kwargs):
+            return type(
+                "Response",
+                (),
+                {
+                    "data": [
+                        ResponseItem(1, [0.0, 2.0]),
+                        ResponseItem(0, [2.0, 0.0]),
+                    ]
+                },
+            )()
+
+    service.client = type("Client", (), {"embeddings": FakeEmbeddings()})()
+
+    assert service.embed_documents(["first", "second"]) == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_document_embeddings_reject_duplicate_provider_indexes() -> None:
+    service = DashScopeEmbeddings(api_key="test-key", dimensions=2)
+
+    class ResponseItem:
+        index = 0
+        embedding = [1.0, 0.0]
+
+    class FakeEmbeddings:
+        def create(self, **kwargs):
+            return type("Response", (), {"data": [ResponseItem(), ResponseItem()]})()
+
+    service.client = type("Client", (), {"embeddings": FakeEmbeddings()})()
+
+    with pytest.raises(RuntimeError, match="index"):
+        service.embed_documents(["first", "second"])
+
+
 def test_rag_observability_keeps_cost_unobserved_without_price_snapshot() -> None:
     payload = build_rag_observability(
         {
@@ -212,6 +255,14 @@ def test_runtime_generation_requires_citation_from_retrieved_sources() -> None:
     )
 
 
+def test_runtime_generation_normalizes_source_paths_to_basenames() -> None:
+    assert _has_valid_citation(
+        [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+        ["docs/knowledge-base/redis.md"],
+        required_sources=["redis.md"],
+    )
+
+
 def test_runtime_generation_subset_is_independent_of_case_order() -> None:
     cases = [{"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}]
 
@@ -295,6 +346,26 @@ cases:
     )
 
     assert [item["id"] for item in load_benchmark_cases(cases_path)] == ["one", "two"]
+
+
+def test_runtime_benchmark_does_not_treat_source_labels_as_chunk_ids(tmp_path) -> None:
+    cases_path = tmp_path / "cases.yaml"
+    cases_path.write_text(
+        """
+cases:
+  - id: source-label
+    query: Redis maxclients
+    expected_source: redis.md
+    reference_context_ids:
+      - redis.md
+      - redis.md#0001
+""",
+        encoding="utf-8",
+    )
+
+    [case] = load_benchmark_cases(cases_path)
+
+    assert case["expected_context_ids"] == ["redis.md#0001"]
 
 
 @pytest.mark.parametrize("values", [[], [1.0]])

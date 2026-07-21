@@ -19,6 +19,7 @@ from app.services.document_loaders.base import (
 MAX_HTML_SECTIONS = 10_000
 HTML_HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 HTML_CONTENT_TAGS = HTML_HEADING_TAGS | {"p", "li", "pre", "code", "td", "th"}
+HIDDEN_STYLE_MARKERS = ("display:none", "display: none", "visibility:hidden", "visibility: hidden")
 
 
 class HtmlDocumentLoader:
@@ -47,6 +48,8 @@ class HtmlDocumentLoader:
                 "textarea",
             ]
         ):
+            tag.decompose()
+        for tag in soup.find_all(_is_hidden_tag):
             tag.decompose()
 
         raw_units, truncated = _extract_heading_sections(path, soup)
@@ -125,6 +128,15 @@ def _extract_heading_sections(
         current_parts.append(text)
     flush()
     return sections, truncated
+
+
+def _is_hidden_tag(tag: Tag) -> bool:
+    if tag.has_attr("hidden"):
+        return True
+    if str(tag.get("aria-hidden") or "").strip().lower() == "true":
+        return True
+    style = str(tag.get("style") or "").replace(" ", "").lower()
+    return any(marker.replace(" ", "") in style for marker in HIDDEN_STYLE_MARKERS)
 
 
 def _has_content_tag_ancestor(element: Tag, body: Tag) -> bool:

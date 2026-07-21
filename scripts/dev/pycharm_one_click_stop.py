@@ -75,11 +75,16 @@ def stop_app_processes() -> None:
 
 def compose_down(compose_file: Path) -> None:
     print(f"[RUN] docker compose -f {compose_file.name} down")
-    subprocess.run(
+    completed = subprocess.run(
         ["docker", "compose", "-f", str(compose_file), "down"],
         cwd=ROOT,
         check=False,
     )
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"docker compose -f {compose_file.name} down failed with exit code "
+            f"{completed.returncode}"
+        )
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ from langchain_core.documents import Document
 from langchain_core.tools import tool
 from loguru import logger
 
-from app.services.rag_retrieval_service import documents_to_context, retrieve_structured_knowledge
+from app.services.rag_retrieval.candidates import documents_to_context
+from app.services.rag_retrieval_service import retrieve_structured_knowledge
 from app.utils.log_safety import summarize_text_for_log
 
 

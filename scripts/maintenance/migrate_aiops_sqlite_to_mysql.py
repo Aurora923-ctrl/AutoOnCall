@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.config import config
+from app.models.a2a import A2ATaskRecord
 from app.models.aiops_session import AIOpsSessionSnapshot
 from app.models.alert import AlertEvent
 from app.models.approval import ApprovalRequest
@@ -36,6 +37,7 @@ RUNTIME_TABLES = (
     "approval_requests",
     "change_executions",
     "aiops_sessions",
+    "a2a_tasks",
     "incident_states",
     "diagnosis_reports",
 )
@@ -74,6 +76,7 @@ def main() -> int:
         approvals = _read_approval_models(source)
         change_executions = _read_models(source, "change_executions", ChangeExecution)
         aiops_sessions = _read_models(source, "aiops_sessions", AIOpsSessionSnapshot)
+        a2a_tasks = _read_models(source, "a2a_tasks", A2ATaskRecord)
         incident_states = _read_models(source, "incident_states", IncidentState)
         reports = _read_models(source, "diagnosis_reports", DiagnosisReport)
 
@@ -88,6 +91,7 @@ def main() -> int:
             "approval_requests": len(approvals),
             "change_executions": len(change_executions),
             "aiops_sessions": len(aiops_sessions),
+            "a2a_tasks": len(a2a_tasks),
             "incident_states": len(incident_states),
             "diagnosis_reports": len(reports),
         },
@@ -101,6 +105,7 @@ def main() -> int:
             approval_requests=approvals,
             change_executions=change_executions,
             aiops_sessions=aiops_sessions,
+            a2a_tasks=a2a_tasks,
             incident_states=incident_states,
             diagnosis_reports=reports,
         )

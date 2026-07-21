@@ -208,6 +208,32 @@ def test_analyzer_caps_unknown_successful_evidence_sources() -> None:
     assert any("未知来源" in reason for reason in analysis.confidence_reasons)
 
 
+def test_mock_evidence_cannot_create_root_cause_hypothesis() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout and 5xx",
+        session_id="analysis-mock-source",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "connected_clients=9940/10000",
+                "connected_clients": 9940,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.994,
+            },
+            data_source="mock",
+        )
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert analysis.evidence_sufficient is False
+    assert analysis.confidence <= 0.5
+    assert all(not item.supporting_evidence_ids for item in analysis.hypothesis_ranking)
+
+
 def test_analyzer_recommends_missing_redis_evidence_when_plan_is_empty() -> None:
     state = create_initial_aiops_state(
         "order-service Redis connection timeout",

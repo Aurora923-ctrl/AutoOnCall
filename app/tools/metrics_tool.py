@@ -183,6 +183,8 @@ class QueryMetricsTool(AIOpsTool):
         }
         if synthetic_fields:
             output["synthetic_fields"] = synthetic_fields
+            output["source_quality"] = "fallback_only"
+            output["evidence_origin"] = "mcp_mock:monitor"
             output["uncertainty"] = (
                 "CPU/memory metrics come from the local synthetic MCP monitor and are not "
                 "production observations."

@@ -1,19 +1,12 @@
----
-title: "Troubleshoot log queries (READ) | Grafana Loki documentation"
-description: "Describes how to troubleshoot and debug specific errors when querying logs from Grafana Loki."
----
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/grafana/loki/blob/925c8c7c7c6feface41c5bef12c74f05c05e8c84/docs/sources/shared/troubleshoot-query.md
+Upstream revision: 925c8c7c7c6feface41c5bef12c74f05c05e8c84
+Retrieved: 2026-07-21
+License: Grafana documentation terms; upstream repository AGPL-3.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
-> For a curated documentation index, see [llms.txt](/llms.txt). For the complete documentation index, see [llms-full.txt](/llms-full.txt).
-
-# Troubleshoot log queries (READ)
-
-This guide helps you troubleshoot errors that occur when querying logs from Loki. When Loki rejects or fails query requests, it’s typically due to query syntax errors, exceeding limits, timeout issues, or storage access problems.
-
-Before you begin, ensure you have the following:
-
-- Access to Grafana Loki logs and metrics
-- Understanding of [LogQL query language](/docs/loki/latest/query/) basics
-- Permissions to configure limits and settings if needed
+This guide helps you troubleshoot errors that occur when querying logs from Loki. When Loki rejects or fails query requests, it's typically due to query syntax errors, exceeding limits, timeout issues, or storage access problems.
 
 ## Monitoring query errors
 
@@ -50,24 +43,22 @@ The LogQL query contains syntax errors. This could be due to:
 
 **Common examples:**
 
-Expand table
-
-| Invalid Query                 | Error                             | Fix                     |
-|-------------------------------|-----------------------------------|-------------------------|
-| `{app="foo"`                  | Missing closing brace             | `{app="foo"}`           |
-| `{app="foo"} |= test`         | Unquoted filter string            | `{app="foo"} |= "test"` |
-| `rate({app="foo"}[5minutes])` | Invalid duration unit             | `rate({app="foo"}[5m])` |
-| `{app="foo"} | json`          | Missing pipe symbol before parser | `{app="foo"} | json`    |
+| Invalid Query | Error | Fix |
+| -------------- | ------- | ----- |
+| `{app="foo"` | Missing closing brace | `{app="foo"}` |
+| `{app="foo"} \|= test` | Unquoted filter string | `{app="foo"} \|= "test"` |
+| `rate({app="foo"}[5minutes])` | Invalid duration unit | `rate({app="foo"}[5m])` |
+| `{app="foo"} \| json` | Missing pipe symbol before parser | `{app="foo"} \| json` |
 
 **Resolution:**
 
 Start with a simple stream selector: `{job="app"}`, then add filters and operations incrementally to identify syntax issues.
 
-- **Check bracket matching** - Ensure all `{`, `}`, `(`, `)`, `[`, `]` are properly closed.
-- **Verify string quoting** - All label values and filter strings must be quoted.
-- **Use valid duration units** - Use `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`, `y` , for example, `5m` not `5minutes`.
-- **Review operator syntax** - Ensure label matchers use proper operators (`=`, `!=`, `=~`, `!~`). Check the [LogQL documentation](/docs/loki/latest/query/) for correct operator usage.
-- **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query using natural language, for example, “What errors occurred for application foo in the last hour?”
+* **Check bracket matching** - Ensure all `{`, `}`, `(`, `)`, `[`, `]` are properly closed.
+* **Verify string quoting** - All label values and filter strings must be quoted.
+* **Use valid duration units** - Use `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`, `y` , for example, `5m` not `5minutes`.
+* **Review operator syntax** - Ensure label matchers use proper operators (`=`, `!=`, `=~`, `!~`). Check the [LogQL documentation](https://grafana.com/docs/loki/<LOKI_VERSION>/query/) for correct operator usage.
+* **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query using natural language, for example, “What errors occurred for application foo in the last hour?”
 
 **Properties:**
 
@@ -88,8 +79,6 @@ The query uses only negative matchers (`!=`, `!~`) or matchers that match empty 
 
 **Invalid examples:**
 
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```logql
 {foo!="bar"}
 {app=~".*"}
@@ -97,8 +86,6 @@ logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 ```
 
 **Valid examples:**
-
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```logql
 {foo="bar"}
@@ -108,10 +95,10 @@ logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 **Resolution:**
 
-- **Add at least one positive matcher** that selects specific streams.
-- **Use `.+` instead of `.*`** in regex matchers to require at least one character.
-- **Add additional label selectors** to narrow down the query scope.
-- **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query using natural language, for example, “Find logs containing ’foo’ but not ‘bar’ or ‘baz’.”
+* **Add at least one positive matcher** that selects specific streams.
+* **Use `.+` instead of `.*`** in regex matchers to require at least one character.
+* **Add additional label selectors** to narrow down the query scope.
+* **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query using natural language, for example, “Find logs containing ’foo' but not 'bar' or 'baz'.”
 
 **Properties:**
 
@@ -132,17 +119,15 @@ The query was passed to an API that only accepts label matchers (like the series
 
 **Resolution:**
 
-- **Use only stream selectors** for APIs that don’t support full LogQL:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Valid for series API
-  {app="foo", env="prod"}
-  
-  # Invalid for series API
-  {app="foo"} |= "error"
-  ```
+* **Use only stream selectors** for APIs that don't support full LogQL:
+
+   ```logql
+   # Valid for series API
+   {app="foo", env="prod"}
+
+   # Invalid for series API
+   {app="foo"} |= "error"
+   ```
 
 **Properties:**
 
@@ -159,24 +144,23 @@ The query was passed to an API that only accepts label matchers (like the series
 
 **Cause:**
 
-A [log query](/docs/loki/latest/query/log_queries/) (one that returns log lines rather than metrics) was submitted to the instant query endpoint (`/loki/api/v1/query`). Log queries must use the range query endpoint.
+A [log query](https://grafana.com/docs/loki/<LOKI_VERSION>/query/log_queries/) (one that returns log lines rather than metrics) was submitted to the instant query endpoint (`/loki/api/v1/query`). Log queries must use the range query endpoint.
 
 **Resolution:**
 
-- **Convert to a range query** Convert log queries to range queries with a time range. Range queries are the default in Grafana Explore.
-- **Use the range query endpoint** `/loki/api/v1/query_range` for log queries.
-- **Convert to a metric query** if you need to use instant queries:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # This is a log query (returns logs)
-  {app="foo"} |= "error"
-  
-  # This is a metric query (can be instant)
-  count_over_time({app="foo"} |= "error"[5m])
-  ```
-- **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query.
+* **Convert to a range query** Convert log queries to range queries with a time range. Range queries are the default in Grafana Explore.
+* **Use the range query endpoint** `/loki/api/v1/query_range` for log queries.
+* **Convert to a metric query** if you need to use instant queries:
+
+   ```logql
+   # This is a log query (returns logs)
+   {app="foo"} |= "error"
+
+   # This is a metric query (can be instant)
+   count_over_time({app="foo"} |= "error"[5m])
+   ```
+
+* **Use Grafana Assistant** - If you are a Cloud Logs user, you can use Grafana Assistant to write or revise your query.
 
 **Properties:**
 
@@ -197,17 +181,15 @@ Aggregation functions like `sum_over_time`, `avg_over_time`, `min_over_time`, `m
 
 **Resolution:**
 
-- **Add an unwrap expression** to extract the numeric label:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Invalid
-  sum_over_time({app="foo"} | json [5m])
-  
-  # Valid - unwrap a numeric label
-  sum_over_time({app="foo"} | json | unwrap duration [5m])
-  ```
+* **Add an unwrap expression** to extract the numeric label:
+
+   ```logql
+   # Invalid
+   sum_over_time({app="foo"} | json [5m])
+
+   # Valid - unwrap a numeric label
+   sum_over_time({app="foo"} | json | unwrap duration [5m])
+   ```
 
 **Properties:**
 
@@ -224,22 +206,21 @@ Aggregation functions like `sum_over_time`, `avg_over_time`, `min_over_time`, `m
 
 **Cause:**
 
-The `count_over_time` function doesn’t use unwrapped values - it just counts log lines. Using it with `unwrap` is invalid.
+The `count_over_time` function doesn't use unwrapped values - it just counts log lines. Using it with `unwrap` is invalid.
 
 **Resolution:**
 
-- **Remove the unwrap expression** for count\_over\_time:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Invalid
-  count_over_time({app="foo"} | json | unwrap duration [5m])
-  
-  # Valid
-  count_over_time({app="foo"} | json [5m])
-  ```
-- **Use sum\_over\_time** if you want to sum unwrapped values.
+* **Remove the unwrap expression** for count_over_time:
+
+   ```logql
+   # Invalid
+   count_over_time({app="foo"} | json | unwrap duration [5m])
+
+   # Valid
+   count_over_time({app="foo"} | json [5m])
+   ```
+
+* **Use sum_over_time** if you want to sum unwrapped values.
 
 **Properties:**
 
@@ -268,34 +249,32 @@ The query matches more unique label combinations (series) than the configured li
 
 **Resolution:**
 
-- **Add more specific stream selectors** to reduce cardinality:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Too broad
-  {job="ingress-nginx"}
-  
-  # More specific
-  {job="ingress-nginx", namespace="production", pod=~"ingress-nginx-.*"}
-  ```
-- **Reduce the time range** of the query.
-- **Use label filters** to narrow down results: `{job="app"} |= "error"`
-- **Use aggregation functions** to reduce cardinality:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  sum by (status) (rate({job="nginx"} | json [5m]))
-  ```
-- **Increase the limit** if resources allow:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_query_series: 1000  #default is 500
-  ```
+* **Add more specific stream selectors** to reduce cardinality:
+
+   ```logql
+   # Too broad
+   {job="ingress-nginx"}
+
+   # More specific
+   {job="ingress-nginx", namespace="production", pod=~"ingress-nginx-.*"}
+   ```
+
+* **Reduce the time range** of the query.
+
+* **Use label filters** to narrow down results: `{job="app"} |= "error"`
+
+* **Use aggregation functions** to reduce cardinality:
+
+   ```logql
+   sum by (status) (rate({job="nginx"} | json [5m]))
+   ```
+
+* **Increase the limit** if resources allow:
+
+   ```yaml
+   limits_config:
+     max_query_series: 1000  #default is 500
+   ```
 
 **Properties:**
 
@@ -320,41 +299,35 @@ The query produces results with too many unique label combinations. This protect
 
 **Resolution:**
 
-- **Use more specific label selectors** to reduce the number of unique streams.
-- **Apply aggregation functions** to reduce cardinality:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  sum by (status) (rate({job="nginx"}[5m]))
-  ```
-- **Use `by()` or `without()` clauses** to group results and reduce dimensions:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  sum by (status, method) (rate({job="nginx"} | json [5m]))
-  ```
-  
-  Another alternative is using `drop` or `keep` to reduce the number of labels and hence the cardinality:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Drop high-cardinality labels like request_id or trace_id
-  {job="nginx"} | json | drop request_id, trace_id, session_id
-  
-  # Keep only the labels you need
-  {job="nginx"} | json | keep status, method, path
-  ```
-- **Increase the limit** if needed:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    cardinality_limit: 200000  #default is 100000
-  ```
+* **Use more specific label selectors** to reduce the number of unique streams.
+* **Apply aggregation functions** to reduce cardinality:
+
+   ```logql
+   sum by (status) (rate({job="nginx"}[5m]))
+   ```
+
+* **Use `by()` or `without()` clauses** to group results and reduce dimensions:
+
+   ```logql
+   sum by (status, method) (rate({job="nginx"} | json [5m]))
+   ```
+
+   Another alternative is using `drop` or `keep` to reduce the number of labels and hence the cardinality:
+
+   ```logql
+   # Drop high-cardinality labels like request_id or trace_id
+   {job="nginx"} | json | drop request_id, trace_id, session_id
+
+   # Keep only the labels you need
+   {job="nginx"} | json | keep status, method, path
+   ```
+
+* **Increase the limit** if needed:
+
+   ```yaml
+   limits_config:
+     cardinality_limit: 200000  #default is 100000
+   ```
 
 **Properties:**
 
@@ -379,23 +352,22 @@ The query requests more log entries than the configured maximum. This applies to
 
 **Resolution:**
 
-- **Reduce the limit parameter** in your query request.
-- **Add more specific filters** to return fewer results:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  {app="foo"} |= "error" 
-  ```
-- **Reduce the time range** of the query.
-- **Increase the limit** if needed:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_entries_limit_per_query: 10000  #default is 5000
-  ```
+* **Reduce the limit parameter** in your query request.
+
+* **Add more specific filters** to return fewer results:
+
+   ```logql
+   {app="foo"} |= "error"
+   ```
+
+* **Reduce the time range** of the query.
+
+* **Increase the limit** if needed:
+
+   ```yaml
+   limits_config:
+     max_entries_limit_per_query: 10000  #default is 5000
+   ```
 
 **Properties:**
 
@@ -420,16 +392,15 @@ The estimated data volume for the query exceeds the configured limit. This is de
 
 **Resolution:**
 
-- **Add more specific stream selectors** to reduce data volume.
-- **Reduce the time range** of the query.
-- **Increase the limit** if resources allow:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_query_bytes_read: 10GB
-  ```
+* **Add more specific stream selectors** to reduce data volume.
+* **Reduce the time range** of the query.
+
+* **Increase the limit** if resources allow:
+
+   ```yaml
+   limits_config:
+     max_query_bytes_read: 10GB
+   ```
 
 **Properties:**
 
@@ -454,26 +425,24 @@ The number of chunks that the query would read exceeds the configured limit. Thi
 
 **Resolution:**
 
-- **Narrow stream selectors** to reduce the number of matching chunks:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Too broad
-  {job="app"}
-  
-  # More specific
-  {job="app", environment="production", namespace="api"}
-  ```
-- **Reduce the query time range** to scan fewer chunks.
-- **Increase the limit** if resources allow:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_chunks_per_query: 5000000  #default is 2000000
-  ```
+* **Narrow stream selectors** to reduce the number of matching chunks:
+
+   ```logql
+   # Too broad
+   {job="app"}
+
+   # More specific
+   {job="app", environment="production", namespace="api"}
+   ```
+
+* **Reduce the query time range** to scan fewer chunks.
+
+* **Increase the limit** if resources allow:
+
+   ```yaml
+   limits_config:
+     max_chunks_per_query: 5000000  #default is 2000000
+   ```
 
 **Properties:**
 
@@ -498,24 +467,21 @@ The query contains too many stream matchers. This limit prevents queries with ex
 
 **Resolution:**
 
-- **Simplify your query** by using fewer label matchers.
-- **Combine multiple queries** instead of using many OR conditions.
-- **Use regex matchers** to consolidate multiple values:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Good: 3 matchers using regex patterns
-  {cluster="prod", namespace=~"api|web", pod=~"nginx-.*"}
-  ```
-- **Increase the limit** if needed:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_streams_matchers_per_query: 2000  #default is 1000
-  ```
+* **Simplify your query** by using fewer label matchers.
+* **Combine multiple queries** instead of using many OR conditions.
+* **Use regex matchers** to consolidate multiple values:
+
+   ```logql
+   # Good: 3 matchers using regex patterns
+   {cluster="prod", namespace=~"api|web", pod=~"nginx-.*"}
+   ```
+
+* **Increase the limit** if needed:
+
+   ```yaml
+   limits_config:
+     max_streams_matchers_per_query: 2000  #default is 1000
+   ```
 
 **Properties:**
 
@@ -544,18 +510,17 @@ Even after query splitting and sharding, individual query shards exceed the per-
 
 **Resolution:**
 
-- **Add more specific stream selectors**.
-- **Reduce the time range** or Break large queries into smaller time ranges.
-- **Simplify the query** if possible - some queries cannot be sharded.
-- **Increase the limit** (requires more querier resources):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_querier_bytes_read: 200GB  # default is 150GB
-  ```
-- **Scale querier resources**
+* **Add more specific stream selectors**.
+* **Reduce the time range** or Break large queries into smaller time ranges.
+* **Simplify the query** if possible - some queries cannot be sharded.
+* **Increase the limit** (requires more querier resources):
+
+   ```yaml
+   limits_config:
+     max_querier_bytes_read: 200GB  # default is 150GB
+   ```
+
+* **Scale querier resources**
 
 **Properties:**
 
@@ -576,15 +541,14 @@ The range vector interval (in brackets like `[5m]`) exceeds configured limits.
 
 **Resolution:**
 
-- **Reduce the range interval** in your query:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # If [1d] is too large, try smaller intervals
-  rate({app="foo"}[1h])
-  ```
-- **Check your configuration** for `max_query_length` limits. The default is `30d1h`.
+* **Reduce the range interval** in your query:
+
+   ```logql
+   # If [1d] is too large, try smaller intervals
+   rate({app="foo"}[1h])
+   ```
+
+* **Check your configuration** for `max_query_length` limits. The default is `30d1h`.
 
 **Properties:**
 
@@ -605,7 +569,7 @@ These errors relate to the time range specified in queries.
 
 **Cause:**
 
-The difference between the query’s start and end time exceeds the maximum allowed query length.
+The difference between the query's start and end time exceeds the maximum allowed query length.
 
 **Default configuration:**
 
@@ -613,25 +577,22 @@ The difference between the query’s start and end time exceeds the maximum allo
 
 **Resolution:**
 
-- **Reduce the query time range**:
-  
-  logcli ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logcli
-  # Instead of querying 60 days
-  logcli query '{app="foo"}' --from="60d" --to="now"
-  
-  # Query 30 days or less
-  logcli query '{app="foo"}' --from="30d" --to="now"
-  ```
-- **Increase the limit** if storage retention supports it:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_query_length: 2160h  # 90 days
-  ```
+* **Reduce the query time range**:
+
+   ```logcli
+   # Instead of querying 60 days
+   logcli query '{app="foo"}' --from="60d" --to="now"
+
+   # Query 30 days or less
+   logcli query '{app="foo"}' --from="30d" --to="now"
+   ```
+
+* **Increase the limit** if storage retention supports it:
+
+   ```yaml
+   limits_config:
+     max_query_length: 2160h  # 90 days
+   ```
 
 **Properties:**
 
@@ -656,19 +617,15 @@ The entire query time range falls before the `max_query_lookback` limit. This ha
 
 **Resolution:**
 
-- **Query more recent data** within the lookback window.
-- **Adjust the lookback limit** if the data should be queryable:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_query_lookback: 8760h  # 1 year
-  ```
-  
-  > Caution
-  > 
-  > The lookback limit should not exceed your retention period.
+* **Query more recent data** within the lookback window.
+* **Adjust the lookback limit** if the data should be queryable:
+
+   ```yaml
+   limits_config:
+     max_query_lookback: 8760h  # 1 year
+   ```
+
+   The lookback limit should not exceed your retention period.
 
 **Properties:**
 
@@ -689,8 +646,8 @@ The query end time is before the start time, which is invalid.
 
 **Resolution:**
 
-- **Swap start and end times** if they were reversed.
-- **Check timestamp formats** to ensure times are correctly specified.
+* **Swap start and end times** if they were reversed.
+* **Check timestamp formats** to ensure times are correctly specified.
 
 **Properties:**
 
@@ -701,7 +658,7 @@ The query end time is before the start time, which is invalid.
 
 ## Required labels errors
 
-These errors occur when queries don’t meet configured label requirements.
+These errors occur when queries don't meet configured label requirements.
 
 ### Error: Missing required matchers
 
@@ -711,23 +668,22 @@ These errors occur when queries don’t meet configured label requirements.
 
 **Cause:**
 
-The tenant is configured to require certain label matchers in all queries, but the query doesn’t include them.
+The tenant is configured to require certain label matchers in all queries, but the query doesn't include them.
 
 **Default configuration:**
 
-- `required_labels`: \[] (none required by default)
+- `required_labels`: [] (none required by default)
 
 **Resolution:**
 
-- **Check with your administrator** about which labels are required.
-- **Add the required labels** to your query:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # If 'namespace' is required
-  {app="foo", namespace="production"}
-  ```
+* **Check with your administrator** about which labels are required.
+
+* **Add the required labels** to your query:
+
+   ```logql
+   # If 'namespace' is required
+   {app="foo", namespace="production"}
+   ```
 
 **Properties:**
 
@@ -752,14 +708,12 @@ The tenant is configured to require a minimum number of label matchers, but the 
 
 **Resolution:**
 
-- **Add more label matchers** to meet the minimum requirement:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # If minimum is 2, add another selector
-  {app="foo", namespace="production"}
-  ```
+* **Add more label matchers** to meet the minimum requirement:
+
+   ```logql
+   # If minimum is 2, add another selector
+   {app="foo", namespace="production"}
+   ```
 
 **Properties:**
 
@@ -800,53 +754,49 @@ The query exceeded the configured timeout. This can happen due to:
 
 **Resolution:**
 
-- **Reduce the time range** of the query.
-- **Add more specific filters** to reduce data processing:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  # Less specific (slower)
-  {namespace=~"prod.*"}
-  
-  # More specific (faster)
-  {namespace="production"}
-  ```
-- **Prefer exact matchers over regex** when possible.
-- **Add line filters early** in the pipeline:
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```logql
-  {app="foo"} |= "error" | json | level="error"
-  ```
-- **Increase timeout limits** (if resources allow):
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    query_timeout: 5m
-  
-  server:
-    http_server_read_timeout: 5m
-    http_server_write_timeout: 5m
-  ```
-- **Use sampling** for exploratory queries
-  
-  logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
+* **Reduce the time range** of the query.
+* **Add more specific filters** to reduce data processing:
+
+   ```logql
+   # Less specific (slower)
+   {namespace=~"prod.*"}
+
+   # More specific (faster)
+   {namespace="production"}
+   ```
+
+* **Prefer exact matchers over regex** when possible.
+* **Add line filters early** in the pipeline:
+
+   ```logql
+   {app="foo"} |= "error" | json | level="error"
+   ```
+
+* **Increase timeout limits** (if resources allow):
+
+   ```yaml
+   limits_config:
+     query_timeout: 5m
+
+   server:
+     http_server_read_timeout: 5m
+     http_server_write_timeout: 5m
+   ```
+
+* **Use sampling** for exploratory queries
+
   ```logql
    {job="app"} | line_format "{{__timestamp__}} {{.msg}}" | sample 0.1
-  ```
-- **Check for network issues** between components.
+   ```
+
+* **Check for network issues** between components.
 
 **Properties:**
 
 - Enforced by: Query Frontend/Querier
 - Retryable: Yes (with modifications)
 - HTTP status: 504 Gateway Timeout
-- Configurable per tenant: Yes (query\_timeout)
+- Configurable per tenant: Yes (query_timeout)
 
 ### Error: Request cancelled by client
 
@@ -864,9 +814,9 @@ The client closed the connection before receiving a response. This is typically 
 
 **Resolution:**
 
-- **Increase client timeout** in Grafana or LogCLI.
-- **Optimize the query** to return faster.
-- **Check network connectivity** between client and Loki.
+* **Increase client timeout** in Grafana or LogCLI.
+* **Optimize the query** to return faster.
+* **Check network connectivity** between client and Loki.
 
 **Properties:**
 
@@ -891,17 +841,14 @@ The query matches a configured block rule. Administrators create tenant policies
 
 **Resolution:**
 
-- **Check with your Loki administrator** about blocked queries and to review policy settings.
-- **Modify the query** to avoid the block pattern:
-  
+* **Check with your Loki administrator** about blocked queries and to review policy settings.
+* **Modify the query** to avoid the block pattern:
   - Change the stream selectors
   - Adjust the time range
   - Use different aggregations
-- **Request the block to be removed** if the query is legitimate.
+* **Request the block to be removed** if the query is legitimate.
 
 **Configuration reference:**
-
-YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```yaml
 limits_config:
@@ -933,15 +880,13 @@ Query parallelism is set to 0, effectively disabling queries for the tenant.
 
 **Resolution:**
 
-- **Contact your Loki administrator** to enable querying.
-- **Check configuration** for `max_query_parallelism`:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    max_query_parallelism: 32     #(the default)
-  ```
+* **Contact your Loki administrator** to enable querying.
+* **Check configuration** for `max_query_parallelism`:
+
+   ```yaml
+   limits_config:
+     max_query_parallelism: 32     #(the default)
+   ```
 
 **Properties:**
 
@@ -960,19 +905,17 @@ Multi variant queries are an experimental feature that enables support for runni
 
 **Cause:**
 
-The query uses the variants feature, but it’s disabled for the tenant or instance.
+The query uses the variants feature, but it's disabled for the tenant or instance.
 
 **Resolution:**
 
-- **Remove variant expressions** from the query.
-- **Enable the feature** if needed:
-  
-  YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-  
-  ```yaml
-  limits_config:
-    enable_multi_variant_queries: true  #default is false
-  ```
+* **Remove variant expressions** from the query.
+* **Enable the feature** if needed:
+
+   ```yaml
+   limits_config:
+     enable_multi_variant_queries: true  #default is false
+   ```
 
 **Properties:**
 
@@ -983,11 +926,11 @@ The query uses the variants feature, but it’s disabled for the tenant or insta
 
 ## Pipeline processing errors
 
-Pipeline errors occur during log line processing but don’t cause query failures. Instead, affected log lines are annotated with error labels.
+Pipeline errors occur during log line processing but don't cause query failures. Instead, affected log lines are annotated with error labels.
 
 ### Understanding pipeline errors
 
-When a pipeline stage fails (for example, parsing JSON that isn’t valid JSON), Loki:
+When a pipeline stage fails (for example, parsing JSON that isn't valid JSON), Loki:
 
 1. Does NOT filter out the log line
 2. Adds an `__error__` label with the error type
@@ -996,29 +939,23 @@ When a pipeline stage fails (for example, parsing JSON that isn’t valid JSON),
 
 ### Error types
 
-Expand table
-
-| Error Label Value     | Cause                                       |
-|-----------------------|---------------------------------------------|
-| `JSONParserErr`       | Log line is not valid JSON                  |
-| `LogfmtParserErr`     | Log line is not valid logfmt                |
+| Error Label Value | Cause |
+| ------------------ | ------- |
+| `JSONParserErr` | Log line is not valid JSON |
+| `LogfmtParserErr` | Log line is not valid logfmt |
 | `SampleExtractionErr` | Failed to extract numeric value for metrics |
-| `LabelFilterErr`      | Label filter operation failed               |
-| `TemplateFormatErr`   | Template formatting failed                  |
+| `LabelFilterErr` | Label filter operation failed |
+| `TemplateFormatErr` | Template formatting failed |
 
 ### Viewing pipeline errors
 
 To see logs with errors:
-
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```logql
 {app="foo"} | json | __error__!=""
 ```
 
 To see error details:
-
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```logql
 {app="foo"} | json | __error__!="" | line_format "Error: {{.__error__}} - {{.__error_details__}}"
@@ -1028,15 +965,11 @@ logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 To exclude logs with parsing errors:
 
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```logql
 {app="foo"} | json | __error__=""
 ```
 
 To exclude specific error types:
-
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```logql
 {app="foo"} | json | __error__!="JSONParserErr"
@@ -1045,8 +978,6 @@ logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 ### Dropping error labels
 
 To remove error labels from results:
-
-logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```logql
 {app="foo"} | json | drop __error__, __error_details__
@@ -1060,8 +991,6 @@ These errors occur when connecting to Loki, often when using LogCLI.
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 no org id
 ```
@@ -1073,14 +1002,13 @@ Multi-tenancy is enabled but no tenant ID was provided in the request.
 **Resolution:**
 
 1. **Add the X-Scope-OrgID header** in your request.
-2. **For LogCLI**, use the `--org-id` flag:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+1. **For LogCLI**, use the `--org-id` flag:
+
    ```bash
    logcli query '{app="foo"}' --org-id="my-tenant"
    ```
-3. **In Grafana**, configure the tenant ID in the data source settings.
+
+1. **In Grafana**, configure the tenant ID in the data source settings.
 
 **Properties:**
 
@@ -1093,15 +1021,11 @@ Multi-tenancy is enabled but no tenant ID was provided in the request.
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 at most one of HTTP basic auth (username/password), bearer-token & bearer-token-file is allowed to be configured
 ```
 
 Or:
-
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```text
 at most one of the options bearer-token & bearer-token-file is allowed to be configured
@@ -1114,16 +1038,14 @@ Multiple authentication methods are configured simultaneously in LogCLI.
 **Resolution:**
 
 1. **Use only one authentication method**:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
    ```bash
    # Basic auth
    logcli query '{app="foo"}' --username="user" --password="pass"
-   
+
    # OR bearer token
    logcli query '{app="foo"}' --bearer-token="token"
-   
+
    # OR bearer token file
    logcli query '{app="foo"}' --bearer-token-file="/path/to/token"
    ```
@@ -1138,8 +1060,6 @@ Multiple authentication methods are configured simultaneously in LogCLI.
 ### Error: Run out of attempts while querying
 
 **Error message:**
-
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```text
 run out of attempts while querying the server
@@ -1156,12 +1076,10 @@ LogCLI exhausted all retry attempts when trying to reach Loki. This usually indi
 **Resolution:**
 
 1. **Check Loki server availability**.
-2. **Verify network connectivity**.
-3. **Check authentication credentials**.
-4. **Increase retries** if transient issues are expected:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+1. **Verify network connectivity**.
+1. **Check authentication credentials**.
+1. **Increase retries** if transient issues are expected:
+
    ```bash
    logcli query '{app="foo"}' --retries=5
    ```
@@ -1176,8 +1094,6 @@ LogCLI exhausted all retry attempts when trying to reach Loki. This usually indi
 ### Error: WebSocket connection closed unexpectedly
 
 **Error message:**
-
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```text
 websocket: close 1006 (abnormal closure): unexpected EOF
@@ -1194,8 +1110,8 @@ When tailing logs, the WebSocket connection was closed unexpectedly. This can ha
 **Resolution:**
 
 1. LogCLI will automatically attempt to reconnect, up to 5 times.
-2. **Check Loki querier health** if reconnections fail.
-3. **Review network stability** between client and server.
+1. **Check Loki querier health** if reconnections fail.
+1. **Review network stability** between client and server.
 
 **Properties:**
 
@@ -1212,8 +1128,6 @@ These errors occur when requested data is not available.
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 no data found
 ```
@@ -1227,32 +1141,28 @@ The query time range contains no matching log data. This can happen if:
 - No logs match the stream selectors
 - The time range is outside the data retention period
 - Log ingestion is not working
-- Stream labels don’t match any existing streams
+- Stream labels don't match any existing streams
 
 **Resolution:**
 
 1. **Verify the time range** contains data for your streams.
-2. **Check if log ingestion is working** correctly:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+1. **Check if log ingestion is working** correctly:
+
    ```bash
    # Check if any data is being ingested
    logcli query '{job=~".+"}'
    ```
-3. **Verify stream selectors** match existing log streams:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Verify stream selectors** match existing log streams:
+
    ```bash
    # List available streams
    curl http://loki:3100/loki/api/v1/series
    ```
-4. **Check data retention** settings to ensure logs are still available.
-5. **Use broader selectors** to test if any data exists:
-   
-   logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Check data retention** settings to ensure logs are still available.
+1. **Use broader selectors** to test if any data exists:
+
    ```logql
    {job=~".+"}
    ```
@@ -1268,15 +1178,11 @@ The query time range contains no matching log data. This can happen if:
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 index not ready
 ```
 
 Or:
-
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```text
 index gateway not ready for time range
@@ -1297,22 +1203,20 @@ The index for the requested time range is not yet available for querying. This c
 **Resolution:**
 
 1. **Wait for the index to become available** - this is often a temporary issue during startup.
-2. **Query more recent data** that’s available in ingesters:
-   
-   logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+1. **Query more recent data** that's available in ingesters:
+
    ```logql
    {app="foo"} # Query last few hours instead of older data
    ```
-3. **Check the configuration** for index readiness:
-   
-   YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Check the configuration** for index readiness:
+
    ```yaml
    query_range:
      query_ready_index_num_days: 7  #default is 0
    ```
-4. **Verify index synchronization** is working correctly by checking ingester and index gateway logs.
+
+1. **Verify index synchronization** is working correctly by checking ingester and index gateway logs.
 
 **Properties:**
 
@@ -1324,8 +1228,6 @@ The index for the requested time range is not yet available for querying. This c
 ### Error: Tenant limits
 
 **Error message:**
-
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
 
 ```text
 max concurrent tail requests limit exceeded, count > limit (10 > 5)
@@ -1342,19 +1244,16 @@ The tenant has exceeded the maximum number of concurrent streaming (tail) reques
 **Resolution:**
 
 1. **Reduce the number of concurrent tail/streaming queries**.
-2. **Use batch queries** instead of real-time streaming where possible:
-   
-   logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+1. **Use batch queries** instead of real-time streaming where possible:
+
    ```logql
    # Instead of tailing in real-time
    # Use periodic range queries
    {app="foo"} |= "error"
    ```
-3. **Increase the limit** if more concurrent tails are needed:
-   
-   YAML ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Increase the limit** if more concurrent tails are needed:
+
    ```yaml
    limits_config:
      max_concurrent_tail_requests: 20  #default is 10
@@ -1375,15 +1274,13 @@ These errors occur when Loki cannot read data from storage.
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 failed to load chunk '<chunk_key>'
 ```
 
 **Cause:**
 
-Loki couldn’t retrieve a chunk from object storage. Possible causes:
+Loki couldn't retrieve a chunk from object storage. Possible causes:
 
 - Chunk was deleted or moved
 - Storage permissions issue
@@ -1393,9 +1290,9 @@ Loki couldn’t retrieve a chunk from object storage. Possible causes:
 **Resolution:**
 
 1. **Check storage connectivity** from Loki components.
-2. **Verify storage credentials and permissions**.
-3. **Check for chunk corruption** or deletion.
-4. **Review storage service status**.
+1. **Verify storage credentials and permissions**.
+1. **Check for chunk corruption** or deletion.
+1. **Review storage service status**.
 
 **Properties:**
 
@@ -1408,15 +1305,13 @@ Loki couldn’t retrieve a chunk from object storage. Possible causes:
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 object not found in storage
 ```
 
 **Cause:**
 
-The requested chunk or object doesn’t exist in storage. This might happen if:
+The requested chunk or object doesn't exist in storage. This might happen if:
 
 - Data was deleted due to retention
 - Compaction removed the chunk
@@ -1425,13 +1320,13 @@ The requested chunk or object doesn’t exist in storage. This might happen if:
 **Resolution:**
 
 1. **Check if data is within retention period**.
-2. **Verify data was ingested successfully**.
-3. **Review compaction jobs** for issues.
+1. **Verify data was ingested successfully**.
+1. **Review compaction jobs** for issues.
 
 **Properties:**
 
 - Enforced by: Storage Client
-- Retryable: No (data doesn’t exist)
+- Retryable: No (data doesn't exist)
 - HTTP status: 404 or 500 depending on context
 - Configurable per tenant: No
 
@@ -1439,21 +1334,19 @@ The requested chunk or object doesn’t exist in storage. This might happen if:
 
 **Error message:**
 
-text ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-
 ```text
 failed to decode chunk '<chunk_key>' for tenant '<tenant>': <error>
 ```
 
 **Cause:**
 
-A chunk was retrieved from storage but couldn’t be decoded. This indicates chunk corruption.
+A chunk was retrieved from storage but couldn't be decoded. This indicates chunk corruption.
 
 **Resolution:**
 
 1. **Report to Loki administrators** for investigation.
-2. **Check for storage data integrity issues**.
-3. Note that the corrupted chunk data may be unrecoverable.
+1. **Check for storage data integrity issues**.
+1. Note that the corrupted chunk data may be unrecoverable.
 
 **Properties:**
 
@@ -1466,63 +1359,49 @@ A chunk was retrieved from storage but couldn’t be decoded. This indicates chu
 
 Follow this workflow when investigating query issues:
 
-1. **Check the error message** - Identify which category of error you’re encountering.
-2. **Review query syntax** - Use the LogQL documentation to validate your query.
-3. **Check query statistics** - In Grafana, enable “Query Inspector” to see:
-   
+1. **Check the error message** - Identify which category of error you're encountering.
+
+1. **Review query syntax** - Use the LogQL documentation to validate your query.
+
+1. **Check query statistics** - In Grafana, enable "Query Inspector" to see:
    - Bytes processed
    - Number of chunks scanned
    - Execution time breakdown
-4. **Simplify the query** - Start with a basic selector and add complexity:
-   
-   logql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Simplify the query** - Start with a basic selector and add complexity:
+
    ```logql
    # Start simple
    {app="foo"}
-   
+
    # Add filters
    {app="foo"} |= "error"
-   
+
    # Add parsing
    {app="foo"} |= "error" | json
-   
+
    # Add label filters
    {app="foo"} |= "error" | json | level="error"
    ```
-5. **Check metrics** for query performance:
-   
-   promql ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Check metrics** for query performance:
+
    ```promql
    # Query latency
    histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[5m])) by (le, route))
-   
+
    # Query errors
    sum by (status_code) (rate(loki_request_duration_seconds_count[5m]))
    ```
-6. **Review Loki logs** for detailed error information:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Review Loki logs** for detailed error information:
+
    ```bash
    kubectl logs -l app=loki-read --tail=100 | grep -i error
    ```
-7. **Test with LogCLI** for more detailed output:
-   
-   Bash ![Copy code to clipboard](/media/images/icons/icon-copy-small-2.svg) Copy
-   
+
+1. **Test with LogCLI** for more detailed output:
+
    ```bash
    logcli query '{app="foo"}' --stats --limit=10
    ```
-
-## Related resources
-
-- Learn more about [LogQL Query Language](/docs/loki/latest/query/)
-- Configure appropriate [query limits](/docs/loki/latest/configure/#limits_config)
-- Learn more about [Query performance tuning](/docs/loki/latest/operations/query-acceleration/)
-- Review the [LogCLI documentation](/docs/loki/latest/query/logcli/)
-- Learn more about [LogQL query optimization](/docs/loki/latest/query/log_queries/)
-- Review [query performance best practices](/docs/loki/latest/best-practices/)
-- Use [query debugging features](/docs/loki/latest/query/query_stats/) to analyze slow queries
-- Explore the [Grafana Loki GitHub repository](https://github.com/grafana/loki) for community support

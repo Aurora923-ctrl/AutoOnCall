@@ -882,6 +882,117 @@ def test_citation_quality_separates_existence_support_and_correctness() -> None:
     assert "citation_correctness_score" not in result["failed_metrics"]
 
 
+def test_citation_quality_resolves_numbered_citation_to_exact_chunk() -> None:
+    sample = RagasCaseSample(
+        case={"id": "numbered", "expected_source": "redis.md"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md#0002"],
+        reference_context_ids=["redis.md#0002"],
+        answer="检查连接池。[证据 2]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+            },
+            {
+                "citation_index": 2,
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0002",
+            },
+        ],
+        retrieval={},
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics == {
+        "citation_grounding_hit": 1.0,
+        "citation_existence_hit": 1.0,
+        "citation_support_score": 1.0,
+        "citation_correctness_score": 1.0,
+    }
+
+
+def test_citation_quality_fails_closed_for_unknown_numbered_citation() -> None:
+    sample = RagasCaseSample(
+        case={"id": "unknown-number", "expected_source": "redis.md"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md#0001"],
+        reference_context_ids=["redis.md#0001"],
+        answer="检查连接池。[证据 99]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+            }
+        ],
+        retrieval={},
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["citation_existence_hit"] == 0.0
+    assert metrics["citation_support_score"] == 0.0
+    assert metrics["citation_correctness_score"] == 0.0
+
+
+def test_citation_quality_distinguishes_neighboring_chunks_in_same_source() -> None:
+    sample = RagasCaseSample(
+        case={"id": "wrong-chunk", "expected_source": "redis.md"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md#0001", "redis.md#0002"],
+        reference_context_ids=["redis.md#0001"],
+        answer="检查连接池。[证据 2]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+            },
+            {
+                "citation_index": 2,
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0002",
+            },
+        ],
+        retrieval={},
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["citation_existence_hit"] == 1.0
+    assert metrics["citation_support_score"] == 1.0
+    assert metrics["citation_correctness_score"] == 0.0
+
+
+def test_citation_quality_keeps_legacy_source_chunk_format_compatible() -> None:
+    sample = RagasCaseSample(
+        case={"id": "legacy", "expected_source": "redis.md"},
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["redis.md#0001"],
+        reference_context_ids=["redis.md#0001"],
+        answer="检查连接池。[redis.md | redis.md#0001]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
+        retrieval={},
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["citation_existence_hit"] == 1.0
+    assert metrics["citation_support_score"] == 1.0
+    assert metrics["citation_correctness_score"] == 1.0
+
+
 def test_human_review_comparison_reports_agreement() -> None:
     comparison = compare_human_reviews(
         [{"id": "case-a", "passed": True}, {"id": "case-b", "passed": False}],

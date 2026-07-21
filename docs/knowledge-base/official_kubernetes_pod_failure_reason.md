@@ -1,10 +1,10 @@
----
-title: Determine the Reason for Pod Failure
-content_type: task
-weight: 30
----
-
-<!-- overview -->
+<!-- AutoOnCall retrieval snapshot
+Upstream: https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6bf0602c0bf364/content/en/docs/tasks/debug/debug-application/determine-reason-pod-failure.md
+Upstream revision: c3317651dc19ef683c5c4463bb6bf0602c0bf364
+Retrieved: 2026-07-21
+License: CC BY 4.0
+Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+-->
 
 This page shows how to write and read a Container termination message.
 
@@ -14,27 +14,19 @@ be easily retrieved and surfaced by tools like dashboards
 and monitoring software. In most cases, information that you
 put in a termination message should also be written to
 the general
-[Kubernetes logs](/docs/concepts/cluster-administration/logging/).
-
-## {{% heading "prerequisites" %}}
-
-{{< include "task-tutorial-prereqs.md" >}}
-
-<!-- steps -->
+Kubernetes logs.
 
 ## Writing and reading a termination message
 
 In this exercise, you create a Pod that runs one container.
 The manifest for that Pod specifies a command that runs when the container starts:
 
-{{% code_sample file="debug/termination.yaml" %}}
-
 1. Create a Pod based on the YAML configuration file:
 
     ```shell
     kubectl apply -f https://k8s.io/examples/debug/termination.yaml
     ```
-    
+
     In the YAML file, in the `command` and `args` fields, you can see that the
     container sleeps for 10 seconds and then writes "Sleep expired" to
     the `/dev/termination-log` file. After the container writes
@@ -123,12 +115,10 @@ to use the last chunk of container log output if the termination message file
 is empty and the container exited with an error. The log output is limited to
 2048 bytes or 80 lines, whichever is smaller.
 
-## {{% heading "whatsnext" %}}
-
 * See the `terminationMessagePath` field in
-  [Container](/docs/reference/generated/kubernetes-api/{{< param "version" >}}/#container-v1-core).
-* See [ImagePullBackOff](/docs/concepts/containers/images/#imagepullbackoff) in [Images](/docs/concepts/containers/images/).
-* Learn about [retrieving logs](/docs/concepts/cluster-administration/logging/).
+  Container.
+* See ImagePullBackOff in Images.
+* Learn about retrieving logs.
 * Learn about [Go templates](https://pkg.go.dev/text/template).
-* Learn about [Pod status](/docs/tasks/debug/debug-application/debug-init-containers/#understanding-pod-status) and [Pod phase](/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase).
-* Learn about [container states](/docs/concepts/workloads/pods/pod-lifecycle/#container-states).
+* Learn about Pod status and Pod phase.
+* Learn about container states.

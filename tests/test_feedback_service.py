@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.api import feedback as feedback_api, incidents
 from app.core.auth import AuthPrincipal
 from app.models.feedback import BadCaseFeedbackCreate, DiagnosisFeedbackCreate
+from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.feedback_service import (
     FeedbackService,
@@ -145,6 +146,27 @@ def test_weak_negative_diagnosis_feedback_with_report_does_not_enter_backlog(tmp
     assert service.list_feedback(incident_id=report.incident_id)
     assert service.list_bad_cases() == []
     assert service.list_eval_backlog() == []
+
+
+def test_diagnosis_feedback_rejects_mismatched_report_context(tmp_path) -> None:
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    report = DiagnosisReport(
+        incident_id="inc-real",
+        report_id="rpt-real",
+        trace_id="trace-real",
+    )
+    payload = DiagnosisFeedbackCreate(
+        report_id="rpt-other",
+        root_cause_correct="no",
+        accepted_suggestion="no",
+    )
+
+    with pytest.raises(ValueError, match="report_id"):
+        service.submit_feedback(
+            incident_id="inc-real",
+            payload=payload,
+            report=report,
+        )
 
 
 def test_bad_case_feedback_records_rag_context_and_category(tmp_path) -> None:
@@ -612,6 +634,39 @@ def test_direct_feedback_marks_invalid_references_as_orphaned(tmp_path) -> None:
     assert feedback.reference_status == "orphaned"
     assert "incident_not_found" in feedback.orphan_reasons
     assert service.list_eval_backlog() == []
+
+
+def test_direct_feedback_rejects_trace_that_does_not_match_report(tmp_path) -> None:
+    class Store:
+        def get_incident_state(self, incident_id):
+            return object()
+
+        def get_report(self, report_id):
+            return type("Report", (), {"incident_id": "inc-1", "trace_id": "trace-real"})()
+
+        def get_aiops_session_snapshot(self, session_id):
+            return None
+
+        def list_trace_events(self, *, incident_id=None, trace_id=None, event_type=None):
+            return [object()]
+
+    service = FeedbackService(tmp_path / "feedback.jsonl")
+    feedback = service.submit_bad_case_feedback(
+        BadCaseFeedbackCreate(
+            target="aiops",
+            vote="thumb_down",
+            category="tool_failure",
+            reason="wrong trace",
+            expected_answer="preserve report identity",
+            query="incident",
+            trace_id="trace-other",
+            metadata={"incident_id": "inc-1", "report_id": "rpt-1"},
+        ),
+        reference_store=Store(),
+    )
+
+    assert feedback.reference_status == "orphaned"
+    assert "trace_report_mismatch" in feedback.orphan_reasons
 
 
 def test_reference_refresh_rejects_existing_backlog_and_preserves_corrupt_lines(tmp_path) -> None:

@@ -462,7 +462,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshApprovals() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/approvals/pending?include_approved_actions=true`);
-            this.setDashboardItems('approvals', data.items);
+            this.setDashboardItems('approvals', Array.isArray(data?.items) ? data.items : []);
             this.renderApprovals(this.dashboardState.approvals);
         } catch (error) {
             this.renderApprovalsError(error);
@@ -612,7 +612,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            const payload = await response.json();
+            const payload = await this.readJsonResponse(response);
             const resolvedApprovalId = payload.approval?.approval_id || approvalId;
             let diagnosisResumed = false;
             if (decision === 'approve') {
@@ -645,6 +645,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const response = await this.apiFetch(`${this.apiBaseUrl}/incidents/${encodeURIComponent(incidentId)}/diagnosis/resume`, {
                 method: 'POST',
+                timeoutMs: 0,
                 headers: {
                     'Content-Type': 'application/json'
                 },
@@ -682,6 +683,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         try {
             const response = await this.apiFetch(`${this.apiBaseUrl}/incidents/${encodeURIComponent(incidentId)}/changes/${encodeURIComponent(changePlanId)}/resume`, {
                 method: 'POST',
+                timeoutMs: 0,
                 headers: {
                     'Content-Type': 'application/json'
                 },
@@ -725,6 +727,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
+            await this.readResponsePayload(response);
             this.showNotification('人工执行结果已记录', 'success');
             await this.refreshSelectedIncidentPanels();
         } catch (error) {
@@ -817,7 +820,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
     async refreshToolContracts() {
         try {
             const data = await this.apiGet(`${this.apiBaseUrl}/aiops/tools/contracts`);
-            this.setDashboardItems('toolContracts', data.items);
+            this.setDashboardItems('toolContracts', Array.isArray(data?.items) ? data.items : []);
             this.setDashboardState('toolContractsError', '');
             this.renderToolContracts(data);
         } catch (error) {
@@ -829,7 +832,10 @@ Object.assign(window.AutoOnCallApp.prototype, {
 ,
     renderToolContracts(payload) {
         if (payload && Array.isArray(payload.items)) {
-            this.setDashboardItems('toolContracts', payload.items);
+            this.setDashboardItems(
+                'toolContracts',
+                Array.isArray(payload?.items) ? payload.items : []
+            );
         }
         const contracts = Array.isArray(this.dashboardState.toolContracts)
             ? this.dashboardState.toolContracts

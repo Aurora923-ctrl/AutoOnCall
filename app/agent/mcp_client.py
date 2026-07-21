@@ -8,6 +8,7 @@ import errno
 import hashlib
 import inspect
 import json
+import re
 from typing import Any
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -21,6 +22,8 @@ _mcp_client: MultiServerMCPClient | None = None
 _mcp_client_cache_key: str | None = None
 _mcp_client_lock: asyncio.Lock | None = None
 _mcp_client_lock_loop: asyncio.AbstractEventLoop | None = None
+_mcp_active_tasks: set[asyncio.Task[Any]] = set()
+_mcp_closing = False
 READ_ONLY_MCP_TOOL_NAMES = frozenset(
     {
         "get_current_timestamp",
@@ -33,6 +36,7 @@ READ_ONLY_MCP_TOOL_NAMES = frozenset(
     }
 )
 DEFAULT_MCP_CALL_TIMEOUT_SECONDS = 12.0
+_SAFE_MCP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
 class MCPCallBudgetTimeout(TimeoutError):
@@ -78,15 +82,13 @@ async def retry_interceptor(
     deadline = asyncio.get_running_loop().time() + timeout_seconds
 
     for attempt in range(max_attempts):
+        task: asyncio.Task[Any] | None = None
         try:
             logger.info(
                 f"调用 MCP 工具: {request.name} "
                 f"(服务器: {request.server_name}, 第 {attempt + 1}/{max_retries} 次尝试)"
             )
 
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError("MCP tool total timeout exhausted")
             started = asyncio.get_running_loop().create_future()
 
             async def invoke_handler(started_signal=started):
@@ -94,7 +96,13 @@ async def retry_interceptor(
                 return await handler(request)
 
             task = asyncio.create_task(invoke_handler())
+            _track_mcp_task(task)
             await started
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise MCPCallBudgetTimeout("MCP tool total timeout exhausted")
             done, _ = await asyncio.wait({task}, timeout=remaining)
             if not done:
                 task.cancel()
@@ -105,6 +113,9 @@ async def retry_interceptor(
             return result
 
         except asyncio.CancelledError:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             raise
         except Exception as e:
             last_error = e
@@ -142,7 +153,15 @@ def select_safe_mcp_tools(tools: list[Any] | None) -> list[Any]:
     """Expose only duplicate-free, explicitly read-only MCP tools to model-facing agents."""
     from app.tools.base import select_named_tools
 
-    return select_named_tools(tools, READ_ONLY_MCP_TOOL_NAMES)
+    selected = select_named_tools(tools, READ_ONLY_MCP_TOOL_NAMES)
+    for tool in selected:
+        name = str(getattr(tool, "name", "") or "")
+        if not _SAFE_MCP_NAME_RE.fullmatch(name):
+            raise ValueError(f"Unsafe MCP tool name: {name}")
+        schema = getattr(tool, "args_schema", None)
+        if isinstance(schema, dict) and schema.get("type") not in (None, "object"):
+            raise ValueError(f"MCP tool {name} must expose an object input schema")
+    return selected
 
 
 async def discover_safe_mcp_tools(
@@ -156,7 +175,20 @@ async def discover_safe_mcp_tools(
     )
     if timeout <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
-    tools = await asyncio.wait_for(client.get_tools(), timeout=timeout)
+    task = asyncio.create_task(client.get_tools())
+    _track_mcp_task(task)
+    try:
+        tools = await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
+    except TimeoutError:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
     return select_safe_mcp_tools(tools)
 
 
@@ -182,6 +214,8 @@ async def get_mcp_client(
         MultiServerMCPClient: MCP 客户端实例
     """
     global _mcp_client, _mcp_client_cache_key
+    if _mcp_closing:
+        raise RuntimeError("MCP client is closing")
 
     if force_new:
         logger.info("创建新的 MCP 客户端实例（非单例）")
@@ -193,6 +227,8 @@ async def get_mcp_client(
     cache_key = _mcp_client_key(effective_servers, tool_interceptors)
     lock = _get_mcp_client_lock()
     async with lock:
+        if _mcp_closing:
+            raise RuntimeError("MCP client is closing")
         if _mcp_client is None:
             logger.info("初始化全局 MCP 客户端...")
             _mcp_client = _create_mcp_client(effective_servers, tool_interceptors)
@@ -296,20 +332,45 @@ def _interceptor_identity(item: Any) -> str:
 async def close_mcp_client(client: MultiServerMCPClient | None = None) -> None:
     """Close an isolated client or release the cached global client."""
     global _mcp_client, _mcp_client_cache_key, _mcp_client_lock, _mcp_client_lock_loop
-    if client is None:
-        client = _mcp_client
-        _mcp_client = None
-        _mcp_client_cache_key = None
-        _mcp_client_lock = None
-        _mcp_client_lock_loop = None
-    if client is None:
-        return
-    close = getattr(client, "aclose", None) or getattr(client, "close", None)
-    if close is None:
-        return
-    value = close()
-    if inspect.isawaitable(value):
-        await value
+    global _mcp_closing
+    closing_global = client is None
+    lock: asyncio.Lock | None = None
+    if closing_global:
+        _mcp_closing = True
+        lock = _get_mcp_client_lock()
+    try:
+        if lock is not None:
+            await lock.acquire()
+        if client is None:
+            client = _mcp_client
+            _mcp_client = None
+            _mcp_client_cache_key = None
+        if closing_global:
+            active = [task for task in tuple(_mcp_active_tasks) if not task.done()]
+            for task in active:
+                task.cancel()
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
+        if client is None:
+            return
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if close is None:
+            return
+        value = close()
+        if inspect.isawaitable(value):
+            await value
+    finally:
+        if closing_global:
+            if lock is not None and lock.locked():
+                lock.release()
+            _mcp_client_lock = None
+            _mcp_client_lock_loop = None
+            _mcp_closing = False
+
+
+def _track_mcp_task(task: asyncio.Task[Any]) -> None:
+    _mcp_active_tasks.add(task)
+    task.add_done_callback(_mcp_active_tasks.discard)
 
 
 def _safe_exception_label(exc: BaseException | None) -> str:
