@@ -28,7 +28,14 @@ from app.agent.mcp_client import discover_safe_mcp_tools, get_mcp_client_with_re
 from app.config import config
 from app.core.observability import dependency_operation
 from app.core.resilience import CircuitOpenError, call_with_resilience, get_circuit_breaker
+from app.services.rag_answer_contract import (
+    AnswerContract,
+    ContractViolation,
+    validate_answer_contract,
+)
 from app.services.rag_answer_policy import (
+    build_extractive_grounded_answer,
+    build_generation_context,
     build_grounded_question,
     build_grounded_system_prompt,
     build_no_answer_message,
@@ -39,6 +46,7 @@ from app.services.rag_answer_policy import (
     validated_citation_prefix,
 )
 from app.services.rag_generation_guard import (
+    GroundedAnswerDecision,
     finalize_grounded_answer,
     prepare_grounded_generation,
 )
@@ -292,6 +300,8 @@ class RagAgentService:
             question,
             metadata_filter=metadata_filter,
         )
+        if not str(retrieval_payload.get("query") or "").strip():
+            retrieval_payload = {**retrieval_payload, "query": question}
         retrieval_context = compact_retrieval_payload(retrieval_payload)
 
         if retrieval_payload.get("status") != "success":
@@ -352,12 +362,16 @@ class RagAgentService:
             session_id,
             history_question=question,
         )
-        decision = finalize_grounded_answer(
-            answer,
-            citations,
-            retrieval_payload,
-            retrieval_context,
-            evidence=generation_payload.get("retrieval_results", []),
+        decision, generation_observability = await self._finalize_with_contract_repair(
+            original_answer=answer,
+            citations=citations,
+            retrieval_payload=retrieval_payload,
+            retrieval_context=retrieval_context,
+            generation_payload=generation_payload,
+            answer_contract=preparation.answer_contract,
+            question=question,
+            session_id=session_id,
+            generation_observability=generation_observability,
         )
         answer = decision.answer
         citations = decision.citations
@@ -407,6 +421,105 @@ class RagAgentService:
                 for item in generation_payload["retrieval_results"]
             ]
         return response
+
+    async def _finalize_with_contract_repair(
+        self,
+        *,
+        original_answer: str,
+        citations: list[dict[str, Any]],
+        retrieval_payload: dict[str, Any],
+        retrieval_context: dict[str, Any],
+        generation_payload: dict[str, Any],
+        answer_contract: AnswerContract | None,
+        question: str,
+        session_id: str,
+        generation_observability: dict[str, Any],
+    ) -> tuple[GroundedAnswerDecision, dict[str, Any]]:
+        """Validate one answer, make one semantic repair, then fall back extractively."""
+        evidence = generation_payload.get("retrieval_results", [])
+        decision = finalize_grounded_answer(
+            original_answer,
+            citations,
+            retrieval_payload,
+            retrieval_context,
+            evidence=evidence,
+        )
+        if decision.no_answer and decision.answer_policy == "refuse_without_trusted_source":
+            return decision, generation_observability
+        if answer_contract is None:
+            return decision, generation_observability
+
+        violations = validate_answer_contract(
+            decision.answer,
+            answer_contract,
+            decision.citations,
+        )
+        if not violations and not decision.no_answer:
+            return decision, generation_observability
+
+        repair_prompt = _build_contract_repair_prompt(
+            generation_payload,
+            original_answer,
+            violations,
+            answer_contract,
+        )
+        repaired_answer, repair_observability = await self.query_grounded_observed(
+            repair_prompt,
+            session_id,
+            history_question=question,
+        )
+        generation_observability = _merge_generation_observability(
+            generation_observability,
+            repair_observability,
+        )
+        generation_observability["repair_reason"] = "answer_contract"
+        generation_observability["repair_sources"] = []
+        repaired_decision = finalize_grounded_answer(
+            repaired_answer,
+            citations,
+            retrieval_payload,
+            retrieval_context,
+            evidence=evidence,
+        )
+        repaired_violations = validate_answer_contract(
+            repaired_decision.answer,
+            answer_contract,
+            repaired_decision.citations,
+        )
+        if not repaired_decision.no_answer and not repaired_violations:
+            return repaired_decision, generation_observability
+
+        extractive_answer = build_extractive_grounded_answer(
+            question,
+            evidence,
+            required_sources=retrieval_payload.get("required_sources"),
+            max_claims=answer_contract.max_claims,
+            answer_contract=answer_contract,
+        )
+        extractive_decision = finalize_grounded_answer(
+            extractive_answer,
+            citations,
+            retrieval_payload,
+            retrieval_context,
+            evidence=evidence,
+        )
+        extractive_violations = validate_answer_contract(
+            extractive_decision.answer,
+            answer_contract,
+            extractive_decision.citations,
+        )
+        if not extractive_decision.no_answer and not extractive_violations:
+            generation_observability["extractive_fallback_used"] = True
+            return extractive_decision, generation_observability
+
+        refusal = finalize_grounded_answer(
+            "",
+            citations,
+            retrieval_payload,
+            retrieval_context,
+            evidence=evidence,
+        )
+        return refusal, generation_observability
 
     async def query_grounded(
         self,
@@ -583,6 +696,8 @@ class RagAgentService:
             question,
             metadata_filter=metadata_filter,
         )
+        if not str(retrieval_payload.get("query") or "").strip():
+            retrieval_payload = {**retrieval_payload, "query": question}
         retrieval_context = compact_retrieval_payload(retrieval_payload)
 
         if retrieval_payload.get("status") != "success":
@@ -689,13 +804,18 @@ class RagAgentService:
             else:
                 yield chunk
 
-        decision = finalize_grounded_answer(
-            full_answer,
-            citations,
-            retrieval_payload,
-            retrieval_context,
-            evidence=generation_payload.get("retrieval_results", []),
+        decision, _repair_observability = await self._finalize_with_contract_repair(
+            original_answer=full_answer,
+            citations=citations,
+            retrieval_payload=retrieval_payload,
+            retrieval_context=retrieval_context,
+            generation_payload=generation_payload,
+            answer_contract=preparation.answer_contract,
+            question=question,
+            session_id=session_id,
+            generation_observability={},
         )
+        citations = decision.citations
         if decision.no_answer and decision.answer_policy == "refuse_without_citation":
             yield {
                 "type": "replace_content" if streamed_answer else "content",
@@ -1208,6 +1328,45 @@ def extract_message_token_usage(message: Any) -> dict[str, Any] | None:
     return None
 
 
+def _build_contract_repair_prompt(
+    generation_payload: dict[str, Any],
+    original_answer: str,
+    violations: tuple[ContractViolation, ...],
+    contract: AnswerContract,
+) -> str:
+    """Render one repair prompt from frozen context and stable contract metadata."""
+    slots_by_id = {slot.subgoal_id: slot for slot in contract.slots}
+    all_allowed = tuple(
+        dict.fromkeys(
+            index for slot in contract.slots for index in slot.allowed_citation_indices
+        )
+    )
+    violation_lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for violation in violations:
+        identity = (violation.code, violation.subgoal_id)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        slot = slots_by_id.get(violation.subgoal_id)
+        allowed = slot.allowed_citation_indices if slot is not None else all_allowed
+        allowed_text = ",".join(str(index) for index in allowed) or "none"
+        violation_lines.append(
+            f"- code={violation.code}; affected_slot={violation.subgoal_id or 'all'}; "
+            f"allowed_evidence={allowed_text}"
+        )
+    violations_text = "\n".join(violation_lines)
+    return (
+        "冻结证据（不得新增或替换）:\n"
+        f"{build_generation_context(generation_payload)}\n\n"
+        "原始答案:\n"
+        f"{original_answer}\n\n"
+        "契约违规:\n"
+        f"{violations_text}\n\n"
+        "只输出修复后的要点；每条事实只绑定一个允许的 [证据 N]。"
+    )
+
+
 def build_rag_observability(
     retrieval_payload: dict[str, Any],
     generation: dict[str, Any],
@@ -1240,6 +1399,33 @@ def build_rag_observability(
         },
         "limitations": retrieval.get("limitations", []),
     }
+
+
+def _merge_generation_observability(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine one citation-repair retry without hiding the extra model cost."""
+    merged = dict(second)
+    merged["llm_generation_ms"] = round(
+        float(first.get("llm_generation_ms") or 0.0)
+        + float(second.get("llm_generation_ms") or 0.0),
+        2,
+    )
+    first_usage = first.get("token_usage")
+    second_usage = second.get("token_usage")
+    if isinstance(first_usage, dict) and isinstance(second_usage, dict):
+        totals = {}
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            values = [first_usage.get(key), second_usage.get(key)]
+            totals[key] = (
+                sum(int(value) for value in values if value is not None)
+                if any(value is not None for value in values)
+                else None
+            )
+        merged["token_usage"] = {"status": "observed", **totals}
+    merged["citation_repair_retry"] = True
+    return merged
 
 
 def _rag_history_metadata(

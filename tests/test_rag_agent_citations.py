@@ -14,6 +14,7 @@ from app.services.rag_agent_service import (
     ensure_citation_block,
     has_valid_citations,
 )
+from app.services.rag_answer_contract import AnswerContract, AnswerSlot
 from app.services.rag_answer_policy import (
     answer_claims_are_cited,
     build_generation_context,
@@ -68,22 +69,18 @@ def test_explicit_knowledge_refusal_is_detected() -> None:
     assert not is_explicit_knowledge_refusal("请先检查 Redis connected_clients。")
 
 
-def test_grounded_system_prompt_forbids_out_of_context_commands_and_tools() -> None:
+def test_grounded_system_prompt_is_limited_to_grounding_and_output_shape() -> None:
     prompt = build_grounded_system_prompt()
 
-    assert "命令" in prompt
-    assert "工具名" in prompt
-    assert "当前检索片段" in prompt
-    assert "最多 4 条" in prompt
-    assert "独立 claim" in prompt
-    assert "部分答案" in prompt
-    assert "通配符" in prompt
-    assert "动作资格" in prompt
-    assert "具体缺口" in prompt
-    assert "每个必要来源" in prompt
-    assert "不得遗漏" in prompt
-    assert "原样引用" in prompt
-    assert "完整回答不得追加泛化缺口" in prompt
+    assert "冻结证据" in prompt
+    assert "不能调用工具或补充外部事实" in prompt
+    assert "仅绑定一个 [证据 N]" in prompt
+    assert "静态 Runbook" in prompt
+    assert "历史复盘或工单必须标明历史" in prompt
+    assert "incident-window" in prompt
+    assert "按用户消息中的答案契约逐 slot 输出" in prompt
+    assert "max_claims" not in prompt
+    assert "canary" not in prompt
 
 
 def test_generation_context_deduplicates_same_content_without_mutating_retrieval() -> None:
@@ -331,7 +328,7 @@ def test_generation_evidence_uses_query_aware_excerpt_before_budgeting() -> None
     assert len(evidence[0]["content"]) <= 900
 
 
-def test_compress_grounded_answer_removes_legacy_labels_and_limits_bullets() -> None:
+def test_compress_grounded_answer_removes_labels_without_global_claim_limit() -> None:
     answer = "\n".join(
         [
             "- 已知上下文事实: 检查进程 CPU。[证据 1]",
@@ -346,7 +343,7 @@ def test_compress_grounded_answer_removes_legacy_labels_and_limits_bullets() -> 
 
     assert "已知上下文事实" not in compact
     assert "当前事故仍需查询的证据" not in compact
-    assert len(compact.splitlines()) == 4
+    assert len(compact.splitlines()) == 5
     assert compact.splitlines()[0] == "- 检查进程 CPU。[证据 1]"
 
 
@@ -439,21 +436,74 @@ def test_grounded_question_requires_claim_level_citation_and_concise_answer() ->
                     "chunk_id": "runbook.md#0001",
                     "content": "先确认证据。",
                 }
-            ]
+            ],
+            "_answer_contract": AnswerContract(
+                slots=(AnswerSlot("evidence", ("slow_queries",), (1,), ()),),
+                max_claims=4,
+            ),
         },
     )
 
-    assert "最多 4 条" in prompt
-    assert "直接提供" in prompt
+    assert "max_claims=4" in prompt
+    assert "slot=evidence" in prompt
+    assert "required_entities=slow_queries" in prompt
+    assert "allowed_evidence=1" in prompt
+    assert "action_slot=absent" in prompt
+    for forbidden in ("审批", "canary", "rollback"):
+        assert forbidden not in prompt
     assert "[证据 N]" in prompt
     assert "[证据 1: source_file=runbook.md; chunk_id=runbook.md#0001]" in prompt
-    assert "告警名只能作为检查线索" in prompt
-    assert "不要因为缺少另一部分而整体拒答" in prompt
-    assert "每个必要来源至少支持一条要点" in prompt
-    assert "审批、dry-run、验证、回滚或人工接管边界" in prompt
-    assert "不得替换成新的示例值" in prompt
-    assert "完整回答时禁止追加泛化缺口" in prompt
-    assert "检查什么 -> 如何判断" in prompt
+
+
+def test_grounded_question_exposes_exact_slots_and_uncovered_evidence() -> None:
+    prompt = build_grounded_question(
+        "如何判断原因并说明回滚边界？",
+        {
+            "retrieval_results": [
+                {
+                    "source_file": "runbook.md",
+                    "chunk_id": "runbook.md#0001",
+                    "content": "根据错误日志判断原因。",
+                }
+            ],
+            "_answer_contract": AnswerContract(
+                slots=(
+                    AnswerSlot("diagnosis", ("错误日志",), (1,), ()),
+                    AnswerSlot("boundary", (), (), ()),
+                ),
+                max_claims=3,
+            ),
+        },
+    )
+
+    assert "slot=diagnosis; required_entities=错误日志; allowed_evidence=1" in prompt
+    assert "slot=boundary; required_entities=none; allowed_evidence=none" in prompt
+    assert "当前证据不足" in prompt
+    assert "action_slot=absent" not in prompt
+
+
+def test_claim_citation_guard_allows_explicit_coverage_gap_line() -> None:
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "runbook.md",
+            "chunk_id": "runbook.md#0001",
+        }
+    ]
+
+    selected = select_supporting_citations(
+        "- 检查错误日志定位原因 [证据 1]。\n- 当前证据不足：未覆盖回滚边界。",
+        citations,
+        evidence=[
+            {
+                "source_file": "runbook.md",
+                "chunk_id": "runbook.md#0001",
+                "content": "检查错误日志定位原因。",
+            }
+        ],
+    )
+
+    assert selected == citations
 
 
 def test_select_supporting_citations_keeps_only_chunks_named_by_answer() -> None:
@@ -778,10 +828,10 @@ async def test_query_with_retrieval_uses_tool_free_grounded_model(monkeypatch) -
             self.messages = []
 
         async def ainvoke(self, messages):
-            self.messages = messages
-            return SimpleNamespace(
-                content="根据知识库，先检查 Redis 连接数。[redis.md | redis.md#0001]"
-            )
+                self.messages = messages
+                return SimpleNamespace(
+                    content="根据知识库，先检查 Redis 连接数。[证据 1]"
+                )
 
     service = rag_module.RagAgentService()
     service.model = FakeGroundedModel()
@@ -802,7 +852,7 @@ async def test_query_with_retrieval_uses_tool_free_grounded_model(monkeypatch) -
                     "source_file": "redis.md",
                     "chunk_id": "redis.md#0001",
                     "score": 0.12,
-                    "content_preview": "Redis 连接数过高会导致超时。",
+                    "content_preview": "检查 Redis 连接数过高会导致超时。",
                 }
             ],
             "rejected_results": [],
@@ -813,12 +863,12 @@ async def test_query_with_retrieval_uses_tool_free_grounded_model(monkeypatch) -
     result = await service.query_with_retrieval("Redis timeout 怎么处理？", "session-grounded")
 
     assert result["no_answer"] is False
-    assert "redis.md#0001" in result["answer"]
+    assert "[证据 1]" in result["answer"]
     assert service.model.messages
     history = await service.get_session_history("session-grounded")
     assert [item["role"] for item in history] == ["user", "assistant"]
     assert history[0]["content"] == "Redis timeout 怎么处理？"
-    assert "redis.md#0001" in history[1]["content"]
+    assert "[证据 1]" in history[1]["content"]
     assert history[1]["metadata"]["citations"][0]["chunk_id"] == "redis.md#0001"
     assert history[1]["metadata"]["answerPolicy"] == "answer_with_citations"
 
@@ -832,16 +882,14 @@ async def test_query_with_retrieval_only_allows_budgeted_generation_evidence(
             prompt = str(messages[-1].content)
             assert "one.md#0001" in prompt
             assert "two.md#0001" not in prompt
-            return SimpleNamespace(
-                content="确认 EVIDENCE_TOKEN。[one.md | one.md#0001]"
-            )
+            return SimpleNamespace(content="确认 EVIDENCE_TOKEN。[证据 1]")
 
     service = rag_module.RagAgentService()
     service.model = FakeGroundedModel()
     first = {
         "source_file": "one.md",
         "chunk_id": "one.md#0001",
-        "content": "EVIDENCE_TOKEN " * 200,
+        "content": "Check EVIDENCE_TOKEN " * 200,
     }
     second = {
         "source_file": "two.md",
@@ -904,7 +952,57 @@ async def test_query_with_retrieval_keeps_frozen_evidence_allowlist_aligned(
 
 
 @pytest.mark.asyncio
-async def test_query_with_retrieval_refuses_generated_answer_without_claim_citation(
+async def test_query_with_retrieval_repairs_missing_required_source_citation(
+    monkeypatch,
+) -> None:
+    service = rag_module.RagAgentService()
+    answers = iter(
+        [
+            "检查 maxclients。[证据 1]",
+            "检查 maxclients。[证据 1]\n"
+            "对比历史事故中的 retry amplification 根因。[证据 2]",
+        ]
+    )
+
+    async def fake_query_grounded_observed(*_args, **_kwargs):
+        return next(answers), {"llm_generation_ms": 1.0}
+
+    monkeypatch.setattr(service, "query_grounded_observed", fake_query_grounded_observed)
+    monkeypatch.setattr(
+        rag_module,
+        "retrieve_structured_knowledge",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "required_sources": ["official_redis.md", "redis_postmortem.pdf"],
+            "retrieval_results": [
+                {
+                    "source_file": "official_redis.md",
+                    "chunk_id": "official_redis.md#0001",
+                    "content": "检查 Redis maxclients 限制。",
+                },
+                {
+                    "source_file": "redis_postmortem.pdf",
+                    "chunk_id": "redis_postmortem.pdf#0001",
+                    "content": "历史事故根因是 retry amplification。",
+                },
+            ],
+        },
+    )
+
+    result = await service.query_with_retrieval(
+        "Redis 如何结合官方限制和事故复盘？",
+        "multi-source",
+    )
+
+    assert result["no_answer"] is False
+    assert {item["source_file"] for item in result["citations"]} == {
+        "official_redis.md",
+        "redis_postmortem.pdf",
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_with_retrieval_repairs_generated_answer_without_claim_citation(
     monkeypatch,
 ) -> None:
     class FakeGroundedModel:
@@ -924,7 +1022,7 @@ async def test_query_with_retrieval_refuses_generated_answer_without_claim_citat
                     "source_file": "redis.md",
                     "chunk_id": "redis.md#0001",
                     "score": 0.12,
-                    "content": "Redis 连接数过高会导致超时。",
+                    "content": "检查 Redis 连接数过高会导致超时。",
                 }
             ],
         },
@@ -932,9 +1030,11 @@ async def test_query_with_retrieval_refuses_generated_answer_without_claim_citat
 
     result = await service.query_with_retrieval("Redis timeout 怎么处理？", "claim-citation")
 
-    assert result["no_answer"] is True
-    assert result["answer_policy"] == "refuse_without_citation"
-    assert result["citations"] == []
+    assert result["no_answer"] is False
+    assert result["answer_policy"] == "answer_with_citations"
+    assert result["citations"][0]["source_file"] == "redis.md"
+    assert result["citations"][0]["chunk_id"] == "redis.md#0001"
+    assert "[证据 1]" in result["answer"]
 
 
 @pytest.mark.asyncio
@@ -1021,6 +1121,75 @@ async def test_query_with_retrieval_converts_model_knowledge_refusal(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_query_stream_with_retrieval_repairs_contract_once_without_schema_change(
+    monkeypatch,
+) -> None:
+    question = "pool_waiting 和 active_connections 上升，如何排查慢查询？"
+    original = "- 检查 slow_queries。[证据 1]"
+    repaired = (
+        "- 对比 pool_waiting、active_connections 与 slow_queries，"
+        "并对慢 SQL 执行 EXPLAIN。[证据 1]"
+    )
+    service = rag_module.RagAgentService(streaming=True)
+    repair_prompts = []
+
+    async def fake_query_grounded_stream(*_args, **_kwargs):
+        yield {"type": "content", "data": original}
+        yield {"type": "complete", "data": {}}
+
+    async def fake_query_grounded_observed(prompt, *_args, **_kwargs):
+        repair_prompts.append(prompt)
+        return repaired, {"llm_generation_ms": 1.0}
+
+    monkeypatch.setattr(service, "query_grounded_stream", fake_query_grounded_stream)
+    monkeypatch.setattr(service, "query_grounded_observed", fake_query_grounded_observed)
+    monkeypatch.setattr(
+        rag_module,
+        "retrieve_structured_knowledge",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "query": question,
+            "answer_policy": "answer_with_citations",
+            "retrieval_results": [
+                {
+                    "source_file": "mysql_slow_query.md",
+                    "chunk_id": "mysql_slow_query.md#0001",
+                    "content": (
+                        "检查 pool_waiting、active_connections 与 slow_queries，"
+                        "并对慢 SQL 执行 EXPLAIN 以排查慢查询。"
+                    ),
+                }
+            ],
+        },
+    )
+
+    events = [
+        event
+        async for event in service.query_stream_with_retrieval(
+            question,
+            "stream-contract-repair",
+        )
+    ]
+
+    assert len(repair_prompts) == 1
+    assert "missing_entity:EXPLAIN" in repair_prompts[0]
+    assert events[-2] == {
+        "type": "replace_content",
+        "data": repaired,
+        "node": "citation_guard",
+    }
+    assert set(events[-1]["data"]) == {
+        "answer",
+        "citations",
+        "retrieval",
+        "no_answer",
+        "answer_policy",
+    }
+    assert events[-1]["data"]["answer"] == repaired
+    assert events[-1]["data"]["no_answer"] is False
+
+
+@pytest.mark.asyncio
 async def test_query_stream_with_retrieval_converts_model_knowledge_refusal(monkeypatch) -> None:
     class FakeGroundedModel:
         async def astream(self, _messages):
@@ -1073,6 +1242,9 @@ async def test_query_stream_with_retrieval_does_not_emit_unverified_model_conten
         async def astream(self, _messages):
             yield SimpleNamespace(content="未经引用门禁的草稿。")
 
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="未经引用门禁的草稿。")
+
     service = rag_module.RagAgentService(streaming=True)
     service.model = FakeGroundedModel()
     monkeypatch.setattr(
@@ -1103,7 +1275,9 @@ async def test_query_stream_with_retrieval_does_not_emit_unverified_model_conten
     assert len(content_events) == 1
     assert content_events[0]["node"] == "citation_guard"
     assert "未经引用门禁的草稿" not in content_events[0]["data"]
-    assert events[-1]["data"]["answer_policy"] == "refuse_without_citation"
+    assert events[-1]["data"]["answer_policy"] == "answer_with_citations"
+    assert events[-1]["data"]["no_answer"] is False
+    assert events[-1]["data"]["citations"][0]["chunk_id"] == "redis.md#0001"
 
 
 @pytest.mark.asyncio
@@ -1113,7 +1287,7 @@ async def test_query_stream_with_retrieval_emits_only_validated_final_answer(
     class FakeGroundedModel:
         async def astream(self, _messages):
             yield SimpleNamespace(content="先检查 Redis 连接数。")
-            yield SimpleNamespace(content="[redis.md | redis.md#0001]")
+            yield SimpleNamespace(content="[证据 1]")
 
     service = rag_module.RagAgentService(streaming=True)
     service.model = FakeGroundedModel()
@@ -1145,7 +1319,7 @@ async def test_query_stream_with_retrieval_emits_only_validated_final_answer(
     assert content_events == [
         {
             "type": "content",
-            "data": "先检查 Redis 连接数。[redis.md | redis.md#0001]",
+            "data": "先检查 Redis 连接数。[证据 1]",
             "node": "citation_guard",
         }
     ]
@@ -1163,9 +1337,9 @@ async def test_query_stream_with_retrieval_releases_validated_claim_before_model
 
     class DelayedGroundedModel:
         async def astream(self, _messages):
-            yield SimpleNamespace(content="第一条。[redis.md | redis.md#0001]")
+            yield SimpleNamespace(content="第一条。[证据 1]")
             await release_second_chunk.wait()
-            yield SimpleNamespace(content="第二条。[redis.md | redis.md#0001]")
+            yield SimpleNamespace(content="\n第二条。[证据 1]")
 
     service = rag_module.RagAgentService(streaming=True)
     service.model = DelayedGroundedModel()
@@ -1178,7 +1352,7 @@ async def test_query_stream_with_retrieval_releases_validated_claim_before_model
                 {
                     "source_file": "redis.md",
                     "chunk_id": "redis.md#0001",
-                    "content": "第一条和第二条。",
+                    "content": "Check 第一条和第二条。",
                 }
             ],
         },
@@ -1190,12 +1364,12 @@ async def test_query_stream_with_retrieval_releases_validated_claim_before_model
 
     first_content = await asyncio.wait_for(first_content_task, timeout=0.1)
     assert first_content["type"] == "content"
-    assert first_content["data"] == "第一条。[redis.md | redis.md#0001]"
+    assert first_content["data"] == "第一条。[证据 1]"
     assert not release_second_chunk.is_set()
 
     release_second_chunk.set()
     remaining = [event async for event in stream]
-    assert remaining[0]["data"] == "第二条。[redis.md | redis.md#0001]"
+    assert remaining[0]["data"] == "\n第二条。[证据 1]"
     assert remaining[-1]["type"] == "complete"
 
 

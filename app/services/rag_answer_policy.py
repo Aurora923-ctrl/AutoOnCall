@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from app.services.rag_answer_contract import AnswerContract, AnswerSlot
 from app.services.rag_generation_context import (
     build_generation_context,
     build_generation_evidence,
@@ -37,87 +38,49 @@ LEGACY_ANSWER_LABELS = (
 def build_grounded_question(question: str, retrieval_payload: dict[str, Any]) -> str:
     """Build the final LLM prompt from trusted retrieval context."""
     context = build_generation_context(retrieval_payload)
+    contract_instruction = _build_answer_contract_instruction(retrieval_payload)
     return (
-        "请只基于下面的知识库检索结果回答用户问题。"
-        "不要使用未出现在知识库中的事实；如果知识不足或主题不匹配，请明确说明"
-        "“当前知识库无法回答该问题”，不要引用无关片段。\n\n"
+        "冻结证据（唯一允许引用范围）:\n"
         f"{context}\n\n"
         f"用户问题: {question}\n\n"
-        "回答要求:\n"
-        "0. 直接回答，不复述问题，不写“已知上下文事实”等固定栏目；"
-        "每条只表达一个由单个证据直接支持的结论。\n"
-        "1. 按用户问题中的子问题逐项回答，优先写 2-3 条、最多 4 条；"
-        "每条不超过两句，不遗漏明确询问的取证、判断或处置边界。\n"
-        "2. 不复述整份 Runbook，不罗列时间、地域、日志主题等参数，"
-        "除非用户明确询问或这些参数是判断所必需的。\n"
-        "3. 命令、参数、数值、原因和动作必须由证据片段直接提供；允许忠实转述，"
-        "但不得推导新的因果关系或操作。\n"
-        "4. 静态 Runbook 只能写成“建议检查”，不得写成当前事件已经观测到的事实。\n"
-        "5. 处置动作仅在片段明确支持时保留，并原样保留审批、验证或回滚边界。\n"
-        "6. 每条要点末尾标注唯一直接支持它的 [证据 N]；N 必须来自上下文证据编号；"
-        "不要列出未被正文使用的来源。\n"
-        "7. 只要至少一个片段能回答部分问题，就回答有证据的部分；不要因为缺少另一部分"
-        "而整体拒答。\n"
-        "8. 不得把通配符、示例值或占位符替换成用户问题中的服务名、阈值或参数。\n"
-        "9. 不得从“需要检查某项证据”推导“满足该证据后即可重启、扩容、清理或回滚”；"
-        "动作条件必须由片段直接给出。\n"
-        "10. 告警名只能作为检查线索，不能单独推出原因、文件特征或处理方案。\n"
-        "11. 当片段只能回答部分问题时，只说明未覆盖的那个具体子问题；"
-        "完整回答时禁止追加泛化缺口。\n"
-        "12. 输出前逐项检查证据覆盖：问题要求多个来源时，每个必要来源至少支持一条要点；"
-        "片段已提供审批、dry-run、验证、回滚或人工接管边界时，必须在相关动作或判断中"
-        "保留该边界。\n"
-        "13. 命令、标签选择器、路径、IP、端口、通配符和占位符必须按片段原样引用；"
-        "不得替换成新的示例值，也不要要求用户把片段中的示例改成实际值。\n"
-        "14. 对调查型问题优先写成“检查什么 -> 如何判断”；"
-        "只有涉及生产动作时才补充安全边界。不要把示例成功输出写成当前环境事实。\n"
-        "15. 不要把用户问题中的现象重复成结论；不要写“可能导致”“表明根因”"
-        "等证据未明确给出的因果判断。\n"
-        "16. 输出前删除与问题无直接关系的参数、背景、示例数字和重复措辞。\n"
-        "17. 每条以“检查、确认、对比、保留、限制”等动作直接开头；"
-        "不要机械重复“依据什么判断”。历史工单、事故复盘和静态文档必须明确标为"
-        "历史或文档信息，不得把用户描述的现象改写成已验证事实。\n"
-        "18. 问题明确要求处置边界时，最后一条必须写出片段提供的审批、dry-run、"
-        "验证或回滚边界；问题涉及历史记录时，必须说明它不能替代当前 incident-window"
-        " 证据。\n"
-        "19. 多来源问题中，每个必要来源至少贡献一条直接相关结论；"
-        "不要用同一来源代替另一个来源要求回答的子问题。\n"
-        "20. 不输出总结、前言、栏目标题或单独的引用来源列表。"
+        f"{contract_instruction}\n"
+        "只输出契约内的要点，不输出前言、总结、栏目标题或单独来源列表。"
     )
+
+
+def _build_answer_contract_instruction(retrieval_payload: dict[str, Any]) -> str:
+    """Render the exact immutable answer slots exposed by generation preparation."""
+    contract = retrieval_payload.get("_answer_contract")
+    if not isinstance(contract, AnswerContract):
+        return "答案契约:\n- max_claims=3"
+
+    lines = ["答案契约:", f"- max_claims={contract.max_claims}"]
+    for slot in contract.slots:
+        entities = ",".join(slot.required_entities) or "none"
+        allowed = ",".join(str(index) for index in slot.allowed_citation_indices) or "none"
+        roles = ",".join(slot.required_source_roles) or "none"
+        lines.append(
+            f"- slot={slot.subgoal_id}; required_entities={entities}; "
+            f"allowed_evidence={allowed}; required_source_roles={roles}"
+        )
+    if not any(slot.subgoal_id == "boundary" for slot in contract.slots):
+        lines.append("- action_slot=absent")
+    lines.append(
+        "- 每条事实只绑定一个该 slot 允许的 [证据 N]；无允许证据时仅输出"
+        "“当前证据不足：缺少 <entity/subgoal>”且不加引用"
+    )
+    return "\n".join(lines)
 
 
 def build_grounded_system_prompt() -> str:
     """Return the strict system prompt used for tool-free grounded generation."""
     return (
-        "直接回答用户问题，不使用固定栏目，不复述问题。"
-        "每个事实或操作 claim 末尾必须绑定且仅绑定一个上下文中的 [证据 N] 引用。"
-        "Runbook 中的指标、阈值、示例值和历史观测只能表述为静态文档信息，"
-        "不得写成当前事故的现场观测。"
-        "上下文只能支持有限回答时，给出有限回答和明确缺失的证据，禁止依靠通用知识扩写。"
-        "你是知识库问答助手。你不能调用工具，也不能补充知识库之外的事实。"
-        "只能复述或紧密归纳当前检索片段已明确提供的信息。"
-        "不得引入检索片段中未出现的命令、工具名、监控方法、参数或处置动作。"
-        "将每个句子视为需要证据支持的独立 claim；无法指出支持片段就删除该句。"
-        "答案优先 2-3 条、最多 4 条；每条不超过两句，并覆盖用户明确询问的证据、"
-        "判断和边界。"
-        "只要有片段能支持部分答案，就回答该部分，不要整体拒答。"
-        "保留片段中的通配符和示例值，不得用用户问题中的实体替换。"
-        "不得从诊断证据推导动作资格，也不得从告警名称扩写原因或处理方案。"
-        "部分证据不足时只声明具体缺口，不要使用整体知识库拒答措辞。"
-        "回答前检查问题的每个子问题和每个必要来源是否都有直接证据覆盖。"
-        "检索片段已经包含审批、dry-run、验证、回滚或人工接管边界时不得遗漏。"
-        "命令、选择器、路径、IP、端口、通配符和占位符必须原样引用，不得改写示例。"
-        "只有确实存在未回答子问题时才能声明具体缺口，完整回答不得追加泛化缺口。"
-        "除非用户明确询问，不复述地域、时间范围、日志主题和示例参数。"
-        "删除背景铺垫、重复措辞和证据未明确支持的因果解释。"
-        "每条以检查、确认、对比、保留或限制等动作直接开头，避免模板化套话。"
-        "历史记录必须明确标为历史证据；用户问题中的现象不是已验证结论。"
-        "问题要求处置边界时必须保留审批、dry-run、验证或回滚边界。"
-        "历史记录不能替代当前 incident-window 证据。"
-        "多来源问题中每个必要来源至少贡献一条直接相关结论。"
-        "不要输出前言、总结、固定栏目标题或单独的引用来源列表。"
-        "如果检索片段不足以回答或与问题主题不匹配，请明确说明当前知识库无法回答，"
-        "并且不要引用无关片段。"
+        "你是知识库问答助手，只能使用用户消息中的冻结证据，不能调用工具或补充外部事实。"
+        "每条事实必须紧密归纳一个证据片段，并在行末仅绑定一个 [证据 N]。"
+        "静态 Runbook、阈值和示例不得写成当前事故观测；历史复盘或工单必须标明历史，"
+        "且不能替代当前 incident-window 证据。"
+        "按用户消息中的答案契约逐 slot 输出短要点；无支持证据的 slot 只写具体证据缺口。"
+        "不要输出前言、总结、固定栏目或单独来源列表。"
     )
 
 
@@ -137,8 +100,6 @@ def compress_grounded_answer(answer: str) -> str:
             break
         line = re.sub(r"\s+", " ", line)
         compact_lines.append(f"- {line}")
-        if len(compact_lines) >= 4:
-            break
     return "\n".join(compact_lines).strip()
 
 
@@ -177,6 +138,209 @@ def select_supporting_citations(
         seen.add(pair)
         unique.append(allowed[pair])
     return unique
+
+
+def build_extractive_grounded_answer(
+    query: str,
+    evidence: list[dict[str, Any]],
+    *,
+    required_sources: list[str] | set[str] | tuple[str, ...] | None = None,
+    max_claims: int = 3,
+    answer_contract: AnswerContract | None = None,
+) -> str:
+    """Build a citation-complete fallback from verbatim evidence sentences."""
+    normalized_evidence = [item for item in evidence if isinstance(item, dict)]
+    if not normalized_evidence:
+        return ""
+    if answer_contract is not None:
+        return _build_slot_aware_extractive_answer(
+            query,
+            normalized_evidence,
+            answer_contract,
+        )
+    query_terms = _claim_terms(query)
+    required = {
+        citation_source_basename(source)
+        for source in required_sources or ()
+        if str(source or "").strip()
+    }
+    ranked: list[tuple[int, int, dict[str, Any], str]] = []
+    for position, item in enumerate(normalized_evidence):
+        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        if not content:
+            continue
+        source = citation_source_basename(item.get("source_file"))
+        for sentence in _evidence_sentences(content):
+            sentence_terms = _claim_terms(sentence)
+            overlap = len(query_terms.intersection(sentence_terms))
+            source_bonus = 4 if source in required else 0
+            ranked.append((source_bonus + overlap, -position, item, sentence))
+    if not ranked:
+        return ""
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    selected: list[tuple[dict[str, Any], str]] = []
+    selected_sources: set[str] = set()
+    selected_pairs: set[tuple[str, str]] = set()
+    for required_source in sorted(required):
+        match = next(
+            (
+                (item, sentence)
+                for _score, _position, item, sentence in ranked
+                if citation_source_basename(item.get("source_file")) == required_source
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        pair = (
+            citation_source_basename(match[0].get("source_file")),
+            str(match[0].get("chunk_id") or ""),
+        )
+        selected.append(match)
+        selected_sources.add(required_source)
+        selected_pairs.add(pair)
+    for _score, _position, item, sentence in ranked:
+        if len(selected) >= max_claims:
+            break
+        pair = (
+            citation_source_basename(item.get("source_file")),
+            str(item.get("chunk_id") or ""),
+        )
+        if pair in selected_pairs:
+            continue
+        selected.append((item, sentence))
+        selected_sources.add(pair[0])
+        selected_pairs.add(pair)
+
+    lines = []
+    for item, sentence in selected[:max_claims]:
+        try:
+            citation_index = int(item.get("citation_index") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if citation_index <= 0:
+            return ""
+        lines.append(f"- {sentence} [证据 {citation_index}]")
+    return "\n".join(lines)
+
+
+def _build_slot_aware_extractive_answer(
+    query: str,
+    evidence: list[dict[str, Any]],
+    contract: AnswerContract,
+) -> str:
+    """Cover each answer slot and required source role from frozen evidence only."""
+    query_terms = _claim_terms(query)
+    roles_by_index: dict[int, set[str]] = {}
+    for citation_index, source_role in contract.citation_source_roles:
+        roles_by_index.setdefault(citation_index, set()).add(source_role)
+
+    candidates: list[tuple[int, dict[str, Any], str]] = []
+    for item in evidence:
+        citation_index = _positive_citation_index(item)
+        if citation_index <= 0:
+            continue
+        content = str(item.get("content") or item.get("content_preview") or "").strip()
+        for sentence in _evidence_sentences(content):
+            candidates.append((citation_index, item, sentence))
+
+    selected: list[tuple[int, dict[str, Any], str]] = []
+    selected_keys: set[tuple[int, str]] = set()
+    gaps: list[str] = []
+    for slot in contract.slots:
+        candidate = _best_slot_sentence(slot, candidates, query_terms)
+        if candidate is None:
+            target = ",".join(slot.required_entities) or slot.subgoal_id
+            gaps.append(f"- 当前证据不足：缺少 {target}")
+            continue
+        key = (candidate[0], candidate[2])
+        if key not in selected_keys:
+            selected.append(candidate)
+            selected_keys.add(key)
+
+    for slot in contract.slots:
+        for source_role in slot.required_source_roles:
+            if any(
+                citation_index in slot.allowed_citation_indices
+                and source_role in roles_by_index.get(citation_index, set())
+                for citation_index, _item, _sentence in selected
+            ):
+                continue
+            role_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate[0] in slot.allowed_citation_indices
+                and source_role in roles_by_index.get(candidate[0], set())
+            ]
+            candidate = _best_slot_sentence(slot, role_candidates, query_terms)
+            if candidate is None:
+                continue
+            key = (candidate[0], candidate[2])
+            if key not in selected_keys:
+                selected.append(candidate)
+                selected_keys.add(key)
+
+    lines: list[str] = []
+    for citation_index, _item, sentence in selected:
+        roles = roles_by_index.get(citation_index, set())
+        if "postmortem" in roles and not any(
+            marker in sentence.casefold()
+            for marker in ("历史", "复盘", "historical", "retrospective")
+        ):
+            sentence = f"历史复盘：{sentence}"
+        elif "ticket" in roles and not any(
+            marker in sentence.casefold() for marker in ("历史", "工单", "ticket")
+        ):
+            sentence = f"历史工单：{sentence}"
+        lines.append(f"- {sentence} [证据 {citation_index}]")
+    lines.extend(gaps)
+    return "\n".join(lines[: contract.max_claims])
+
+
+def _best_slot_sentence(
+    slot: AnswerSlot,
+    candidates: list[tuple[int, dict[str, Any], str]],
+    query_terms: set[str],
+) -> tuple[int, dict[str, Any], str] | None:
+    allowed = [
+        candidate for candidate in candidates if candidate[0] in slot.allowed_citation_indices
+    ]
+    if not allowed:
+        return None
+    return max(
+        allowed,
+        key=lambda candidate: (
+            sum(
+                str(entity).casefold() in candidate[2].casefold()
+                for entity in slot.required_entities
+            ),
+            len(query_terms.intersection(_claim_terms(candidate[2]))),
+            -candidate[0],
+        ),
+    )
+
+
+def _positive_citation_index(item: dict[str, Any]) -> int:
+    try:
+        citation_index = int(item.get("citation_index") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return citation_index if citation_index > 0 else 0
+
+
+def _evidence_sentences(content: str) -> list[str]:
+    """Return compact complete sentences, excluding headings and code fences."""
+    sentences: list[str] = []
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip().lstrip("-*# ").strip()
+        if not line or line.startswith("```") or len(line) < 8:
+            continue
+        for sentence in re.split(r"(?<=[。！？.!?])\s+|(?<=。)", line):
+            sentence = sentence.strip()
+            if 8 <= len(sentence) <= 220:
+                sentences.append(sentence)
+    return sentences
 
 
 def answer_claims_match_evidence(
@@ -288,6 +452,9 @@ def answer_claims_are_cited(
         return False
     for line in claim_lines:
         pairs = extract_citation_pairs(line, citation_map=citation_map)
+        normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])?\s*", "", line).strip()
+        if normalized.startswith("当前证据不足"):
+            continue
         if not pairs or any(pair not in allowed_pairs for pair in pairs):
             return False
     return True

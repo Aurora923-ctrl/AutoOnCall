@@ -70,6 +70,11 @@ async def test_chat_returns_citations_and_retrieval_metadata(monkeypatch) -> Non
             "observability": {
                 "runtime": {"llm_model": "qwen-max"},
                 "token_usage": {"status": "observed", "total_tokens": 42},
+                "generation_repair": {
+                    "attempted": True,
+                    "reason": "answer_contract",
+                    "sources": [],
+                },
             },
         }
 
@@ -94,6 +99,11 @@ async def test_chat_returns_citations_and_retrieval_metadata(monkeypatch) -> Non
     assert payload["data"]["noAnswer"] is False
     assert payload["data"]["answerPolicy"] == "answer_with_citations"
     assert payload["data"]["observability"]["runtime"]["llm_model"] == "qwen-max"
+    assert payload["data"]["observability"]["generation_repair"] == {
+        "attempted": True,
+        "reason": "answer_contract",
+        "sources": [],
+    }
 
 
 @pytest.mark.asyncio
