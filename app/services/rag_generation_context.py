@@ -10,6 +10,20 @@ from app.services.rag_retrieval.candidates import extract_retrieval_terms
 
 GENERATION_EVIDENCE_TARGET_CHARS = 900
 
+
+def format_frozen_generation_context(evidence: Any) -> str:
+    """Render only the exact content and citation labels assigned during freezing."""
+    return "\n\n".join(
+        _format_evidence_block(
+            item.get("citation_index") or index,
+            source_file=str(item.get("source_file") or "未知来源").strip(),
+            chunk_id=str(item.get("chunk_id") or "unknown").strip(),
+            content=str(item.get("content") or item.get("content_preview") or ""),
+        )
+        for index, item in enumerate(evidence.items, 1)
+    )
+
+
 def build_generation_context(
     retrieval_payload: dict[str, Any],
     *,
@@ -17,6 +31,9 @@ def build_generation_context(
     limit: int | None = None,
 ) -> str:
     """Build a de-duplicated evidence block without changing retrieval results."""
+    frozen_evidence = retrieval_payload.get("_frozen_generation_evidence")
+    if frozen_evidence is not None:
+        return format_frozen_generation_context(frozen_evidence)
     evidence = build_generation_evidence(
         retrieval_payload,
         budgeter=budgeter,
@@ -300,6 +317,25 @@ def select_generation_excerpt(
 
     blocks = _split_evidence_blocks(text)
     if len(blocks) <= 1:
+        structured_marker = re.search(
+            r"\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^。；;\r\n]{1,240}",
+            text,
+        )
+        query_terms = extract_retrieval_terms(f"{query} {heading_path}")
+        marker_context = (
+            text[max(0, structured_marker.start() - 120) : structured_marker.end() + 120]
+            if structured_marker is not None
+            else ""
+        )
+        if structured_marker is not None and (
+            query_terms & extract_retrieval_terms(marker_context)
+        ):
+            return _center_generation_excerpt(
+                text,
+                marker_start=structured_marker.start(),
+                marker_end=structured_marker.end(),
+                target_chars=target_chars,
+            )
         return DEFAULT_CONTEXT_BUDGETER.text(text, limit=target_chars, preserve_tail=True)
 
     query_terms = extract_retrieval_terms(f"{query} {heading_path}")
@@ -351,6 +387,27 @@ def select_generation_excerpt(
     if not selected_indices:
         return DEFAULT_CONTEXT_BUDGETER.text(text, limit=target_chars, preserve_tail=True)
     return "\n\n".join(blocks[index] for index in sorted(selected_indices))
+
+
+def _center_generation_excerpt(
+    text: str,
+    *,
+    marker_start: int,
+    marker_end: int,
+    target_chars: int,
+) -> str:
+    """Keep a structured formula in a bounded excerpt from one long text block."""
+    truncation_marker = DEFAULT_CONTEXT_BUDGETER.budget.truncation_marker
+    content_chars = target_chars - (2 * len(truncation_marker))
+    if content_chars <= 0 or marker_end - marker_start > content_chars:
+        return DEFAULT_CONTEXT_BUDGETER.text(text, limit=target_chars, preserve_tail=True)
+    marker_center = marker_start + ((marker_end - marker_start) // 2)
+    start = max(0, marker_center - (content_chars // 2))
+    end = min(len(text), start + content_chars)
+    start = max(0, end - content_chars)
+    prefix = truncation_marker if start else ""
+    suffix = truncation_marker if end < len(text) else ""
+    return f"{prefix}{text[start:end]}{suffix}"
 
 def _split_evidence_blocks(content: str) -> list[str]:
     """Split Markdown-like evidence while keeping fenced command examples intact."""

@@ -69,6 +69,51 @@ def test_context_budgeter_can_preserve_recent_tail_context() -> None:
     assert len(output) == 48
 
 
+def test_generation_context_uses_already_frozen_content_verbatim() -> None:
+    from app.services.rag_evidence_plan import FrozenGenerationEvidence
+    from app.services.rag_generation_context import build_generation_context
+
+    frozen_content = "middle-only evidence: effective_capacity = maxclients - reserved_connections"
+    frozen = FrozenGenerationEvidence(
+        items=(
+            {
+                "citation_index": 7,
+                "source_file": "official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#middle",
+                "content": frozen_content,
+            },
+        ),
+        bindings=(),
+        missing_subgoals=(),
+        missing_entities=(),
+    )
+
+    context = build_generation_context(
+        {
+            "retrieval_results": [],
+            "_frozen_generation_evidence": frozen,
+        },
+        limit=20,
+    )
+
+    assert "[证据 7:" in context
+    assert frozen_content in context
+
+
+def test_generation_excerpt_does_not_center_an_unrelated_assignment() -> None:
+    from app.services.rag_generation_context import select_generation_excerpt
+
+    content = "foo = unrelated;" + ("background " * 200) + "TARGET connected_clients maxclients"
+
+    excerpt = select_generation_excerpt(
+        content,
+        query="Redis connected_clients 接近 maxclients",
+        target_chars=200,
+    )
+
+    assert "TARGET connected_clients maxclients" in excerpt
+
+
 def test_context_budgeter_rejects_negative_limit_and_non_string_separator() -> None:
     budgeter = ContextBudgeter()
 

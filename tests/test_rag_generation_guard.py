@@ -27,6 +27,36 @@ def test_generation_guard_prepares_stable_citation_allowlist() -> None:
     ]
 
 
+def test_frozen_planner_accepts_generation_guard_payload_schema() -> None:
+    from app.services.rag_evidence_plan import build_frozen_generation_evidence
+    from app.services.rag_question_plan import build_question_plan
+
+    plan = build_question_plan("Redis connected_clients near maxclients")
+    preparation = prepare_grounded_generation(
+        {
+            "status": "success",
+            "query": plan.query,
+            "retrieval_results": [
+                {
+                    "source_file": "official_redis_clients.md",
+                    "chunk_id": "official_redis_clients.md#0001",
+                    "content": (
+                        "Check connected_clients, maxclients, blocked_clients, and "
+                        "effective_capacity."
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert preparation.generation_payload is not None
+    frozen = build_frozen_generation_evidence(plan, preparation.generation_payload)
+
+    assert [item["chunk_id"] for item in frozen.items] == [
+        "official_redis_clients.md#0001"
+    ]
+
+
 def test_generation_guard_finalizes_supported_answer() -> None:
     retrieval_payload = {
         "status": "success",
