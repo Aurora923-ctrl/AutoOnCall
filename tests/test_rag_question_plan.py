@@ -44,6 +44,19 @@ def test_builds_redis_official_and_postmortem_capacity_plan() -> None:
     assert plan.max_claims == 5
 
 
+def test_builds_metric_led_redis_capacity_plan_without_product_name() -> None:
+    plan = build_question_plan("connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？")
+
+    assert plan.domain == "redis"
+    assert set(plan.explicit_entities) >= {
+        "connected_clients",
+        "maxclients",
+        "effective_capacity",
+        "blocked_clients",
+    }
+    assert plan.max_claims == 5
+
+
 def test_adds_action_subgoal_only_for_explicit_production_action() -> None:
     plan = build_question_plan("发布后 pool_waiting 上升，如何判断是否回滚？")
 

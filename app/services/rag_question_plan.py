@@ -80,7 +80,7 @@ def build_question_plan(query: str) -> QuestionPlan:
     entities = list(_service_entities(raw_query))
     entities.extend(entity for entity in domain_entities if entity.casefold() in normalized_query)
 
-    if domain == "redis" and _is_redis_capacity_question(normalized_query):
+    if _is_redis_capacity_question(domain, normalized_query):
         _append_unique(entities, "effective_capacity")
         _append_unique(entities, "blocked_clients")
     if domain == "mysql" and _asks_how_to_investigate_slow_query(normalized_query):
@@ -126,7 +126,7 @@ def build_question_plan(query: str) -> QuestionPlan:
     if not subgoals:
         subgoals.append(AnswerSubgoal("evidence", "evidence", tuple(entities), ()))
 
-    max_claims = 5 if domain == "redis" and _is_redis_capacity_question(normalized_query) else 3
+    max_claims = 5 if _is_redis_capacity_question(domain, normalized_query) else 3
     return QuestionPlan(raw_query, domain, tuple(entities), tuple(subgoals), max_claims)
 
 
@@ -149,8 +149,8 @@ def _service_entities(query: str) -> tuple[str, ...]:
     return tuple(match.group(0) for match in _SERVICE_PATTERN.finditer(query))
 
 
-def _is_redis_capacity_question(normalized_query: str) -> bool:
-    return "redis" in normalized_query and (
+def _is_redis_capacity_question(domain: str, normalized_query: str) -> bool:
+    return domain == "redis" and (
         "connected_clients" in normalized_query or "maxclients" in normalized_query
     )
 
