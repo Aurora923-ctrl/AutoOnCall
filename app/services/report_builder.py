@@ -11,6 +11,7 @@ from app.models.report import DiagnosisReport
 from app.models.trace import TraceEvent
 from app.services.aiops_state_utils import extract_incident_id as _extract_incident_id
 from app.services.evidence_graph import build_incident_evidence_graph
+from app.services.evidence_quality import FALLBACK_EVIDENCE_SOURCES
 from app.services.incident_lifecycle import (
     REPORT_SAFE_INSUFFICIENT_EVIDENCE_STATUSES,
     REPORT_SAFE_POLICY_BOUNDARY_STATUSES,
@@ -470,12 +471,7 @@ def _evidence_is_usable_for_conclusion(evidence: dict[str, Any]) -> bool:
     quality = _as_dict(metadata.get("evidence_quality"))
     if quality.get("usable", True) is False:
         return False
-    return str(evidence.get("data_source") or "") not in {
-        "failed",
-        "not_configured",
-        "manual_analysis",
-        "llm_toolnode_fallback",
-    }
+    return str(evidence.get("data_source") or "") not in FALLBACK_EVIDENCE_SOURCES
 
 
 def _compact_tool_call(record: dict[str, Any]) -> dict[str, Any]:

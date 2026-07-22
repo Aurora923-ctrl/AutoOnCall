@@ -26,8 +26,10 @@ from app.models.incident import utc_now
 from app.models.plan import PlanStep
 from app.models.trace import ToolCallRecord
 from app.services.approval_service import ApprovalService
+from app.services.approval_workflow import create_approval_request_from_risk_decision
 from app.services.change_execution_service import ChangeExecutionService
 from app.services.change_plan_builder import build_change_plan
+from app.services.policies.approval_policy import RISK_POLICY_VERSION
 from app.services.report_generator import ReportGenerator
 from app.services.trace_service import TraceService
 from scripts.eval.eval_environment import (
@@ -593,18 +595,26 @@ def _create_approval(
     approval_service: ApprovalService,
 ) -> tuple[ApprovalRequest, Any]:
     incident_id = str(case.get("incident_id") or f"inc-{case['id']}")
+    trace_id = f"trace-{case['id']}"
+    step_id = f"step-{case['id']}"
+    tool_name = str(case.get("tool_name") or "suggest_remediation")
+    input_args = dict(case.get("input_args") or {})
     plan_metadata = {
-        "trace_id": f"trace-{case['id']}",
         **dict(case.get("plan_metadata") or {}),
+        "trace_id": trace_id,
+        "step_id": step_id,
+        "policy": "approval_required",
+        "risk_policy_version": RISK_POLICY_VERSION,
     }
     plan = build_change_plan(
         incident_id=incident_id,
         action=str(case.get("action") or "manual safe change"),
         risk_level=str(case.get("risk_level") or "high"),
-        tool_name=str(case.get("tool_name") or "suggest_remediation"),
+        tool_name=tool_name,
         service_name=str(case.get("service_name") or "order-service"),
         environment=str(case.get("environment") or "prod"),
         reason="safe change evaluation",
+        input_args=input_args,
         metadata=plan_metadata,
     )
     overrides = dict(case.get("plan_overrides") or {})
@@ -613,18 +623,32 @@ def _create_approval(
         overrides["created_at"] = utc_now() + timedelta(seconds=offset)
     if overrides:
         plan = plan.model_copy(update=overrides)
-    request = approval_service.create_request(
-        ApprovalRequest(
-            incident_id=incident_id,
-            action=plan.action,
-            risk_level=plan.risk_level,
-            reason="safe change evaluation approval",
-            change_plan=plan,
-            metadata={
-                "trace_id": plan_metadata["trace_id"],
-                "change_plan": plan.model_dump(mode="json"),
-            },
-        )
+    decision = {
+        "action": plan.action,
+        "risk_level": plan.risk_level,
+        "reason": "safe change evaluation approval",
+        "step_id": step_id,
+        "tool_name": tool_name,
+        "policy": "approval_required",
+        "policy_version": RISK_POLICY_VERSION,
+        "input_args": input_args,
+        "matched_rules": ["eval:approval-required"],
+        "read_only": False,
+    }
+    state = {
+        "session_id": f"eval-{case['id']}",
+        "trace_id": trace_id,
+        "incident": {
+            "incident_id": incident_id,
+            "service_name": str(case.get("service_name") or "order-service"),
+            "environment": str(case.get("environment") or "prod"),
+        },
+    }
+    request = create_approval_request_from_risk_decision(
+        state,
+        decision,
+        approval_repository=approval_service,
+        change_plan=plan,
     )
     approval_status = str(case.get("approval_status") or "approved")
     if approval_status == "approved":

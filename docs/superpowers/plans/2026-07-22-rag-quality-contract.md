@@ -664,7 +664,7 @@ git commit -m "Measure RAG answer contracts precisely"
 ### Task 6: Verification, Runtime Acceptance, and Evidence Update
 
 **Files:**
-- Modify only if results require wording/provenance updates: `docs/AutoOnCall当前问题与后续改进计划.md`
+- Modify only if results require wording/provenance updates: [problem document](../../AutoOnCall%E5%BD%93%E5%89%8D%E9%97%AE%E9%A2%98%E4%B8%8E%E5%90%8E%E7%BB%AD%E6%94%B9%E8%BF%9B%E8%AE%A1%E5%88%92.md)
 - Create runtime artifacts under ignored `logs/`; never commit them unless repository policy explicitly tracks the selected summary.
 - Modify focused code/tests only through a new RED-GREEN cycle if verification finds a defect.
 
@@ -760,7 +760,8 @@ Dispatch a fresh high-capability reviewer with the approved design, this plan, f
 - [ ] **Step 9: Commit only verified documentation changes**
 
 ```powershell
-git add docs/AutoOnCall当前问题与后续改进计划.md
+$problemDocument = Get-ChildItem docs -File | Where-Object Name -EQ 'AutoOnCall当前问题与后续改进计划.md'
+git add -- $problemDocument.FullName
 git commit -m "Record verified RAG quality improvements"
 ```
 

@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from multiprocessing import get_context
 
 import pytest
 
@@ -16,6 +17,46 @@ from app.models.report import DiagnosisReport
 from app.services.approval_service import ApprovalService, ApprovalStateError
 from app.services.approval_workflow import create_approval_request_from_risk_decision
 from app.services.report_generator import ReportGenerator
+
+
+def _run_concurrent_approval_creation(database_path: str, result_sender) -> None:
+    state = {
+        "session_id": "session-concurrent",
+        "trace_id": "trace-concurrent",
+        "incident": {
+            "incident_id": "inc-concurrent",
+            "service_name": "checkout-service",
+            "environment": "prod",
+        },
+    }
+    decision = {
+        "action": "restart checkout-service",
+        "risk_level": "high",
+        "policy": "approval_required",
+        "step_id": "s-risk",
+        "tool_name": "restart_service",
+        "reason": "production write requires approval",
+    }
+    barrier = threading.Barrier(6)
+    services = [ApprovalService(database_path) for _ in range(6)]
+
+    def create_request(index: int) -> ApprovalRequest:
+        barrier.wait(timeout=10)
+        return create_approval_request_from_risk_decision(
+            state,
+            decision,
+            approval_repository=services[index],
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(create_request, index) for index in range(6)]
+        requests = [future.result(timeout=20) for future in futures]
+    result_sender.send(
+        {
+            "approval_ids": [request.approval_id for request in requests],
+            "pending_count": len(ApprovalService(database_path).list_pending("inc-concurrent")),
+        }
+    )
 
 
 def test_approval_service_creates_lists_and_persists_pending_request(tmp_path) -> None:
@@ -188,39 +229,31 @@ def test_approval_workflow_reuses_same_pending_request_by_idempotency_key(tmp_pa
 
 def test_approval_workflow_concurrent_creation_has_single_pending_request(tmp_path) -> None:
     database_path = tmp_path / "approval-concurrency.db"
-    state = {
-        "session_id": "session-concurrent",
-        "trace_id": "trace-concurrent",
-        "incident": {
-            "incident_id": "inc-concurrent",
-            "service_name": "checkout-service",
-            "environment": "prod",
-        },
-    }
-    decision = {
-        "action": "restart checkout-service",
-        "risk_level": "high",
-        "policy": "approval_required",
-        "step_id": "s-risk",
-        "tool_name": "restart_service",
-        "reason": "production write requires approval",
-    }
-    barrier = threading.Barrier(6)
+    context = get_context("spawn")
+    result_receiver, result_sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_run_concurrent_approval_creation,
+        args=(str(database_path), result_sender),
+    )
+    process.start()
+    result_sender.close()
+    process.join(timeout=30)
 
-    def create_request(_: int) -> ApprovalRequest:
-        service = ApprovalService(database_path)
-        barrier.wait()
-        return create_approval_request_from_risk_decision(
-            state,
-            decision,
-            approval_repository=service,
-        )
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=5)
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        requests = list(executor.map(create_request, range(6)))
+    assert not process.is_alive(), "concurrent approval creation exceeded its hard timeout"
+    assert process.exitcode == 0
+    assert result_receiver.poll(5), "child process exited without approval results"
+    result = result_receiver.recv()
+    result_receiver.close()
 
-    assert len({request.approval_id for request in requests}) == 1
-    assert len(ApprovalService(database_path).list_pending("inc-concurrent")) == 1
+    assert len(set(result["approval_ids"])) == 1
+    assert result["pending_count"] == 1
 
 
 def test_approval_idempotency_is_scoped_to_run_environment_and_plan(tmp_path) -> None:

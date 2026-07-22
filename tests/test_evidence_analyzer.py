@@ -234,6 +234,48 @@ def test_mock_evidence_cannot_create_root_cause_hypothesis() -> None:
     assert all(not item.supporting_evidence_ids for item in analysis.hypothesis_ranking)
 
 
+def test_eval_fixture_evidence_can_support_deterministic_offline_evaluation() -> None:
+    state = create_initial_aiops_state(
+        "order-service Redis connection timeout and 5xx",
+        session_id="analysis-eval-fixture-source",
+    )
+    state["incident"]["service_name"] = "order-service"
+    state["gathered_evidence"] = [
+        evidence_from_tool(
+            "query_metrics",
+            {
+                "summary": "P95=3250ms, 5xx=8.20%",
+                "p95_latency_ms": {"status": "high"},
+                "error_rate": {"status": "high"},
+            },
+            "s1",
+            data_source="eval_fixture",
+        ),
+        evidence_from_tool(
+            "query_logs",
+            {"summary": "Redis connection timeout in /api/order/create"},
+            "s2",
+            data_source="eval_fixture",
+        ),
+        evidence_from_tool(
+            "query_redis_status",
+            {
+                "summary": "connected_clients=9940/10000",
+                "connected_clients": 9940,
+                "maxclients": 10000,
+                "client_usage_ratio": 0.994,
+            },
+            "s3",
+            data_source="eval_fixture",
+        ),
+    ]
+
+    analysis = analyze_evidence(state)
+
+    assert analysis.hypothesis_ranking[0].category == "redis_maxclients"
+    assert analysis.hypothesis_ranking[0].supporting_evidence_ids
+
+
 def test_analyzer_recommends_missing_redis_evidence_when_plan_is_empty() -> None:
     state = create_initial_aiops_state(
         "order-service Redis connection timeout",

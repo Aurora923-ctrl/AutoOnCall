@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from app.agent.aiops.risk_controller import READ_ONLY_TOOL_NAMES
+from app.services.change_execution_checks import build_pre_check_result
 from scripts.eval.eval_change_cases import (
+    _build_runtime,
+    _create_approval,
     build_summary,
     evaluate_cases,
     load_cases,
@@ -30,6 +34,29 @@ def test_change_eval_dataset_has_balanced_positive_and_negative_cases() -> None:
     assert sum(case["scenario"] == "safe_change" for case in cases) >= 8
     assert sum(case["scenario"] == "sensitive_redaction" for case in cases) >= 2
     assert sum(case["scenario"] == "concurrent_approval" for case in cases) >= 1
+    assert {
+        str(case.get("tool_name") or "manual_analysis")
+        for case in policy_cases
+        if case.get("expected_policy") == "allow"
+    } <= READ_ONLY_TOOL_NAMES
+
+
+def test_change_eval_approved_fixture_uses_current_approval_bindings(tmp_path: Path) -> None:
+    case = next(
+        case
+        for case in load_cases("eval/change_cases.yaml")
+        if case["id"] == "safe_change_dry_run_success"
+    )
+    runtime = _build_runtime(tmp_path / "change-eval-approval.db")
+
+    approval, plan = _create_approval(case, runtime["approval_service"])
+    pre_check = build_pre_check_result(approval=approval, plan=plan)
+
+    assert approval.step_id == plan.metadata["step_id"]
+    assert approval.tool_name == plan.metadata["tool_name"]
+    assert approval.risk_policy_version == plan.metadata["risk_policy_version"]
+    assert approval.metadata["input_args"] == plan.metadata["approved_input_args"]
+    assert pre_check.status == "passed"
 
 
 def test_load_cases_rejects_duplicate_ids_and_small_datasets(tmp_path: Path) -> None:

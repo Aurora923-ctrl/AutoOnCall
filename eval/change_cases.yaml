@@ -157,12 +157,12 @@ cases:
     expected_policy: allow
   - id: allow_get_pod_status
     scenario: policy
-    tool_name: get_pod_status
+    tool_name: query_k8s_status
     action: Read pod status
     expected_policy: allow
   - id: allow_retrieve_knowledge
     scenario: policy
-    tool_name: retrieve_knowledge
+    tool_name: search_history_ticket
     action: Retrieve troubleshooting guidance
     expected_policy: allow
   - id: allow_manual_analysis
@@ -185,14 +185,14 @@ cases:
     tags: [prompt_injection]
   - id: allow_select_sql_as_read_only_text
     scenario: policy
-    tool_name: query_database
+    tool_name: query_mysql_status
     action: Read connection statistics
     input_args: {sql: "SELECT count(*) FROM processlist"}
     expected_policy: allow
     tags: [argument_injection]
   - id: allow_get_config_snapshot
     scenario: policy
-    tool_name: get_config_snapshot
+    tool_name: query_service_context
     action: Read the active configuration snapshot
     expected_policy: allow
 

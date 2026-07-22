@@ -4,6 +4,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from scripts.data.update_official_snapshot_manifest import update_official_snapshot_manifest
 from scripts.maintenance.verify_references import find_reference_issues
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,3 +66,38 @@ def test_official_snapshot_manifest_matches_current_files() -> None:
             (ROOT / "docs" / "knowledge-base" / file_name).read_bytes()
         ).hexdigest().upper()
         assert actual_hash == expected_hash
+
+
+def test_official_snapshot_manifest_updater_is_deterministic(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "knowledge-base"
+    docs_dir.mkdir()
+    (docs_dir / "official_z.md").write_text("z snapshot\n", encoding="utf-8")
+    (docs_dir / "official_a.md").write_text("a snapshot\n", encoding="utf-8")
+    manifest_path = tmp_path / "official-sources.md"
+    prefix = (
+        b"\xef\xbb\xbf# Sources\n\n"
+        b"Keep this prefix byte-for-byte.\n\n"
+        b"## Current cleaned hashes\r\n\r\n"
+    )
+    suffix = b"## Distribution boundary\n\n- Preserve attribution.\r\n"
+    stale_table = (
+        b"| Local file | SHA-256 |\r\n"
+        b"| --- | --- |\r\n"
+        + b"| `stale.md` | `"
+        + b"0" * 64
+        + b"` |\r\n\r\n"
+    )
+    manifest_path.write_bytes(prefix + stale_table + suffix)
+
+    update_official_snapshot_manifest(manifest_path=manifest_path, docs_dir=docs_dir)
+    first_render = manifest_path.read_bytes()
+    update_official_snapshot_manifest(manifest_path=manifest_path, docs_dir=docs_dir)
+
+    assert manifest_path.read_bytes() == first_render
+    assert first_render.startswith(prefix)
+    assert first_render.endswith(suffix)
+    assert first_render.index(b"official_a.md") < first_render.index(b"official_z.md")
+    for path in sorted(docs_dir.glob("official_*.md")):
+        expected_hash = hashlib.sha256(path.read_bytes()).hexdigest().upper()
+        expected_row = f"| `{path.name}` | `{expected_hash}` |".encode()
+        assert expected_row in first_render

@@ -1019,6 +1019,35 @@ def test_report_generator_does_not_present_unsupported_hypothesis_as_summary_or_
     assert all("Database corruption" not in item for item in report.inferred_conclusions)
 
 
+def test_report_generator_does_not_treat_rule_based_suggestion_as_key_finding(tmp_path) -> None:
+    state = _state_with_redis_evidence()
+    suggestion = "Remediation suggestions generated; real changes require approval"
+    state["gathered_evidence"].append(
+        Evidence(
+            source_tool="suggest_remediation",
+            step_id="s5",
+            summary=suggestion,
+            fact=suggestion,
+            evidence_type="risk",
+            data_source="rule_based",
+            stance="supporting",
+            confidence_reason="Deterministic suggestion output, not an observed incident fact",
+            raw_data={"status": "success", "output": {"summary": suggestion}},
+            confidence=0.99,
+        ).model_dump(mode="json")
+    )
+
+    report = ReportGenerator(tmp_path / "reports.db").generate_from_state(
+        state,
+        trace_events=[],
+        status="completed",
+    )
+
+    assert report.status == "completed"
+    assert all(suggestion not in finding for finding in report.key_findings)
+    assert report.conclusion_alignment["status"] == "aligned"
+
+
 def test_report_generator_redacts_secrets_before_persistence_and_markdown(tmp_path) -> None:
     state = _state_with_redis_evidence()
     state["incident"]["symptom"] = "authorization=Bearer incident-secret"

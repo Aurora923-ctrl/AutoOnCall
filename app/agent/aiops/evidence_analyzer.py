@@ -332,7 +332,6 @@ def _hypothesis_evidence_items(evidence_items: list[Any]) -> list[Any]:
             "failed",
             "not_configured",
             "mock",
-            "eval_fixture",
             "manual_analysis",
             "llm_toolnode_fallback",
             "rule_based",
