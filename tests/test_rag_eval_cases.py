@@ -807,3 +807,35 @@ def test_strict_multisource_requires_relevant_chunk_from_each_source() -> None:
     payload = _strategy_case_payload(retrieved, case, latency_ms=1.0)
 
     assert payload["strict_multisource_at_k"]["3"] is False
+
+
+def test_dependency_timeout_paraphrase_exposes_service_boundary_in_top_three() -> None:
+    index = build_offline_index("docs/knowledge-base")
+
+    results = search_offline(
+        index,
+        "进程仍在运行但接口返回 5xx，下游缓存和消息中间件超时，应如何分流排查？",
+        top_k=3,
+        min_score=0.5,
+    )
+    retrieved_text = "\n".join(str(item.get("content") or "") for item in results)
+
+    assert "service_unavailable.md" in {item["source_file"] for item in results}
+    assert all(term in retrieved_text for term in ("依赖服务", "Redis", "MQ", "重试", "熔断"))
+
+
+def test_queue_backlog_paraphrase_exposes_idempotent_recovery_in_top_three() -> None:
+    index = build_offline_index("docs/knowledge-base")
+
+    results = search_offline(
+        index,
+        "Kafka 消费进度与最老事件持续恶化，怎样定位瓶颈并控制追赶风险？",
+        top_k=3,
+        min_score=0.5,
+    )
+    retrieved_text = "\n".join(str(item.get("content") or "") for item in results)
+
+    assert "message_queue_backlog_runbook.md" in {
+        item["source_file"] for item in results
+    }
+    assert all(term in retrieved_text for term in ("consumer lag", "幂等", "重放"))
