@@ -32,6 +32,7 @@ from app.services.rag_answer_policy import (
     ensure_citation_block,
     extract_citation_pairs,
 )
+from app.services.rag_evidence_plan import classify_source_role
 from app.services.rag_read_models import compact_retrieval_payload
 from app.services.rag_retrieval_service import (
     retrieve_structured_knowledge,
@@ -558,17 +559,34 @@ async def query_product_behavior(
         *,
         history_question: str | None = None,
     ) -> str:
-        allowed_chunk_ids = {
-            match.strip() for match in re.findall(r"chunk_id=([^\]\s;]+)", grounded_question)
+        frozen_citations = {
+            (source_file.strip(), chunk_id.strip()): int(citation_index)
+            for citation_index, source_file, chunk_id in re.findall(
+                (
+                    r"\[证据\s+(\d+):\s*source_file=([^;\]\n]+);\s*"
+                    r"chunk_id=([^\]\s;]+)\]"
+                ),
+                grounded_question,
+            )
         }
         citations = [
             {
                 "source_file": item.get("source_file", ""),
                 "chunk_id": item.get("chunk_id", ""),
                 "score": item.get("offline_score", item.get("score")),
+                "citation_index": frozen_citations[
+                    (
+                        str(item.get("source_file") or "").strip(),
+                        str(item.get("chunk_id") or "").strip(),
+                    )
+                ],
             }
             for item in retrieval_payload.get("retrieval_results", [])
-            if str(item.get("chunk_id") or "") in allowed_chunk_ids
+            if (
+                str(item.get("source_file") or "").strip(),
+                str(item.get("chunk_id") or "").strip(),
+            )
+            in frozen_citations
         ]
         return build_reference_fixture_answer(case, retrieval_payload, citations)
 
@@ -732,9 +750,11 @@ def build_reference_fixture_answer(
         answer = build_fallback_reference_answer(case, retrieval_payload)
     inline_citation = next(
         (
-            f"[{item.get('source_file', '')} | {item.get('chunk_id', '')}]"
+            f"[证据 {item.get('citation_index')}]"
             for item in citations
-            if item.get("source_file") and item.get("chunk_id")
+            if item.get("source_file")
+            and item.get("chunk_id")
+            and item.get("citation_index")
         ),
         "",
     )
@@ -1176,8 +1196,13 @@ def build_not_run_payload(
         "oncall_actionability_avg": None,
         "citation_grounding_rate": None,
         "citation_existence_rate": None,
+        "citation_membership_rate": None,
         "citation_support_rate": None,
         "citation_correctness_rate": None,
+        "required_source_contribution_avg": None,
+        "claim_support_avg": None,
+        "entity_coverage_avg": None,
+        "temporal_boundary_rate": None,
         "factual_error_rate": None,
         "severe_hallucination_rate": None,
         "incident_boundary_rate": None,
@@ -1709,8 +1734,13 @@ def build_case_result(
                 "refusal_boundary_hit": refusal_hit,
                 "citation_grounding_hit": len(sample.citations) == 0,
                 "citation_existence_hit": 1.0 if not sample.citations else 0.0,
+                "citation_membership_score": 1.0 if not sample.citations else 0.0,
                 "citation_support_score": 1.0 if not sample.citations else 0.0,
                 "citation_correctness_score": 1.0 if not sample.citations else 0.0,
+                "required_source_contribution_score": 1.0,
+                "claim_support_score": 1.0,
+                "entity_coverage_score": 1.0,
+                "temporal_boundary_hit": 1.0,
                 "factual_error_hit": 0.0,
                 "severe_hallucination_hit": (
                     1.0 if deterministic_severe_hallucination(sample) else 0.0
@@ -1856,8 +1886,13 @@ def build_summary(
         "oncall_actionability_score",
         "citation_grounding_hit",
         "citation_existence_hit",
+        "citation_membership_score",
         "citation_support_score",
         "citation_correctness_score",
+        "required_source_contribution_score",
+        "claim_support_score",
+        "entity_coverage_score",
+        "temporal_boundary_hit",
         "factual_error_hit",
         "severe_hallucination_hit",
         "incident_boundary_hit",
@@ -1893,8 +1928,19 @@ def build_summary(
         "oncall_actionability_avg": average_metric(quality_results, "oncall_actionability_score"),
         "citation_grounding_rate": average_metric(quality_results, "citation_grounding_hit"),
         "citation_existence_rate": average_metric(quality_results, "citation_existence_hit"),
+        "citation_membership_rate": average_metric(
+            quality_results,
+            "citation_membership_score",
+        ),
         "citation_support_rate": average_metric(quality_results, "citation_support_score"),
         "citation_correctness_rate": average_metric(quality_results, "citation_correctness_score"),
+        "required_source_contribution_avg": average_metric(
+            quality_results,
+            "required_source_contribution_score",
+        ),
+        "claim_support_avg": average_metric(quality_results, "claim_support_score"),
+        "entity_coverage_avg": average_metric(quality_results, "entity_coverage_score"),
+        "temporal_boundary_rate": average_metric(quality_results, "temporal_boundary_hit"),
         "factual_error_rate": average_metric(quality_results, "factual_error_hit"),
         "severe_hallucination_rate": average_metric(quality_results, "severe_hallucination_hit"),
         "incident_boundary_rate": average_metric(quality_results, "incident_boundary_hit"),
@@ -2353,8 +2399,18 @@ def render_markdown_summary(payload: dict[str, Any]) -> str:
         f"- ID context recall avg: `{summary['id_context_recall_avg']:.2f}`",
         f"- OnCall actionability avg: `{summary['oncall_actionability_avg']:.2f}`",
         f"- Citation existence rate: `{summary.get('citation_existence_rate', 0.0):.0%}`",
-        f"- Citation support rate: `{summary.get('citation_support_rate', 0.0):.0%}`",
+        (
+            "- Citation membership rate: "
+            f"`{summary.get('citation_membership_rate', summary.get('citation_support_rate', 0.0)):.0%}`"
+        ),
         f"- Citation correctness rate: `{summary.get('citation_correctness_rate', 0.0):.0%}`",
+        (
+            "- Required source contribution avg: "
+            f"`{summary.get('required_source_contribution_avg', 0.0):.0%}`"
+        ),
+        f"- Claim support avg: `{summary.get('claim_support_avg', 0.0):.0%}`",
+        f"- Entity coverage avg: `{summary.get('entity_coverage_avg', 0.0):.0%}`",
+        f"- Temporal boundary rate: `{summary.get('temporal_boundary_rate', 0.0):.0%}`",
         f"- Factual error rate: `{summary.get('factual_error_rate', 0.0):.0%}`",
         f"- Severe hallucination rate: `{summary.get('severe_hallucination_rate', 0.0):.0%}`",
         f"- Refusal boundary rate: `{summary['refusal_boundary_rate']:.0%}`",
@@ -2937,7 +2993,7 @@ def business_metric_scores(sample: RagasCaseSample) -> dict[str, float]:
 
 
 def citation_quality_scores(sample: RagasCaseSample) -> dict[str, float]:
-    """Measure citation existence, retrieved-context support, and expected-source correctness."""
+    """Measure citation membership and explicit answer-contract contribution."""
     valid = [
         item
         for item in sample.citations
@@ -2953,14 +3009,293 @@ def citation_quality_scores(sample: RagasCaseSample) -> dict[str, float]:
         for source_file, chunk_id in cited_pairs
     }
     cited_ids.discard("")
-    support = ratio(len(cited_ids & retrieved_ids), len(cited_ids)) if cited_ids else 0.0
+    membership = ratio(len(cited_ids & retrieved_ids), len(cited_ids)) if cited_ids else 0.0
     correctness = ratio(len(cited_ids & expected_ids), len(cited_ids)) if cited_ids else 0.0
     return {
         "citation_grounding_hit": existence,
         "citation_existence_hit": existence,
-        "citation_support_score": support,
+        "citation_membership_score": membership,
+        "citation_support_score": membership,
         "citation_correctness_score": correctness,
+        "required_source_contribution_score": required_source_contribution_score(
+            sample,
+            _claim_citation_pairs(sample),
+        ),
+        "claim_support_score": claim_support_score(sample),
+        "entity_coverage_score": entity_coverage_score(sample),
+        "temporal_boundary_hit": temporal_boundary_hit(sample),
     }
+
+
+_ANSWER_ENTITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "慢查询": ("慢查询", "slow_query", "slow_queries", "slow query", "slow queries"),
+    "pool_waiting": ("pool_waiting", "pool waiting", "pool-waiting"),
+    "active_connections": (
+        "active_connections",
+        "active connections",
+        "active-connections",
+    ),
+    "connected_clients": (
+        "connected_clients",
+        "connected clients",
+        "connected-clients",
+    ),
+    "maxclients": ("maxclients", "max clients", "max_clients"),
+    "blocked_clients": ("blocked_clients", "blocked clients", "blocked-clients"),
+    "effective_capacity": (
+        "effective_capacity",
+        "effective capacity",
+        "effective-capacity",
+        "有效容量",
+    ),
+    "oomkilled": ("oomkilled", "oom killed", "oom-killed"),
+}
+_HISTORICAL_SOURCE_ROLES = {"ticket", "postmortem"}
+_HISTORICAL_CLAIM_MARKERS = (
+    "历史",
+    "复盘",
+    "工单",
+    "部署记录",
+    "此前",
+    "当时",
+    "historical",
+    "history",
+    "postmortem",
+    "retrospective",
+)
+_CURRENT_FACT_PATTERNS = (
+    re.compile(r"(?:证明|表明|说明|确认|显示|意味着)\s*(?:本次|当前|目前|实时)"),
+    re.compile(
+        r"(?:本次|当前|目前|实时)[^。；;\n]{0,16}"
+        r"(?:根因|故障|状态|数值|值|指标|容量)\s*(?:是|为|=|达到|已|已经)"
+    ),
+    re.compile(
+        r"(?<!不)(?:是|为)\s*(?:本次|当前|目前|实时)\s*"
+        r"(?:根因|故障|状态|数值|值|指标|容量)"
+    ),
+    re.compile(r"(?:proves?|shows?|confirms?)\s+(?:the\s+)?current\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:is|are|equals?)\s+(?:the\s+)?current\s+"
+        r"(?:root\s+cause|fault|state|value|capacity)\b",
+        re.IGNORECASE,
+    ),
+)
+_CURRENT_FACT_NEGATION_MARKERS = (
+    "尚不能",
+    "不能",
+    "无法",
+    "未能",
+    "不代表",
+    "不足以",
+    "并非",
+    "不是",
+    "cannot",
+    "can't",
+    "does not",
+    "doesn't",
+    "do not",
+    "is not",
+    "are not",
+    "insufficient to",
+    "not enough to",
+)
+_MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}(?:\s+|$)")
+
+
+def required_source_contribution_score(
+    sample: RagasCaseSample,
+    cited_pairs: list[tuple[str, str]] | None = None,
+) -> float:
+    """Score required source-file and source-role obligations cited by answer claims."""
+    claim_pairs = cited_pairs if cited_pairs is not None else _claim_citation_pairs(sample)
+    cited_sources = {
+        _source_identity(source_file or chunk_id) for source_file, chunk_id in claim_pairs
+    }
+    cited_sources.discard("")
+    required_sources = {
+        _source_identity(source)
+        for source in (
+            sample.case.get("required_sources") or expected_sources(sample.case)
+        )
+        if str(source or "").strip()
+    }
+    required_roles = {
+        str(role).strip().casefold()
+        for role in sample.case.get("required_source_roles", []) or []
+        if str(role).strip()
+    }
+    cited_roles = {
+        _source_role_for_pair(sample, pair) for pair in claim_pairs
+    }
+    cited_roles.discard("")
+    obligation_count = len(required_sources) + len(required_roles)
+    if obligation_count == 0:
+        return 1.0
+    covered_count = len(required_sources & cited_sources) + len(required_roles & cited_roles)
+    return ratio(covered_count, obligation_count)
+
+
+def claim_support_score(sample: RagasCaseSample) -> float:
+    """Score required entities bound to the concrete evidence cited by each claim."""
+    required_entities = _required_answer_entities(sample.case)
+    if not required_entities:
+        pairs = _claim_citation_pairs(sample)
+        retrieved_ids = set(sample.retrieved_context_ids)
+        expected_ids = set(sample.reference_context_ids)
+        preserve_chunks = any("#" in item for item in retrieved_ids | expected_ids)
+        cited_ids = {
+            citation_context_id(source_file, chunk_id, preserve_chunks=preserve_chunks)
+            for source_file, chunk_id in pairs
+        }
+        cited_ids.discard("")
+        return ratio(len(cited_ids & retrieved_ids), len(cited_ids)) if cited_ids else 0.0
+
+    supported_bindings = 0
+    asserted_bindings = 0
+    for claim, pairs in _answer_claims(sample):
+        claimed_entities = [
+            entity for entity in required_entities if _contains_answer_entity(claim, entity)
+        ]
+        asserted_bindings += len(claimed_entities)
+        evidence_text = "\n".join(_evidence_text_for_pair(sample, pair) for pair in pairs)
+        supported_bindings += sum(
+            1 for entity in claimed_entities if _contains_answer_entity(evidence_text, entity)
+        )
+    return ratio(supported_bindings, asserted_bindings) if asserted_bindings else 0.0
+
+
+def entity_coverage_score(sample: RagasCaseSample) -> float:
+    """Measure concrete final-answer coverage of case-required answer entities."""
+    required_entities = _required_answer_entities(sample.case)
+    if not required_entities:
+        return 1.0
+    semantic_answer = answer_for_judge(sample.answer)
+    covered = sum(
+        1 for entity in required_entities if _contains_answer_entity(semantic_answer, entity)
+    )
+    return ratio(covered, len(required_entities))
+
+
+def temporal_boundary_hit(sample: RagasCaseSample) -> float:
+    """Require historical labels and reject current-fact claims from historical evidence."""
+    for claim, pairs in _cited_claims(sample):
+        roles = {_source_role_for_pair(sample, pair) for pair in pairs}
+        if not roles & _HISTORICAL_SOURCE_ROLES:
+            continue
+        lowered = claim.casefold()
+        if not any(marker in lowered for marker in _HISTORICAL_CLAIM_MARKERS):
+            return 0.0
+        if _asserts_current_fact(claim):
+            return 0.0
+    return 1.0
+
+
+def _asserts_current_fact(claim: str) -> bool:
+    clauses = re.split(
+        r"[。；;，,\n]|(?:但(?:是)?|然而|因此|所以|\b(?:but|therefore|thus|hence)\b)",
+        claim,
+        flags=re.IGNORECASE,
+    )
+    for clause in clauses:
+        for pattern in _CURRENT_FACT_PATTERNS:
+            for match in pattern.finditer(clause):
+                prefix = clause[max(0, match.start() - 48) : match.start()].casefold()
+                if any(marker in prefix for marker in _CURRENT_FACT_NEGATION_MARKERS):
+                    continue
+                return True
+    return False
+
+
+def _required_answer_entities(case: dict[str, Any]) -> tuple[str, ...]:
+    entities: list[str] = []
+    for value in case.get("required_answer_entities", []) or []:
+        entity = str(value or "").strip()
+        if entity and entity.casefold() not in {item.casefold() for item in entities}:
+            entities.append(entity)
+    return tuple(entities)
+
+
+def _contains_answer_entity(text: str, entity: str) -> bool:
+    normalized_entity = str(entity or "").strip().casefold()
+    if not normalized_entity:
+        return True
+    aliases = _ANSWER_ENTITY_ALIASES.get(normalized_entity, (normalized_entity,))
+    lowered = str(text or "").casefold()
+    for alias in aliases:
+        normalized_alias = alias.casefold()
+        if re.search(r"[a-z0-9_]", normalized_alias):
+            if re.search(
+                rf"(?<![a-z0-9_]){re.escape(normalized_alias)}(?![a-z0-9_])",
+                lowered,
+            ):
+                return True
+        elif normalized_alias in lowered:
+            return True
+    return False
+
+
+def _cited_claims(sample: RagasCaseSample) -> list[tuple[str, list[tuple[str, str]]]]:
+    return [(claim, pairs) for claim, pairs in _answer_claims(sample) if pairs]
+
+
+def _answer_claims(sample: RagasCaseSample) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Return semantic answer lines with their inline evidence bindings."""
+    answer_body = str(sample.answer or "").split("引用来源：", 1)[0]
+    citation_map = citation_pair_map(sample.citations)
+    claims: list[tuple[str, list[tuple[str, str]]]] = []
+    for raw_line in answer_body.splitlines():
+        line = raw_line.strip()
+        if not line or _MARKDOWN_HEADING_PATTERN.match(line):
+            continue
+        pairs = extract_citation_pairs(line, citation_map=citation_map)
+        claim = re.sub(r"\[[^\[\]\r\n]+\]", "", line).strip()
+        if claim:
+            claims.append((claim, pairs))
+    return claims
+
+
+def _claim_citation_pairs(sample: RagasCaseSample) -> list[tuple[str, str]]:
+    return [pair for _claim, pairs in _cited_claims(sample) for pair in pairs]
+
+
+def _source_identity(value: Any) -> str:
+    normalized = normalize_context_id(value).replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1].casefold()
+
+
+def _source_role_for_pair(sample: RagasCaseSample, pair: tuple[str, str]) -> str:
+    source_file, chunk_id = pair
+    for item in sample.retrieval.get("retrieval_results", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if _retrieval_item_matches_pair(item, pair):
+            return classify_source_role(item)
+    citation = next(
+        (
+            item
+            for item in sample.citations
+            if isinstance(item, dict) and _retrieval_item_matches_pair(item, pair)
+        ),
+        {"source_file": source_file, "chunk_id": chunk_id},
+    )
+    return classify_source_role(citation)
+
+
+def _evidence_text_for_pair(sample: RagasCaseSample, pair: tuple[str, str]) -> str:
+    for item in sample.retrieval.get("retrieval_results", []) or []:
+        if isinstance(item, dict) and _retrieval_item_matches_pair(item, pair):
+            return str(item.get("content") or item.get("content_preview") or "")
+    return ""
+
+
+def _retrieval_item_matches_pair(
+    item: dict[str, Any],
+    pair: tuple[str, str],
+) -> bool:
+    source_file, chunk_id = pair
+    item_source = _source_identity(item.get("source_file") or item.get("source_path"))
+    item_chunk = str(item.get("chunk_id") or "").strip()
+    return item_source == _source_identity(source_file) and item_chunk == str(chunk_id).strip()
 
 
 def citation_context_id(
@@ -3320,8 +3655,13 @@ def quality_failure_reasons(failed_metrics: list[str]) -> dict[str, str]:
         ),
         "oncall_actionability_score": "Answer misses required OnCall actionability rubric items.",
         "citation_grounding_hit": "Answer lacks auditable source_file + chunk_id citations.",
-        "citation_support_score": "One or more citations are not present in retrieved context.",
+        "citation_membership_score": "One or more citation identities are not in frozen retrieval.",
+        "citation_support_score": "One or more citation identities are not in frozen retrieval.",
         "citation_correctness_score": "One or more citations do not match expected sources.",
+        "required_source_contribution_score": "Claims omit required source files or source roles.",
+        "claim_support_score": "Claimed entities are not bound to the cited evidence.",
+        "entity_coverage_score": "Final answer omits required answer entities.",
+        "temporal_boundary_hit": "Historical evidence is presented without a safe time boundary.",
         "factual_error": "Answer violates deterministic required/forbidden fact checks.",
         "severe_hallucination": "Answer makes an unsupported live claim or unsafe action claim.",
         "incident_boundary_hit": "Answer does not separate Runbook knowledge from live incident evidence.",

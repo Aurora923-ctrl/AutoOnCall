@@ -9,6 +9,8 @@ cases:
       先确认告警时间窗、进程 CPU 和线程热点，再结合日志判断是否为死循环或流量突增。
       扩容、限流、重启或回滚必须保留审批、dry-run 和回滚边界。
     reference_context_ids: [cpu_high_usage.md]
+    required_answer_entities: [CPU, 进程, 线程, 告警时间窗]
+    required_source_roles: [runbook]
     ragas_tags: [core_interview]
     business_rubric:
       - 包含进程或线程级 CPU 证据
@@ -22,6 +24,8 @@ cases:
       应先保留内存、GC、OOM 日志和堆信息，判断内存泄漏、配置不足或流量压力。
       重启和扩容只能作为有审批与回滚记录的处置建议。
     reference_context_ids: [memory_high_usage.md]
+    required_answer_entities: [OOMKilled, GC, OOM 日志, 堆信息]
+    required_source_roles: [runbook]
     ragas_tags: [core_interview]
     business_rubric:
       - 包含 OOM 或内存证据
@@ -35,6 +39,8 @@ cases:
       应检查 df、inode 使用率、目录和大文件占用，再定位日志、临时文件或容器资源。
       删除、截断或清理前必须确认影响范围并走安全变更。
     reference_context_ids: [disk_high_usage.md]
+    required_answer_entities: [df, inode, 目录, 大文件]
+    required_source_roles: [runbook]
     ragas_tags: [core_interview]
     business_rubric:
       - 覆盖空间、inode 和目录证据
@@ -48,6 +54,8 @@ cases:
       主方向应放在下游依赖超时，检查 Redis/MQ 连接、超时日志、重试放大和错误率。
       降级、限流或恢复依赖必须经过审批，不应直接认定应用崩溃。
     reference_context_ids: [service_unavailable.md]
+    required_answer_entities: [503, Redis, MQ, 超时]
+    required_source_roles: [runbook]
     ragas_tags: [core_interview, confusion]
     business_rubric:
       - 识别依赖故障而非应用崩溃
@@ -61,6 +69,8 @@ cases:
       应检查慢 SQL、EXPLAIN、active_connections、pool_waiting 和最近发布，
       再决定降低查询压力、准备索引变更或回滚高风险版本。
     reference_context_ids: [payment_wiki.html]
+    required_answer_entities: [pool_waiting, active_connections, 慢查询, EXPLAIN]
+    required_source_roles: [runbook]
     ragas_tags: [core_interview]
     business_rubric:
       - 覆盖 EXPLAIN、active_connections 或 pool_waiting
@@ -78,6 +88,12 @@ cases:
     reference_context_ids:
       - official_redis_clients.md
       - redis_postmortem.pdf
+    required_answer_entities:
+      - connected_clients
+      - maxclients
+      - effective_capacity
+      - blocked_clients
+    required_source_roles: [official, postmortem]
     ragas_tags: [core_interview, multi_source]
     business_rubric:
       - 说明 connected_clients 与 maxclients 的关系
@@ -95,6 +111,8 @@ cases:
     reference_context_ids:
       - official_kubernetes_debug_pods.md
       - official_kubernetes_debug_services.md
+    required_answer_entities: [Pod, Service, selector, EndpointSlice]
+    required_source_roles: [official]
     ragas_tags: [core_interview, multi_source]
     business_rubric:
       - 同时覆盖 Pod 和 Service 证据
@@ -112,6 +130,12 @@ cases:
     reference_context_ids:
       - official_loki_troubleshoot_ingest.md
       - official_prometheus_alerting_practices.md
+    required_answer_entities:
+      - loki_discarded_samples_total
+      - loki_discarded_bytes_total
+      - 用户可见
+      - 症状告警
+    required_source_roles: [official]
     ragas_tags: [core_interview, multi_source]
     business_rubric:
       - 包含 Loki discarded 指标
@@ -125,6 +149,8 @@ cases:
       应引用 tickets.xlsx 中 INC-REDIS-009 对应行，并说明它是历史处置证据；
       当前事件仍需读取 incident-window 的 Redis 连接指标后才能给出处置建议。
     reference_context_ids: [tickets.xlsx]
+    required_answer_entities: [INC-REDIS-009, 历史处置, incident-window, Redis]
+    required_source_roles: [ticket]
     ragas_tags: [core_interview]
     business_rubric:
       - 引用 INC-REDIS-009 历史记录
@@ -138,6 +164,8 @@ cases:
       应引用部署历史中的版本和变更内容，并结合慢查询、连接池等待和当前影响判断。
       回滚必须有审批、pre-check、dry-run 和可验证的回滚计划。
     reference_context_ids: [tickets.xlsx]
+    required_answer_entities: [payment-service, 版本, pool_waiting, 慢查询]
+    required_source_roles: [ticket]
     ragas_tags: [core_interview]
     business_rubric:
       - 包含发布历史和 pool_waiting

@@ -10,6 +10,11 @@ from scripts.eval.build_rag_scorecard import (
     provenance_signature,
     validate_dataset_binding,
 )
+from scripts.eval.eval_ragas_cases import (
+    expected_sources,
+    load_cases,
+    render_markdown_summary,
+)
 
 
 def test_scorecard_rejects_stale_artifact() -> None:
@@ -164,3 +169,69 @@ def test_scorecard_rejects_same_file_hash_with_different_selected_cases() -> Non
 def test_scorecard_markdown_formats_missing_metrics_without_crashing() -> None:
     assert format_optional_score(None) == "not_run"
     assert format_optional_percent(None) == "not_run"
+
+
+def test_stage3_positive_cases_freeze_entities_and_source_roles() -> None:
+    positive = [
+        case
+        for case in load_cases("eval/ragas_stage3_core_cases.yaml")
+        if not case.get("should_reject")
+    ]
+
+    assert len(positive) == 10
+    assert all(case.get("required_answer_entities") for case in positive)
+    assert all(case.get("required_source_roles") for case in positive)
+
+    mysql = next(case for case in positive if "pool_waiting" in str(case.get("query")))
+    redis = next(
+        case
+        for case in positive
+        if set(expected_sources(case))
+        == {"official_redis_clients.md", "redis_postmortem.pdf"}
+    )
+    assert set(mysql["required_answer_entities"]) == {
+        "pool_waiting",
+        "active_connections",
+        "慢查询",
+        "EXPLAIN",
+    }
+    assert mysql["required_source_roles"] == ["runbook"]
+    assert set(redis["required_answer_entities"]) == {
+        "connected_clients",
+        "maxclients",
+        "effective_capacity",
+        "blocked_clients",
+    }
+    assert set(redis["required_source_roles"]) == {"official", "postmortem"}
+
+
+def test_ragas_report_labels_citation_membership_honestly() -> None:
+    report = render_markdown_summary(
+        {
+            "run": {"metric_profile": "id-smoke", "environment": {}},
+            "summary": {
+                "status": "passed",
+                "passed_count": 1,
+                "case_count": 1,
+                "core_case_pass_rate": 1.0,
+                "faithfulness_avg": None,
+                "response_relevancy_avg": None,
+                "id_context_precision_avg": 1.0,
+                "id_context_recall_avg": 1.0,
+                "oncall_actionability_avg": 1.0,
+                "citation_existence_rate": 1.0,
+                "citation_membership_rate": 0.5,
+                "citation_support_rate": 0.5,
+                "citation_correctness_rate": 1.0,
+                "factual_error_rate": 0.0,
+                "severe_hallucination_rate": 0.0,
+                "refusal_boundary_rate": 1.0,
+                "failed_cases": [],
+            },
+            "quality_contract": {},
+            "case_scores": [],
+        }
+    )
+
+    assert "Citation membership rate: `50%`" in report
+    assert "Citation support rate" not in report

@@ -623,9 +623,9 @@ async def test_ragas_product_offline_uses_query_with_retrieval_for_all_cases(
 ) -> None:
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
-    (docs_dir / "redis_postmortem.md").write_text(
-        "Redis maxclients evidence includes connected_clients, incident-window, "
-        "approval, source_file and chunk_id.",
+    (docs_dir / "redis.md").write_text(
+        "Redis maxclients evidence includes connected_clients, effective_capacity, "
+        "blocked_clients, incident-window, approval, source_file and chunk_id.",
         encoding="utf-8",
     )
     cases_path = tmp_path / "ragas_cases.yaml"
@@ -634,16 +634,16 @@ async def test_ragas_product_offline_uses_query_with_retrieval_for_all_cases(
 cases:
   - id: redis_core
     query: Redis maxclients connected_clients approval
-    expected_source: redis_postmortem.md
+    expected_source: redis.md
     required_sources:
-      - redis_postmortem.md
+      - redis.md
     relevant_chunks:
-      - redis_postmortem.md
+      - redis.md
     reference_answer: >
-      Redis maxclients should check connected_clients, incident-window evidence,
-      and approval before limit or scale actions.
+      Redis maxclients should check connected_clients, effective_capacity,
+      blocked_clients, incident-window evidence, and approval before limit or scale actions.
     reference_context_ids:
-      - redis_postmortem.md
+      - redis.md
     ragas_tags:
       - core_interview
     business_rubric:
@@ -697,7 +697,8 @@ async def test_context_fixture_uses_real_grounded_generation_with_fixed_retrieva
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (docs_dir / "redis.md").write_text(
-        "Redis maxclients requires checking connected_clients before approved changes.",
+        "Redis maxclients requires checking connected_clients, effective_capacity, and "
+        "blocked_clients before approved changes.",
         encoding="utf-8",
     )
     cases_path = tmp_path / "cases.yaml"
@@ -721,8 +722,8 @@ cases:
     async def fake_query_grounded(self, grounded_question, session_id, *, history_question=None):
         generated_prompts.append(grounded_question)
         return (
-            "Generated from the supplied context: check connected_clients before approval. "
-            "[redis.md | redis.md#0001]"
+            "Generated from the supplied context: check connected_clients, maxclients, "
+            "effective_capacity, and blocked_clients before approval. [证据 1]"
         )
 
     async def fake_query_grounded_observed(
@@ -911,8 +912,13 @@ def test_citation_quality_resolves_numbered_citation_to_exact_chunk() -> None:
     assert metrics == {
         "citation_grounding_hit": 1.0,
         "citation_existence_hit": 1.0,
+        "citation_membership_score": 1.0,
         "citation_support_score": 1.0,
         "citation_correctness_score": 1.0,
+        "required_source_contribution_score": 1.0,
+        "claim_support_score": 1.0,
+        "entity_coverage_score": 1.0,
+        "temporal_boundary_hit": 1.0,
     }
 
 
@@ -991,6 +997,286 @@ def test_citation_quality_keeps_legacy_source_chunk_format_compatible() -> None:
     assert metrics["citation_existence_hit"] == 1.0
     assert metrics["citation_support_score"] == 1.0
     assert metrics["citation_correctness_score"] == 1.0
+
+
+def test_citation_membership_does_not_overstate_required_source_contribution() -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "redis-required-source-contribution",
+            "expected_sources": ["official_redis_clients.md", "redis_postmortem.pdf"],
+            "required_source_roles": ["official", "postmortem"],
+            "required_answer_entities": [
+                "connected_clients",
+                "maxclients",
+                "effective_capacity",
+                "blocked_clients",
+            ],
+        },
+        retrieved_contexts=["official", "postmortem"],
+        retrieved_context_ids=["official_redis_clients.md", "redis_postmortem.pdf"],
+        reference_context_ids=["official_redis_clients.md", "redis_postmortem.pdf"],
+        answer=(
+            "官方限制说明 connected_clients 接近 maxclients。[证据 1]\n\n"
+            "引用来源：\n"
+            "- [证据 1] official_redis_clients.md#0004\n"
+            "- [证据 2] redis_postmortem.pdf#0002"
+        ),
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#0004",
+            },
+            {
+                "citation_index": 2,
+                "source_file": "redis_postmortem.pdf",
+                "chunk_id": "redis_postmortem.pdf#0002",
+            },
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "official_redis_clients.md",
+                    "chunk_id": "official_redis_clients.md#0004",
+                    "content": "connected_clients must stay below maxclients.",
+                },
+                {
+                    "source_file": "redis_postmortem.pdf",
+                    "chunk_id": "redis_postmortem.pdf#0002",
+                    "content": "Historical effective_capacity and blocked_clients evidence.",
+                },
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["citation_membership_score"] == 1.0
+    assert metrics["citation_support_score"] == metrics["citation_membership_score"]
+    assert metrics["required_source_contribution_score"] == 0.5
+
+
+def test_claim_support_requires_entity_binding_to_the_cited_evidence() -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "entity-binding",
+            "expected_source": "official_redis_clients.md",
+            "required_source_roles": ["official"],
+            "required_answer_entities": ["connected_clients", "maxclients"],
+        },
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["official_redis_clients.md"],
+        reference_context_ids=["official_redis_clients.md"],
+        answer=(
+            "maxclients 是配置限制。[证据 1]\n"
+            "connected_clients 已接近限制。"
+        ),
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#0004",
+            }
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "official_redis_clients.md",
+                    "chunk_id": "official_redis_clients.md#0004",
+                    "content": "The configured maxclients limit is documented here.",
+                }
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["claim_support_score"] == 0.5
+    assert metrics["entity_coverage_score"] == 1.0
+
+
+def test_claim_support_ignores_structural_markdown_headings() -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "structured-heading",
+            "expected_source": "official_redis_clients.md",
+            "required_answer_entities": ["maxclients"],
+        },
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["official_redis_clients.md"],
+        reference_context_ids=["official_redis_clients.md"],
+        answer="# Redis maxclients 诊断\nmaxclients 是配置限制。[证据 1]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#0004",
+            }
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "official_redis_clients.md",
+                    "chunk_id": "official_redis_clients.md#0004",
+                    "content": "The configured maxclients limit is documented here.",
+                }
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["claim_support_score"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "INC-REDIS-009 证明当前根因是 maxclients。[证据 1]",
+        "历史工单 INC-REDIS-009 证明 maxclients 是当前根因。[证据 1]",
+        (
+            "Historical ticket INC-REDIS-009 confirms maxclients is the current root cause. "
+            "[证据 1]"
+        ),
+        "历史工单不是 CPU 证据，因此 maxclients 是当前根因。[证据 1]",
+        (
+            "Historical ticket is not CPU evidence, therefore maxclients is the current root "
+            "cause. [证据 1]"
+        ),
+    ],
+)
+def test_ticket_claim_as_current_fact_fails_temporal_boundary(answer: str) -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "ticket-temporal-boundary",
+            "expected_source": "tickets.xlsx",
+            "required_source_roles": ["ticket"],
+            "required_answer_entities": ["INC-REDIS-009", "maxclients"],
+        },
+        retrieved_contexts=["historical ticket"],
+        retrieved_context_ids=["tickets.xlsx"],
+        reference_context_ids=["tickets.xlsx"],
+        answer=answer,
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "tickets.xlsx",
+                "chunk_id": "tickets.xlsx#redis-009",
+            }
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "tickets.xlsx",
+                    "chunk_id": "tickets.xlsx#redis-009",
+                    "content": "INC-REDIS-009 historical maxclients resolution.",
+                }
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["temporal_boundary_hit"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "历史工单尚不能确认 maxclients 是当前根因。[证据 1]",
+        (
+            "Historical ticket cannot confirm maxclients is the current root cause. "
+            "[证据 1]"
+        ),
+    ],
+)
+def test_historical_claim_that_rejects_current_fact_passes_temporal_boundary(
+    answer: str,
+) -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "safe-ticket-temporal-boundary",
+            "expected_source": "tickets.xlsx",
+            "required_source_roles": ["ticket"],
+            "required_answer_entities": ["maxclients"],
+        },
+        retrieved_contexts=["historical ticket"],
+        retrieved_context_ids=["tickets.xlsx"],
+        reference_context_ids=["tickets.xlsx"],
+        answer=answer,
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "tickets.xlsx",
+                "chunk_id": "tickets.xlsx#redis-009",
+            }
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "tickets.xlsx",
+                    "chunk_id": "tickets.xlsx#redis-009",
+                    "content": "Historical maxclients resolution.",
+                }
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["temporal_boundary_hit"] == 1.0
+
+
+def test_entity_coverage_requires_all_explicit_mysql_entities() -> None:
+    sample = RagasCaseSample(
+        case={
+            "id": "mysql-entity-coverage",
+            "expected_source": "payment_wiki.html",
+            "required_source_roles": ["runbook"],
+            "required_answer_entities": [
+                "pool_waiting",
+                "active_connections",
+                "慢查询",
+                "EXPLAIN",
+            ],
+        },
+        retrieved_contexts=["ctx"],
+        retrieved_context_ids=["payment_wiki.html"],
+        reference_context_ids=["payment_wiki.html"],
+        answer="先查看 slow_queries。[证据 1]",
+        answer_policy="answer_with_citations",
+        no_answer=False,
+        citations=[
+            {
+                "citation_index": 1,
+                "source_file": "payment_wiki.html",
+                "chunk_id": "payment_wiki.html#0003",
+            }
+        ],
+        retrieval={
+            "retrieval_results": [
+                {
+                    "source_file": "payment_wiki.html",
+                    "chunk_id": "payment_wiki.html#0003",
+                    "content": "Inspect slow_queries before deciding on changes.",
+                }
+            ]
+        },
+    )
+
+    metrics = citation_quality_scores(sample)
+
+    assert metrics["entity_coverage_score"] < 1.0
 
 
 def test_human_review_comparison_reports_agreement() -> None:

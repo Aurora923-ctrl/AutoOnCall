@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+from app.services.rag_answer_contract import build_answer_contract
+from app.services.rag_evidence_plan import build_frozen_generation_evidence
+from app.services.rag_question_plan import build_question_plan
 from scripts.eval.eval_rag_cases import (
     _strategy_case_payload,
     audit_case_set_isolation,
@@ -12,6 +15,24 @@ from scripts.eval.eval_rag_cases import (
     render_summary,
     search_offline,
 )
+
+
+def _contract_for_diagnosis_query(
+    query: str,
+    *,
+    required_sources: list[str],
+    retrieval_results: list[dict[str, str]],
+):
+    plan = build_question_plan(query)
+    frozen = build_frozen_generation_evidence(
+        plan,
+        {
+            "status": "success",
+            "required_sources": required_sources,
+            "retrieval_results": retrieval_results,
+        },
+    )
+    return plan, build_answer_contract(plan, frozen)
 
 
 def test_rag_cases_cover_core_runbook_types_and_rejection() -> None:
@@ -312,12 +333,16 @@ def test_search_offline_understands_alert_rule_and_symptom_paraphrases() -> None
         min_score=0.5,
     )
 
-    assert "official_prometheus_alerting_rules.md#0002" in {
-        item["chunk_id"] for item in rule_results
-    }
-    assert "official_prometheus_alerting_practices.md#0003" in {
-        item["chunk_id"] for item in practice_results
-    }
+    assert any(
+        item["source_file"] == "official_prometheus_alerting_rules.md"
+        and all(term in item["content"] for term in ("for", "labels", "annotations"))
+        for item in rule_results
+    )
+    assert any(
+        item["source_file"] == "official_prometheus_alerting_practices.md"
+        and all(term in item["content"] for term in ("症状", "用户影响", "原因"))
+        for item in practice_results
+    )
 
 
 def test_search_offline_prefers_explicit_ticket_document_type() -> None:
@@ -449,6 +474,83 @@ def test_search_offline_handles_enterprise_paraphrases() -> None:
         "payment_wiki.html",
         "mysql_slow_query_postmortem.pdf",
     } & {item["source_file"] for item in mysql}
+
+
+def test_redis_diagnosis_paraphrases_keep_contract_entities_without_action_slot() -> None:
+    retrieval_results = [
+        {
+            "source_file": "official_redis_clients.md",
+            "chunk_id": "official_redis_clients.md#0004",
+            "content": (
+                "connected_clients, maxclients, effective_capacity, and blocked_clients "
+                "are Redis capacity evidence."
+            ),
+        },
+        {
+            "source_file": "redis_postmortem.pdf",
+            "chunk_id": "redis_postmortem.pdf#0002",
+            "content": (
+                "Historical postmortem: connected_clients, maxclients, effective_capacity, "
+                "and blocked_clients."
+            ),
+        },
+    ]
+    expected_entities = {
+        "connected_clients",
+        "maxclients",
+        "effective_capacity",
+        "blocked_clients",
+    }
+
+    for query in (
+        "Redis connected_clients 接近 maxclients，怎样结合官方限制和事故复盘判断容量风险？",
+        (
+            "Redis connected_clients 逼近 maxclients 时，如何依据官方文档与 "
+            "postmortem 定位连接容量风险？"
+        ),
+    ):
+        plan, contract = _contract_for_diagnosis_query(
+            query,
+            required_sources=["official_redis_clients.md", "redis_postmortem.pdf"],
+            retrieval_results=retrieval_results,
+        )
+
+        assert set(plan.explicit_entities) == expected_entities
+        assert {slot.subgoal_id for slot in contract.slots}.isdisjoint({"boundary"})
+        assert all(set(slot.required_entities) == expected_entities for slot in contract.slots)
+
+
+def test_mysql_diagnosis_paraphrases_keep_contract_entities_without_action_slot() -> None:
+    retrieval_results = [
+        {
+            "source_file": "payment_wiki.html",
+            "chunk_id": "payment_wiki.html#0003",
+            "content": (
+                "Use EXPLAIN with pool_waiting, active_connections, and 慢查询 evidence "
+                "for payment-service."
+            ),
+        }
+    ]
+    expected_entities = {
+        "pool_waiting",
+        "active_connections",
+        "慢查询",
+        "EXPLAIN",
+    }
+
+    for query in (
+        "MySQL 的 pool_waiting 和 active_connections 上升，如何排查慢查询？",
+        "出现 MySQL 慢查询，怎么排查 pool_waiting 与 active_connections？",
+    ):
+        plan, contract = _contract_for_diagnosis_query(
+            query,
+            required_sources=["payment_wiki.html"],
+            retrieval_results=retrieval_results,
+        )
+
+        assert set(plan.explicit_entities) == expected_entities
+        assert {slot.subgoal_id for slot in contract.slots}.isdisjoint({"boundary"})
+        assert all(set(slot.required_entities) == expected_entities for slot in contract.slots)
 
 
 def test_rag_eval_case_failure_identifies_failed_metric() -> None:
