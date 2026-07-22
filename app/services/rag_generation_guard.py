@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.rag_answer_contract import AnswerContract, build_answer_contract
 from app.services.rag_answer_policy import (
     build_citation_guard_payload,
     build_generation_evidence,
@@ -17,6 +18,11 @@ from app.services.rag_answer_policy import (
     remove_generic_uncertainty_boilerplate,
     select_supporting_citations,
 )
+from app.services.rag_evidence_plan import (
+    FrozenGenerationEvidence,
+    build_frozen_generation_evidence,
+)
+from app.services.rag_question_plan import build_question_plan
 from app.services.rag_read_models import build_citations, compact_retrieval_payload
 
 
@@ -27,6 +33,8 @@ class GenerationPreparation:
     refusal_answer: str = ""
     refusal_context: dict[str, Any] | None = None
     refusal_policy: str = ""
+    frozen_evidence: FrozenGenerationEvidence | None = None
+    answer_contract: AnswerContract | None = None
 
     @property
     def refused(self) -> bool:
@@ -46,10 +54,28 @@ def prepare_grounded_generation(
     retrieval_payload: dict[str, Any],
 ) -> GenerationPreparation:
     """Build bounded generation evidence and apply the pre-generation citation gate."""
-    generation_evidence = build_generation_evidence(
+    question_plan = build_question_plan(str(retrieval_payload.get("query") or ""))
+    bounded_evidence = build_generation_evidence(
         retrieval_payload,
         select_excerpts=False,
     )
+    planning_payload = {
+        **retrieval_payload,
+        "retrieval_results": bounded_evidence,
+        "generation_allowlist": [
+            {
+                "source_file": str(item.get("source_file") or ""),
+                "chunk_id": str(item.get("chunk_id") or ""),
+            }
+            for item in bounded_evidence
+        ],
+    }
+    frozen_evidence = build_frozen_generation_evidence(
+        question_plan,
+        planning_payload,
+    )
+    generation_evidence = list(frozen_evidence.items)
+    answer_contract = build_answer_contract(question_plan, frozen_evidence)
     if retrieval_payload.get("required_sources") and not generation_evidence:
         guarded_payload = build_citation_guard_payload(retrieval_payload)
         return GenerationPreparation(
@@ -71,6 +97,8 @@ def prepare_grounded_generation(
             ),
             refusal_context=compact_retrieval_payload(guarded_payload),
             refusal_policy="refuse_without_trusted_source",
+            frozen_evidence=frozen_evidence,
+            answer_contract=answer_contract,
         )
 
     generation_payload = {
@@ -83,12 +111,16 @@ def prepare_grounded_generation(
             }
             for item in generation_evidence
         ],
+        "_frozen_generation_evidence": frozen_evidence,
+        "_answer_contract": answer_contract,
     }
     citations = build_citations(generation_payload)
     if has_valid_citations(citations):
         return GenerationPreparation(
             generation_payload=generation_payload,
             citations=citations,
+            frozen_evidence=frozen_evidence,
+            answer_contract=answer_contract,
         )
 
     guarded_payload = build_citation_guard_payload(retrieval_payload)
@@ -98,6 +130,8 @@ def prepare_grounded_generation(
         refusal_answer=build_missing_citation_message(),
         refusal_context=compact_retrieval_payload(guarded_payload),
         refusal_policy="refuse_without_citation",
+        frozen_evidence=frozen_evidence,
+        answer_contract=answer_contract,
     )
 
 
