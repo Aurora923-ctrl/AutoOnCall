@@ -1,83 +1,70 @@
-# 服务响应时间过长告警处理方案
+# 服务慢响应与超时诊断 Runbook
 
-## 适用范围
+## 文档元数据
 
-- 告警：`SlowResponse`、`ServiceTimeout`
-- 典型信号：P95/P99 超过服务 SLO、请求排队、超时或吞吐下降
-- Owner：对应服务团队；涉及数据库时升级 DBA
+- 适用范围：P95/P99 超过 SLO、请求排队、超时、吞吐下降或用户感知明显变慢，包括外部API超时、缓存穿透和数据库连接池等待。
+- Owner：服务 Owner；涉及数据库时升级 DBA
+- 最后复核：2026-07-21
+- 关联工单：`OPS-LATENCY-RUNBOOK`
+- 自动化边界：默认只允许读操作、证据汇总、dry-run 和变更计划生成。
 
-阈值使用服务 SLO 和历史基线。地域、集群、日志主题与时间窗口从 Incident 上下文读取。
+## 事件入口与影响确认
 
-## 首轮证据
+固定延迟窗口后，用 trace 将总耗时拆成应用执行、数据库、缓存、外部 API、DNS/TLS、线程池排队和序列化，并按 route、release 与实例对比 P50/P95/P99。pool_waiting 与SQL hold time 同升时优先慢 SQL 或锁；线程队列增长且下游 span 变长时优先下游阻塞。资源指标只能解释伴随压力，不能替代分段耗时证据。
 
-1. 固定 Incident 时间窗口并确认受影响接口、租户和实例。
-2. 查询 P50/P95/P99、吞吐、错误率、队列长度和超时阶段。
-3. 分解应用耗时、数据库、缓存、外部 API、网络和序列化时间。
-4. 关联最近发布、配置、流量和依赖变更。
-5. 保存 trace、慢查询 digest、连接池等待和 profiler 摘要。
+## 首轮证据清单
 
-```text
-metrics: request_duration, request_rate, error_rate, queue_depth, pool_waiting
-logs: response_time OR slow_query OR upstream_timeout OR lock_wait
-traces: group by endpoint, downstream, release, status
+- P50/P95/P99、QPS、错误率、队列长度、线程池和数据库连接池等待
+- trace 中应用、数据库、缓存、外部 API、DNS/TLS 和序列化分段耗时
+- 数据库慢查询、SQL digest、锁等待、慢命令、最近发布、配置和流量变化
+
+所有证据必须带查询时间、时间范围、数据源和筛选条件。历史工单只能支持假设，不能替代当前
+Incident 的实时证据。
+
+## 指标查询
+
+以下查询是模板，标签值必须来自 Incident 上下文：
+
+```promql
+histogram_quantile(0.95, sum by (le, service, route) (rate(http_request_duration_seconds_bucket[5m])))
+sum by (service) (application_db_pool_waiting)
+sum by (downstream) (rate(client_request_duration_seconds_sum[5m]))
 ```
 
-## 原因判别
+查询结果需与事件前基线、未受影响实例和最近发布进行对照，避免只看峰值。
 
-### 数据库慢查询
+## 日志与事件模式
 
-数据库慢查询数量、连接持有时间和数据库连接池、pool_waiting 同时上升时，优先捕获 SQL digest，并通过批准的
-只读路径查看 `EXPLAIN`。CPU 升高可能是等待、重试或结果处理的伴随现象。
+- `slow query、pool acquire timeout、lock wait、upstream timeout`
+- `retry exhausted、queue full、task rejected、cache miss storm`
 
-添加索引、改写 SQL、终止会话或调整连接池都需要变更计划。未经评估直接扩大连接池可能让
-数据库更快达到连接上限。
+按 release、instance、endpoint、downstream 和 error type 聚合。保留代表性样本及总量，
+不要把单条错误日志当作根因结论。
 
-### 外部 API 超时
+## 假设排除与决策树
 
-检查外部API、第三方 API 的 DNS、TLS、connect、first-byte 和 read 阶段耗时，区分网络问题、下游过载和客户端超时
-配置。熔断、降级和超时调整需要业务边界与回滚条件。
+1. 数据库慢查询、SQL digest、连接持有和 pool_waiting 同时升高：只读获取 EXPLAIN，转入慢 SQL 或锁等待 Runbook。
+2. 外部 API 慢：拆分 DNS、connect、TLS、first-byte 和 read 阶段。
+3. 缓存命中率下降且数据库 QPS 上升：检查批量失效、穿透、热点 key 和 TTL。
+4. 线程池队列增长：获取线程栈并确认阻塞点，禁止默认扩大线程池。
 
-### 缓存失效或缓存穿透
-
-缓存命中率下降且数据库 QPS 上升时，检查缓存穿透、批量失效、热点 key、空值缓存和请求参数。预热或
-修改 TTL 可能引发流量尖峰，应先做小范围验证。
-
-### 代码热点与线程池
-
-APM 或火焰图显示单一路径耗时时，检查锁竞争、同步等待、序列化、大对象和线程池排队。线程池
-扩容可能增加依赖并发，不应脱离下游容量单独调整。
-
-### 资源或网络
-
-CPU、内存、磁盘 IO、带宽或丢包异常时，确认它们发生在延迟上升之前还是之后。相关性必须
-通过同一时间窗口和对照实例验证。
+每个假设都要记录“支持证据、反证、缺失证据和置信度”。无法区分时继续采集最小成本的
+只读证据，不通过高风险动作试错。
 
 ## 处置计划与审批
 
-先选择最小、可逆的动作，例如关闭高成本功能、回滚单一发布、降低重试、限制异常调用方或
-小比例扩容。计划必须包含基线、canary、预期改善、下游容量、回滚步骤和观察时长。
+候选动作包括：添加索引、改写 SQL、终止会话、调整连接池或线程池、缓存、超时、限流、降级或回滚。执行前生成变更计划，至少包含证据链接、预期收益、
+影响范围、风险、执行人、审批人、canary 比例、观察时长、验证查询和回滚步骤。任何生产写
+操作必须经过人工审批；AutoOnCall 不自动执行不可逆或扩大故障面的动作。
 
-扩容、限流、降级、添加索引、调整连接池、缓存或超时配置均需人工审批或安全变更 dry-run。
+## 回滚与恢复判定
 
-## 回滚条件
+索引、SQL、连接池、线程池、缓存、超时、限流、降级或版本回滚都必须先验证一个 canary。若 P95/P99、错误率、队列、锁等待、缓存穿透、下游错误或连接数恶化，立即恢复原配置或版本。恢复需要目标 route 延迟回到 SLO，pool_waiting、慢查询、线程队列和下游超时恢复，吞吐无异常下降，并完成端到端业务校验。Owner 记录 trace 样本、查询时间和 `OPS-LATENCY-RUNBOOK` 的观察结论。
 
-- P95/P99、错误率或队列继续恶化；
-- 数据库连接、锁等待、缓存或下游错误率上升；
-- canary 没有优于对照组；
-- 数据完整性、幂等性或核心业务校验失败。
+## 长期行动项
 
-## 恢复验证
+- 建立 endpoint、release 和 downstream 延迟预算
+- 为数据库慢查询、SQL digest、连接持有和线程阻塞建立回归
+- 统一重试、线程池与连接池并发预算
 
-- P95/P99 回到服务 SLO，且吞吐没有异常下降；
-- pool_waiting、慢查询、外部超时和队列恢复；
-- 依赖容量与错误率稳定；
-- 核心接口通过端到端验证；
-- 持续观察约定窗口并记录审批与执行结果。
-
-## 长期行动
-
-- 建立按 endpoint、release 和 downstream 的延迟预算；
-- 为慢查询 digest 和连接持有时间建立回归；
-- 对重试、线程池和连接池建立统一并发预算；
-- 通过压测验证缓存失效和依赖降级；
-- 将 trace、日志、指标和发布历史关联到同一 Incident。
+行动项必须记录 Owner、截止日期、验收方式和关联工单；完成后回写本 Runbook 的更新时间。

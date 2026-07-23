@@ -56,6 +56,40 @@ def test_retrieval_payload_exposes_honest_stage_observations() -> None:
     assert observation["runtime"]["embedding_model"]
 
 
+def test_runtime_default_retrieval_marks_milvus_backend(monkeypatch) -> None:
+    class RuntimeVectorStore(FakeVectorStore):
+        pass
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        lambda: RuntimeVectorStore(),
+    )
+    payload = retrieve_structured_knowledge("Redis maxclients", top_k=1)
+
+    assert payload["vector_backend"] == "milvus"
+    assert payload["retrieval_backend"] == "milvus"
+    assert payload["observability"]["runtime"]["vector_backend"] == "milvus"
+    assert payload["observability"]["stages"]["milvus_search_ms"] >= 0
+
+
+def test_runtime_failure_preserves_milvus_backend_and_error(monkeypatch) -> None:
+    def unavailable():
+        raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        unavailable,
+    )
+
+    payload = retrieve_structured_knowledge("Redis maxclients", top_k=1)
+
+    assert payload["status"] == "failed"
+    assert payload["vector_backend"] == "milvus"
+    assert payload["retrieval_backend"] == "milvus"
+    assert payload["vector_error_type"] == "RuntimeError"
+    assert payload["observability"]["runtime"]["retrieval_backend"] == "milvus"
+
+
 def test_retrieval_observability_distinguishes_hits_from_unique_candidates() -> None:
     shared = Document(
         page_content="Redis maxclients connection timeout runbook",

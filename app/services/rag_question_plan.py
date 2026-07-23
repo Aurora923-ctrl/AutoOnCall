@@ -23,6 +23,7 @@ class QuestionPlan:
     explicit_entities: tuple[str, ...]
     subgoals: tuple[AnswerSubgoal, ...]
     max_claims: int
+    off_topic_entities: tuple[str, ...] = ()
 
 
 _DOMAIN_DEFINITIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
@@ -30,6 +31,11 @@ _DOMAIN_DEFINITIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = 
         "mysql",
         ("mysql", "慢查询", "pool_waiting", "active_connections"),
         ("pool_waiting", "active_connections", "慢查询"),
+    ),
+    (
+        "dependency",
+        ("依赖", "下游", "upstream", "downstream", "mq", "503", "5xx"),
+        ("依赖", "下游"),
     ),
     (
         "redis",
@@ -70,6 +76,15 @@ _DIAGNOSIS_MARKERS = (
 )
 _TEMPORAL_MARKERS = ("历史", "当前", "实时", "事故窗口", "incident-window", "复盘", "工单", "部署", "发布")
 _SERVICE_PATTERN = re.compile(r"\b[\w-]+-service\b", re.IGNORECASE)
+
+_DOMAIN_ENTITY_MARKERS: dict[str, tuple[str, ...]] = {
+    "mysql": ("redis", "kubernetes", "pod", "loki", "dns", "mq"),
+    "redis": ("mysql", "pool_waiting", "active_connections", "kubernetes", "pod", "loki"),
+    "memory": ("redis", "mysql", "pool_waiting", "loki", "dns"),
+    "kubernetes": ("redis", "mysql", "pool_waiting", "loki", "dns"),
+    "loki": ("redis", "mysql", "pool_waiting", "pod", "dns"),
+    "dns": ("redis", "mysql", "pool_waiting", "pod", "loki"),
+}
 
 
 def build_question_plan(query: str) -> QuestionPlan:
@@ -127,7 +142,19 @@ def build_question_plan(query: str) -> QuestionPlan:
         subgoals.append(AnswerSubgoal("evidence", "evidence", tuple(entities), ()))
 
     max_claims = 5 if _is_redis_capacity_question(domain, normalized_query) else 3
-    return QuestionPlan(raw_query, domain, tuple(entities), tuple(subgoals), max_claims)
+    off_topic_entities = tuple(
+        marker
+        for marker in _DOMAIN_ENTITY_MARKERS.get(domain, ())
+        if marker in normalized_query
+    )
+    return QuestionPlan(
+        raw_query,
+        domain,
+        tuple(entities),
+        tuple(subgoals),
+        max_claims,
+        off_topic_entities,
+    )
 
 
 def entities_for_subgoal(plan: QuestionPlan, subgoal_id: str) -> tuple[str, ...]:

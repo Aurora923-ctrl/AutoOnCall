@@ -209,12 +209,43 @@ def answer_topic_focus(query: str, answer: str) -> dict[str, Any]:
     answer_terms = set(_topic_terms(str(answer or "")))
     matched = sorted(query_terms & answer_terms)
     missing = sorted(query_terms - answer_terms)
+    plan = build_question_plan(query)
+    explicit_matches = [
+        entity
+        for entity in plan.explicit_entities
+        if _contains_entity(answer, entity)
+    ]
     return {
         "query_terms": sorted(query_terms),
         "matched_terms": matched,
         "missing_terms": missing,
-        "focused": not query_terms or bool(matched),
+        "explicit_entities": list(plan.explicit_entities),
+        "matched_explicit_entities": explicit_matches,
+        "focused": (
+            not query_terms
+            or bool(matched)
+        )
+        and (
+            not plan.explicit_entities
+            or bool(explicit_matches)
+            or plan.domain in {"general", "dependency"}
+            or (
+                plan.domain == "dependency"
+                and any(
+                    marker in str(answer or "").casefold()
+                    for marker in ("依赖", "下游", "upstream", "downstream", "mq", "redis")
+                )
+            )
+        ),
     }
+
+
+def _contains_entity(text: str, entity: str) -> bool:
+    normalized = str(text or "").casefold()
+    candidate = str(entity or "").casefold()
+    if not candidate:
+        return False
+    return candidate in normalized
 
 
 def _topic_terms(text: str) -> list[str]:

@@ -169,3 +169,21 @@ def test_contract_rejects_change_template_split_across_lines() -> None:
     )
 
     assert any(item.code == "unrequested_change_template" for item in violations)
+
+
+def test_contract_reports_off_topic_entity() -> None:
+    contract = AnswerContract(
+        slots=(AnswerSlot("evidence", (), (1,), ()),),
+        max_claims=3,
+        off_topic_entities=("redis",),
+    )
+    violations = validate_answer_contract(
+        "- Check Redis connected_clients. [证据 1]",
+        contract,
+        [{"citation_index": 1, "source_file": "runbook.md", "chunk_id": "chunk-1"}],
+    )
+
+    assert any(
+        item.code == "off_topic_entity" and item.detail == "redis"
+        for item in violations
+    )

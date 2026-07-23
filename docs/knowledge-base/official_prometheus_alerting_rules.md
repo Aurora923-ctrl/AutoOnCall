@@ -3,118 +3,74 @@ Upstream: https://github.com/prometheus/prometheus/blob/2cf323988931bd586a2ab251
 Upstream revision: 2cf323988931bd586a2ab25160e46bcace9398ae
 Retrieved: 2026-07-21
 License: Apache-2.0
-Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+Transformation: retrieval-focused operational summary; upstream attribution preserved
 -->
 
-Alerting rules allow you to define alert conditions based on Prometheus
-expression language expressions and to send notifications about firing alerts
-to an external service. Whenever the alert expression results in one or more
-vector elements at a given point in time, the alert counts as active for these
-elements' label sets.
+# Prometheus 官方告警规则语义 - RAG 操作快照
 
-## Defining alerting rules
+## 适用范围
 
-Alerting rules are configured in Prometheus in the same way as recording
-rules.
+理解 alert expression、pending/firing、for、keep_firing_for、labels 和 annotations。
 
-An example rules file with an alert would be:
+本快照面向 AutoOnCall 事故诊断，只保留可用于分流、证据采集和风险判断的上游知识。需要完整
+参数、版本差异或边缘行为时，应回到上游固定 revision 核对。
 
-```yaml
-groups:
-- name: example
-  labels:
-    team: myteam
-  rules:
-  - alert: HighRequestLatency
-    expr: job:request_latency_seconds:mean5m{job="myjob"} > 0.5
-    for: 10m
-    keep_firing_for: 5m
-    labels:
-      severity: page
-    annotations:
-      summary: High request latency
-```
+Owner 为 SRE Observability 与当前 Incident 服务 Owner；最后复核时间为 2026-07-21；
+适用版本以 Upstream revision 为准。关联问题需在内部 Incident 或变更工单中记录本快照版本。
 
-The optional `for` clause causes Prometheus to wait for a certain duration
-between first encountering a new expression output vector element and counting
-an alert as firing for this element. In this case, Prometheus will check that
-the alert continues to be active during each evaluation for 10 minutes before
-firing the alert. Elements that are active, but not firing yet, are in the pending state.
-Alerting rules without the `for` clause will become active on the first evaluation.
+## 最小证据集
 
-There is also an optional `keep_firing_for` clause that tells Prometheus to keep
-this alert firing for the specified duration after the firing condition was last met.
-This can be used to prevent situations such as flapping alerts, false resolutions
-due to lack of data loss, etc. Alerting rules without the `keep_firing_for` clause
-will deactivate on the first evaluation where the condition is not met (assuming
-any optional `for` duration described above has been satisfied).
+- 表达式在历史窗口的结果与基线
+- pending、firing、resolved 状态转换
+- 规则评估错误、模板错误和 Alertmanager 接收情况
 
-The `labels` clause allows specifying a set of additional labels to be attached
-to the alert. Any existing conflicting labels will be overwritten. The label
-values can be templated.
+证据必须来自同一 Incident 时间窗口，并与健康实例或事件前基线比较。
 
-The `annotations` clause specifies a set of informational labels that can be used to store longer additional information such as alert descriptions or runbook links. The annotation values can be templated.
-
-### Templating
-
-Label and annotation values can be templated using [console
-templates](https://prometheus.io/docs/visualization/consoles).  The `$labels`
-variable holds the label key/value pairs of an alert instance. The configured
-external labels can be accessed via the `$externalLabels` variable. The
-`$value` variable holds the evaluated value of an alert instance.
-
-    # To insert a firing element's label values:
-    {{ $labels.<labelname> }}
-    # To insert the numeric expression value of the firing element:
-    {{ $value }}
-
-Examples:
+## 可执行查询与判据
 
 ```yaml
-groups:
-- name: example
-  rules:
-
-  # Alert for any instance that is unreachable for >5 minutes.
-  - alert: InstanceDown
-    expr: up == 0
-    for: 5m
-    labels:
-      severity: page
-    annotations:
-      summary: "Instance {{ $labels.instance }} down"
-      description: "{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 5 minutes."
-
-  # Alert for any instance that has a median request latency >1s.
-  - alert: APIHighRequestLatency
-    expr: api_http_request_latencies_second{quantile="0.5"} > 1
-    for: 10m
-    annotations:
-      summary: "High request latency on {{ $labels.instance }}"
-      description: "{{ $labels.instance }} has a median request latency above 1s (current value: {{ $value }}s)"
+- alert: ServiceHighErrorRate
+  expr: service:http_5xx_ratio:rate5m > 0.02
+  for: 10m
+  labels: {severity: page, owner: payments}
+  annotations: {runbook_url: "<internal-runbook>"}
 ```
+```bash
+promtool check rules <rules-file>
+promtool test rules <test-file>
+```
+判据：语法、表达式结果、标签路由和 Alertmanager 接收必须分别验证；规则发布保留旧版本、canary group 与回滚 commit。关联工单：`KB-PROM-RULES`。
 
-## Inspecting alerts during runtime
+## 诊断工作流
 
-To manually inspect which alerts are active (pending or firing), navigate to
-the "Alerts" tab of your Prometheus instance. This will show you the exact
-label sets for which each defined alert is currently active.
+1. 先在查询界面验证 expr 和标签基数。
+2. 使用 for 过滤短暂抖动，并验证不会掩盖快速故障。
+3. keep_firing_for 用于减少短暂恢复引发的反复通知。
+4. labels 用于路由和归属，annotations 提供摘要、dashboard 与 runbook。
+5. 用 promtool 和历史回放验证规则。
 
-For pending and firing alerts, Prometheus also stores synthetic time series of
-the form `ALERTS{alertname="<alert name>", alertstate="<pending or firing>", <additional alert labels>}`.
-The sample value is set to `1` as long as the alert is in the indicated active
-(pending or firing) state, and the series is marked stale when this is no
-longer the case.
+官方文档提供产品行为和排查方法，不证明当前 Incident 的根因。历史经验、单条日志和当前
+健康检查不能替代同窗口证据链。本快照的判定对象是“理解 alert expression、pending/firing、for、keep_firing_for、labels 和 annotations。”。
+形成结论前至少完成“先在查询界面验证 expr 和标签基数。”，并记录支持证据、反证、缺失证据和置信度；
+无法区分时继续采集只读证据，不通过生产写操作试错。
 
-## Sending alert notifications
+## AutoOnCall 审批边界
 
-Prometheus's alerting rules are good at figuring what is broken *right now*, but
-they are not a fully-fledged notification solution. Another layer is needed to
-add summarization, notification rate limiting, silencing and alert dependencies
-on top of the simple alert definitions. In Prometheus's ecosystem, the
-[Alertmanager](https://prometheus.io/docs/alerting/alertmanager/) takes on this
-role. Thus, Prometheus may be configured to periodically send information about
-alert states to an Alertmanager instance, which then takes care of dispatching
-the right notifications.
-Prometheus can be configured to automatically discover available
-Alertmanager instances through its service discovery integrations.
+修改阈值、for、路由标签或 keep_firing_for 需告警 Owner 审批并保留回滚版本。
+
+变更计划必须包含 approver、canary 范围、验证查询、观察时长和 rollback 条件。Agent 只生成
+只读查询、证据摘要、候选假设和变更计划，不自动执行生产写操作。
+
+## 恢复验证
+
+恢复结论需要同时验证原始错误消失、用户侧或调用侧恢复、产品组件指标回到基线，并在约定
+观察窗口内无复发。对本主题至少复查：表达式在历史窗口的结果与基线；pending、firing、resolved 状态转换。每项验证都要保留查询时间、
+筛选条件、结果摘要和 Owner。若 canary 未优于对照组，或错误率、延迟、资源消耗继续恶化，
+应按已审批计划 rollback，不能把一次成功探测当作稳定恢复。
+
+## 引用信息
+
+- Source URL：`https://github.com/prometheus/prometheus/blob/2cf323988931bd586a2ab25160e46bcace9398ae/docs/configuration/alerting_rules.md`
+- Upstream revision：`2cf323988931bd586a2ab25160e46bcace9398ae`
+- License：Apache-2.0
+- Snapshot updated：2026-07-21

@@ -120,7 +120,11 @@ async def test_chat_persists_local_live_request_summary(monkeypatch) -> None:
             "citations": [{"source_file": "redis.md", "chunk_id": "redis.md#0001"}],
             "retrieval": {"status": "success"},
             "observability": {
-                "runtime": {"llm_model": "qwen-max"},
+                "runtime": {
+                    "llm_model": "qwen-max",
+                    "retrieval_backend": "milvus",
+                },
+                "stages": {"milvus_search_ms": 12.5},
                 "token_usage": {"input_tokens": 10, "output_tokens": 4},
             },
             "no_answer": False,
@@ -148,6 +152,8 @@ async def test_chat_persists_local_live_request_summary(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert captured[0]["event_type"] == "request_complete"
+    assert captured[0]["metadata"]["retrieval_backend"] == "milvus"
+    assert captured[0]["metadata"]["retrieval_query_ms"] == 12.5
     assert captured[0]["status"] == "success"
     assert captured[0]["latency_ms"] >= 0
     assert captured[0]["metadata"]["request_id"] == "rag-live-summary"

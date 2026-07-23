@@ -24,6 +24,7 @@ class AnswerContract:
     slots: tuple[AnswerSlot, ...]
     max_claims: int
     citation_source_roles: tuple[tuple[int, str], ...] = ()
+    off_topic_entities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,7 @@ def build_answer_contract(
         slots=slots,
         max_claims=plan.max_claims,
         citation_source_roles=citation_source_roles,
+        off_topic_entities=plan.off_topic_entities,
     )
 
 
@@ -223,6 +225,15 @@ def validate_answer_contract(
                 ContractViolation(
                     "unrequested_change_template",
                     detail=change_candidate,
+                )
+            )
+
+    for entity in contract.off_topic_entities:
+        if _contains_entity("\n".join(line.text for line in valid_claims), entity):
+            violations.append(
+                ContractViolation(
+                    "off_topic_entity",
+                    detail=entity,
                 )
             )
 

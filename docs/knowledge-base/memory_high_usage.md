@@ -1,86 +1,70 @@
-# 内存使用率过高告警处理方案
+# 内存压力、OOM 与 GC 诊断 Runbook
 
-## 适用范围
+## 文档元数据
 
-- 告警：`HighMemoryUsage`、`OOMKilled`、`FrequentGC`
-- 适用对象：容器、JVM、Python/Go 服务和主机进程
-- Owner：运行平台与对应服务团队
+- 适用范围：容器、JVM、Python/Go 服务或主机进程出现 working set 增长、OOMKilled、频繁 GC 或 swap 压力。
+- Owner：运行平台与服务 Owner
+- 最后复核：2026-07-21
+- 关联工单：`OPS-MEMORY-RUNBOOK`
+- 自动化边界：默认只允许读操作、证据汇总、dry-run 和变更计划生成。
 
-阈值应来自服务容量基线、容器 limit 和历史趋势。地域、集群、日志主题与实例标识从 Incident
-上下文读取，不在 Runbook 中硬编码。
+## 事件入口与影响确认
 
-## 首轮证据
+固定内存事故窗口后，区分容器 working set、RSS、JVM heap、节点可用内存与 swap，并保存 OOMKilled、kernel OOM、GC pause 和 restart 时间线。Full GC 后仍持续增长更支持泄漏；流量下降后内存回落更支持负载或批量对象。heap dump、pprof 和 core 文件可能带来 IO、容量和敏感数据风险，必须先估算大小、脱敏和保留位置。
 
-1. 固定 Incident 时间窗口和受影响实例。
-2. 查询 RSS、working set、container limit、swap、OOM kill、重启次数和请求量。
-3. JVM 服务补充 heap、metaspace、GC 次数、暂停时长和 GC 后存活量。
-4. 记录内存增长斜率，区分突增、阶梯增长和持续泄漏。
-5. 在资源允许时先保存 heap dump、GC 日志或 profile，再提出重启计划。
+## 首轮证据清单
 
-```text
-metrics: memory_working_set, memory_limit, oom_kill, restart_count, gc_pause, heap_used
-logs: OutOfMemoryError OR OOMKilled OR "GC overhead" OR allocation_failure
+- RSS、working set、容器 limit、swap、OOM kill、restart count
+- JVM heap、metaspace、GC 次数、暂停时长和 GC 后存活量
+- 内存增长斜率、对象分配、缓存体积、流量和批量请求大小
+
+所有证据必须带查询时间、时间范围、数据源和筛选条件。历史工单只能支持假设，不能替代当前
+Incident 的实时证据。
+
+## 指标查询
+
+以下查询是模板，标签值必须来自 Incident 上下文：
+
+```promql
+container_memory_working_set_bytes / container_spec_memory_limit_bytes
+increase(kube_pod_container_status_restarts_total[30m])
+rate(jvm_gc_pause_seconds_sum[5m]) / rate(jvm_gc_pause_seconds_count[5m])
 ```
 
-## 原因判别
+查询结果需与事件前基线、未受影响实例和最近发布进行对照，避免只看峰值。
 
-### 内存泄漏
+## 日志与事件模式
 
-Full GC 后占用仍不下降，且随运行时间持续增长时，优先怀疑泄漏。保留堆转储并用 MAT、jcmd
-或语言 profiler 查找 dominator、异常集合和引用链。重启只能止损，不能证明根因。
+- `OutOfMemoryError、OOMKilled、GC overhead、allocation failure`
+- `heap dump failure、memory limit exceeded、kernel oom`
 
-### 流量与大对象
+按 release、instance、endpoint、downstream 和 error type 聚合。保留代表性样本及总量，
+不要把单条错误日志当作根因结论。
 
-内存随请求量同步突增、流量下降后可回收时，检查请求体、批量查询、序列化和大对象分配。
-优先考虑流式处理、批次上限和背压。
+## 假设排除与决策树
 
-### 缓存失控
+1. Full GC 后占用仍持续增长：优先怀疑泄漏，保留 heap/profile 再提出重启计划。
+2. 内存随流量突增且流量下降后回收：检查批量大小、序列化、大对象和背压。
+3. 缓存体积增长或 TTL 缺失：评估穿透和数据库冲击，禁止直接清空缓存。
+4. 容器 limit 或 JVM 参数不匹配：基于容量和 GC 证据制定 canary 配置变更。
 
-缓存体积增长、命中率低或 TTL 缺失时，检查 key 数量、对象大小、淘汰策略和租户隔离。清空
-缓存可能导致穿透和数据库冲击，必须先评估影响。
-
-### JVM 或容器配置
-
-检查 `-Xmx`、metaspace、GC 算法、容器 limit 和 JVM 容器感知配置。只增加内存可能延后 OOM
-并扩大单次 GC 暂停，配置变更需要容量依据。
-
-## 只读取证命令
-
-```bash
-jcmd <pid> GC.heap_info
-jcmd <pid> GC.class_histogram
-jstat -gc <pid> 1000
-```
-
-生成 heap dump 可能带来暂停和磁盘压力。执行前必须确认剩余磁盘、敏感数据处理方式和审批
-要求，产物应写入受控 Artifact 目录。
+每个假设都要记录“支持证据、反证、缺失证据和置信度”。无法区分时继续采集最小成本的
+只读证据，不通过高风险动作试错。
 
 ## 处置计划与审批
 
-重启实例、扩容、限流、调整 JVM 参数、修改容器 limit 或清理缓存前，先生成变更计划。计划
-必须包含现场是否已保留、canary 范围、预期内存曲线、下游风险和回滚条件，并由人工审批。
+候选动作包括：生成 dump、重启、扩容、限流、调整 JVM 参数、容器 limit 或缓存策略。执行前生成变更计划，至少包含证据链接、预期收益、
+影响范围、风险、执行人、审批人、canary 比例、观察时长、验证查询和回滚步骤。任何生产写
+操作必须经过人工审批；AutoOnCall 不自动执行不可逆或扩大故障面的动作。
 
-优先采用单实例摘流或小比例 canary，避免同时重启所有副本。
+## 回滚与恢复判定
 
-## 回滚条件
+dump、重启、扩容、JVM 参数、容器 limit 或缓存策略变更必须经审批并从 canary 开始。若 GC pause、OOM 循环、磁盘占用、错误率、P95 或数据库 QPS 恶化，立即恢复原参数、limit 或版本，并停止继续采样。恢复需要 working set 和 GC 后存活量回到基线，无新增 OOMKilled，核心接口和数据一致性验证通过，且 30 分钟内内存斜率不再异常。Owner记录 dump hash、存储位置、删除期限和 `OPS-MEMORY-RUNBOOK`。
 
-- canary 重启或参数变更后 GC 暂停、错误率或延迟恶化；
-- OOM、重启循环或磁盘压力增加；
-- 缓存变更导致数据库 QPS 或连接池等待突增；
-- 内存下降但核心功能或数据一致性检查失败。
+## 长期行动项
 
-## 恢复验证
+- 建立 GC 后存活量和内存增长斜率告警
+- 对上传、批处理和缓存设置大小上限
+- 建立 dump 脱敏、保留和清理规范
 
-- working set 与 heap 回到服务基线并保持稳定；
-- 无新增 OOM、重启循环或长时间 GC；
-- P95/P99、错误率和吞吐恢复；
-- heap dump、日志和审批记录可追溯；
-- 至少观察一个业务高峰或约定的稳定窗口。
-
-## 长期行动
-
-- 建立内存增长斜率和 GC 后存活量告警；
-- 对上传、批处理和缓存设置大小上限；
-- 在压测中覆盖长时间运行和泄漏检测；
-- 为 dump 产物建立脱敏、保留和清理策略；
-- 定期复核 JVM、容器 limit 与副本容量。
+行动项必须记录 Owner、截止日期、验收方式和关联工单；完成后回写本 Runbook 的更新时间。

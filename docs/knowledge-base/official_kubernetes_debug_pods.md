@@ -3,184 +3,69 @@ Upstream: https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6
 Upstream revision: c3317651dc19ef683c5c4463bb6bf0602c0bf364
 Retrieved: 2026-07-21
 License: CC BY 4.0
-Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+Transformation: retrieval-focused operational summary; upstream attribution preserved
 -->
 
-This guide is to help users debug applications that are deployed into Kubernetes
-and not behaving correctly. This is *not* a guide for people who want to debug their cluster.
-For that you should check out this guide.
+# Kubernetes 官方 Pod 调试 - RAG 操作快照
 
-## Diagnosing the problem
+## 适用范围
 
-The first step in troubleshooting is triage. What is the problem?
-Is it your Pods, your Replication Controller or your Service?
+Pod Pending、CrashLoopBackOff、ImagePull、容器启动失败、重启和终止原因诊断。
 
-   * [Debugging Pods](#debugging-pods)
-   * [Debugging Replication Controllers](#debugging-replication-controllers)
-   * [Debugging Services](#debugging-services)
+本快照面向 AutoOnCall 事故诊断，只保留可用于分流、证据采集和风险判断的上游知识。需要完整
+参数、版本差异或边缘行为时，应回到上游固定 revision 核对。
 
-### Debugging Pods
+Owner 为 Kubernetes Platform 与当前 Incident 服务 Owner；最后复核时间为 2026-07-21；
+适用版本以 Upstream revision 为准。关联问题需在内部 Incident 或变更工单中记录本快照版本。
 
-The first step in debugging a Pod is taking a look at it. Check the current
-state of the Pod and recent events with the following command:
+## 最小证据集
 
-```shell
-kubectl describe pods ${POD_NAME}
+- kubectl describe pod 的状态、容器状态和 Events
+- kubectl logs --previous 与当前容器日志
+- 资源 requests/limits、探针、镜像和节点状态
+
+证据必须来自同一 Incident 时间窗口，并与健康实例或事件前基线比较。
+
+## 可执行查询与判据
+
+```bash
+kubectl get pod <pod> -n <namespace> -o wide
+kubectl describe pod <pod> -n <namespace>
+kubectl logs <pod> -n <namespace> -c <container> --previous --since=30m
+kubectl get pod <pod> -n <namespace> -o jsonpath='{range .status.containerStatuses[*]}{.name}{"\t"}{.state}{"\t"}{.lastState}{"\n"}{end}'
 ```
+判据：Pending 必须有 scheduler Event；CrashLoop 必须保留当前与 previous 日志；OOM 需要 reason、limit 和节点内存同时支持。命令均为只读，输出记录 namespace、pod UID、resourceVersion 和采集时间。关联工单：`KB-K8S-POD-DEBUG`。
 
-Look at the state of the containers in the pod. Are they all `Running`?
-Have there been recent restarts?
+## 诊断工作流
 
-Continue debugging depending on the state of the pods.
+1. 先确认 Pod phase 与每个 container state。
+2. Pending 优先读取 scheduler Events。
+3. Waiting 检查 reason、镜像、Secret、ConfigMap 和探针。
+4. Terminated 检查 exit code、signal、OOMKilled 和 termination message。
+5. 仅特定节点失败时比较节点条件、运行时和挂载。
 
-#### My pod stays pending
+官方文档提供产品行为和排查方法，不证明当前 Incident 的根因。历史经验、单条日志和当前
+健康检查不能替代同窗口证据链。本快照的判定对象是“Pod Pending、CrashLoopBackOff、ImagePull、容器启动失败、重启和终止原因诊断。”。
+形成结论前至少完成“先确认 Pod phase 与每个 container state。”，并记录支持证据、反证、缺失证据和置信度；
+无法区分时继续采集只读证据，不通过生产写操作试错。
 
-If a Pod is stuck in `Pending` it means that it can not be scheduled onto a node.
-Generally this is because there are insufficient resources of one type or another
-that prevent scheduling. Look at the output of the `kubectl describe ...` command above.
-There should be messages from the scheduler about why it can not schedule your pod.
-Reasons include:
+## AutoOnCall 审批边界
 
-* **You don't have enough resources**: You may have exhausted the supply of CPU
-  or Memory in your cluster, in this case you need to delete Pods, adjust resource
-  requests, or add new nodes to your cluster. See Compute Resources document
-  for more information.
+删除 Pod、修改资源、探针、镜像、调度约束或扩容节点均为生产变更，需要内部审批。
 
-* **You are using `hostPort`**: When you bind a Pod to a `hostPort` there are a
-  limited number of places that pod can be scheduled. In most cases, `hostPort`
-  is unnecessary, try using a Service object to expose your Pod.  If you do require
-  `hostPort` then you can only schedule as many Pods as there are nodes in your Kubernetes cluster.
+变更计划必须包含 approver、canary 范围、验证查询、观察时长和 rollback 条件。Agent 只生成
+只读查询、证据摘要、候选假设和变更计划，不自动执行生产写操作。
 
-#### My pod stays waiting
+## 恢复验证
 
-If a Pod is stuck in the `Waiting` state, then it has been scheduled to a worker node,
-but it can't run on that machine. Again, the information from `kubectl describe ...`
-should be informative. The most common cause of `Waiting` pods is a failure to pull the image.
-There are three things to check:
+恢复结论需要同时验证原始错误消失、用户侧或调用侧恢复、产品组件指标回到基线，并在约定
+观察窗口内无复发。对本主题至少复查：kubectl describe pod 的状态、容器状态和 Events；kubectl logs --previous 与当前容器日志。每项验证都要保留查询时间、
+筛选条件、结果摘要和 Owner。若 canary 未优于对照组，或错误率、延迟、资源消耗继续恶化，
+应按已审批计划 rollback，不能把一次成功探测当作稳定恢复。
 
-* Make sure that you have the name of the image correct.
-* Have you pushed the image to the registry?
-* Try to manually pull the image to see if the image can be pulled. For example,
-  if you use Docker on your PC, run `docker pull <image>`.
+## 引用信息
 
-#### My pod stays terminating
-
-If a Pod is stuck in the `Terminating` state, it means that a deletion has been
-issued for the Pod, but the control plane is unable to delete the Pod object.
-
-This typically happens if the Pod has a finalizer
-and there is an admission webhook
-installed in the cluster that prevents the control plane from removing the
-finalizer.
-
-To identify this scenario, check if your cluster has any
-ValidatingWebhookConfiguration or MutatingWebhookConfiguration that target
-`UPDATE` operations for `pods` resources.
-
-If the webhook is provided by a third-party:
-- Make sure you are using the latest version.
-- Disable the webhook for `UPDATE` operations.
-- Report an issue with the corresponding provider.
-
-If you are the author of the webhook:
-- For a mutating webhook, make sure it never changes immutable fields on
-  `UPDATE` operations. For example, changes to containers are usually not allowed.
-- For a validating webhook, make sure that your validation policies only apply
-  to new changes. In other words, you should allow Pods with existing violations
-  to pass validation. This allows Pods that were created before the validating
-  webhook was installed to continue running.
-
-#### My pod is crashing or otherwise unhealthy
-
-Once your pod has been scheduled, the methods described in
-Debug Running Pods
-are available for debugging.
-
-#### My pod is running but not doing what I told it to do
-
-If your pod is not behaving as you expected, it may be that there was an error in your
-pod description (e.g. `mypod.yaml` file on your local machine), and that the error
-was silently ignored when you created the pod.  Often a section of the pod description
-is nested incorrectly, or a key name is typed incorrectly, and so the key is ignored.
-For example, if you misspelled `command` as `commnd` then the pod will be created but
-will not use the command line you intended it to use.
-
-The first thing to do is to delete your pod and try creating it again with the `--validate` option.
-For example, run `kubectl apply --validate -f mypod.yaml`.
-If you misspelled `command` as `commnd` then will give an error like this:
-
-```shell
-I0805 10:43:25.129850   46757 schema.go:126] unknown field: commnd
-I0805 10:43:25.129973   46757 schema.go:129] this may be a false alarm, see https://github.com/kubernetes/kubernetes/issues/6842
-pods/mypod
-```
-
-The next thing to check is whether the pod on the apiserver
-matches the pod you meant to create (e.g. in a yaml file on your local machine).
-For example, run `kubectl get pods/mypod -o yaml > mypod-on-apiserver.yaml` and then
-manually compare the original pod description, `mypod.yaml` with the one you got
-back from apiserver, `mypod-on-apiserver.yaml`. There will typically be some
-lines on the "apiserver" version that are not on the original version. This is
-expected. However, if there are lines on the original that are not on the apiserver
-version, then this may indicate a problem with your pod spec.
-
-### Debugging Replication Controllers
-
-Replication controllers are fairly straightforward. They can either create Pods or they can't.
-If they can't create pods, then please refer to the
-[instructions above](#debugging-pods) to debug your pods.
-
-You can also use `kubectl describe rc ${CONTROLLER_NAME}` to introspect events
-related to the replication controller.
-
-### Debugging Services
-
-Services provide load balancing across a set of pods. There are several common problems that can make Services
-not work properly.  The following instructions should help debug Service problems.
-
-First, verify that there are endpoints for the service. For every Service object,
-the apiserver makes one or more `EndpointSlice` resources available.
-
-You can view these resources with:
-
-```shell
-kubectl get endpointslices -l kubernetes.io/service-name=${SERVICE_NAME}
-```
-
-Make sure that the endpoints in the EndpointSlices match up with the number of pods that you expect to be members of your service.
-For example, if your Service is for an nginx container with 3 replicas, you would expect to see three different
-IP addresses in the Service's endpoint slices.
-
-#### My service is missing endpoints
-
-If you are missing endpoints, try listing pods using the labels that Service uses.
-Imagine that you have a Service where the labels are:
-
-```yaml
-...
-spec:
-  - selector:
-     name: nginx
-     type: frontend
-```
-
-You can use:
-
-```shell
-kubectl get pods --selector=name=nginx,type=frontend
-```
-
-to list pods that match this selector. Verify that the list matches the Pods that you expect to provide your Service.
-Verify that the pod's `containerPort` matches up with the Service's `targetPort`
-
-#### Network traffic is not forwarded
-
-Please see debugging service for more information.
-
-If none of the above solves your problem, follow the instructions in
-Debugging Service document
-to make sure that your `Service` is running, has `Endpoints`, and your `Pods` are
-actually serving; you have DNS working, iptables rules installed, and kube-proxy
-does not seem to be misbehaving.
-
-You may also visit troubleshooting document for more information.
+- Source URL：`https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6bf0602c0bf364/content/en/docs/tasks/debug/debug-application/debug-pods.md`
+- Upstream revision：`c3317651dc19ef683c5c4463bb6bf0602c0bf364`
+- License：CC BY 4.0
+- Snapshot updated：2026-07-21

@@ -14,6 +14,22 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     preferred_extensions: set[str] = set()
     preferred_heading_terms: set[str] = set()
     required_sources: set[str] = set()
+    asks_for_postmortem = any(
+        term in lowered
+        for term in {
+            "postmortem",
+            "复盘",
+            "事故复盘",
+            "历史事故",
+            "事故时间线",
+            "澶嶇洏",
+            "浜嬫晠澶嶇洏",
+            "鍘嗗彶浜嬫晠",
+        }
+    )
+    asks_for_official_source = any(
+        term in lowered for term in {"官方", "official", "瀹樻柟"}
+    )
 
     if any(
         term in lowered for term in {"postmortem", "复盘", "事故复盘", "历史事故", "事故时间线"}
@@ -34,6 +50,7 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     if "redis" in lowered and any(term in lowered for term in {"两个可信来源", "哪两个"}):
         preferred_doc_types.update({"pdf", "html"})
         preferred_extensions.update({".pdf", ".html", ".htm"})
+
     if any(
         term in lowered
         for term in {
@@ -55,6 +72,10 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         or "版本记录" in lowered
         or bool(re.search(r"\b[a-z][a-z0-9-]*-\d{4}\.\d{2}\.\d{2}-rc\d+\b", lowered))
     )
+    if "inc-" in lowered and any(
+        term in lowered for term in {"历史", "工单", "引用", "证据"}
+    ):
+        required_sources.add("tickets.xlsx")
     if "inc-" in lowered and not explicit_xlsx_history:
         # Incident IDs are present in both legacy CSV exports and the current
         # workbook. Keep both sources eligible instead of requiring one exact
@@ -80,7 +101,9 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         required_sources.discard("tickets.csv")
 
     if any(term in lowered for term in {"证据", "取证", "如何收集", "怎样区分"}):
-        preferred_heading_terms.update({"排查步骤", "常用命令", "相关工具命令"})
+        preferred_heading_terms.update(
+            {"首轮证据", "排查步骤", "常用命令", "相关工具命令"}
+        )
     if any(term in lowered for term in {"先确认", "哪些信号", "排查步骤"}):
         preferred_heading_terms.add("排查步骤")
     if any(
@@ -99,10 +122,15 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
         }
     ):
         preferred_heading_terms.add("升级与审批")
-    if (
+    if "redis" in lowered and asks_for_official_source and asks_for_postmortem:
+        required_sources.update({"official_redis_clients.md", "redis_postmortem.pdf"})
+    elif (
         "redis" in lowered
-        and "官方" in lowered
-        and any(term in lowered for term in {"复盘", "事故"})
+        and any(
+            term in lowered
+            for term in {"官方", "official", "复盘", "事故", "postmortem", "incident"}
+        )
+        and any(term in lowered for term in {"复盘", "事故", "postmortem", "incident"})
     ):
         required_sources.update({"official_redis_clients.md", "redis_postmortem.pdf"})
     if (
@@ -118,6 +146,26 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     ):
         required_sources.update({"payment_wiki.html", "mysql_slow_query_postmortem.pdf"})
     if (
+        any(term in lowered for term in {"503", "5xx", "服务返回"})
+        and any(term in lowered for term in {"redis", "mq", "依赖", "下游"})
+    ):
+        required_sources.add("service_unavailable.md")
+        preferred_heading_terms.update({"首轮证据", "假设排除与决策树"})
+    if (
+        any(term in lowered for term in {"payment-service", "payment service", "支付服务"})
+        and "pool_waiting" in lowered
+        and "active_connections" in lowered
+    ):
+        required_sources.add("payment_wiki.html")
+        preferred_heading_terms.update(
+            {
+                "evidence and metric queries",
+                "read-only diagnosis",
+                "decision tree",
+                "change and approval boundary",
+            }
+        )
+    if (
         any(term in lowered for term in {"kubernetes", "k8s"})
         and "pod" in lowered
         and "service" in lowered
@@ -132,7 +180,7 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     if (
         "loki" in lowered
         and "discarded" in lowered
-        and any(term in lowered for term in {"告警", "alert"})
+        and any(term in lowered for term in {"告警", "alert", "症状"})
     ):
         required_sources.update(
             {
@@ -155,7 +203,7 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
     if (
         any(term in lowered for term in {"loki", "日志", "可观测性"})
         and any(term in lowered for term in {"ingestion", "摄取", "写入"})
-        and any(term in lowered for term in {"prometheus", "告警", "指标"})
+        and any(term in lowered for term in {"prometheus", "告警", "指标", "症状"})
     ):
         required_sources.update(
             {
@@ -163,6 +211,39 @@ def infer_retrieval_preferences(query: str) -> dict[str, set[str] | bool]:
                 "official_prometheus_alerting_practices.md",
             }
         )
+    if (
+        "first byte" in lowered
+        and "tcp" in lowered
+        and any(term in lowered for term in {"网络", "应用", "依赖", "区分"})
+    ):
+        required_sources.add("network_timeout_runbook.md")
+        preferred_heading_terms.update({"首轮证据", "假设排除与决策树"})
+    if any(term in lowered for term in {"active threads", "线程池", "thread pool"}):
+        if any(
+            term in lowered
+            for term in {"任务队列", "queue", "达到上限", "扩大", "扩容", "exhaustion"}
+        ):
+            required_sources.add("thread_pool_exhaustion_runbook.md")
+            preferred_heading_terms.update({"首轮证据", "假设排除与决策树", "处置计划与审批"})
+    if any(
+        term in lowered
+        for term in {"consumer lag", "oldest message age", "消息队列积压", "队列积压"}
+    ):
+        required_sources.add("message_queue_backlog_runbook.md")
+        preferred_heading_terms.update({"首轮证据", "假设排除与决策树", "处置计划与审批"})
+    if any(
+        term in lowered
+        for term in {
+            "certificate has expired",
+            "notafter",
+            "hostname mismatch",
+            "unknown authority",
+            "tls handshake",
+            "tls 握手",
+            "证书过期",
+        }
+    ):
+        required_sources.add("tls_certificate_expiry_runbook.md")
 
     specific_fault_query = any(
         term in lowered
@@ -493,6 +574,13 @@ def query_has_oncall_scope(query: str) -> bool:
             "扩容",
             "限流",
             "重启",
+            "thread pool",
+            "active threads",
+            "consumer lag",
+            "oldest message age",
+            "first byte",
+            "message queue",
+            "queue backlog",
         }
     )
 
@@ -560,12 +648,22 @@ def retrieval_intent_multiplier(
             multiplier *= 0.35
     if source_file.lower() in required_sources:
         multiplier *= 1.65
+        if len(required_sources) == 1:
+            multiplier *= 1.25
     if preferred_heading_terms:
         if any(term.lower() in normalized_heading for term in preferred_heading_terms):
             multiplier *= 1.55
         elif any(
             term in normalized_heading
-            for term in {"告警名称", "问题描述", "相关告警", "预防措施", "长期优化"}
+            for term in {
+                "告警名称",
+                "问题描述",
+                "相关告警",
+                "预防措施",
+                "长期优化",
+                "文档元数据",
+                "scope and ownership",
+            }
         ):
             multiplier *= 0.68
     searchable_text = " ".join(
@@ -672,7 +770,19 @@ def build_targeted_lexical_queries(query: str) -> dict[str, str]:
         "mysql_slow_query_postmortem.pdf": (
             "mysql slow query postmortem active_connections pool_waiting incident window"
         ),
-        "tickets.xlsx": "deploy_history release version change_summary rollback",
+        "tickets.xlsx": (
+            "deploy_history release version change_summary rollback approval "
+            "verification rc4 pool_waiting"
+        ),
+        "network_timeout_runbook.md": (
+            "tcp connect first byte application dependency staged diagnosis"
+        ),
+        "thread_pool_exhaustion_runbook.md": (
+            "active threads queue depth downstream capacity thread pool approval"
+        ),
+        "message_queue_backlog_runbook.md": (
+            "consumer lag oldest message age backlog idempotency downstream dependency"
+        ),
     }
     for source_file in required_sources:
         targeted[source_file] = f"{query} {source_hints.get(source_file, source_file)}"

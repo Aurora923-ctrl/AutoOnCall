@@ -124,9 +124,30 @@ def rerank_retrieval_candidates(
         if bool(retrieval_preferences.get("require_source_diversity")):
             deduped = select_diverse_sources(deduped, top_k=top_k)
 
+    # Once the query explicitly asks for evidence/diagnosis/action boundaries,
+    # heading coverage is more valuable than a score-only relative floor. The
+    # floor can otherwise remove the evidence or approval chunk selected for a
+    # distinct subgoal, leaving the LLM with only document metadata.
+    coverage_requested = any(
+        marker in str(query or "").lower()
+        for marker in {
+            "如何",
+            "怎样",
+            "怎么",
+            "排查",
+            "取证",
+            "证据",
+            "判断",
+            "区分",
+            "边界",
+            "审批",
+            "回滚",
+            "处置",
+        }
+    )
     selected = (
         prune_low_relevance_candidates(deduped, top_k=top_k)
-        if prune_low_relevance and not required_sources
+        if prune_low_relevance and not required_sources and not coverage_requested
         else deduped[:top_k]
     )
     for rank, chunk in enumerate(selected, 1):

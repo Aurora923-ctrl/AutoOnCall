@@ -17,6 +17,7 @@ ASCII_RUNTIME_PATH_RE = re.compile(
     r"\.(?:md|markdown|pdf|html|htm|csv|xlsx|yaml|yml|json|svg|png)"
 )
 DOC_PATH_TOKEN_RE = re.compile(r"docs[/\\][^\s`'\"<>|)]+")
+EXTERNAL_URL_RE = re.compile(r"https?://[^\s`'\"<>|)]+")
 IGNORED_REFERENCE_PREFIXES = (
     "http://",
     "https://",
@@ -90,6 +91,7 @@ def find_reference_issues(root: Path = REPO_ROOT) -> list[ReferenceIssue]:
             continue
         relative_source = path.relative_to(root).as_posix()
         for line_number, line in enumerate(content.splitlines(), 1):
+            local_reference_line = EXTERNAL_URL_RE.sub("", line)
             if path.suffix.lower() == ".md":
                 for match in MARKDOWN_LINK_RE.finditer(line):
                     raw_target = match.group(1).strip()
@@ -104,7 +106,7 @@ def find_reference_issues(root: Path = REPO_ROOT) -> list[ReferenceIssue]:
                     )
                     if issue:
                         issues.append(issue)
-            for match in ASCII_RUNTIME_PATH_RE.finditer(line):
+            for match in ASCII_RUNTIME_PATH_RE.finditer(local_reference_line):
                 reference = match.group(0)
                 if path.name == "knowledge-base-official-sources.md" or (
                     path.name in VERBATIM_EXTERNAL_ASSET_NAMES
@@ -119,7 +121,7 @@ def find_reference_issues(root: Path = REPO_ROOT) -> list[ReferenceIssue]:
                             reason="referenced path does not exist",
                         )
                     )
-            for match in DOC_PATH_TOKEN_RE.finditer(line):
+            for match in DOC_PATH_TOKEN_RE.finditer(local_reference_line):
                 reference = match.group(0).rstrip(".,;:，。；：")
                 if any(ord(char) > 127 for char in reference):
                     issues.append(

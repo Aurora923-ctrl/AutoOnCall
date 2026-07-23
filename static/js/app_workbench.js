@@ -197,7 +197,15 @@ Object.assign(window.AutoOnCallApp.prototype, {
             response: '处置中心',
             system: '环境就绪中心'
         };
+        const subtitles = {
+            incidents: '聚合告警、诊断运行与证据结论，完整展示 Agent 推理链路。',
+            response: '集中处理人工审批与变更执行，保留风险控制和处置审计记录。',
+            system: '核验模型应用、数据依赖、诊断工具和离线评测是否具备运行条件。'
+        };
         this.workbenchTitle.textContent = titles[this.currentWorkbenchView] || 'AutoOnCall 工作台';
+        if (this.workbenchSubtitle) {
+            this.workbenchSubtitle.textContent = subtitles[this.currentWorkbenchView] || '';
+        }
     }
 ,
     setIncidentTab(tab) {

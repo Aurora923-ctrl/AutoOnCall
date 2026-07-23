@@ -288,6 +288,7 @@ def create_shadow_collection(collection_name: str) -> Collection:
 
 def query_collection_records(collection_name: str) -> list[dict[str, str]]:
     collection = Collection(collection_name, using=milvus_manager.CONNECTION_ALIAS)
+    collection.load(timeout=180)
     iterator = collection.query_iterator(
         expr='id != ""',
         output_fields=["id", "metadata"],

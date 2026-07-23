@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -87,10 +88,10 @@ def build_generation_evidence(
             continue
         if item.get("metadata_identity_valid") is False:
             continue
-        identity = (
-            str(item.get("source_file") or "").strip(),
-            str(item.get("chunk_id") or "").strip(),
-        )
+        source_file = str(item.get("source_file") or "").strip()
+        raw_chunk_id = str(item.get("chunk_id") or "").strip()
+        chunk_id = raw_chunk_id or derive_generation_chunk_id(item)
+        identity = (source_file, raw_chunk_id)
         if allowlist and identity not in allowlist:
             continue
         content = str(item.get("content") or item.get("content_preview") or "").strip()
@@ -115,10 +116,14 @@ def build_generation_evidence(
             if len(normalized) <= len(seen_content[redundant_index]):
                 continue
             seen_content[redundant_index] = normalized
-            evidence[redundant_index] = _copy_evidence_with_content(item, content)
+            updated = _copy_evidence_with_content(item, content)
+            updated["chunk_id"] = chunk_id
+            evidence[redundant_index] = updated
             continue
         seen_content.append(normalized)
-        evidence.append(_copy_evidence_with_content(item, content))
+        updated = _copy_evidence_with_content(item, content)
+        updated["chunk_id"] = chunk_id
+        evidence.append(updated)
 
     active_budgeter = budgeter or DEFAULT_CONTEXT_BUDGETER
     max_chars = active_budgeter.limit(limit)
@@ -225,6 +230,22 @@ def build_generation_evidence(
         }
         for index, item in enumerate(normalized_evidence, 1)
     ]
+
+
+def derive_generation_chunk_id(item: dict[str, Any]) -> str:
+    """Recover a stable id for legacy runtime rows with source but no chunk id."""
+    source_file = citation_source_basename(item.get("source_file"))
+    if not source_file:
+        return ""
+    for key in ("primary_key", "row_number", "page_number", "citation_index", "rank"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return f"{source_file}#legacy-{key}-{value}"
+    content = str(item.get("content") or item.get("content_preview") or "").strip()
+    if not content:
+        return ""
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    return f"{source_file}#legacy-{digest}"
 
 def _fit_required_evidence(
     evidence: list[dict[str, Any]],

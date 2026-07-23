@@ -3,77 +3,67 @@ Upstream: https://github.com/prometheus/docs/blob/47c3b182327d2832daadb00d0beacf
 Upstream revision: 47c3b182327d2832daadb00d0beacfcd802e4458
 Retrieved: 2026-07-21
 License: Apache-2.0
-Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+Transformation: retrieval-focused operational summary; upstream attribution preserved
 -->
 
-We recommend that you read [My Philosophy on Alerting](https://docs.google.com/a/boxever.com/document/d/199PqyG3UsyXlwieHaqbGiWVa8eMWi8zzAn0YfcApr8Q/edit)
-based on Rob Ewaschuk's observations at Google.
+# Prometheus 官方告警实践 - RAG 操作快照
 
-To summarize: keep alerting simple, alert on symptoms, have good consoles to
-allow pinpointing causes, and avoid having pages where there is nothing to do.
+## 适用范围
 
-## Naming
+设计能反映用户影响、可行动且低噪声的告警规则和 Runbook 链接。
 
-There are no strict restrictions regarding the naming of alerting rules, as alert names may contain any number of Unicode characters, just like any other label value. However, [the community has rallied around](https://monitoring.mixins.dev/) using [Camel Case](https://en.wikipedia.org/wiki/Camel_case) for their alert names.
+本快照面向 AutoOnCall 事故诊断，只保留可用于分流、证据采集和风险判断的上游知识。需要完整
+参数、版本差异或边缘行为时，应回到上游固定 revision 核对。
 
-## What to alert on
+Owner 为 SRE Observability 与当前 Incident 服务 Owner；最后复核时间为 2026-07-21；
+适用版本以 Upstream revision 为准。关联问题需在内部 Incident 或变更工单中记录本快照版本。
 
-Aim to have as few alerts as possible, by alerting on symptoms that are
-associated with end-user pain rather than trying to catch every possible way
-that pain could be caused. Alerts should link to relevant consoles
-and make it easy to figure out which component is at fault.
+## 最小证据集
 
-Allow for slack in alerting to accommodate small blips.
+- 用户可见延迟、错误率、可用性与业务损失
+- 告警触发频率、持续时间、误报率和处置动作
+- dashboard、runbook、owner 和升级路径
 
-### Online serving systems
+证据必须来自同一 Incident 时间窗口，并与健康实例或事件前基线比较。
 
-Typically alert on high latency and error rates as high up in the stack as possible.
+## 可执行查询与判据
 
-Only page on latency at one point in a stack. If a lower-level component is
-slower than it should be, but the overall user latency is fine, then there is
-no need to page.
+```promql
+sum(rate(http_requests_total{status=~"5.."}[5m]))
+/ clamp_min(sum(rate(http_requests_total[5m])), 1)
+```
+候选告警必须在历史窗口回放，记录样本数、阈值、`for`、预期 page 次数和对应人工动作。低流量服务使用最小样本保护；同一故障链只保留最接近用户影响的 paging 告警，原因指标进入 dashboard。Owner：SRE Observability；关联工单：`KB-PROM-ALERT-PRACTICE`。
 
-For error rates, page on user-visible errors. If there are errors further down
-the stack that will cause such a failure, there is no need to page on them
-separately. However, if some failures are not user-visible, but are otherwise
-severe enough to require human involvement (for example, you are losing a lot of
-money), add pages to be sent on those.
+## 诊断工作流
 
-You may need alerts for different types of request if they have different
-characteristics, or problems in a low-traffic type of request would be drowned
-out by high-traffic requests.
+1. 优先对症状和用户影响告警，而非每个可能原因。
+2. 同一故障链避免上下游重复 paging。
+3. 低流量服务使用适合的窗口和最小样本保护。
+4. 离线任务关注完成时限、积压和失败，而非瞬时资源。
+5. 告警必须对应明确人工动作或自动化边界。
 
-### Offline processing
+官方文档提供产品行为和排查方法，不证明当前 Incident 的根因。历史经验、单条日志和当前
+健康检查不能替代同窗口证据链。本快照的判定对象是“设计能反映用户影响、可行动且低噪声的告警规则和 Runbook 链接。”。
+形成结论前至少完成“优先对症状和用户影响告警，而非每个可能原因。”，并记录支持证据、反证、缺失证据和置信度；
+无法区分时继续采集只读证据，不通过生产写操作试错。
 
-For offline processing systems, the key metric is how long data takes to get
-through the system, so page if that gets high enough to cause user impact.
+## AutoOnCall 审批边界
 
-### Batch jobs
+告警规则发布需评审阈值、for、标签、路由、抑制和回滚；禁止以告警自动触发高风险生产写操作。
 
-For batch jobs it makes sense to page if the batch job has not succeeded
-recently enough, and this will cause user-visible problems.
+变更计划必须包含 approver、canary 范围、验证查询、观察时长和 rollback 条件。Agent 只生成
+只读查询、证据摘要、候选假设和变更计划，不自动执行生产写操作。
 
-This should generally be at least enough time for 2 full runs of the batch job.
-For a job that runs every 4 hours and takes an hour, 10 hours would be a
-reasonable threshold. If you cannot withstand a single run failing, run the
-job more frequently, as a single failure should not require human intervention.
+## 恢复验证
 
-### Capacity
+恢复结论需要同时验证原始错误消失、用户侧或调用侧恢复、产品组件指标回到基线，并在约定
+观察窗口内无复发。对本主题至少复查：用户可见延迟、错误率、可用性与业务损失；告警触发频率、持续时间、误报率和处置动作。每项验证都要保留查询时间、
+筛选条件、结果摘要和 Owner。若 canary 未优于对照组，或错误率、延迟、资源消耗继续恶化，
+应按已审批计划 rollback，不能把一次成功探测当作稳定恢复。
 
-While not a problem causing immediate user impact, being close to capacity
-often requires human intervention to avoid an outage in the near future.
+## 引用信息
 
-### Metamonitoring
-
-It is important to have confidence that monitoring is working. Accordingly, have
-alerts to ensure that Prometheus servers, Alertmanagers, PushGateways, and
-other monitoring infrastructure are available and running correctly.
-
-As always, if it is possible to alert on symptoms rather than causes, this helps
-to reduce noise. For example, a blackbox test that alerts are getting from
-PushGateway to Prometheus to Alertmanager to email is better than individual
-alerts on each.
-
-Supplementing the whitebox monitoring of Prometheus with external blackbox
-monitoring can catch problems that are otherwise invisible, and also serves as
-a fallback in case internal systems completely fail.
+- Source URL：`https://github.com/prometheus/docs/blob/47c3b182327d2832daadb00d0beacfcd802e4458/docs/practices/alerting.md`
+- Upstream revision：`47c3b182327d2832daadb00d0beacfcd802e4458`
+- License：Apache-2.0
+- Snapshot updated：2026-07-21

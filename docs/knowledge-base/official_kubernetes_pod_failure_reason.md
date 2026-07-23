@@ -3,122 +3,67 @@ Upstream: https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6
 Upstream revision: c3317651dc19ef683c5c4463bb6bf0602c0bf364
 Retrieved: 2026-07-21
 License: CC BY 4.0
-Transformation: front matter, comments, shortcodes, internal-link wrappers, and generic navigation text removed
+Transformation: retrieval-focused operational summary; upstream attribution preserved
 -->
 
-This page shows how to write and read a Container termination message.
+# Kubernetes 官方容器终止原因 - RAG 操作快照
 
-Termination messages provide a way for containers to write
-information about fatal events to a location where it can
-be easily retrieved and surfaced by tools like dashboards
-and monitoring software. In most cases, information that you
-put in a termination message should also be written to
-the general
-Kubernetes logs.
+## 适用范围
 
-## Writing and reading a termination message
+需要从 exit code、signal、reason 和 termination message 判断容器失败原因。
 
-In this exercise, you create a Pod that runs one container.
-The manifest for that Pod specifies a command that runs when the container starts:
+本快照面向 AutoOnCall 事故诊断，只保留可用于分流、证据采集和风险判断的上游知识。需要完整
+参数、版本差异或边缘行为时，应回到上游固定 revision 核对。
 
-1. Create a Pod based on the YAML configuration file:
+Owner 为 Kubernetes Platform 与当前 Incident 服务 Owner；最后复核时间为 2026-07-21；
+适用版本以 Upstream revision 为准。关联问题需在内部 Incident 或变更工单中记录本快照版本。
 
-    ```shell
-    kubectl apply -f https://k8s.io/examples/debug/termination.yaml
-    ```
+## 最小证据集
 
-    In the YAML file, in the `command` and `args` fields, you can see that the
-    container sleeps for 10 seconds and then writes "Sleep expired" to
-    the `/dev/termination-log` file. After the container writes
-    the "Sleep expired" message, it terminates.
+- containerStatuses.state.terminated 与 lastState.terminated
+- exitCode、signal、reason、startedAt、finishedAt
+- /dev/termination-log 或 terminationMessagePolicy 产生的消息
 
-1. Display information about the Pod:
+证据必须来自同一 Incident 时间窗口，并与健康实例或事件前基线比较。
 
-    ```shell
-    kubectl get pod termination-demo
-    ```
+## 可执行查询与判据
 
-    Repeat the preceding command until the Pod is no longer running.
-
-1. Display detailed information about the Pod:
-
-    ```shell
-    kubectl get pod termination-demo --output=yaml
-    ```
-
-    The output includes the "Sleep expired" message:
-
-    ```yaml
-    apiVersion: v1
-    kind: Pod
-    ...
-        lastState:
-          terminated:
-            containerID: ...
-            exitCode: 0
-            finishedAt: ...
-            message: |
-              Sleep expired
-            ...
-    ```
-
-1. Use a Go template to filter the output so that it includes only the termination message:
-
-    ```shell
-    kubectl get pod termination-demo -o go-template="{{range .status.containerStatuses}}{{.lastState.terminated.message}}{{end}}"
-    ```
-
-If you are running a multi-container Pod, you can use a Go template to include the container's name.
-By doing so, you can discover which of the containers is failing:
-
-```shell
-kubectl get pod multi-container-pod -o go-template='{{range .status.containerStatuses}}{{printf "%s:\n%s\n\n" .name .lastState.terminated.message}}{{end}}'
+```bash
+kubectl get pod <pod> -n <namespace> -o jsonpath='{range .status.containerStatuses[*]}{.name}{"\t"}{.lastState.terminated.reason}{"\t"}{.lastState.terminated.exitCode}{"\t"}{.lastState.terminated.finishedAt}{"\n"}{end}'
+kubectl logs <pod> -n <namespace> -c <container> --previous --since=30m
 ```
+判据：exit 137 只有与 OOMKilled、limit 或节点压力一致时才支持内存假设；SIGTERM 需要关联 rollout、探针或驱逐事件。termination message 是摘要，不能替代完整日志。关联工单：`KB-K8S-TERMINATION-REASON`。
 
-## Customizing the termination message
+## 诊断工作流
 
-Kubernetes retrieves termination messages from the termination message file
-specified in the `terminationMessagePath` field of a Container, which has a default
-value of `/dev/termination-log`. By customizing this field, you can tell Kubernetes
-to use a different file. Kubernetes use the contents from the specified file to
-populate the Container's status message on both success and failure.
+1. 优先读取 lastState，避免重启后丢失上一次原因。
+2. exit 137 结合 OOMKilled 与节点内存证据判断，不只凭数字。
+3. 非零业务退出码关联应用日志和发布版本。
+4. 信号退出关联 kubelet、探针、驱逐和人工操作记录。
+5. termination message 只作摘要，仍需关联完整日志。
 
-The termination message is intended to be brief final status, such as an assertion failure message.
-The kubelet truncates messages that are longer than 4096 bytes.
+官方文档提供产品行为和排查方法，不证明当前 Incident 的根因。历史经验、单条日志和当前
+健康检查不能替代同窗口证据链。本快照的判定对象是“需要从 exit code、signal、reason 和 termination message 判断容器失败原因。”。
+形成结论前至少完成“优先读取 lastState，避免重启后丢失上一次原因。”，并记录支持证据、反证、缺失证据和置信度；
+无法区分时继续采集只读证据，不通过生产写操作试错。
 
-The total message length across all containers is limited to 12KiB, divided equally among each container.
-For example, if there are 12 containers (`initContainers` or `containers`), each has 1024 bytes of available termination message space.
+## AutoOnCall 审批边界
 
-The default termination message path is `/dev/termination-log`.
-You cannot set the termination message path after a Pod is launched.
+修改 terminationMessagePolicy、探针、资源或重启策略属于部署变更，需要服务 Owner 审批。
 
-In the following example, the container writes termination messages to
-`/tmp/my-log` for Kubernetes to retrieve:
+变更计划必须包含 approver、canary 范围、验证查询、观察时长和 rollback 条件。Agent 只生成
+只读查询、证据摘要、候选假设和变更计划，不自动执行生产写操作。
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: msg-path-demo
-spec:
-  containers:
-  - name: msg-path-demo-container
-    image: debian
-    terminationMessagePath: "/tmp/my-log"
-```
+## 恢复验证
 
-Moreover, users can set the `terminationMessagePolicy` field of a Container for
-further customization. This field defaults to "`File`" which means the termination
-messages are retrieved only from the termination message file. By setting the
-`terminationMessagePolicy` to "`FallbackToLogsOnError`", you can tell Kubernetes
-to use the last chunk of container log output if the termination message file
-is empty and the container exited with an error. The log output is limited to
-2048 bytes or 80 lines, whichever is smaller.
+恢复结论需要同时验证原始错误消失、用户侧或调用侧恢复、产品组件指标回到基线，并在约定
+观察窗口内无复发。对本主题至少复查：containerStatuses.state.terminated 与 lastState.terminated；exitCode、signal、reason、startedAt、finishedAt。每项验证都要保留查询时间、
+筛选条件、结果摘要和 Owner。若 canary 未优于对照组，或错误率、延迟、资源消耗继续恶化，
+应按已审批计划 rollback，不能把一次成功探测当作稳定恢复。
 
-* See the `terminationMessagePath` field in
-  Container.
-* See ImagePullBackOff in Images.
-* Learn about retrieving logs.
-* Learn about [Go templates](https://pkg.go.dev/text/template).
-* Learn about Pod status and Pod phase.
-* Learn about container states.
+## 引用信息
+
+- Source URL：`https://github.com/kubernetes/website/blob/c3317651dc19ef683c5c4463bb6bf0602c0bf364/content/en/docs/tasks/debug/debug-application/determine-reason-pod-failure.md`
+- Upstream revision：`c3317651dc19ef683c5c4463bb6bf0602c0bf364`
+- License：CC BY 4.0
+- Snapshot updated：2026-07-21

@@ -51,9 +51,7 @@ histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_second
   blocked_clients and rejected connections return to baseline, customer error rate is below
   the service threshold, and the signals remain stable for at least 30 minutes.</p>
 
-  <h2>Historical context</h2>
-  <p>The sanitized golden incident recorded connected_clients=9940, maxclients=10000, and
-  blocked_clients=37. Treat these values as historical evidence, not as current live_info.
-  See redis_postmortem.pdf and the tickets sheet in tickets.xlsx.</p>
+  <h2>Document role and historical boundary</h2>
+<p>This wiki is the live Redis client-capacity decision guide. The PDF preserves a sanitized historical timeline, and tickets.xlsx stores structured incident records. Historical client counts and approvals are hypotheses only; current diagnosis must use same-window INFO clients, INFO stats, application pool metrics, deploy history, and logs. Cite the source that supplied each fact rather than repeating the same incident as multiple independent votes.</p>
 </body>
 </html>

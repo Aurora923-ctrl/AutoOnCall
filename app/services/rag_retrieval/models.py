@@ -52,6 +52,8 @@ class BackendResult:
     lexical_results: list[tuple[Document, float]] = field(default_factory=list)
     vector_error: BackendError = field(default_factory=lambda: BackendError("vector"))
     lexical_error: BackendError = field(default_factory=lambda: BackendError("lexical"))
+    vector_backend: str = "unknown"
+    retrieval_backend: str = "unknown"
     stage_timings: dict[str, float] = field(
         default_factory=lambda: {
             "vector_search_ms": 0.0,

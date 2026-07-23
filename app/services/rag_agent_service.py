@@ -1398,6 +1398,11 @@ def build_rag_observability(
             "price_snapshot": None,
         },
         "limitations": retrieval.get("limitations", []),
+        "generation_repair": {
+            "attempted": bool(generation.get("citation_repair_retry")),
+            "reason": generation.get("repair_reason", ""),
+            "sources": list(generation.get("repair_sources") or []),
+        },
     }
 
 

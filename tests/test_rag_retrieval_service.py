@@ -33,6 +33,7 @@ from app.services.rag_retrieval.selection import (
     enforce_source_coverage,
     is_trusted_retrieval_chunk,
     query_is_out_of_scope,
+    select_heading_coverage,
     select_required_sources,
 )
 from app.services.rag_retrieval_service import retrieve_structured_knowledge
@@ -211,6 +212,25 @@ def test_dependency_outage_requires_service_unavailable_runbook() -> None:
 
     assert preferences["required_sources"] == {"service_unavailable.md"}
     assert preferences["dominant_source_terms"] == {"service_unavailable"}
+
+
+def test_503_dependency_query_requires_service_unavailable_runbook() -> None:
+    preferences = infer_retrieval_preferences(
+        "服务返回 503，但应用没有崩溃，Redis 和 MQ 同时超时，应如何判断主故障域？"
+    )
+
+    assert "service_unavailable.md" in preferences["required_sources"]
+
+
+def test_redis_capacity_history_requires_official_and_postmortem_sources() -> None:
+    preferences = infer_retrieval_preferences(
+        "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？"
+    )
+
+    assert preferences["required_sources"] == {
+        "official_redis_clients.md",
+        "redis_postmortem.pdf",
+    }
 
 
 def test_generic_slow_endpoint_query_requires_slow_response_runbook() -> None:
@@ -788,6 +808,40 @@ def test_required_source_count_larger_than_top_k_cannot_claim_coverage() -> None
     assert len(missing) == 1
 
 
+def test_heading_coverage_keeps_explicit_service_history_rows_on_topic() -> None:
+    candidates = [
+        {
+            "doc_id": "tickets",
+            "source_file": "tickets.xlsx",
+            "chunk_id": "tickets#order",
+            "content": "service_name: order-service risk_hint: remediation after approval",
+        },
+        {
+            "doc_id": "tickets",
+            "source_file": "tickets.xlsx",
+            "chunk_id": "tickets#payment-rc3",
+            "content": "service_name: payment-service version: rc3 pool_waiting=6",
+        },
+        {
+            "doc_id": "tickets",
+            "source_file": "tickets.xlsx",
+            "chunk_id": "tickets#payment-rc4",
+            "content": "service_name: payment-service version: rc4 after approval",
+        },
+    ]
+
+    selected = select_heading_coverage(
+        candidates,
+        query="payment-service 发布后 pool_waiting 上升，结合部署历史判断是否回滚",
+        top_k=2,
+    )[:2]
+
+    assert [item["chunk_id"] for item in selected] == [
+        "tickets#payment-rc3",
+        "tickets#payment-rc4",
+    ]
+
+
 def test_multi_source_intent_prefers_distinct_sources() -> None:
     candidates = [
         {
@@ -1094,6 +1148,16 @@ def test_deploy_history_query_requires_xlsx_ticket_source() -> None:
     assert ".xlsx" in preferences["preferred_extensions"]
 
 
+def test_ticket_history_expansion_includes_rollback_boundary_terms() -> None:
+    queries = retrieval_backends.build_targeted_lexical_queries(
+        "payment-service 发布后 pool_waiting 上升，如何结合部署历史判断是否回滚？"
+    )
+
+    assert "approval" in queries["tickets.xlsx"]
+    assert "verification" in queries["tickets.xlsx"]
+    assert "rc4" in queries["tickets.xlsx"]
+
+
 def test_release_version_entity_requires_xlsx_source() -> None:
     preferences = infer_retrieval_preferences(
         "payment-api-2026.07.06-rc4 对应的部署变更是什么？"
@@ -1161,6 +1225,55 @@ def test_source_aware_preferences_cover_capacity_wiki_and_mysql_postmortem() -> 
         "payment_wiki.html",
         "mysql_slow_query_postmortem.pdf",
     }
+
+
+def test_source_aware_preferences_cover_unicode_redis_postmortem_query() -> None:
+    preferences = infer_retrieval_preferences(
+        "Redis connected_clients 接近 maxclients 时，如何结合官方限制和事故复盘判断？"
+    )
+
+    assert preferences["required_sources"] == {
+        "official_redis_clients.md",
+        "redis_postmortem.pdf",
+    }
+
+
+def test_payment_pool_waiting_query_requires_payment_runbook() -> None:
+    preferences = infer_retrieval_preferences(
+        "payment-service 的 pool_waiting 和 active_connections 上升，如何排查慢查询？"
+    )
+
+    assert preferences["required_sources"] == {"payment_wiki.html"}
+
+
+def test_heading_coverage_treats_explicit_disposition_as_boundary_request() -> None:
+    candidates = [
+        {
+            "doc_id": "cpu.md",
+            "source_file": "cpu.md",
+            "chunk_id": "cpu.md#evidence",
+            "heading_path": "首轮证据",
+            "rerank_score": 2.0,
+        },
+        {
+            "doc_id": "cpu.md",
+            "source_file": "cpu.md",
+            "chunk_id": "cpu.md#approval",
+            "heading_path": "处置计划与审批",
+            "rerank_score": 1.0,
+        },
+    ]
+
+    selected = select_heading_coverage(
+        candidates,
+        query="如何收集进程和线程证据并给出处置边界？",
+        top_k=2,
+    )
+
+    assert [item["chunk_id"] for item in selected[:2]] == [
+        "cpu.md#evidence",
+        "cpu.md#approval",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1445,6 +1558,130 @@ def test_retrieval_degrades_to_lexical_when_default_vector_store_fails(
     assert payload["retrieval_results"][0]["metadata"]["_retrieval_source"] == "lexical"
 
 
+def test_runtime_default_path_fails_closed_instead_of_using_lexical_fallback(monkeypatch, tmp_path):
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    document = Document(
+        page_content="Redis maxclients connection timeout runbook.",
+        metadata={
+            "_source": "docs/knowledge-base/redis.md",
+            "_file_name": "redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+    index.upsert_source("docs/knowledge-base/redis.md", [document])
+
+    def raise_vector_unavailable():
+        raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        raise_vector_unavailable,
+    )
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        lexical_index=index,
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["lexical_candidate_count"] == 0
+    assert payload["retrieval_results"] == []
+
+
+def test_runtime_default_path_never_queries_lexical_index(monkeypatch, tmp_path):
+    class ExplodingLexicalIndex:
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("runtime must not query lexical fallback")
+
+        def is_source_stale(self, _source_path: str) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        lambda: FakeVectorStore([]),
+    )
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        lexical_index=ExplodingLexicalIndex(),
+    )
+
+    assert payload["vector_backend"] == "milvus"
+    assert payload["lexical_candidate_count"] == 0
+
+
+def test_runtime_source_probe_uses_candidate_budget_before_final_top_k(monkeypatch):
+    calls: list[tuple[str, int, str | None]] = []
+
+    class RecordingVectorStore:
+        def similarity_search_with_score(self, query, k=4, expr=None):
+            calls.append((query, k, expr))
+            return []
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        lambda: RecordingVectorStore(),
+    )
+
+    retrieve_structured_knowledge(
+        "payment-service 发布后 pool_waiting 上升，如何结合部署历史判断是否回滚？",
+        top_k=2,
+    )
+
+    source_probes = [call for call in calls if call[2] and "tickets.xlsx" in call[2]]
+    assert source_probes
+    assert source_probes[0][1] > 2
+
+
+def test_runtime_heading_probe_scopes_vector_search_to_runbook(monkeypatch):
+    calls: list[tuple[str, int, str | None]] = []
+
+    class RecordingVectorStore:
+        def similarity_search_with_score(self, query, k=4, expr=None):
+            calls.append((query, k, expr))
+            return []
+
+    monkeypatch.setattr(
+        "app.services.rag_retrieval_service.vector_store_manager.get_vector_store",
+        lambda: RecordingVectorStore(),
+    )
+
+    retrieve_structured_knowledge(
+        "billing-service CPU 持续 95%，如何收集进程和线程证据并给出处置边界？",
+        top_k=3,
+    )
+
+    runbook_probes = [
+        call for call in calls if call[2] and "cpu_high_usage.md" in call[2]
+    ]
+    assert runbook_probes
+    assert "处置" in runbook_probes[0][0] or "审批" in runbook_probes[0][0]
+
+
+def test_explicit_injected_provider_can_keep_lexical_fallback(monkeypatch, tmp_path):
+    index = LexicalIndexService(tmp_path / "lexical.json")
+    document = Document(
+        page_content="Redis maxclients connection timeout runbook.",
+        metadata={
+            "_source": "docs/knowledge-base/redis.md",
+            "_file_name": "redis.md",
+            "_doc_id": "docs/knowledge-base/redis.md",
+            "_chunk_id": "redis.md#0001",
+        },
+    )
+    index.upsert_source("docs/knowledge-base/redis.md", [document])
+    monkeypatch.setattr(config, "rag_min_lexical_trust_score", 0.0)
+
+    payload = retrieve_structured_knowledge(
+        "Redis maxclients connection timeout",
+        lexical_index=index,
+        vector_store_provider=lambda: (_ for _ in ()).throw(RuntimeError("milvus unavailable")),
+    )
+
+    assert payload["status"] == "success"
+    assert payload["retrieval_results"][0]["metadata"]["_retrieval_source"] == "lexical"
+
+
 def test_retrieval_degrades_to_vector_when_lexical_search_fails() -> None:
     document = Document(
         page_content="Redis maxclients timeout",
@@ -1616,3 +1853,30 @@ def test_stale_registry_read_failure_filters_vector_candidate() -> None:
         )
         is True
     )
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_source"),
+    [
+        (
+            "TCP connect 正常但 first byte 很慢，如何区分网络和应用依赖问题？",
+            "network_timeout_runbook.md",
+        ),
+        (
+            "active threads 达到上限且任务队列持续增长，是否应该直接扩大线程池？",
+            "thread_pool_exhaustion_runbook.md",
+        ),
+        (
+            "consumer lag 和 oldest message age 持续增长，如何判断消息队列积压根因？",
+            "message_queue_backlog_runbook.md",
+        ),
+    ],
+)
+def test_runtime_boundary_queries_require_their_specific_runbook(
+    query: str,
+    expected_source: str,
+) -> None:
+    preferences = infer_retrieval_preferences(query)
+
+    assert expected_source in preferences["required_sources"]
+    assert expected_source in build_targeted_lexical_queries(query)

@@ -29,7 +29,13 @@
         <div class="sidebar-backdrop" id="sidebarBackdrop" hidden></div>
         <aside class="sidebar" id="appSidebar" aria-label="主导航">
             <div class="sidebar-header">
-                <h2 class="sidebar-title">AutoOnCall</h2>
+                <div class="sidebar-brand">
+                    <span class="sidebar-brand-mark" aria-hidden="true">AO</span>
+                    <div>
+                        <h2 class="sidebar-title">AutoOnCall</h2>
+                        <p class="sidebar-subtitle">AIOps intelligence workspace</p>
+                    </div>
+                </div>
             </div>
             
             <div class="sidebar-content">
@@ -42,19 +48,29 @@
 
                 <nav class="workspace-nav" aria-label="AutoOnCall 工作台">
                     <button class="workspace-nav-btn" data-workbench-view="chat">
-                        <span class="workspace-nav-dot"></span>
+                        <svg class="workspace-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M6 5.5H18C19.1 5.5 20 6.4 20 7.5V15.5C20 16.6 19.1 17.5 18 17.5H11L7 20V17.5H6C4.9 17.5 4 16.6 4 15.5V7.5C4 6.4 4.9 5.5 6 5.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                        </svg>
                         <span>知识问答</span>
                     </button>
                     <button class="workspace-nav-btn active" data-workbench-view="incidents">
-                        <span class="workspace-nav-dot"></span>
+                        <svg class="workspace-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M12 3L21 19H3L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                            <path d="M12 9V13M12 16.5V16.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
                         <span>故障诊断中心</span>
                     </button>
                     <button class="workspace-nav-btn" data-workbench-view="response">
-                        <span class="workspace-nav-dot"></span>
+                        <svg class="workspace-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M7 4H17L20 7V19C20 20.1 19.1 21 18 21H6C4.9 21 4 20.1 4 19V6C4 4.9 4.9 4 6 4H7Z" stroke="currentColor" stroke-width="1.8"/>
+                            <path d="M8 10H16M8 14H16M8 18H13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
                         <span>处置中心</span>
                     </button>
                     <button class="workspace-nav-btn" data-workbench-view="system">
-                        <span class="workspace-nav-dot"></span>
+                        <svg class="workspace-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M4 7H20M7 4V10M4 17H20M16 14V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
                         <span>环境就绪中心</span>
                     </button>
                 </nav>
@@ -100,6 +116,7 @@
                     <div>
                         <p class="workbench-kicker">AutoOnCall Workbench</p>
                         <h1 id="workbenchTitle">故障诊断中心</h1>
+                        <p class="workbench-subtitle" id="workbenchSubtitle">聚合告警、诊断运行与证据结论，完整展示 Agent 推理链路。</p>
                     </div>
                     <div class="workbench-actions">
                         <span class="status-pill" id="healthStatusPill">状态加载中</span>
@@ -353,6 +370,14 @@
                 </div>
             </section>
             <div class="chat-container">
+                <header class="chat-page-header">
+                    <div>
+                        <p class="workbench-kicker">RAG Assistant</p>
+                        <h1>知识问答</h1>
+                        <p>上传运维文档并进行可追溯问答，查看召回来源与回答依据。</p>
+                    </div>
+                    <span class="chat-capability-pill">Hybrid retrieval</span>
+                </header>
                 <section class="knowledge-panel" id="knowledgePanel">
                     <div class="knowledge-panel-header">
                         <div>
@@ -384,7 +409,8 @@
                     <div class="knowledge-upload-summary" id="knowledgeUploadSummary">暂无知识库上传记录</div>
                 </section>
                 <div class="welcome-greeting" id="welcomeGreeting">
-                    <p>你好！我是智能Oncall小助手</p>
+                    <strong>开始一次可追溯的运维问答</strong>
+                    <p>答案会结合知识库检索结果，并展示引用来源与相关性。</p>
                 </div>
                 <div class="chat-messages" id="chatMessages">
                 </div>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.config import config
@@ -54,6 +55,13 @@ def select_required_sources(
         for chunk in candidates
         if citation_source_basename(chunk.get("source_file")) in required_sources
     ]
+    if len(required_sources) == 1:
+        # A single explicit source requirement means the query is asking for
+        # multiple semantic facets from one runbook. Fill remaining slots from
+        # that source before admitting adjacent-domain chunks.
+        required_candidates.sort(
+            key=lambda item: -float(item.get("rerank_score") or 0.0)
+        )
     for chunk in required_candidates:
         if len(selected) >= top_k:
             break
@@ -62,6 +70,17 @@ def select_required_sources(
             continue
         selected.append(chunk)
         selected_ids.add(identity)
+
+    if len(required_sources) == 1:
+        # Avoid spending the final slot on document metadata when the query
+        # asks for diagnosis or action from one explicitly required runbook.
+        semantic_candidates = [
+            chunk
+            for chunk in selected
+            if not _is_metadata_only_chunk(chunk)
+        ]
+        if semantic_candidates:
+            selected = semantic_candidates
 
     selected_identities = {
         (str(item.get("doc_id") or ""), str(item.get("chunk_id") or "")) for item in selected
@@ -89,11 +108,36 @@ def select_heading_coverage(
 
     selected: list[dict[str, Any]] = []
     selected_ids: set[tuple[str, str]] = set()
+    query_entities = _query_service_entities(query)
+
+    boundary_requested = any(
+        term in str(query or "").lower()
+        for term in {
+            "边界",
+            "审批",
+            "重启",
+            "扩容",
+            "回滚",
+            "清理",
+            "删除",
+            "截断",
+            "写文件失败",
+            "处置",
+            "限流",
+        }
+    )
     for heading_terms in heading_groups:
         match = next(
             (
                 chunk
                 for chunk in candidates
+                if (
+                    not query_entities
+                    or any(
+                        entity in _candidate_searchable_text(chunk)
+                        for entity in query_entities
+                    )
+                )
                 if any(
                     term in str(chunk.get("heading_path") or "").lower()
                     for term in heading_terms
@@ -103,6 +147,10 @@ def select_heading_coverage(
         )
         if match is None:
             continue
+        if query_entities and not any(
+            entity in _candidate_searchable_text(match) for entity in query_entities
+        ):
+            continue
         identity = (str(match.get("doc_id") or ""), str(match.get("chunk_id") or ""))
         if identity in selected_ids:
             continue
@@ -110,6 +158,21 @@ def select_heading_coverage(
         selected_ids.add(identity)
         if len(selected) >= top_k:
             break
+
+    if query_entities and len(selected) < top_k:
+        entity_matches = [
+            chunk
+            for chunk in candidates
+            if any(entity in _candidate_searchable_text(chunk) for entity in query_entities)
+        ]
+        for chunk in entity_matches:
+            if len(selected) >= top_k:
+                break
+            identity = (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
+            if identity in selected_ids:
+                continue
+            selected.append(chunk)
+            selected_ids.add(identity)
 
     primary_source = citation_source_basename(candidates[0].get("source_file"))
     same_source = [
@@ -130,12 +193,86 @@ def select_heading_coverage(
             continue
         selected.append(chunk)
         selected_ids.add(identity)
+    if boundary_requested and len(selected) >= top_k:
+        boundary_candidate = next(
+            (
+                chunk
+                for chunk in candidates
+                if any(
+                    term in str(chunk.get("heading_path") or "").lower()
+                    for term in {
+                        "处置计划与审批",
+                        "升级与审批",
+                        "change and approval boundary",
+                        "回滚条件",
+                        "rollback conditions",
+                    }
+                )
+            ),
+            None,
+        )
+        if boundary_candidate is not None:
+            boundary_identity = (
+                str(boundary_candidate.get("doc_id") or ""),
+                str(boundary_candidate.get("chunk_id") or ""),
+            )
+            if boundary_identity not in selected_ids:
+                selected[-1] = boundary_candidate
+                selected_ids = {
+                    (str(item.get("doc_id") or ""), str(item.get("chunk_id") or ""))
+                    for item in selected
+                }
     return selected + [
         chunk
         for chunk in candidates
         if (str(chunk.get("doc_id") or ""), str(chunk.get("chunk_id") or ""))
         not in selected_ids
     ]
+
+
+def _is_metadata_only_chunk(chunk: dict[str, Any]) -> bool:
+    heading = str(chunk.get("heading_path") or "").lower()
+    content = str(chunk.get("content") or chunk.get("content_preview") or "").lower()
+    metadata_markers = ("文档元数据", "scope and ownership", "owner", "last reviewed")
+    semantic_markers = (
+        "证据",
+        "metric",
+        "pool_waiting",
+        "active_connections",
+        "decision",
+        "rollback",
+        "审批",
+        "回滚",
+    )
+    return (
+        any(marker in heading for marker in metadata_markers)
+        and not any(marker in content for marker in semantic_markers)
+    )
+
+
+def _query_service_entities(query: str) -> set[str]:
+    """Extract explicit service names used to keep table history rows on-topic."""
+    return {
+        match.group(0).lower()
+        for match in re.finditer(
+            r"\b[a-z][a-z0-9-]*-service\b",
+            str(query or ""),
+            flags=re.IGNORECASE,
+        )
+    }
+
+
+def _candidate_searchable_text(chunk: dict[str, Any]) -> str:
+    metadata = chunk.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return " ".join(
+        (
+            str(chunk.get("source_file") or ""),
+            str(chunk.get("heading_path") or ""),
+            str(chunk.get("content") or chunk.get("content_preview") or ""),
+            str(metadata.get("primary_key") or ""),
+        )
+    ).lower()
 
 
 def retrieval_heading_groups(query: str) -> list[tuple[str, ...]]:
@@ -148,13 +285,53 @@ def retrieval_heading_groups(query: str) -> list[tuple[str, ...]]:
             "取证",
             "排查",
             "如何判断",
+            "判断",
+            "原因",
             "怎样区分",
             "怎么区分",
             "如何验证",
             "如何收集",
         }
     ):
-        groups.append(("排查步骤", "常用命令", "相关工具命令", "diagnosing"))
+        groups.append(
+            (
+                "首轮证据",
+                "证据与指标查询",
+                "evidence and metric queries",
+                "排查步骤",
+                "只读取证命令",
+                "常用命令",
+                "相关工具命令",
+                "diagnosing",
+                "evidence",
+                "read-only diagnosis",
+                "monitoring ingestion errors",
+            )
+        )
+    if any(
+        term in lowered
+        for term in {
+            "区分",
+            "判断",
+            "主故障域",
+            "根因",
+            "慢查询",
+            "连接池",
+            "pool_waiting",
+            "active_connections",
+            "503",
+            "5xx",
+        }
+    ):
+        groups.append(
+            (
+                "假设排除与决策树",
+                "原因判别",
+                "decision tree",
+                "read-only diagnosis",
+                "排查步骤",
+            )
+        )
     if any(
         term in lowered
         for term in {
@@ -166,7 +343,15 @@ def retrieval_heading_groups(query: str) -> list[tuple[str, ...]]:
             "oomkilled",
         }
     ):
-        groups.append(("常用命令", "相关工具命令", "排查步骤"))
+        groups.append(
+            (
+                "首轮证据",
+                "只读取证命令",
+                "常用命令",
+                "相关工具命令",
+                "排查步骤",
+            )
+        )
     if any(
         term in lowered
         for term in {
@@ -178,9 +363,60 @@ def retrieval_heading_groups(query: str) -> list[tuple[str, ...]]:
             "删除",
             "截断",
             "写文件失败",
+            "处置",
+            "审批",
+            "限流",
+            "设计症状告警",
+            "503",
+            "5xx",
+            "pool_waiting",
+            "active_connections",
+            "慢查询",
+            "索引",
+            "连接池",
         }
     ):
-        groups.append(("升级与审批", "审批", "安全"))
+        groups.append(
+            (
+                "处置计划与审批",
+                "升级与审批",
+                "change and approval boundary",
+                "回滚条件",
+                "rollback conditions",
+                "审批",
+                "安全",
+                "快速决策摘要",
+            )
+        )
+    if any(
+        term in lowered
+        for term in {"历史", "当前", "实时", "incident-window", "复盘", "工单", "部署历史"}
+    ):
+        groups.append(("快速决策摘要", "incident-window", "历史", "部署历史", "工单"))
+    if any(
+        term in lowered
+        for term in {
+            "cpu",
+            "oom",
+            "oomkilled",
+            "disk",
+            "inode",
+            "pool_waiting",
+            "active_connections",
+            "endpointslice",
+            "discarded",
+        }
+    ):
+        groups.append(
+            (
+                "quick decision summary",
+                "change and approval boundary",
+                "处置计划与审批",
+                "假设排除与决策树",
+                "decision tree",
+                "快速决策摘要",
+            )
+        )
     return groups
 
 

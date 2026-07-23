@@ -75,6 +75,7 @@ volumes/
 # Uploads
 uploads/
 *.tmp
+tmp/
 tmp_debug*/
 
 # OS

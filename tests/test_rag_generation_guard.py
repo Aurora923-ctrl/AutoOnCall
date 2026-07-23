@@ -1,8 +1,10 @@
 """Shared streaming/non-streaming RAG generation gate tests."""
 
 from app.services import rag_answer_coverage, rag_generation_guard
+from app.services.rag_answer_policy import build_extractive_grounded_answer
 from app.services.rag_generation_guard import (
     finalize_grounded_answer,
+    missing_required_citation_sources,
     prepare_grounded_generation,
 )
 
@@ -128,6 +130,29 @@ def test_generation_guard_builds_question_plan_once(monkeypatch) -> None:
     assert calls == 1
 
 
+def test_generation_guard_keeps_partial_evidence_and_recomputes_answer_coverage() -> None:
+    preparation = prepare_grounded_generation(
+        {
+            "status": "success",
+            "query": "如何判断 Redis 原因，并说明回滚边界？",
+            "retrieval_results": [
+                {
+                    "source_file": "redis.md",
+                    "chunk_id": "redis.md#0001",
+                    "heading_path": "原因判别",
+                    "content": "根据 connected_clients 判断连接耗尽。",
+                }
+            ],
+        }
+    )
+
+    assert preparation.refused is False
+    assert preparation.generation_payload is not None
+    coverage = preparation.generation_payload["answer_coverage"]
+    assert coverage["complete"] is False
+    assert coverage["uncovered_subgoals"] == ["boundary"]
+
+
 def test_generation_guard_finalizes_supported_answer() -> None:
     retrieval_payload = {
         "status": "success",
@@ -160,6 +185,38 @@ def test_generation_guard_finalizes_supported_answer() -> None:
     assert decision.answer_policy == "answer_with_citations"
 
 
+def test_generation_guard_rejects_topic_drift_before_citation_acceptance() -> None:
+    retrieval_payload = {
+        "status": "success",
+        "query": "payment-service 的 pool_waiting 如何排查慢查询？",
+        "answer_policy": "answer_with_citations",
+        "retrieval_results": [
+            {
+                "source_file": "payment_wiki.html",
+                "chunk_id": "payment_wiki.html#0001",
+                "content": "检查 pool_waiting、active_connections 和慢查询。",
+            }
+        ],
+    }
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "payment_wiki.html",
+            "chunk_id": "payment_wiki.html#0001",
+        }
+    ]
+
+    decision = finalize_grounded_answer(
+        "先生成变更计划，审批后执行。[证据 1]",
+        citations,
+        retrieval_payload,
+        {"status": "success"},
+    )
+
+    assert decision.no_answer is True
+    assert decision.citations == []
+
+
 def test_generation_guard_rejects_citation_with_unrelated_claim() -> None:
     retrieval_payload = {
         "status": "success",
@@ -189,6 +246,71 @@ def test_generation_guard_rejects_citation_with_unrelated_claim() -> None:
 
     assert decision.no_answer is True
     assert decision.answer_policy == "refuse_without_citation"
+
+
+def test_generation_guard_repairs_missing_citation_on_grounded_claim() -> None:
+    retrieval_payload = {
+        "status": "success",
+        "query": "如何判断 Redis connected_clients 接近 maxclients？",
+        "answer_policy": "answer_with_citations",
+        "retrieval_results": [
+            {
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+                "content": "检查 connected_clients 和 maxclients 判断连接容量。",
+            }
+        ],
+    }
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+        }
+    ]
+
+    decision = finalize_grounded_answer(
+        "检查 connected_clients 和 maxclients 判断连接容量。",
+        citations,
+        retrieval_payload,
+        {"status": "success"},
+    )
+
+    assert decision.no_answer is False
+    assert "[证据 1]" in decision.answer
+    assert decision.citations == citations
+
+
+def test_generation_guard_does_not_repair_unrelated_uncited_claim() -> None:
+    retrieval_payload = {
+        "status": "success",
+        "query": "如何判断 Redis connected_clients 接近 maxclients？",
+        "answer_policy": "answer_with_citations",
+        "retrieval_results": [
+            {
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+                "content": "检查 connected_clients 和 maxclients 判断连接容量。",
+            }
+        ],
+    }
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+        }
+    ]
+
+    decision = finalize_grounded_answer(
+        "删除订单表中的历史数据。",
+        citations,
+        retrieval_payload,
+        {"status": "success"},
+    )
+
+    assert decision.no_answer is True
+    assert decision.citations == []
 
 
 def test_generation_guard_checks_only_budgeted_generation_evidence() -> None:
@@ -244,3 +366,74 @@ def test_generation_allowlist_malformed_payload_fails_closed() -> None:
     }
 
     assert build_generation_evidence(payload) == []
+
+
+def test_generation_guard_keeps_uncited_evidence_gap_with_grounded_claim() -> None:
+    retrieval_payload = {
+        "status": "success",
+        "answer_policy": "answer_with_citations",
+        "retrieval_results": [
+            {
+                "source_file": "redis.md",
+                "chunk_id": "redis.md#0001",
+                "content": "检查 connected_clients 和 maxclients。",
+            }
+        ],
+    }
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "redis.md",
+            "chunk_id": "redis.md#0001",
+        }
+    ]
+
+    decision = finalize_grounded_answer(
+        "检查 connected_clients 和 maxclients。[证据 1]\n"
+        "当前证据不足：缺少当前事件的审批和回滚记录。[证据 1]",
+        citations,
+        retrieval_payload,
+        {"status": "success"},
+    )
+
+    assert decision.no_answer is False
+    assert decision.citations == citations
+    assert decision.answer.endswith("当前证据不足：缺少当前事件的审批和回滚记录。")
+
+
+def test_missing_required_citation_sources_uses_source_basenames() -> None:
+    missing = missing_required_citation_sources(
+        [
+            {
+                "source_file": "docs/knowledge-base/official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#0001",
+            }
+        ],
+        ["official_redis_clients.md", "redis_postmortem.pdf"],
+    )
+
+    assert missing == ["redis_postmortem.pdf"]
+
+
+def test_extractive_grounded_answer_covers_required_sources() -> None:
+    answer = build_extractive_grounded_answer(
+        "Redis connected_clients 接近 maxclients 时如何判断？",
+        [
+            {
+                "citation_index": 1,
+                "source_file": "official_redis_clients.md",
+                "chunk_id": "official_redis_clients.md#1",
+                "content": "检查 connected_clients 和 maxclients，计算有效连接容量。",
+            },
+            {
+                "citation_index": 2,
+                "source_file": "redis_postmortem.pdf",
+                "chunk_id": "redis_postmortem.pdf#1",
+                "content": "历史复盘显示 retry amplification 推高了连接需求。",
+            },
+        ],
+        required_sources=["official_redis_clients.md", "redis_postmortem.pdf"],
+    )
+
+    assert "[证据 1]" in answer
+    assert "[证据 2]" in answer

@@ -18,6 +18,7 @@ from app.services.policies.retrieval_policy import (
     RETRIEVAL_NO_ANSWER,
     RETRIEVAL_SUCCESS,
 )
+from app.services.rag_answer_coverage import build_answer_coverage_matrix
 from app.services.rag_retrieval.backends import (
     _candidate_count,
     _search_with_optional_scores,
@@ -64,6 +65,7 @@ from app.services.rag_retrieval.selection import (
     enforce_source_coverage,
     is_trusted_retrieval_chunk,
     query_is_out_of_scope,
+    select_heading_coverage,
     select_required_sources,
 )
 from app.services.rag_retrieval.validation import normalize_fusion_strategy
@@ -88,6 +90,8 @@ def retrieve_structured_knowledge(
     vector_store: Any | None = None,
     vector_store_provider: Callable[[], Any] | None = None,
     lexical_index: Any,
+    allow_lexical_fallback: bool = True,
+    vector_backend_label: str = "unknown",
 ) -> dict[str, Any]:
     """Retrieve trusted chunks while preserving the legacy public dictionary contract."""
     total_started = time.perf_counter()
@@ -106,9 +110,12 @@ def retrieve_structured_knowledge(
         )
         backends = _retrieve_backends(
             request,
+            result=backends,
             vector_store=vector_store,
             vector_store_provider=vector_store_provider,
             lexical_index=lexical_index,
+            allow_lexical_fallback=allow_lexical_fallback,
+            vector_backend_label=vector_backend_label,
         )
         candidates = _prepare_candidates(request, backends, lexical_index, counts)
         trusted, rejected, required_sources, missing_sources = _apply_gates(
@@ -205,11 +212,16 @@ def _build_request(
 def _retrieve_backends(
     request: RetrievalRequest,
     *,
+    result: BackendResult | None = None,
     vector_store: Any | None,
     vector_store_provider: Callable[[], Any] | None,
     lexical_index: Any,
+    allow_lexical_fallback: bool,
+    vector_backend_label: str,
 ) -> BackendResult:
-    result = BackendResult()
+    result = result or BackendResult()
+    result.vector_backend = vector_backend_label
+    result.retrieval_backend = vector_backend_label
     provider = vector_store_provider
     vector_started = time.perf_counter()
     try:
@@ -222,9 +234,37 @@ def _retrieve_backends(
             request.options.candidate_k,
             expr=request.options.metadata_filter_expr,
         )
+        # Runtime keeps Milvus authoritative, but uses source-scoped vector
+        # probes for explicit multi-source questions. This improves recall
+        # without consulting the local lexical index.
+        if vector_backend_label == "milvus":
+            preferences = infer_retrieval_preferences(request.query)
+            required_sources = _required_sources_from_preferences(preferences)
+            targeted_queries = build_targeted_lexical_queries(request.query)
+            probe_sources = required_sources | set(targeted_queries)
+            for source in sorted(probe_sources):
+                source_expr = build_milvus_metadata_expr({"_file_name": source})
+                probe_query = targeted_queries.get(
+                    source,
+                    f"{request.query} {source}",
+                )
+                result.vector_results.extend(
+                    _search_with_optional_scores(
+                        store,
+                        probe_query,
+                        request.options.candidate_k,
+                        expr=source_expr,
+                    )
+                )
+            if probe_sources:
+                result.vector_results = _deduplicate_vector_results(result.vector_results)
     except Exception as exc:
         result.vector_error = BackendError("vector", str(exc), type(exc).__name__)
-        if vector_store is not None or not request.options.hybrid_search_enabled:
+        if (
+            vector_store is not None
+            or not request.options.hybrid_search_enabled
+            or not allow_lexical_fallback
+        ):
             raise
         logger.warning(
             "向量检索不可用，降级使用本地词法索引: {}, error_type={}",
@@ -234,12 +274,12 @@ def _retrieve_backends(
     finally:
         result.stage_timings["vector_search_ms"] = _elapsed_ms(vector_started)
 
-    if request.options.hybrid_search_enabled and (
+    if allow_lexical_fallback and request.options.hybrid_search_enabled and (
         result.vector_error.failed
         or _should_query_lexical_index(vector_store, result.vector_results)
     ):
         _run_lexical_search(request, lexical_index, result)
-    if request.options.hybrid_search_enabled and vector_store is None:
+    if allow_lexical_fallback and request.options.hybrid_search_enabled and vector_store is None:
         _run_targeted_lexical_search(request, lexical_index, result)
     return result
 
@@ -274,6 +314,32 @@ def _run_lexical_search(
         )
     finally:
         result.stage_timings["lexical_search_ms"] = _elapsed_ms(started)
+
+
+def _deduplicate_vector_results(
+    results: list[tuple[Any, float | None]],
+) -> list[tuple[Any, float | None]]:
+    """Keep the closest Milvus result for each source/chunk identity."""
+    selected: dict[tuple[str, str], tuple[Any, float | None]] = {}
+    for document, score in results:
+        metadata = dict(getattr(document, "metadata", {}) or {})
+        key = (
+            str(
+                metadata.get("_source_id")
+                or metadata.get("_doc_id")
+                or metadata.get("_file_name")
+                or ""
+            ),
+            str(metadata.get("_chunk_id") or metadata.get("chunk_id") or ""),
+        )
+        existing = selected.get(key)
+        if existing is None:
+            selected[key] = (document, score)
+            continue
+        old_score = existing[1]
+        if score is not None and (old_score is None or score < old_score):
+            selected[key] = (document, score)
+    return list(selected.values())
 
 
 def _run_targeted_lexical_search(
@@ -391,12 +457,38 @@ def _apply_gates(
 
     required = _required_sources_from_preferences(infer_retrieval_preferences(request.query))
     trusted_before_coverage = trusted
+    trusted = select_heading_coverage(
+        trusted,
+        query=request.query,
+        top_k=max(request.options.top_k, len(required)),
+    )
     trusted = select_required_sources(
         trusted,
         required_sources=required,
         top_k=request.options.top_k,
     )
-    if request.options.fusion_strategy == "weighted" and not required:
+    coverage_requested = any(
+        marker in str(request.query or "").lower()
+        for marker in {
+            "如何",
+            "怎样",
+            "怎么",
+            "排查",
+            "取证",
+            "证据",
+            "判断",
+            "区分",
+            "边界",
+            "审批",
+            "回滚",
+            "处置",
+        }
+    )
+    if (
+        request.options.fusion_strategy == "weighted"
+        and not required
+        and not coverage_requested
+    ):
         trusted = prune_low_relevance_candidates(trusted, top_k=request.options.top_k)
     else:
         trusted = trusted[: request.options.top_k]
@@ -500,6 +592,7 @@ def _build_outcome(
                 }
                 for item in trusted
             ],
+            "answer_coverage": build_answer_coverage_matrix(request.query, trusted),
             "observability": _observability(
                 request,
                 backends,
@@ -534,6 +627,8 @@ def _base_payload(
         "max_l2_distance": options.max_distance,
         "min_lexical_trust_score": options.min_lexical_score,
         "retrieval_mode": retrieval_mode,
+        "vector_backend": backends.vector_backend,
+        "retrieval_backend": backends.retrieval_backend,
         "fusion_strategy": options.fusion_strategy,
         "retrieval_degraded": backends.vector_error.failed or backends.lexical_error.failed,
         "vector_error_message": build_public_vector_error_message(
@@ -568,7 +663,11 @@ def _observability(
     return {
         "stages": {
             "embedding_ms": "not_observed",
-            "milvus_search_ms": "not_observed",
+            "milvus_search_ms": (
+                backends.stage_timings.get("vector_search_ms", 0.0)
+                if backends.vector_backend == "milvus"
+                else "not_observed"
+            ),
             "vector_search_ms": backends.stage_timings.get("vector_search_ms", 0.0),
             "lexical_search_ms": backends.stage_timings.get("lexical_search_ms", 0.0),
             "fusion_rerank_ms": backends.stage_timings.get("fusion_rerank_ms", 0.0),
@@ -588,6 +687,8 @@ def _observability(
         },
         "runtime": {
             "retrieval_mode": retrieval_mode,
+            "vector_backend": backends.vector_backend,
+            "retrieval_backend": backends.retrieval_backend,
             "embedding_model": config.dashscope_embedding_model,
             "reranker_model": (
                 "rule-weighted" if request.options.rerank_enabled else "disabled"
@@ -648,6 +749,8 @@ def _build_failed_outcome(
             "retrieval_mode": mode,
             "fusion_strategy": strategy,
             "retrieval_degraded": False,
+            "vector_backend": "unknown",
+            "retrieval_backend": "unknown",
             "vector_error_message": build_public_vector_error_message(
                 backends.vector_error.detail
             ),
@@ -700,6 +803,7 @@ def _build_failed_outcome(
             "observability": observability,
             "summary": PUBLIC_RETRIEVAL_ERROR,
             "content": PUBLIC_RETRIEVAL_ERROR,
+            "answer_coverage": build_answer_coverage_matrix(query, []),
         }
     )
     return payload

@@ -25,6 +25,8 @@ def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "retrieval_mode": payload.get("retrieval_mode", ""),
         "fusion_strategy": payload.get("fusion_strategy", "weighted"),
         "retrieval_degraded": bool(payload.get("retrieval_degraded")),
+        "vector_backend": payload.get("vector_backend", ""),
+        "retrieval_backend": payload.get("retrieval_backend", ""),
         "vector_error_message": payload.get("vector_error_message", ""),
         "vector_error_type": payload.get("vector_error_type", ""),
         "lexical_error_message": payload.get("lexical_error_message", ""),
@@ -44,6 +46,7 @@ def compact_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
             for item in payload.get("generation_allowlist", []) or []
             if isinstance(item, dict)
         ],
+        "answer_coverage": dict(payload.get("answer_coverage") or {}),
         "no_answer_rejected": bool(payload.get("no_answer_rejected")),
         "retrieval_results": build_citations(payload),
         "rejected_results": [

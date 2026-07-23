@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -29,6 +31,8 @@ REDIS_POSTMORTEM = {
     "incident_id": "INC-REDIS-2026-07-A",
     "owner": "Commerce Platform SRE",
     "classification": "Internal training fixture - identifiers and traffic values sanitized",
+    "reviewed_at": "2026-07-21",
+    "source_reference": "INC-REDIS-2026-07-A / CR-REDIS-2026-071",
     "pages": [
         {
             "heading": "1. Executive Summary and Impact",
@@ -150,6 +154,11 @@ REDIS_POSTMORTEM = {
                     "connection demand while the pool retained idle connections. The combined load "
                     "exhausted available client capacity and produced a positive feedback loop."
                 ),
+                (
+                    "Diagnostic conclusion: the confirmed hypothesis is supported by temporal "
+                    "ordering, mechanism evidence, and causal reversal. The rejected hypotheses "
+                    "remain documented to prevent future responders from repeating the same checks."
+                ),
             ],
         },
         {
@@ -170,6 +179,11 @@ REDIS_POSTMORTEM = {
                     "Recovery required connected_clients below 80% of effective capacity, "
                     "blocked_clients returning to baseline, checkout 5xx below 1%, and stable "
                     "replication for 30 minutes."
+                ),
+                (
+                    "Recovery verification was owned by Commerce Platform SRE. The incident record "
+                    "was reviewed on 2026-07-21 and linked to the approval and long-term action "
+                    "tickets so the resolution remains auditable."
                 ),
             ],
             "table": [
@@ -214,6 +228,8 @@ MYSQL_POSTMORTEM = {
     "incident_id": "INC-MYSQL-2026-07-B",
     "owner": "Payments Reliability",
     "classification": "Internal training fixture - identifiers and traffic values sanitized",
+    "reviewed_at": "2026-07-21",
+    "source_reference": "INC-MYSQL-2026-07-B / CR-MYSQL-2026-044",
     "pages": [
         {
             "heading": "1. Executive Summary and Impact",
@@ -333,6 +349,11 @@ MYSQL_POSTMORTEM = {
                     "query held connections long enough to consume the application pool, creating "
                     "queueing and request timeouts."
                 ),
+                (
+                    "Diagnostic conclusion: the confirmed hypothesis is supported by the new digest, "
+                    "read-only plan evidence, connection hold time, and causal reversal. Rejected "
+                    "hypotheses are retained as negative evidence for future incident comparison."
+                ),
             ],
         },
         {
@@ -353,6 +374,11 @@ MYSQL_POSTMORTEM = {
                 (
                     "Recovery required pool_waiting=0, active connections below 70% of capacity, "
                     "P95 below 1 s, no duplicate-charge signal, and 30 minutes of stable observation."
+                ),
+                (
+                    "Recovery verification was owned by Payments Reliability and the DBA. The "
+                    "incident record was reviewed on 2026-07-21 and linked to the approval, query "
+                    "regression test, and covering-index action tickets."
                 ),
             ],
             "table": [
@@ -462,6 +488,8 @@ PAYMENT_WIKI_HTML = """<!doctype html>
 <body>
   <h1>Payment MySQL Runbook</h1>
   <h2>Scope and ownership</h2>
+  <p>Retrieval alias: Payment Runbook MySQL slow query EXPLAIN active_connections
+  pool_waiting.</p>
   <p>This runbook applies when checkout latency, MySQL slow-query volume, active connection
   occupancy, or application pool_waiting rises. Owner: Payments Reliability. DBA escalation:
   Database Platform. Last reviewed: 2026-07-21. Related tickets: INC-MYSQL-014,
@@ -519,33 +547,166 @@ TICKET_ROWS = [
         "ticket_id": "INC-REDIS-001",
         "service_name": "order-service",
         "incident_type": "redis_maxclients",
+        "impact": "Checkout 5xx peaked at 12.8% for 18 minutes",
         "root_cause": "Redis maxclients exhausted by retry storm",
+        "excluded_hypotheses": "Redis CPU saturation; packet loss; single slow command",
+        "decision_record": "Confirmed after temporal ordering, mechanism evidence, and canary reversal",
         "resolution": "Reduced retry amplification and raised maxclients after approval",
         "evidence": "connected_clients=9940 maxclients=10000 blocked_clients=37",
+        "approval_record": "CR-REDIS-2026-071 approved by Incident Commander and Redis Owner",
+        "rollback_condition": "Checkout 5xx or replication lag increases during canary",
+        "owner": "Commerce Platform SRE",
+        "updated_at": "2026-07-21",
     },
     {
         "ticket_id": "INC-REDIS-009",
         "service_name": "order-service",
         "incident_type": "redis_maxclients",
-        "root_cause": "Promotion lookup retry loop exhausted Redis client slots",
+        "impact": "促销查询重试超时 delayed order confirmation",
+        "root_cause": "促销查询重试循环 exhausted Redis client slots and maxclients headroom",
+        "excluded_hypotheses": "Network loss; Redis host CPU; command latency",
+        "decision_record": "Confirmed by release ownership and client-pressure reversal",
         "resolution": "Reduced retry burst and capped idle Redis pool after approval",
         "evidence": "Loki redis timeout Prometheus 5xx connected_clients near maxclients",
+        "approval_record": "Order Platform and Redis Owner approved 10% canary",
+        "rollback_condition": "Client churn, blocked clients, or 5xx increases",
+        "owner": "Order Platform",
+        "updated_at": "2026-07-21",
     },
     {
         "ticket_id": "INC-MYSQL-014",
         "service_name": "payment-service",
         "incident_type": "mysql_slow_query",
+        "impact": "Payment P95 reached 5.2 seconds and timeout rate reached 9.6%",
         "root_cause": "Slow SQL held MySQL connections and caused pool waiting",
+        "excluded_hypotheses": "Database host CPU; network latency; permanent connection leak",
+        "decision_record": "Confirmed by digest, EXPLAIN, hold time, and canary reversal",
         "resolution": "Captured digest, added index after approval, observed P95 recovery",
         "evidence": "slow_queries=18 active_connections=188/200 pool_waiting=6",
+        "approval_record": "CR-MYSQL-2026-044 approved by Payments Owner and DBA",
+        "rollback_condition": "Lock wait, replica lag, or payment errors increase",
+        "owner": "Payments Reliability",
+        "updated_at": "2026-07-21",
     },
     {
         "ticket_id": "INC-MYSQL-021",
         "service_name": "payment-service",
         "incident_type": "mysql_pool_waiting",
+        "impact": "Checkout requests queued while idempotency prevented duplicate charges",
         "root_cause": "Checkout report query caused MySQL pool_waiting after release rc3",
+        "excluded_hypotheses": "Connection leak; packet loss; storage saturation",
+        "decision_record": "Confirmed after feature disable cleared pool waiting",
         "resolution": "Disabled report flag, reviewed EXPLAIN, then added covering index",
         "evidence": "deploy rc3 slow query digest payment_report_join_v3 pool_waiting=6",
+        "approval_record": "Feature canary approved before the later DBA index change",
+        "rollback_condition": "Payment errors exceed 2% or replica lag exceeds 10 seconds",
+        "owner": "Payments Reliability",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-NET-027",
+        "service_name": "gateway-service",
+        "incident_type": "network_timeout",
+        "impact": "Cross-zone connect latency caused intermittent upstream 504 responses",
+        "root_cause": "SNAT port pressure amplified by short-lived retry connections",
+        "excluded_hypotheses": "DNS resolution; TLS expiry; application first-byte latency",
+        "decision_record": "Confirmed by network-stage decomposition and connection canary",
+        "resolution": "Reduced retry concurrency and shifted a 10% canary after approval",
+        "evidence": "connect latency retransmits conntrack and SNAT utilization aligned",
+        "approval_record": "Network Platform approved route canary CR-NET-2026-027",
+        "rollback_condition": "Packet loss, cross-zone cost, or downstream connections increase",
+        "owner": "Network Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-TLS-011",
+        "service_name": "public-api",
+        "incident_type": "tls_certificate_expiry",
+        "impact": "A subset of older clients failed TLS handshake at one ingress",
+        "root_cause": "One ingress retained an expired certificate binding",
+        "excluded_hypotheses": "Client clock skew; DNS mismatch; unsupported cipher",
+        "decision_record": "Confirmed by node-specific certificate serial and binding comparison",
+        "resolution": "Applied dual-certificate canary and reloaded the ingress after approval",
+        "evidence": "SNI serial notAfter and ingress binding differed on one node",
+        "approval_record": "Security Platform and API Owner approved CR-TLS-2026-011",
+        "rollback_condition": "Handshake failures or legacy-client failures increase",
+        "owner": "Security Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-DNS-019",
+        "service_name": "catalog-service",
+        "incident_type": "dns_resolution_failure",
+        "impact": "Pods intermittently returned no such host for an internal dependency",
+        "root_cause": "CoreDNS upstream timeout combined with stale negative cache",
+        "excluded_hypotheses": "Authoritative record error; service endpoint failure; TCP routing",
+        "decision_record": "Confirmed by resolver comparison and CoreDNS upstream timing",
+        "resolution": "Canaried an upstream resolver change after preserving DNS evidence",
+        "evidence": "SERVFAIL coredns latency and Pod resolver comparison",
+        "approval_record": "Kubernetes Platform approved CR-DNS-2026-019",
+        "rollback_condition": "NXDOMAIN, wrong-address answers, or traffic skew increases",
+        "owner": "Kubernetes Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-THREAD-008",
+        "service_name": "inventory-service",
+        "incident_type": "thread_pool_exhaustion",
+        "impact": "Request queue growth pushed inventory P99 above eight seconds",
+        "root_cause": "Worker threads blocked on a slow downstream API",
+        "excluded_hypotheses": "CPU saturation; database pool leak; garbage collection",
+        "decision_record": "Confirmed by thread stacks and downstream span duration",
+        "resolution": "Reduced downstream concurrency and enabled approved backpressure canary",
+        "evidence": "thread dumps queue depth rejected tasks and downstream trace spans",
+        "approval_record": "Inventory Owner approved CR-THREAD-2026-008",
+        "rollback_condition": "Rejected tasks, downstream connections, or error rate increases",
+        "owner": "Inventory Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-MQ-023",
+        "service_name": "fulfillment-consumer",
+        "incident_type": "message_queue_backlog",
+        "impact": "Oldest fulfillment event age reached 26 minutes",
+        "root_cause": "A poison message triggered repeated consumer retries on one partition",
+        "excluded_hypotheses": "Producer surge; broker disk saturation; broad consumer shortage",
+        "decision_record": "Confirmed by single-message and single-partition concentration",
+        "resolution": "Quarantined the message and replayed at a capped rate after approval",
+        "evidence": "single partition lag repeated message key and downstream validation error",
+        "approval_record": "Messaging Platform and Fulfillment Owner approved replay",
+        "rollback_condition": "Duplicate processing, rebalance, or downstream errors increase",
+        "owner": "Messaging Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-K8S-031",
+        "service_name": "recommendation-worker",
+        "incident_type": "kubernetes_scheduling_failure",
+        "impact": "New worker replicas remained Pending and reduced batch throughput",
+        "root_cause": "Resource requests and zone affinity left no eligible node",
+        "excluded_hypotheses": "Container image failure; application crash; PVC outage",
+        "decision_record": "Confirmed by scheduler events and eligible-node calculation",
+        "resolution": "Adjusted one canary workload constraint after platform approval",
+        "evidence": "FailedScheduling events requests allocatable capacity and affinity",
+        "approval_record": "Kubernetes Platform approved CR-K8S-2026-031",
+        "rollback_condition": "Wrong-zone placement, resource contention, or instability appears",
+        "owner": "Kubernetes Platform",
+        "updated_at": "2026-07-21",
+    },
+    {
+        "ticket_id": "INC-MYSQL-LOCK-017",
+        "service_name": "billing-service",
+        "incident_type": "mysql_lock_wait",
+        "impact": "Invoice updates queued and API timeout rate reached 6.4%",
+        "root_cause": "A long batch transaction blocked the online update path",
+        "excluded_hypotheses": "Slow storage; connection leak; database CPU saturation",
+        "decision_record": "Confirmed by lock graph, transaction age, and recovery after rollback",
+        "resolution": "Paused the batch and rolled back the blocker after DBA approval",
+        "evidence": "performance_schema lock graph transaction age digest and pool waiting",
+        "approval_record": "DBA and Billing Owner approved CR-LOCK-2026-017",
+        "rollback_condition": "Replica lag, rollback volume, or data mismatch increases",
+        "owner": "Database Platform",
+        "updated_at": "2026-07-21",
     },
 ]
 
@@ -582,6 +743,7 @@ def write_tickets_xlsx(path: Path) -> None:
     tickets.append(headers)
     for row in TICKET_ROWS:
         tickets.append([row[key] for key in headers])
+    _format_sheet(tickets, widths=[22, 24, 26, 42, 46, 42, 46, 46, 48, 46, 44, 26, 16])
 
     deploys = workbook.create_sheet("deploy_history")
     deploys.append(["service_name", "version", "deployed_at", "change_summary", "risk_hint"])
@@ -621,7 +783,27 @@ def write_tickets_xlsx(path: Path) -> None:
             "Remediation after approval for maxclients pressure",
         ]
     )
+    _format_sheet(deploys, widths=[24, 34, 24, 54, 54])
     workbook.save(path)
+
+
+def _format_sheet(sheet, *, widths: list[int]) -> None:
+    """Apply a restrained audit-friendly workbook layout."""
+    header_fill = PatternFill("solid", fgColor="17324D")
+    header_font = Font(color="FFFFFF", bold=True)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    sheet.row_dimensions[1].height = 30
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+        sheet.row_dimensions[row[0].row].height = 66
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
 
 
 def write_postmortem_pdf(path: Path, report: dict[str, object]) -> None:
@@ -683,7 +865,8 @@ def write_postmortem_pdf(path: Path, report: dict[str, object]) -> None:
             story.append(
                 Paragraph(
                     f"{report['incident_id']} | Owner: {report['owner']}<br/>"
-                    f"{report['classification']}",
+                    f"{report['classification']}<br/>"
+                    f"Reviewed: {report['reviewed_at']} | Trace: {report['source_reference']}",
                     subtitle_style,
                 )
             )

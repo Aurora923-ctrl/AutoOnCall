@@ -30,6 +30,7 @@ from scripts.eval.eval_ragas_cases import (
     load_cases,
     load_human_reviews,
     load_ragas_metric_classes,
+    metric_coverage,
     parse_args,
     ragas_execution_markdown_lines,
     reference_context_ids,
@@ -49,15 +50,68 @@ def test_installed_ragas_metric_classes_resolve_without_private_exports() -> Non
     assert not any(metric.__name__.startswith("_") for metric in metrics.values())
 
 
-def test_full_profile_metric_average_requires_complete_case_coverage() -> None:
+def test_full_profile_metric_average_uses_available_cases_and_preserves_zero() -> None:
     from scripts.eval.eval_ragas_cases import average_optional_metric
 
     results = [
-        {"id": "case-a", "metrics": {"faithfulness": 1.0}},
+        {"id": "case-a", "metrics": {"faithfulness": 0.0}},
+        {"id": "case-b", "metrics": {"faithfulness": 1.0}},
+        {"id": "case-c", "metrics": {"faithfulness": None}},
+    ]
+
+    assert average_optional_metric(results, "faithfulness") == 0.5
+
+
+def test_full_profile_metric_average_is_none_when_no_score_is_available() -> None:
+    from scripts.eval.eval_ragas_cases import average_optional_metric
+
+    results = [
+        {"id": "case-a", "metrics": {"faithfulness": None}},
         {"id": "case-b", "metrics": {"faithfulness": None}},
     ]
 
     assert average_optional_metric(results, "faithfulness") is None
+
+
+def test_metric_coverage_distinguishes_all_missing_states() -> None:
+    results = [
+        {"id": "zero", "metrics": {"faithfulness": 0.0}},
+        {
+            "id": "not-run",
+            "judge_metrics_status": "not_run",
+            "metrics": {"faithfulness": None},
+        },
+        {
+            "id": "unavailable",
+            "judge_metrics_status": "failed",
+            "metrics": {"faithfulness": None},
+        },
+        {
+            "id": "invalid",
+            "input_status": "invalid_input",
+            "metrics": {},
+        },
+    ]
+
+    coverage = metric_coverage(results, "faithfulness")
+
+    assert coverage["available_count"] == 1
+    assert coverage["expected_count"] == 4
+    assert coverage["missing_count"] == 3
+    assert coverage["numerator"] == 0.0
+    assert coverage["denominator"] == 1
+    assert coverage["average"] == 0.0
+    assert coverage["status_counts"] == {
+        "available": 1,
+        "not_run": 1,
+        "unavailable": 1,
+        "invalid_input": 1,
+    }
+    assert coverage["missing_by_status"] == {
+        "not_run": ["not-run"],
+        "unavailable": ["unavailable"],
+        "invalid_input": ["invalid"],
+    }
 
 
 def test_repeat_metric_stability_requires_every_repeat() -> None:
@@ -80,7 +134,14 @@ def test_ragas_report_exposes_metric_engine_and_exact_coverage() -> None:
                 "faithfulness": {
                     "available_count": 1,
                     "expected_count": 2,
+                    "missing_count": 1,
+                    "average": 0.0,
                     "missing_case_ids": ["case-b"],
+                    "missing_by_status": {
+                        "not_run": [],
+                        "unavailable": [],
+                        "invalid_input": ["case-b"],
+                    },
                 }
             }
         },
@@ -89,7 +150,7 @@ def test_ragas_report_exposes_metric_engine_and_exact_coverage() -> None:
     text = "\n".join(lines)
     assert "deterministic_fallback/fallback" in text
     assert "ImportError: incompatible RAGAS" in text
-    assert "| `faithfulness` | 0 | 2 | 1 | case-b |" in text
+    assert "| `faithfulness` | 0.00 | 1 | 2 | 1 | invalid_input: case-b |" in text
 
 
 def test_ragas_context_ids_use_chunk_granularity_when_relevance_labels_are_chunks() -> None:
@@ -372,9 +433,26 @@ def test_business_requirement_hit_understands_oncall_boundary_paraphrases() -> N
     assert business_requirement_hit("区分诊断证据和处置动作", answer)
     assert business_requirement_hit("处置动作保留审批或回滚边界", answer)
     assert business_requirement_hit(
+        "包含审批或 dry-run 边界",
+        "诊断阶段只执行读取命令，不直接删除或截断。",
+    )
+    assert business_requirement_hit(
         "不把相关性直接当作根因",
         "应结合慢查询、连接池等待和当前影响判断。",
     )
+
+
+def test_answer_for_judge_removes_numbered_citation_markers() -> None:
+    answer = (
+        "- 检查 CPU 和线程栈 [证据 1]。\n"
+        "- 当前证据不足：未提供审批边界。"
+    )
+
+    judged = answer_for_judge(answer)
+
+    assert "[证据 1]" not in judged
+    assert "检查 CPU 和线程栈" in judged
+    assert "当前证据不足" in judged
 
 
 def test_ragas_quality_contract_explains_id_smoke_watch_metrics() -> None:
@@ -543,7 +621,7 @@ cases:
     )
 
     assert payload["summary"]["status"] == "not_run"
-    assert payload["summary"]["deterministic_status"] == "passed"
+    assert payload["summary"]["deterministic_status"] == "passed", payload["case_scores"]
     assert payload["summary"]["refusal_case_count"] == 1
     assert payload["summary"]["refusal_boundary_rate"] == 1.0
     assert payload["case_scores"][0]["answer_policy"] == "refuse_without_trusted_source"
@@ -769,7 +847,9 @@ cases:
     assert generated_prompts
     assert payload["run"]["answer_generation_mode"] == "real_grounded_llm"
     assert payload["run"]["retrieval_evidence_mode"] == "fixed_offline_retrieval"
-    assert "Generated from the supplied context" in payload["case_scores"][0]["answer"]
+    assert "Generated from the supplied context" in payload["case_scores"][0]["answer"], payload[
+        "case_scores"
+    ][0]
 
 
 @pytest.mark.asyncio

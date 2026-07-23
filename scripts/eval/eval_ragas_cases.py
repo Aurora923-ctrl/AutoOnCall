@@ -796,11 +796,12 @@ def answer_for_judge(answer: str) -> str:
     if content and ("source" in content[-1].lower() or content[-1].strip().startswith("引用来源")):
         content.pop()
     semantic_answer = "\n".join(content).strip()
-    return re.sub(
+    semantic_answer = re.sub(
         r"\[\s*[^]\n|]+\s*\|\s*[^]\n]+\s*\]",
         "",
         semantic_answer,
     ).strip()
+    return re.sub(r"\[\s*证据\s*\d+\s*\]", "", semantic_answer).strip()
 
 
 def build_fallback_reference_answer(case: dict[str, Any], retrieval_payload: dict[str, Any]) -> str:
@@ -2522,18 +2523,29 @@ def ragas_execution_markdown_lines(
                 "",
                 "## Metric Coverage",
                 "",
-                "| Metric | Numerator | Denominator | Available | Missing cases |",
-                "| --- | ---: | ---: | ---: | --- |",
+                (
+                    "| Metric | Mean | Available | Expected | Missing | "
+                    "Missing cases by status |"
+                ),
+                "| --- | ---: | ---: | ---: | ---: | --- |",
             ]
         )
         for metric, item in coverage.items():
             if not isinstance(item, dict):
                 continue
-            missing = ", ".join(item.get("missing_case_ids", [])) or "-"
+            missing_by_status = item.get("missing_by_status")
+            missing_by_status = (
+                missing_by_status if isinstance(missing_by_status, dict) else {}
+            )
+            missing = "; ".join(
+                f"{status}: {', '.join(case_ids)}"
+                for status in ("not_run", "unavailable", "invalid_input")
+                if (case_ids := missing_by_status.get(status))
+            ) or "-"
             lines.append(
-                f"| `{metric}` | {item.get('numerator', 0)} | "
-                f"{item.get('denominator', item.get('expected_count', 0))} | "
-                f"{item.get('available_count', 0)} | {missing} |"
+                f"| `{metric}` | {format_contract_value(item.get('average'))} | "
+                f"{item.get('available_count', 0)} | {item.get('expected_count', 0)} | "
+                f"{item.get('missing_count', 0)} | {missing} |"
             )
     return lines
 
@@ -3389,7 +3401,17 @@ def business_requirement_hit(requirement: str, answer: str) -> bool:
         ),
         (
             {"审批", "回滚边界", "安全变更", "不越过", "不自动执行"},
-            {"approval", "dry-run", "rollback", "审批", "回滚", "安全变更"},
+            {
+                "approval",
+                "dry-run",
+                "rollback",
+                "审批",
+                "回滚",
+                "安全变更",
+                "只执行读取",
+                "不直接",
+                "禁止直接",
+            },
         ),
         (
             {"告警", "用户可见", "症状"},
@@ -3426,6 +3448,9 @@ def business_domain_hit(sample: RagasCaseSample) -> bool:
         "redis": ["redis", "maxclients", "connected_clients"],
         "mysql": ["mysql", "sql", "active_connections", "pool_waiting", "explain"],
         "payment": ["payment", "mysql", "pool_waiting", "explain"],
+        "kubernetes": ["kubernetes", "pod", "service", "endpointslice", "selector"],
+        "loki": ["loki", "discarded", "ingestion", "告警", "症状"],
+        "prometheus": ["prometheus", "告警", "症状", "用户可见"],
     }
     candidate_terms: list[str] = []
     for source_marker, terms in source_terms.items():
@@ -3764,33 +3789,61 @@ def average_metric(results: list[dict[str, Any]], metric: str) -> float:
 
 
 def average_optional_metric(results: list[dict[str, Any]], metric: str) -> float | None:
-    """Average only complete coverage so missing Judge rows cannot inflate results."""
-    if not results:
-        return None
-    raw_values = [result.get("metrics", {}).get(metric) for result in results]
-    if any(optional_metric_float(value) is None for value in raw_values):
-        return None
-    values = [safe_float(value) for value in raw_values]
-    return round(sum(values) / len(results), 4)
+    """Average finite values only while preserving a real numeric zero."""
+    values = [
+        value
+        for result in results
+        if (value := optional_metric_float(result.get("metrics", {}).get(metric))) is not None
+    ]
+    return round(sum(values) / len(values), 4) if values else None
+
+
+def metric_result_status(result: dict[str, Any], metric: str) -> str:
+    """Classify one metric result without collapsing missing states into zero."""
+    value = optional_metric_float(result.get("metrics", {}).get(metric))
+    if value is not None:
+        return "available"
+    if result.get("input_status") == "invalid_input":
+        return "invalid_input"
+    if result.get("judge_metrics_status") == "not_run":
+        return "not_run"
+    return "unavailable"
 
 
 def metric_coverage(results: list[dict[str, Any]], metric: str) -> dict[str, Any]:
     """Expose the exact denominator used by aggregate metric averages."""
+    statuses = {
+        str(result.get("id") or ""): metric_result_status(result, metric) for result in results
+    }
     available_values = [
-        result.get("metrics", {}).get(metric)
+        value
         for result in results
-        if optional_metric_float(result.get("metrics", {}).get(metric)) is not None
+        if (value := optional_metric_float(result.get("metrics", {}).get(metric))) is not None
+    ]
+    missing_by_status = {
+        status: [case_id for case_id, item_status in statuses.items() if item_status == status]
+        for status in ("not_run", "unavailable", "invalid_input")
+    }
+    missing_case_ids = [
+        case_id for case_id, status in statuses.items() if status != "available"
     ]
     return {
         "available_count": len(available_values),
         "expected_count": len(results),
+        "missing_count": len(missing_case_ids),
         "numerator": round(sum(safe_float(value) for value in available_values), 4),
-        "denominator": len(results),
-        "missing_case_ids": [
-            str(result.get("id") or "")
-            for result in results
-            if optional_metric_float(result.get("metrics", {}).get(metric)) is None
-        ],
+        "denominator": len(available_values),
+        "average": (
+            round(sum(safe_float(value) for value in available_values) / len(available_values), 4)
+            if available_values
+            else None
+        ),
+        "status_counts": {
+            status: sum(1 for item_status in statuses.values() if item_status == status)
+            for status in ("available", "not_run", "unavailable", "invalid_input")
+        },
+        "missing_case_ids": missing_case_ids,
+        "missing_by_status": missing_by_status,
     }
 
 
@@ -4018,8 +4071,10 @@ def build_failed_payload(args: argparse.Namespace, exc: Exception) -> dict[str, 
             "core_case_count": 0,
             "core_case_pass_rate": 0.0,
             "refusal_boundary_rate": 0.0,
-            "faithfulness_avg": 0.0,
-            "response_relevancy_avg": 0.0,
+            "faithfulness_avg": None,
+            "response_relevancy_avg": None,
+            "judge_oncall_actionability_avg": None,
+            "answer_completeness_avg": None,
             "id_context_precision_avg": 0.0,
             "id_context_recall_avg": 0.0,
             "oncall_actionability_avg": 0.0,

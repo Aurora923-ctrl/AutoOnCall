@@ -83,10 +83,34 @@ async def chat(
         observability = observability if isinstance(observability, dict) else {}
         runtime = observability.get("runtime", {})
         runtime = runtime if isinstance(runtime, dict) else {}
+        stages = observability.get("stages", {})
+        stages = stages if isinstance(stages, dict) else {}
+        retrieval = chat_payload.get("retrieval", {})
+        retrieval = retrieval if isinstance(retrieval, dict) else {}
+        retrieval_results = retrieval.get("retrieval_results", [])
+        retrieval_results = retrieval_results if isinstance(retrieval_results, list) else []
         token_usage = observability.get("token_usage")
         trace_metadata: dict[str, Any] = {
             **request_metadata,
             "model": str(runtime.get("llm_model") or ""),
+            "retrieval_backend": str(
+                retrieval.get("retrieval_backend")
+                or runtime.get("retrieval_backend")
+                or ""
+            ),
+            "retrieval_query_ms": stages.get(
+                "milvus_search_ms",
+                stages.get("vector_search_ms"),
+            ),
+            "retrieval_hits": [
+                {
+                    "source_file": str(item.get("source_file") or ""),
+                    "chunk_id": str(item.get("chunk_id") or ""),
+                    "similarity_or_distance": item.get("score"),
+                }
+                for item in retrieval_results
+                if isinstance(item, dict)
+            ],
         }
         if isinstance(token_usage, dict):
             trace_metadata["token_usage"] = token_usage

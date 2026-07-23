@@ -1,4 +1,4 @@
-# External Knowledge Sources
+﻿# External Knowledge Sources
 
 This file records the retrieval-focused official documentation snapshots included in the
 AutoOnCall knowledge corpus.
@@ -11,6 +11,9 @@ AutoOnCall knowledge corpus.
 - On `2026-07-21`, each source was downloaded again from the pinned upstream commit below
   and deterministically cleaned by
   `scripts/data/clean_official_knowledge_snapshots.py`.
+- On `2026-07-22`, the cleaned snapshots were transformed into retrieval-focused operational
+  summaries by `scripts/data/upgrade_high_value_knowledge.py`; the pinned source URL,
+  revision, retrieval date, and license remain embedded in every local file.
 - Cleaning removes YAML front matter, HTML comments, Hugo shortcodes, and internal-site link
   wrappers, converts Setext headings, and removes generic navigation/resource-list noise.
 - The current hashes identify cleaned local artifacts, not byte-identical upstream files.
@@ -33,15 +36,15 @@ AutoOnCall knowledge corpus.
 
 | Local file | SHA-256 |
 | --- | --- |
-| `official_kubernetes_debug_pods.md` | `AEAEA304C74B94C94CE8B37BBCE134F2C8B4B299F08BF5DB1E7D39F2F1473AC2` |
-| `official_kubernetes_debug_services.md` | `93A5C2AFE62CB25F4A8F6731CB982F862F851C94C1FD6B0224EB0295E9494A59` |
-| `official_kubernetes_pod_failure_reason.md` | `B90A57B0D65BC6EDD151332B9B0D96F9BF54148F572761C61BDEC5A264964DB5` |
-| `official_loki_troubleshoot_ingest.md` | `BBBD4BBD2A9A2DA2D0325F272EDFF4F5A98D3BDCA79E3BF08F11FE818F6B0259` |
-| `official_loki_troubleshoot_query.md` | `FA8B945779F4F27E82FEB2661FD53383BC116BD77652EFFCECBD96621DFAA49E` |
-| `official_prometheus_alerting_practices.md` | `64D8860A7D87105FBC7AFC307A77279AD7786F8B3D3E82B81B23741E415DBAED` |
-| `official_prometheus_alerting_rules.md` | `0EFF0107BC828AA94D0D8CDBE13224DBEF3A58AE84D2DEFFA0FA15C3C3010CF4` |
-| `official_redis_clients.md` | `C51754B6F76146675640A99F4B9B53F34538A7FBE5DB3B39EB3D23CFE37D5997` |
-| `official_redis_latency.md` | `1D5678EEEF9697F5817463B8EBC95AFB8359F95707C90C590D1D79C9A8B78B75` |
+| `official_kubernetes_debug_pods.md` | `9156066AF3CA6502B31C994984623E09B7AA32AC6F78616A84B31A4D270CE726` |
+| `official_kubernetes_debug_services.md` | `446175634102FFC0969405D6EDEE8D6B5781C565F782A65CCC4C52E1CE0CF1FC` |
+| `official_kubernetes_pod_failure_reason.md` | `B2001F435F7ACABBCA6ED7780C034CFBF7547E129D5A83494CF483695D071553` |
+| `official_loki_troubleshoot_ingest.md` | `794DF9A0B8076DE9C56D1E3E8F2A764FF05DAE8DD14A0F8B8E31C6B2205A4DBA` |
+| `official_loki_troubleshoot_query.md` | `3DB38106F35BEC46212EED0E482699513B0733FA32E9A5F9F8FAD3B8A6C7BB28` |
+| `official_prometheus_alerting_practices.md` | `FAB486E2B8212B83C4F5754B597009CDCCF7EF2B86E33319B598B8908F3FFCE4` |
+| `official_prometheus_alerting_rules.md` | `4ED214CDBFFD2ACB500787F3EB23549CA24FCEA531C533550C897B10E92C03D5` |
+| `official_redis_clients.md` | `DF8693439741B956F0ED0A96DC5AAD90E1C2692E26454866FF1ACD67ABE6A600` |
+| `official_redis_latency.md` | `EFBAE57099744C7EACFD270E4C6D0643C7DF563A9ACA78A9AB2BBC5F8790AC1C` |
 
 ## Distribution boundary
 

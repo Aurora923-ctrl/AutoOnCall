@@ -345,6 +345,48 @@ def test_compress_grounded_answer_removes_labels_without_global_claim_limit() ->
     assert "当前事故仍需查询的证据" not in compact
     assert len(compact.splitlines()) == 5
     assert compact.splitlines()[0] == "- 检查进程 CPU。[证据 1]"
+    assert compact.splitlines()[-1] == "- 多余总结。[证据 1]"
+
+
+def test_compress_grounded_answer_splits_multiple_cited_sentences_from_one_line() -> None:
+    compact = compress_grounded_answer(
+        "检查 discarded 指标 [证据 1]。"
+        "基于用户可见症状设计告警 [证据 2]。"
+        "修改规则前需要审批 [证据 2]。"
+    )
+
+    assert compact.splitlines() == [
+        "- 检查 discarded 指标 [证据 1]。",
+        "- 基于用户可见症状设计告警 [证据 2]。",
+        "- 修改规则前需要审批 [证据 2]。",
+    ]
+
+
+def test_supporting_citation_guard_accepts_grounded_bilingual_summary() -> None:
+    citations = [
+        {
+            "citation_index": 1,
+            "source_file": "alerting.md",
+            "chunk_id": "alerting.md#summary",
+        }
+    ]
+
+    selected = select_supporting_citations(
+        "- 基于用户可见症状设计告警，修改阈值或通知前需要审批 [证据 1]。",
+        citations,
+        evidence=[
+            {
+                "source_file": "alerting.md",
+                "chunk_id": "alerting.md#summary",
+                "content": (
+                    "Alert on user-visible symptoms. Changing alert thresholds or "
+                    "notification policy requires review and approval."
+                ),
+            }
+        ],
+    )
+
+    assert selected == citations
 
 
 def test_generation_evidence_fairly_truncates_long_required_sources() -> None:
@@ -998,6 +1040,11 @@ async def test_query_with_retrieval_repairs_missing_required_source_citation(
     assert {item["source_file"] for item in result["citations"]} == {
         "official_redis.md",
         "redis_postmortem.pdf",
+    }
+    assert result["observability"]["generation_repair"] == {
+        "attempted": True,
+        "reason": "answer_contract",
+        "sources": [],
     }
 
 

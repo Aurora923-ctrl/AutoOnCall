@@ -69,6 +69,11 @@ def _build_answer_contract_instruction(retrieval_payload: dict[str, Any]) -> str
         "- 每条事实只绑定一个该 slot 允许的 [证据 N]；无允许证据时仅输出"
         "“当前证据不足：缺少 <entity/subgoal>”且不加引用"
     )
+    if contract.off_topic_entities:
+        lines.append(
+            "- 禁止扩展到这些与当前故障域无关的实体："
+            + ",".join(contract.off_topic_entities)
+        )
     return "\n".join(lines)
 
 
@@ -88,19 +93,37 @@ def compress_grounded_answer(answer: str) -> str:
     """Remove legacy scaffolding without rewriting evidence-bearing claims."""
     compact_lines: list[str] = []
     for raw_line in str(answer or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
-        for label in LEGACY_ANSWER_LABELS:
-            line = re.sub(rf"^{re.escape(label)}\s*[:：]\s*", "", line).strip()
-        if not line or line in LEGACY_ANSWER_LABELS:
-            continue
-        if line.startswith(("引用来源", "参考来源")):
-            break
-        line = re.sub(r"\s+", " ", line)
-        compact_lines.append(f"- {line}")
+        for line in _split_cited_claims(raw_line):
+            line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+            for label in LEGACY_ANSWER_LABELS:
+                line = re.sub(rf"^{re.escape(label)}\s*[:：]\s*", "", line).strip()
+            if not line or line in LEGACY_ANSWER_LABELS:
+                continue
+            if line.startswith(("引用来源", "参考来源")):
+                return "\n".join(compact_lines).strip()
+            line = re.sub(r"\s+", " ", line)
+            compact_lines.append(f"- {line}")
     return "\n".join(compact_lines).strip()
+
+
+def _split_cited_claims(text: str) -> list[str]:
+    """Split one-line model output after complete citation-bearing sentences."""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return []
+    matches = list(
+        re.finditer(
+            r".*?(?:\[[^\[\]\r\n]+\])(?:[。！？.!?]+|$)",
+            normalized,
+        )
+    )
+    if len(matches) <= 1:
+        return [normalized]
+    parts = [match.group(0).strip() for match in matches if match.group(0).strip()]
+    tail = normalized[matches[-1].end() :].strip()
+    if tail:
+        parts.append(tail)
+    return parts
 
 
 def select_supporting_citations(
@@ -138,6 +161,78 @@ def select_supporting_citations(
         seen.add(pair)
         unique.append(allowed[pair])
     return unique
+
+
+def repair_missing_claim_citations(
+    answer: str,
+    citations: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> str:
+    """Bind uncited grounded claims to the strongest allowlisted evidence chunk."""
+    citation_map = citation_pair_map(citations)
+    evidence_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+    citation_index_by_pair: dict[tuple[str, str], int] = {}
+    for fallback_index, citation in enumerate(citations, 1):
+        source_file = str(citation.get("source_file") or "").strip().replace("\\", "/")
+        chunk_id = str(citation.get("chunk_id") or "").strip()
+        if not source_file or not chunk_id:
+            continue
+        try:
+            citation_index = int(citation.get("citation_index") or fallback_index)
+        except (TypeError, ValueError):
+            continue
+        pair = (source_file.rsplit("/", 1)[-1], chunk_id)
+        citation_index_by_pair[pair] = citation_index
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        source_file = str(item.get("source_file") or "").strip().replace("\\", "/")
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        if source_file and chunk_id:
+            evidence_by_pair[(source_file.rsplit("/", 1)[-1], chunk_id)] = item
+
+    repaired_lines: list[str] = []
+    repaired_any = False
+    for raw_line in str(answer or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])?\s*", "", line).strip()
+        if normalized.startswith("当前证据不足"):
+            repaired_lines.append(raw_line)
+            continue
+        if extract_citation_pairs(line, citation_map=citation_map):
+            repaired_lines.append(raw_line)
+            continue
+        if re.search(r"\[[^\[\]\r\n]+\]", line):
+            return answer
+
+        claim_terms = _claim_terms(normalized)
+        claim_concepts = _semantic_concepts(normalized)
+        ranked: list[tuple[int, int, tuple[str, str]]] = []
+        for pair, item in evidence_by_pair.items():
+            evidence_text = " ".join(
+                (
+                    str(item.get("source_file") or ""),
+                    str(item.get("heading_path") or ""),
+                    str(item.get("content") or item.get("content_preview") or ""),
+                )
+            )
+            term_overlap = len(claim_terms.intersection(_claim_terms(evidence_text)))
+            concept_overlap = len(
+                claim_concepts.intersection(_semantic_concepts(evidence_text))
+            )
+            if term_overlap or concept_overlap:
+                ranked.append((term_overlap, concept_overlap, pair))
+        if not ranked:
+            return answer
+        ranked.sort(reverse=True)
+        citation_index = citation_index_by_pair.get(ranked[0][2])
+        if citation_index is None:
+            return answer
+        repaired_lines.append(f"{raw_line.rstrip()} [证据 {citation_index}]")
+        repaired_any = True
+    return "\n".join(repaired_lines).strip() if repaired_any else answer
 
 
 def build_extractive_grounded_answer(
@@ -372,18 +467,39 @@ def answer_claims_match_evidence(
             chunk = evidence_by_pair.get(pair)
             if chunk is None:
                 return False
-            chunk_terms = _claim_terms(
-                " ".join(
-                    (
-                        str(chunk.get("source_file") or ""),
-                        str(chunk.get("heading_path") or ""),
-                        str(chunk.get("content") or chunk.get("content_preview") or ""),
-                    )
+            chunk_text = " ".join(
+                (
+                    str(chunk.get("source_file") or ""),
+                    str(chunk.get("heading_path") or ""),
+                    str(chunk.get("content") or chunk.get("content_preview") or ""),
                 )
             )
-            if not claim_terms.intersection(chunk_terms):
+            chunk_terms = _claim_terms(chunk_text)
+            if not claim_terms.intersection(chunk_terms) and not _semantic_concepts(
+                claim
+            ).intersection(_semantic_concepts(chunk_text)):
                 return False
     return True
+
+
+def _semantic_concepts(text: str) -> set[str]:
+    """Map common bilingual OnCall wording to stable evidence concepts."""
+    lowered = str(text or "").lower()
+    aliases = {
+        "alert": ("alert", "告警", "报警"),
+        "symptom": ("symptom", "用户可见", "影响", "症状"),
+        "approval": ("approval", "approved", "review", "审批", "批准"),
+        "threshold": ("threshold", "阈值"),
+        "routing": ("routing", "路由"),
+        "notification": ("notification", "通知"),
+        "rollback": ("rollback", "回滚"),
+        "live_evidence": ("live evidence", "incident-window", "实时证据", "当前事件"),
+    }
+    return {
+        concept
+        for concept, markers in aliases.items()
+        if any(marker in lowered for marker in markers)
+    }
 
 
 def _claim_terms(text: str) -> set[str]:

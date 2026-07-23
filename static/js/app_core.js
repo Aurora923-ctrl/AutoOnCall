@@ -321,6 +321,7 @@ Object.assign(window.AutoOnCallApp.prototype, {
         this.mainContent = document.querySelector('.main-content');
         this.workbenchPanel = document.getElementById('workbenchPanel');
         this.workbenchTitle = document.getElementById('workbenchTitle');
+        this.workbenchSubtitle = document.getElementById('workbenchSubtitle');
         this.workbenchNavButtons = document.querySelectorAll('[data-workbench-view]');
         this.incidentTabNav = document.getElementById('incidentTabNav');
         this.incidentTabButtons = document.querySelectorAll('[data-incident-tab]');

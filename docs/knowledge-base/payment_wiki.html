@@ -7,6 +7,8 @@
 <body>
   <h1>Payment MySQL Runbook</h1>
   <h2>Scope and ownership</h2>
+  <p>Retrieval alias: Payment Runbook MySQL slow query EXPLAIN active_connections
+  pool_waiting.</p>
   <p>This runbook applies when checkout latency, MySQL slow-query volume, active connection
   occupancy, or application pool_waiting rises. Owner: Payments Reliability. DBA escalation:
   Database Platform. Last reviewed: 2026-07-21. Related tickets: INC-MYSQL-014,
@@ -50,10 +52,7 @@ histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[
   Prefer application feature rollback before emergency database mutation when it removes the
   triggering query safely.</p>
 
-  <h2>Recovery criteria and history</h2>
-  <p>Recovery requires pool_waiting=0, active connections below 70% of capacity, payment P95
-  below 1 second, stable replication, and no duplicate-charge signal for 30 minutes. The
-  sanitized incident facts were slow_queries=18, active_connections=188/200, pool_waiting=6,
-  and release payment-api-2026.07.06-rc3.</p>
+  <h2>Recovery criteria and document role</h2>
+<p>Recovery requires pool_waiting=0, active connections below the approved service capacity threshold, payment P95 below the service SLO, stable replication, and no duplicate-charge signal throughout the observation window. This wiki is the live diagnostic decision guide; the PDF is the historical postmortem and tickets.xlsx is the structured incident catalog. Do not copy historical incident values from those sources into a current diagnosis without incident-window evidence.</p>
 </body>
 </html>

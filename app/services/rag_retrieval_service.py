@@ -9,6 +9,7 @@ from app.services.lexical_index_service import lexical_index_service
 from app.services.rag_retrieval.service import (
     retrieve_structured_knowledge as _retrieve_structured_knowledge,
 )
+from app.services.vector_store_manager import vector_store_manager
 
 
 def retrieve_structured_knowledge(
@@ -25,6 +26,10 @@ def retrieve_structured_knowledge(
     lexical_index: Any | None = None,
 ) -> dict[str, Any]:
     """Preserve the historical retrieval call signature."""
+    runtime_default_path = vector_store is None and vector_store_provider is None
+    provider = vector_store_provider
+    if provider is None and vector_store is None:
+        provider = vector_store_manager.get_vector_store
     return _retrieve_structured_knowledge(
         query,
         top_k=top_k,
@@ -34,8 +39,10 @@ def retrieve_structured_knowledge(
         rerank_enabled=rerank_enabled,
         fusion_strategy=fusion_strategy,
         vector_store=vector_store,
-        vector_store_provider=vector_store_provider,
+        vector_store_provider=provider,
         lexical_index=lexical_index or lexical_index_service,
+        allow_lexical_fallback=not runtime_default_path,
+        vector_backend_label="milvus" if runtime_default_path else "injected",
     )
 
 
